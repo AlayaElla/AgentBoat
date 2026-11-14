@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto'
 import path from 'node:path'
 import type { StorageApi } from 'orca'
-import { taskState, type Acceptance, type Artifact, type Project, type ProjectRef, type SourceEvent, type Task, type Workspace, type Overview, type Attention } from './model'
+import { taskState, type Acceptance, type Artifact, type Project, type ProjectRef, type SourceEvent, type Task, type Workspace, type Overview, type Attention, type Messaging } from './model'
 
 export function fail(message: string): never { throw Object.assign(new Error(message), { code: 'invalid_request' }) }
 export function object(value: unknown): Record<string, any> {
@@ -55,15 +55,15 @@ export function overview(projects: Project[], workspace: Workspace, error = ''):
 }
 
 // Transition keys include acceptance revisions; old records are never backfilled on read or restart.
-export function notifyWorkspace(before: Project, after: Project, runId: string): void {
-  if (!runId) return
-  const notices = (p: Project) => p.tasks.flatMap(t => [
+export const workspaceNotices = (p: Project) => p.tasks.flatMap(t => [
     ...t.decisions.filter(d => d.answer === undefined).map(d => ({ key: [t.id, 'decision', d.id], task: t, action: `请向用户确认：${d.question}` })),
     ...t.acceptance.filter(a => t.phase === 'ready' && a.status === 'pending').map(a => ({ key: [t.id, 'review', a.id, a.revision], task: t, action: `请用户验收：${a.title}` })),
     ...((t.phase === 'blocked' || taskState(t) === 'completed') ? [{ key: [t.id, t.phase === 'blocked' ? 'blocked' : 'completed'], task: t, action: t.phase === 'blocked' ? `请协调解除受阻：${t.progress || t.goal}` : '任务已完成，请汇总告知用户' }] : [])
   ])
-  const prior = new Set(notices(before).map(n => fingerprint(n.key)))
-  for (const n of notices(after)) {
+export function notifyWorkspace(before: Project, after: Project, runId: string): void {
+  if (!runId) return
+  const prior = new Set(workspaceNotices(before).map(n => fingerprint(n.key)))
+  for (const n of workspaceNotices(after)) {
     const key = fingerprint(n.key), id = `workspace:${key}`
     if (prior.has(key) || after.deliveries.some(d => d.id === id)) continue
     after.deliveries.push({ id, targetRunId: runId, subject: `${after.ref.name} · ${n.task.title}`.slice(0, 200),
@@ -74,6 +74,23 @@ export function notifyWorkspace(before: Project, after: Project, runId: string):
 export class ProjectStore {
   private chain: Promise<unknown> = Promise.resolve()
   constructor(private storage: Pick<StorageApi, 'get' | 'set' | 'keys'>) {}
+  async messaging(): Promise<Messaging> {
+    const value = await this.storage.get('workspace.messaging')
+    const m = value ? structuredClone(object(value)) as Messaging : { version: 1 as const, revision: 0, feishu: fresh({} as ProjectRef).feishu, inbox: [], deliveries: [] }
+    if (m.version !== 1 || !Number.isSafeInteger(m.revision) || !Array.isArray(m.inbox) || !Array.isArray(m.deliveries) || !m.feishu) fail('工作间消息记录不兼容，请保留数据并检查版本')
+    return m
+  }
+  async mutateMessaging(fn: (m: Messaging) => void | Promise<void>, expected?: number): Promise<Messaging> {
+    return this.serial(async () => {
+      const m = await this.messaging()
+      if (expected !== undefined && expected !== m.revision) fail('工作间消息已更新，请刷新后再保存')
+      await fn(m); m.revision++
+      // shortcut: bounded local mailbox; add paged storage before using it for a large chat history.
+      if (Buffer.byteLength(JSON.stringify(m)) > 200_000) fail('工作间消息记录已达容量上限；原记录已保留')
+      await this.storage.set('workspace.messaging', m as any)
+      return m
+    })
+  }
   async workspace(): Promise<Workspace> {
     const value = await this.storage.get('workspace')
     const w: Workspace = { version: 1, revision: 0, runId: '', requests: [], ...(value ? structuredClone(object(value)) : {}) }

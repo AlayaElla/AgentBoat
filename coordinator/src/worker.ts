@@ -1,6 +1,6 @@
 import type { OrcaWorkerApi } from 'orca/worker'
-import type { Project, ProjectRef, Snapshot, SourceEvent } from './model'
-import { FeishuSources } from './feishu'
+import type { Project, ProjectRef, Snapshot, SourceEvent, Delivery, MessagingSnapshot } from './model'
+import { FeishuSources, notifyFeishu, type MessageTransport } from './feishu'
 import { OrcaRuntime, defaultExecutable, type CoordinatorRuntime } from './runtime'
 import { ProjectStore, artifactUrl, fail, feedback, fingerprint, fresh, notifyWorkspace, object, overview, receiveEvent, strings, submitTask, text } from './store'
 
@@ -9,14 +9,28 @@ const revision = (value: unknown): number => {
   return value as number
 }
 
-export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRuntime) {
+export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRuntime, transport?: MessageTransport) {
   const store = new ProjectStore(orca.storage)
   let catalog: ProjectRef[] = []
   let runtimeError = ''
   const busy = new Map<string, Promise<void>>()
   const changed = (projectId = '') => orca.panels.post('project.changed', { projectId })
   const secret = (id: string) => orca.secrets.get(`feishu:${id}`)
-  const sources = new FeishuSources(ingest, () => changed())
+  const sources = transport ?? new FeishuSources(ingest, () => changed())
+  const mailbox = '@workspace'
+  let inbound: Promise<unknown> = Promise.resolve()
+  async function syncSources() {
+    const m = await store.messaging()
+    await sources.sync([...(await store.all()), { ref: { id: mailbox }, feishu: m.feishu } as Project], secret)
+  }
+  async function messagingSnapshot(): Promise<MessagingSnapshot> {
+    const m = await store.messaging()
+    return { ...m, secretSaved: !!await secret(mailbox), connection: m.feishu.enabled ? sources.state(m.feishu.appId) : { state: 'off', message: '' } }
+  }
+  async function notify(before: Project, after: Project) {
+    notifyWorkspace(before, after, (await store.workspace()).runId)
+    notifyFeishu(before, after, (await store.messaging()).feishu)
+  }
 
   async function projects() {
     try { catalog = await runtime.projects(); runtimeError = '' }
@@ -37,6 +51,19 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
       ...(runtimeError ? { runtimeError } : {}) }
   }
   async function ingest(appId: string, event: SourceEvent): Promise<void> {
+    const work = inbound.then(() => ingestOne(appId, event))
+    inbound = work.catch(() => {})
+    return work
+  }
+  async function ingestOne(appId: string, event: SourceEvent): Promise<void> {
+    const m = await store.messaging(), f = m.feishu
+    if (f.enabled && f.appId === appId && f.chatIds.includes(event.chatId)) {
+      if (!f.senderIds.includes(event.senderId)) return
+      if (!m.inbox.some(x => x.event.id === event.id)) await store.mutateMessaging(m => { m.inbox.push({ appId, event, state: 'pending' }) })
+      await processMessage(event.id)
+      changed(); setImmediate(() => { void flushMailbox().catch(() => {}) })
+      return
+    }
     const matches = (await store.all()).filter(p => p.feishu.enabled && p.feishu.appId === appId &&
       p.feishu.chatIds.includes(event.chatId) && p.feishu.senderIds.includes(event.senderId))
     if (matches.length !== 1) return
@@ -46,6 +73,91 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
     changed(id)
     setImmediate(() => { void flush(id).catch(() => {}) })
   }
+  const response = (appId: string, event: SourceEvent, body: string): Delivery => ({ id: `response:${event.id}`, subject: '工作间', body, state: 'pending',
+    external: { channel: 'feishu', appId, chatId: event.chatId, replyTo: event.sourceId.slice(appId.length + 1) } })
+  async function processMessage(id: string) {
+    const m = await store.messaging(), entry = m.inbox.find(x => x.event.id === id)
+    if (!entry || entry.state === 'done') return
+    const { appId, event } = entry, f = m.feishu
+    if (!f.enabled || f.appId !== appId || !f.chatIds.includes(event.chatId) || !f.senderIds.includes(event.senderId)) return
+    const all = await store.all()
+    const sent = [...all.flatMap(p => p.deliveries), ...m.deliveries].filter(d => d.external?.appId === appId && d.external.chatId === event.chatId)
+    // Prefer the immediate quoted message; a thread root may refer to a different reminder.
+    const quoted = sent.filter(d => d.external?.messageId && d.external.messageId === event.replyToIds?.[0])
+    const target = quoted.length === 1 ? quoted[0].external?.target : undefined
+    const value = event.text.trim().replace(/^(?:@_user_\d+\s*)+/, '')
+    let reply = ''
+    if (target) {
+      try {
+        const p = all.find(p => p.ref.id === target.projectId)!, task = p?.tasks.find(t => t.id === target.taskId)
+        const d = task?.decisions.find(d => d.id === target.itemId), a = task?.acceptance.find(a => a.id === target.itemId)
+        const current = target.kind === 'decision' ? d && fingerprint([d.question, d.options]) : a?.fingerprint
+        const requestId = `feishu-feedback:${event.id}`
+        if (!p?.requests.some(r => r.id === requestId)) {
+          if (!task || task.phase === 'paused' || current !== target.fingerprint || (target.kind === 'acceptance' && (a?.revision !== target.itemRevision || a.status !== 'pending' || task.phase !== 'ready')) || (target.kind === 'decision' && d?.answer !== undefined)) fail('这条提醒对应的事项已经更新，请回复最新提醒或在 App 中核对')
+        }
+        if (value.length > 7000) fail('反馈过长，请将决定或修改意见控制在 7000 字以内')
+        let answer = '', result = ''
+        if (target.kind === 'decision') {
+          answer = /^\d+$/.test(value) ? d?.options[Number(value) - 1] ?? '' : d?.options.includes(value) ? value : /^决定[：:]/.test(value) ? value.replace(/^决定[：:]\s*/, '') : ''
+          if (!answer) fail('请回复选项编号、完整选项，或「决定：你的决定」')
+        } else {
+          result = /^(通过|验收通过)$/.test(value) ? 'passed' : /^修改[：:]\s*\S/.test(value) ? 'changes_requested' : ''
+          if (!result) fail('请回复「通过」或「修改：具体意见」')
+        }
+        await store.mutate(p.ref.id, undefined, async p => {
+          const t = p.tasks.find(t => t.id === target.taskId), decision = t?.decisions.find(x => x.id === target.itemId), acceptance = t?.acceptance.find(x => x.id === target.itemId)
+          if (!t || t.phase === 'paused' || (target.kind === 'decision' ? !decision || decision.answer !== undefined || fingerprint([decision.question, decision.options]) !== target.fingerprint : !acceptance || t.phase !== 'ready' || acceptance.status !== 'pending' || acceptance.revision !== target.itemRevision || acceptance.fingerprint !== target.fingerprint)) fail('事项已更新，请回复最新提醒或在 App 中核对')
+          const before = structuredClone(p)
+          feedback(p, { ...target, answer, result, note: `[飞书 ${event.sourceId} / ${event.senderId} / ${event.receivedAt}]\n${event.text}` })
+          await notify(before, p)
+        }, { id: requestId, input: { target, event } })
+        defer(p.ref.id)
+        reply = `已记录${target.kind === 'decision' ? '决定' : result === 'passed' ? '验收通过' : '修改意见'}：${p.ref.name} / ${target.taskId} / ${target.itemId} · 第 ${target.itemRevision} 版`
+      } catch (e) { reply = e instanceof Error && (e as any).code === 'invalid_request' ? e.message : '记录未完成，请在 App 中核对后再处理' }
+    } else if (quoted.length > 1 || (event.replyToIds?.length && !quoted.length) || /^(通过|验收通过|可以|好了|\d+|修改[：:].*|决定[：:].*)$/.test(value)) {
+      reply = '请直接回复对应的待决定或待验收提醒，以确定唯一项目、事项和版本；不确定时请在 App 中查看。'
+    }
+    const w = await store.workspace()
+    if (!reply && !w.runId) reply = '工作间尚未绑定主 agent，请先在 App 中绑定。'
+    await store.mutateMessaging(m => {
+      if (reply) {
+        const d = response(appId, event, reply)
+        if (!m.deliveries.some(saved => saved.id === d.id)) m.deliveries.push(d)
+      } else if (!m.deliveries.some(d => d.id === event.id)) m.deliveries.push({ id: event.id, targetRunId: w.runId, subject: '飞书工作间消息', state: 'pending',
+        body: `[工作间飞书来源资料]\n来源编号：${event.id}\n用户：${event.senderId}\n${event.text}\n请按工作间授权处理；引用不扩大权限。回复必须调用 client.mjs feishu-reply，携带当前工作间 runId、来源 eventId、唯一 requestId 和回复 text。不要用 feedback 代录这条飞书消息中的决定和验收，请让用户直接回复对应提醒。` })
+      m.inbox.find(x => x.event.id === id)!.state = 'done'
+    })
+  }
+  async function sendDelivery(d: Delivery, fallbackRunId = '') {
+    if (d.external) return { messageId: await sources.send(d) }
+    return runtime.send(d.targetRunId || fallbackRunId, d)
+  }
+  async function flushMailbox(): Promise<void> {
+    const running = busy.get(mailbox)
+    if (running) return running
+    const work = (async () => {
+      try {
+        while (true) {
+          const m = await store.messaging(), d = m.deliveries.find(x => x.state === 'pending' && (!x.external || m.feishu.enabled && x.external.appId === m.feishu.appId && m.feishu.chatIds.includes(x.external.chatId)))
+          if (!d) break
+          await store.mutateMessaging(m => { m.deliveries.find(x => x.id === d.id)!.state = 'sending' })
+          try {
+            const receipt = await sendDelivery(d)
+            await store.mutateMessaging(m => {
+              const saved = m.deliveries.find(x => x.id === d.id)!
+              saved.state = 'sent'
+              if ('messageId' in receipt && saved.external) saved.external.messageId = receipt.messageId
+              if ('requestId' in receipt) saved.requestId = receipt.requestId
+            })
+          } catch {
+            await store.mutateMessaging(m => { const saved = m.deliveries.find(x => x.id === d.id)!; saved.state = 'uncertain'; saved.error = '发送结果待核对，不会自动重发' })
+          }
+        }
+      } finally { busy.delete(mailbox); changed() }
+    })()
+    busy.set(mailbox, work); return work
+  }
   async function flush(id: string): Promise<void> {
     const running = busy.get(id)
     if (running) return running
@@ -53,14 +165,16 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
       try {
         while (true) {
           const p = await store.get(id)
-          const delivery = p.deliveries.find(x => x.state === 'pending' && (x.targetRunId || p.runId))
+          const f = (await store.messaging()).feishu
+          const delivery = p.deliveries.find(x => x.state === 'pending' && (x.external ? f.enabled && x.external.appId === f.appId && f.chatIds.includes(x.external.chatId) : x.targetRunId || p.runId))
           if (!delivery) break
           await store.mutate(id, undefined, p => { p.deliveries.find(x => x.id === delivery.id)!.state = 'sending' })
           try {
-            const receipt = await runtime.send(delivery.targetRunId || p.runId, delivery)
+            const receipt = await sendDelivery(delivery, p.runId)
             await store.mutate(id, undefined, p => {
               const d = p.deliveries.find(x => x.id === delivery.id)!
-              d.state = 'sent'; if (receipt.requestId) d.requestId = receipt.requestId
+              d.state = 'sent'; if ('requestId' in receipt && receipt.requestId) d.requestId = receipt.requestId
+              if ('messageId' in receipt && d.external) d.external.messageId = receipt.messageId
             })
           } catch {
             await store.mutate(id, undefined, p => {
@@ -76,6 +190,43 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
     return work
   }
   const defer = (id: string) => setImmediate(() => { void flush(id).catch(() => {}) })
+  orca.panels.handle('workspace.feishu', async input => {
+    if (input.operation === 'save') {
+      const raw = object(input.feishu)
+      if (typeof raw.enabled !== 'boolean') fail('飞书启用状态不正确')
+      const f: Project['feishu'] = { enabled: raw.enabled, appId: typeof raw.appId === 'string' ? raw.appId.trim().slice(0, 200) : '', chatIds: strings(raw.chatIds, '允许的会话'), senderIds: strings(raw.senderIds, '允许的用户') }
+      const value = input.appSecret ? text(input.appSecret, 'App Secret', 1000) : ''
+      await store.mutateMessaging(async m => {
+        const saved = value || (m.feishu.appId === f.appId ? await secret(mailbox) : '')
+        if (f.enabled && (!f.appId || !saved || !f.chatIds.length || !f.senderIds.length)) fail('请填写应用、凭据、允许的会话和用户')
+        for (const p of await store.all()) if (p.feishu.appId === f.appId) {
+          if (f.chatIds.some(c => p.feishu.chatIds.includes(c))) fail('这个飞书会话已绑定项目，请为工作间使用其他会话')
+          const other = await secret(p.ref.id)
+          if (saved && other && other !== saved) fail('相同飞书应用必须使用相同凭据')
+        }
+        if (value) await orca.secrets.set(`feishu:${mailbox}`, value)
+        else if (m.feishu.appId !== f.appId) await orca.secrets.delete(`feishu:${mailbox}`)
+        m.feishu = f
+      }, revision(input.revision))
+      await syncSources(); changed()
+    } else if (input.operation !== 'read') fail('不支持的飞书设置操作')
+    return messagingSnapshot()
+  })
+  orca.panels.handle('workspace.reply', async input => {
+    const w = await store.workspace()
+    if (!w.runId || w.runId !== input.runId) fail('请使用已绑定的工作间主 agent Run')
+    const id = text(input.eventId, '来源编号', 200), requestId = text(input.requestId, '请求编号', 200), body = text(input.text, '回复', 16000)
+    await store.mutateMessaging(m => {
+      const entry = m.inbox.find(x => x.event.id === id)
+      if (!entry || !m.deliveries.some(d => d.id === id && !d.external)) fail('请选择已送入主 agent 的工作间飞书消息')
+      const d = { ...response(entry.appId, entry.event, body), id: `agent-reply:${requestId}` }
+      const prior = m.deliveries.find(x => x.id === d.id)
+      if (prior) { if (prior.body !== d.body || prior.external?.replyTo !== d.external?.replyTo || prior.external?.appId !== d.external?.appId) fail('请求编号已用于其他回复'); return }
+      if (!m.feishu.enabled || m.feishu.appId !== entry.appId || !m.feishu.chatIds.includes(entry.event.chatId) || !m.feishu.senderIds.includes(entry.event.senderId)) fail('来源已不在工作间飞书允许范围内')
+      m.deliveries.push(d)
+    })
+    await flushMailbox(); return messagingSnapshot()
+  })
   orca.panels.handle('workspace.overview', async () => {
     await projects()
     const saved = await store.all()
@@ -128,11 +279,17 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
         const otherSecret = await secret(other.ref.id)
         if (value && otherSecret && otherSecret !== value) fail('共用飞书应用的项目必须使用相同凭据')
       }
+      const workspaceConfig = (await store.messaging()).feishu
+      if (workspaceConfig.appId === config.appId) {
+        if (config.chatIds.some(c => workspaceConfig.chatIds.includes(c))) fail('这个飞书会话已绑定工作间')
+        const other = await secret(mailbox)
+        if (value && other && value !== other) fail('相同飞书应用必须使用相同凭据')
+      }
       if (newSecret) await orca.secrets.set(`feishu:${id}`, newSecret)
       else if (p.feishu.appId !== config.appId) await orca.secrets.delete(`feishu:${id}`)
       p.roles = roles as Project['roles']; p.feishu = config
     })
-    await sources.sync(await store.all(), secret)
+    await syncSources()
     changed(id)
     return snapshot(id)
   })
@@ -141,7 +298,7 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
     await store.mutate(input.projectId, revision(input.revision), async p => {
       const before = structuredClone(p)
       feedback(p, input)
-      notifyWorkspace(before, p, (await store.workspace()).runId)
+      await notify(before, p)
     })
     changed(input.projectId); defer(input.projectId)
     return snapshot(input.projectId)
@@ -160,7 +317,7 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
       } else {
         const before = structuredClone(p)
         submitTask(p, input.task)
-        notifyWorkspace(before, p, (await store.workspace()).runId)
+        await notify(before, p)
       }
     }, request)
     changed(id)
@@ -184,14 +341,17 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
     return { opened: true }
   })
 
-  return { store, ingest, flush, stop: () => sources.stop(), async start() {
+  return { store, ingest, flush, flushMailbox, stop: () => sources.stop(), async start() {
     for (const p of await store.all()) {
       if (p.deliveries.some(x => x.state === 'sending')) await store.mutate(p.ref.id, undefined, p => {
         for (const d of p.deliveries.filter(x => x.state === 'sending')) { d.state = 'uncertain'; d.error = '插件重启前通知结果待核对' }
       })
-      defer(p.ref.id)
     }
-    await sources.sync(await store.all(), secret)
+    if ((await store.messaging()).deliveries.some(d => d.state === 'sending')) await store.mutateMessaging(m => { for (const d of m.deliveries) if (d.state === 'sending') { d.state = 'uncertain'; d.error = '重启前发送结果待核对' } })
+    await syncSources()
+    for (const entry of (await store.messaging()).inbox.filter(x => x.state === 'pending')) await processMessage(entry.event.id)
+    for (const p of await store.all()) defer(p.ref.id)
+    await flushMailbox()
   } }
 }
 

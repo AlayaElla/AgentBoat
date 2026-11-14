@@ -1,0 +1,196 @@
+import { assert, mockHost, mountWorker, test } from 'orca/testing'
+import type { OrcaWorkerApi } from 'orca/worker'
+import { mkdtemp, writeFile } from 'node:fs/promises'
+import path from 'node:path'
+import { createCoordinator } from './worker'
+import { FeishuSources, normalizeFeishu, publicImageAddress, type MessageTransport } from './feishu'
+import { deliverable, refs } from './fixtures'
+import { fresh } from './store'
+import type { Delivery, SourceEvent } from './model'
+
+const config = { enabled: true, appId: 'app_demo', chatIds: ['chat_demo'], senderIds: ['user_demo'] }
+const event = (id: string, text: string, parent?: string, user = 'user_demo'): SourceEvent => normalizeFeishu('app_demo', {
+  sender: { sender_type: 'user', sender_id: { open_id: user } },
+  message: { message_id: id, chat_id: 'chat_demo', parent_id: parent, message_type: 'text', content: JSON.stringify({ text }) }
+})!
+async function fixture(main = true) {
+  const sends: Delivery[] = [], mainSends: { run: string; delivery: Delivery }[] = []
+  let failSend = false, coordinator!: ReturnType<typeof createCoordinator>
+  const transport: MessageTransport = { state: () => ({ state: 'connected', message: '' }), sync: async () => {}, stop() {}, send: async d => {
+    sends.push(structuredClone(d)); if (failSend) throw new Error('mock timeout'); return `sent_${sends.length}`
+  } }
+  const host = mockHost({ storage: {
+    'workspace': { version: 1, revision: 1, runId: main ? 'run_main' : '', requests: [] },
+    'workspace.messaging': { version: 1, revision: 0, feishu: config, inbox: [], deliveries: [] } as any,
+    'project:p1': fresh(refs[0]) as any, 'project:p2': fresh(refs[1]) as any
+  } })
+  const worker = await mountWorker({ default: (api: OrcaWorkerApi) => { coordinator = createCoordinator(api, {
+    projects: async () => refs, verifyRun: async () => {}, send: async (run, d) => { mainSends.push({ run, delivery: d }); return { requestId: 'mock_receipt' } }
+  }, transport) } }, { host })
+  const submit = async (task: unknown, requestId: string, projectId = 'p1') => {
+    const p = await coordinator.store.get(projectId)
+    await worker.request('project.agent', { operation: 'submit', projectId, revision: p.revision, requestId, task })
+    await coordinator.flush(projectId)
+  }
+  const ingest = async (e: SourceEvent) => { await coordinator.ingest('app_demo', e); await coordinator.flushMailbox(); await coordinator.flush('p1') }
+  return { worker, host, coordinator, transport, sends, mainSends, submit, ingest, timeout: () => { failSend = true } }
+}
+
+test('workspace Feishu settings preserve legacy projects and store credentials only in secrets', async () => {
+  const f = await fixture()
+  const before = await f.coordinator.store.all()
+  const saved = await f.worker.request('workspace.feishu', { operation: 'save', revision: 0, feishu: config, appSecret: 'mock-only-secret' })
+  assert.equal(saved.secretSaved, true)
+  assert.equal(JSON.stringify(f.host.data().storage).includes('mock-only-secret'), false)
+  assert.equal(f.host.data().secrets['feishu:@workspace'], 'mock-only-secret')
+  assert.deepEqual(await f.coordinator.store.all(), before)
+  await assert.rejects(() => f.worker.request('workspace.feishu', { operation: 'save', revision: 0, feishu: config }))
+  await assert.rejects(() => f.worker.request('project.settings', { projectId: 'p1', revision: 0, roles: before[0].roles, feishu: config, appSecret: 'mock-only-secret' }))
+  await f.worker.deactivate()
+})
+
+test('workspace messages reach main once and agent replies return to the originating Feishu message', async () => {
+  const f = await fixture(), e = event('hello', '项目现在怎么样？'), before = await f.coordinator.store.all()
+  await Promise.all([f.ingest(e), f.ingest(e)])
+  assert.equal(f.mainSends.length, 1)
+  assert.equal(f.mainSends[0].run, 'run_main')
+  assert.ok(f.mainSends[0].delivery.body.includes(e.id))
+  const input = { runId: 'run_main', eventId: e.id, requestId: 'reply_demo', text: '正在处理，稍后给你结果。' }
+  await f.worker.request('workspace.reply', input)
+  await f.worker.request('workspace.reply', input)
+  assert.equal(f.sends.length, 1)
+  assert.equal(f.sends[0].external!.replyTo, 'hello')
+  assert.equal(f.sends[0].external!.chatId, 'chat_demo')
+  await assert.rejects(() => f.worker.request('workspace.reply', { ...input, runId: 'run_other' }))
+  await assert.rejects(() => f.worker.request('workspace.reply', { ...input, text: 'different' }))
+  await f.ingest(event('followup', '明天再看', 'sent_1'))
+  assert.equal(f.mainSends.length, 2)
+  assert.deepEqual(await f.coordinator.store.all(), before)
+  await f.worker.deactivate()
+})
+
+test('reminders go directly to Feishu with options and review steps even without a main agent', async () => {
+  const f = await fixture(false)
+  await f.submit({ id: 'choose', title: '选择方向', goal: '确认方向', phase: 'blocked', decisions: [{ id: 'style', question: '选哪个？', options: ['浅色', '深色'] }] }, 'decision')
+  await f.submit(deliverable, 'review')
+  await f.submit({ id: 'done', title: '已完成', goal: '完成', phase: 'completed' }, 'done')
+  assert.equal(f.mainSends.length, 0)
+  assert.equal(f.sends.length, 4)
+  assert.ok(f.sends.some(d => d.body.includes('1. 浅色\n2. 深色')))
+  assert.ok(f.sends.some(d => d.body.includes(deliverable.acceptance[0].details) && d.external?.target?.itemRevision === 1))
+  const count = f.sends.length
+  await f.submit(deliverable, 'same'); await f.coordinator.start(); await f.coordinator.flush('p1')
+  assert.equal(f.sends.length, count)
+  await f.worker.deactivate()
+})
+
+test('quoted reminders record decisions, changes and acceptance on their exact project and version; duplicate events do nothing', async () => {
+  const f = await fixture(false)
+  await f.submit({ id: 'choose', title: '选择方向', goal: '确认方向', phase: 'working', decisions: [{ id: 'style', question: '选哪个？', options: ['浅色', '深色'] }] }, 'decision')
+  const e = event('decision', '2', 'sent_1')
+  await Promise.all([f.ingest(e), f.ingest(e)])
+  let p = await f.coordinator.store.get('p1')
+  assert.equal(p.tasks[0].decisions[0].answer, '深色')
+  assert.equal(p.tasks[0].decisions[0].history.length, 1)
+  assert.ok(p.tasks[0].decisions[0].history[0].note.includes('app_demo/decision'))
+  assert.ok(p.tasks[0].decisions[0].history[0].note.endsWith('\n2'))
+  await f.submit(deliverable, 'review')
+  const reminder = (await f.coordinator.store.get('p1')).deliveries.find(d => d.external?.target?.kind === 'acceptance')!
+  await f.ingest(event('changes', '修改：主按钮更醒目', reminder.external!.messageId))
+  p = await f.coordinator.store.get('p1')
+  const item = p.tasks.find(t => t.id === 'task-1')!.acceptance[0]
+  assert.equal(item.status, 'changes_requested')
+  assert.equal(item.history[0].revision, 1)
+  assert.ok(item.history[0].note.endsWith('\n修改：主按钮更醒目'))
+  await f.submit({ ...deliverable, artifacts: [{ ...deliverable.artifacts[0], id: 'v2', version: 'v2' }], acceptance: [{ ...deliverable.acceptance[0], artifactIds: ['v2'] }] }, 'review-v2')
+  await f.ingest(event('stale', '通过', reminder.external!.messageId))
+  p = await f.coordinator.store.get('p1')
+  assert.equal(p.tasks.find(t => t.id === 'task-1')!.acceptance[0].history.length, 1)
+  const latest = p.deliveries.find(d => d.external?.target?.itemRevision === 2)!
+  const pass = event('pass', '@_user_1 通过', latest.external!.messageId)
+  await f.ingest(pass); await f.ingest(pass)
+  p = await f.coordinator.store.get('p1')
+  const history = p.tasks.find(t => t.id === 'task-1')!.acceptance[0].history
+  assert.deepEqual(history.map(h => [h.result, h.revision]), [['changes_requested', 1], ['passed', 2]])
+  assert.equal((await f.coordinator.store.get('p2')).tasks.length, 0)
+  // Recovering a saved inbound after the project commit must not record feedback twice.
+  await f.coordinator.store.mutateMessaging(m => { m.inbox.find(x => x.event.id === pass.id)!.state = 'pending' })
+  await f.coordinator.start()
+  assert.equal((await f.coordinator.store.get('p1')).tasks.find(t => t.id === 'task-1')!.acceptance[0].history.length, 2)
+  await f.worker.deactivate()
+})
+
+test('unknown, ambiguous and unquoted feedback asks for clarification; unauthorized user and chat cannot write', async () => {
+  const f = await fixture(false)
+  await f.submit(deliverable, 'review')
+  const before = await f.coordinator.store.all()
+  await f.ingest(event('outsider', '通过', 'sent_1', 'stranger'))
+  await f.ingest({ ...event('wrongchat', '通过', 'sent_1'), chatId: 'not_allowed' })
+  assert.equal((await f.coordinator.store.messaging()).inbox.length, 0)
+  assert.equal(f.sends.length, 1)
+  await f.ingest(event('unquoted', '通过'))
+  await f.ingest(event('unknown', '通过', 'not_found'))
+  await f.ingest({ ...event('unknown_parent', '通过', 'not_found'), replyToIds: ['not_found', 'sent_1'] })
+  await f.ingest(event('unclear', '可以', 'sent_1'))
+  assert.ok(f.sends.slice(1).every(d => /请.*回复/.test(d.body)))
+  assert.deepEqual(await f.coordinator.store.all(), before)
+  await f.worker.deactivate()
+})
+
+test('timeout and restart keep Feishu sending uncertain without automatic resend', async () => {
+  const f = await fixture(false)
+  f.timeout(); await f.submit(deliverable, 'review')
+  assert.equal((await f.coordinator.store.get('p1')).deliveries[0].state, 'uncertain')
+  await f.coordinator.start(); await f.coordinator.flush('p1')
+  assert.equal(f.sends.length, 1)
+  await f.coordinator.store.mutateMessaging(m => { m.deliveries.push({ id: 'inflight', subject: 'mock', body: 'mock', state: 'sending', external: { channel: 'feishu', appId: 'app_demo', chatId: 'chat_demo' } }) })
+  await f.coordinator.start()
+  assert.equal((await f.coordinator.store.messaging()).deliveries[0].state, 'uncertain')
+  assert.equal(f.sends.length, 1)
+  await f.worker.deactivate()
+})
+
+test('restart initializes the Feishu transport before flushing saved pending reminders', async () => {
+  const f = await fixture(false)
+  await f.submit(deliverable, 'review')
+  await new Promise<void>(resolve => setImmediate(resolve))
+  await f.coordinator.store.mutate('p1', undefined, p => { p.deliveries[0].state = 'pending' })
+  let ready = false
+  f.transport.sync = async () => { await new Promise<void>(resolve => setImmediate(resolve)); ready = true }
+  const send = f.transport.send
+  f.transport.send = async d => { assert.equal(ready, true); return send(d) }
+  await f.coordinator.start(); await f.coordinator.flush('p1')
+  assert.equal((await f.coordinator.store.get('p1')).deliveries[0].state, 'sent')
+  assert.equal(f.sends.length, 2)
+  await f.worker.deactivate()
+})
+
+test('Feishu API adapter posts inline local images, hides file paths, and replies using the message API (mock only)', async () => {
+  const dir = await mkdtemp(path.resolve('.orca/local-test/agentboat-demo-'))
+  const file = path.join(dir, 'preview.png')
+  await writeFile(file, Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aT9sAAAAASUVORK5CYII=', 'base64'))
+  const calls: any[] = []
+  const source = new FeishuSources(async () => {}, () => {})
+  ;(source as any).clients.set('app_demo', { api: { im: {
+    image: { create: async (input: any) => { assert.ok(Buffer.isBuffer(input.data.image)); return { image_key: 'img_demo' } } },
+    message: { create: async (input: any) => { calls.push(input); return { code: 0, data: { message_id: 'created_demo' } } }, reply: async (input: any) => { calls.push(input); return { code: 0, data: { message_id: 'replied_demo' } } } }
+  } } })
+  const d: Delivery = { id: 'mock', subject: '验收图片', body: '核对布局', state: 'pending', external: { channel: 'feishu', appId: 'app_demo', chatId: 'chat_demo', root: dir,
+    artifacts: [{ id: 'a', label: '预览', version: 'v1', url: file }, { id: 'b', label: '外部链接', version: 'v1', url: 'https://example.com/preview' }, { id: 'c', label: '说明', version: 'v1', url: path.join(dir, 'readme.md') }] } }
+  assert.equal(await source.send(d), 'created_demo')
+  assert.ok(calls[0].data.content.includes('img_demo'))
+  assert.ok(calls[0].data.content.includes('在 App 里查看'))
+  assert.equal(calls[0].data.content.includes(dir.replaceAll('\\', '\\\\')), false)
+  assert.equal(calls[0].data.receive_id, 'chat_demo')
+  assert.equal(await source.send({ ...d, external: { ...d.external!, replyTo: 'original_demo' } }), 'replied_demo')
+  assert.equal(calls[1].path.message_id, 'original_demo')
+  const remote = new FeishuSources(async () => {}, () => {}, async url => { assert.equal(url, 'https://example.com/image.png'); return Buffer.from('mock-image') })
+  ;(remote as any).clients = (source as any).clients
+  await remote.send({ ...d, external: { ...d.external!, artifacts: [{ id: 'remote', label: '网络图片', version: 'v1', url: 'https://example.com/image.png' }] } })
+  assert.ok(calls[2].data.content.includes('img_demo'))
+})
+
+test('image download rejects local and reserved networks', () => {
+  for (const ip of ['127.0.0.1', '10.0.0.1', '169.254.169.254', '192.168.0.1', '172.16.0.1', '100.64.0.1', '0.0.0.0', '::1', '::ffff:127.0.0.1', 'fc00::1', '2001:db8::1']) assert.equal(publicImageAddress(ip), false)
+  for (const ip of ['8.8.8.8', '1.1.1.1', '2606:4700:4700::1111']) assert.equal(publicImageAddress(ip), true)
+})

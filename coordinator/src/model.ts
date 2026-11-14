@@ -26,13 +26,24 @@ export interface Task {
 export interface SourceEvent {
   id: string; source: string; sourceId: string; threadId: string; chatId: string
   senderId: string; text: string; receivedAt: string; taskId?: string
+  replyToIds?: string[]
+}
+export interface FeedbackTarget {
+  projectId: string; taskId: string; kind: 'decision' | 'acceptance'; itemId: string; itemRevision: number; fingerprint: string
 }
 export interface Delivery {
   id: string; subject: string; body: string
   targetRunId?: string
   state: 'pending' | 'sending' | 'sent' | 'failed' | 'uncertain'
   error?: string; requestId?: string
+  external?: { channel: 'feishu'; appId: string; chatId: string; replyTo?: string; messageId?: string; target?: FeedbackTarget; artifacts?: Artifact[]; root?: string }
 }
+export interface Messaging {
+  version: 1; revision: number; feishu: Project['feishu']
+  inbox: { appId: string; event: SourceEvent; state: 'pending' | 'done' }[]
+  deliveries: Delivery[]
+}
+export interface MessagingSnapshot extends Messaging { secretSaved: boolean; connection: ConnectionState }
 export interface Project {
   version: 1; ref: ProjectRef; revision: number; runId: string
   updatedAt?: string

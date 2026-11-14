@@ -1,6 +1,6 @@
 ﻿import { atom, read, set, update, plugin, shell, files, Stack, Row, Box, Heading, Text, Button, IconButton, Badge, List, ListItem, Link,
   Select, Input, Textarea, Switch, RadioGroup, Field, Tabs, Tab, Collapsible, EmptyState, Callout, Skeleton, KeyValue, type PanelContext, type Tone } from 'orca'
-import { taskState, type Acceptance, type Decision, type Project, type ProjectRef, type Snapshot, type Task, type Overview } from './model'
+import { taskState, type Acceptance, type Decision, type Project, type ProjectRef, type Snapshot, type Task, type Overview, type MessagingSnapshot } from './model'
 
 type View = { kind: 'task'; id: string } | { kind: 'settings' } | null
 const OTHER = ' other' // options are stored trimmed, so a leading space cannot collide with one
@@ -18,6 +18,9 @@ const picks = atom<Record<string, string>>({})
 const editing = atom('')
 const config = atom({ design: 'claude', code: 'codex', review: 'codex', appId: '', appSecret: '', chatIds: '', senderIds: '', enabled: false })
 const configOwner = atom('')
+const workspaceFeishu = atom<MessagingSnapshot | null>(null)
+const workspaceFeishuOpen = atom(false)
+const workspaceConfig = atom({ appId: '', appSecret: '', chatIds: '', senderIds: '', enabled: false })
 let epoch = 0
 
 function showConfig(p: Project) {
@@ -213,14 +216,14 @@ function messages(p: Project) {
   const states = { pending: '待通知', sending: '正在通知', sent: '已通知', failed: '通知失败', uncertain: '待核对' }
   if (!p.events.length && !waiting.length) return <EmptyState icon="bell" title="还没有消息" />
   return <Stack gap="lg">
-    {waiting.length ? <Stack gap="sm"><Heading level={2}>未送达主会话</Heading>{waiting.map(d => <Box key={d.id} border radius="lg" padding="md" gap="sm" background="card">
+    {waiting.length ? <Stack gap="sm"><Heading level={2}>未送达通知</Heading>{waiting.map(d => <Box key={d.id} border radius="lg" padding="md" gap="sm" background="card">
       <Row justify="between" gap="sm" align="start"><Text weight="medium">{d.subject}</Text><Badge tone={d.state === 'pending' || d.state === 'sending' ? 'neutral' : 'warning'}>{states[d.state]}</Badge></Row>
-      {d.targetRunId ? <Text muted>发往工作间主 agent</Text> : null}
+      {d.external ? <Text muted>发往飞书</Text> : d.targetRunId ? <Text muted>发往工作间主 agent</Text> : null}
       {summary(d.error ?? d.body)}
-      {d.state === 'pending' && p.runId ? <Button disabled={read(busy)} onPress={() => act(d.id, '通知未成功', async () => {
+      {d.state === 'pending' && (d.external || p.runId) ? <Button disabled={read(busy)} onPress={() => act(d.id, '通知未成功', async () => {
         const answer = await plugin.request('project.deliver', { projectId: p.ref.id, deliveryId: d.id })
         if (read(selected) === p.ref.id) set(snapshot, answer)
-      })}>通知主会话</Button> : null}
+      })}>{d.external ? '发送飞书提醒' : '通知主会话'}</Button> : null}
       {problem(d.id)}
     </Box>)}</Stack> : null}
     {p.events.length ? <Stack gap="sm">
@@ -330,9 +333,15 @@ async function openOverviewTask(projectId: string, taskId: string) {
   if (read(selected) === projectId && read(snapshot)?.project?.tasks.some(t => t.id === taskId)) show({ kind: 'task', id: taskId })
 }
 function workspacePage(all: Overview) {
+  if (read(workspaceFeishuOpen)) return workspaceFeishuPage()
   const kinds = { decision: '待决定', review: '待验收', blocked: '受阻', rework: '要求返修' }
   return <Stack gap="lg">
     <Row justify="between" gap="sm" wrap><Heading>工作间总览</Heading><Badge tone={all.workspace.runId ? 'success' : 'neutral'}>{all.workspace.runId ? '主 agent 已绑定' : '主 agent 未绑定'}</Badge></Row>
+    <Button icon="settings" onPress={() => act('workspace-feishu', '读取飞书设置未成功', async () => {
+      const s = await plugin.request('workspace.feishu', { operation: 'read' })
+      set(workspaceFeishu, s); set(workspaceConfig, { ...s.feishu, appSecret: '', chatIds: s.feishu.chatIds.join('\n'), senderIds: s.feishu.senderIds.join('\n') }); set(workspaceFeishuOpen, true)
+    })}>工作间飞书</Button>
+    {problem('workspace-feishu')}
     {all.error ? <Callout tone="danger" title="项目列表读取未成功">{paragraphs(all.error)}</Callout> : null}
     <Stack gap="sm"><Heading level={2}>{`待用户处理 ${all.attention.length}`}</Heading>
       {all.attention.length ? all.attention.map(item => <Box key={`${item.projectId}/${item.taskId}/${item.kind}/${item.itemId}`} border radius="lg" padding="md" gap="sm" background="card">
@@ -359,11 +368,37 @@ function workspacePage(all: Overview) {
     </Stack>
   </Stack>
 }
+function workspaceFeishuPage() {
+  const s = read(workspaceFeishu)!, c = read(workspaceConfig)
+  const edit = (key: keyof typeof c, value: string | boolean) => update(workspaceConfig, c => ({ ...c, [key]: value }))
+  const split = (s: string) => s.split(/[\n,，]/).map(s => s.trim()).filter(Boolean)
+  const status = !s.feishu.enabled ? '未启用' : { off: '未连接', connecting: '连接中', connected: '已连接', error: '连接异常' }[s.connection.state]
+  const leave = () => { set(workspaceFeishuOpen, false); update(workspaceConfig, c => ({ ...c, appSecret: '' })); set(failure, null) }
+  return <Stack gap="md">
+    <Button variant="ghost" onPress={leave}>返回总览</Button>
+    <Row justify="between" gap="sm"><Heading>工作间飞书</Heading><Badge tone={s.connection.state === 'connected' ? 'success' : 'neutral'}>{status}</Badge></Row>
+    {s.connection.message ? <Callout tone="warning" title="飞书连接">{paragraphs(s.connection.message)}</Callout> : null}
+    <Switch label="启用工作间飞书" checked={c.enabled} onChange={v => edit('enabled', v)} />
+    <Input label="App ID" value={c.appId} onChange={v => edit('appId', v)} />
+    <Input label="App Secret" type="password" value={c.appSecret} placeholder={s.secretSaved ? '已保存，留空保留' : ''} onChange={v => edit('appSecret', v)} />
+    <Textarea label="允许的用户 Open ID" value={c.senderIds} placeholder="每行一个" rows={2} onChange={v => edit('senderIds', v)} />
+    <Textarea label="允许的会话 Chat ID" value={c.chatIds} placeholder="每行一个，提醒会发送到这些会话" rows={2} onChange={v => edit('chatIds', v)} />
+    <Collapsible title="使用说明"><Text>企业自建应用启用机器人和长连接，订阅 im.message.receive_v1。所有允许会话的成员都能看到提醒，请只填写工作间主人的单聊或可信群聊。直接回复某条提醒，发送选项编号、「通过」或「修改：具体意见」。完整配置步骤见 coordinator/FEISHU.md。</Text></Collapsible>
+    {s.deliveries.some(d => d.state === 'uncertain') ? <Callout tone="warning" title="有发送结果待核对的消息">请在飞书和主 agent 会话核对；插件不会自动重发。</Callout> : null}
+    {problem('workspace-feishu')}
+    <Button variant="solid" disabled={read(busy)} onPress={() => act('workspace-feishu', '保存飞书设置未成功', async () => {
+      const answer = await plugin.request('workspace.feishu', { operation: 'save', revision: s.revision,
+        feishu: { enabled: c.enabled, appId: c.appId, chatIds: split(c.chatIds), senderIds: split(c.senderIds) }, ...(c.appSecret ? { appSecret: c.appSecret } : {}) })
+      set(workspaceFeishu, answer); leave()
+    })}>{read(busy) ? '正在保存…' : '保存飞书设置'}</Button>
+  </Stack>
+}
 export function setup(ctx: PanelContext): void {
   ctx.subscriptions.push(plugin.on('project.changed', e => {
     void plugin.request('workspace.overview').then(all => set(workspace, all)).catch(e => fail('', '读取总览未成功', e))
     const id = read(selected)
     if (id && (!e.projectId || e.projectId === id)) void load(id)
+    if (read(workspaceFeishuOpen)) void plugin.request('workspace.feishu', { operation: 'read' }).then(s => set(workspaceFeishu, s)).catch(e => fail('workspace-feishu', '读取飞书状态未成功', e))
   }))
   void list()
 }

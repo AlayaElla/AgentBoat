@@ -3,6 +3,41 @@ import * as panel from './panel'
 import { refs, sample, longSample, deliverable } from './fixtures'
 import { fresh, feedback, overview, submitTask } from './store'
 
+test('workspace Feishu settings open in overview, preserve drafts on failure and clear secret on success', async () => {
+  let reject = true, saved: any
+  const host = mockHost({ requests: {
+    'projects.list': () => ({ projects: refs }),
+    'workspace.overview': () => overview([], { version: 1, revision: 1, runId: 'run_main', requests: [] }),
+    'workspace.feishu': input => {
+      if (input.operation === 'save') {
+        if (reject) throw hostError('invalid_request', '请刷新后重试')
+        saved = input
+      }
+      return { version: 1, revision: input.operation === 'save' ? 1 : 0, feishu: fresh(refs[0]).feishu, inbox: [], deliveries: [], secretSaved: false, connection: { state: 'off', message: '' } }
+    }
+  } })
+  const view = await mount(panel, { host })
+  await view.press({ text: '工作间飞书' })
+  assert.ok(view.find({ label: '允许的用户 Open ID' }))
+  await view.type({ label: 'App ID' }, 'app_demo')
+  await view.type({ label: 'App Secret' }, 'mock-password')
+  await view.type({ label: '允许的用户 Open ID' }, 'ou_demo')
+  await view.type({ label: '允许的会话 Chat ID' }, 'oc_demo')
+  await view.press({ text: '保存飞书设置' })
+  assert.ok(JSON.stringify(view.tree()).includes('保存飞书设置未成功'))
+  assert.equal(view.valueOf({ label: 'App ID' }), 'app_demo')
+  reject = false
+  await view.press({ text: '保存飞书设置' })
+  assert.equal(saved.appSecret, 'mock-password')
+  assert.deepEqual(saved.feishu.chatIds, ['oc_demo'])
+  assert.ok(view.find({ text: '工作间总览' }))
+  await view.press({ text: '工作间飞书' })
+  assert.equal(view.valueOf({ label: 'App Secret' }), '')
+  assert.deepEqual(view.errors, [])
+  assert.deepEqual(view.warnings, [])
+  await view.unmount()
+})
+
 function fixture() {
   const s = sample(), two = { ...s, project: fresh(refs[1]) }
   const saved: any[] = []

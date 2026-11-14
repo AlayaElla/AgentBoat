@@ -1,7 +1,9 @@
-import type { Snapshot, Project, ProjectRef, Overview, WorkspaceBinding } from './model'
+import type { Snapshot, Project, ProjectRef, Overview, WorkspaceBinding, MessagingSnapshot } from './model'
 export {}
 declare module 'orca' {
   interface PluginRequests {
+    'workspace.feishu': { input: { operation: 'read' | 'save'; revision?: number; feishu?: Project['feishu']; appSecret?: string }; output: MessagingSnapshot }
+    'workspace.reply': { input: { runId: string; eventId: string; requestId: string; text: string }; output: MessagingSnapshot }
     'workspace.overview': { output: Overview }
     'workspace.agent': { input: { operation: 'read' | 'bind'; revision?: number; requestId?: string; runId?: string }; output: WorkspaceBinding }
     'workspace.message': { input: { projectId: string; revision: number; requestId: string; runId: string; text: string }; output: Snapshot }
