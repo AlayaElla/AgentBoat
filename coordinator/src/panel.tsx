@@ -5,7 +5,7 @@ import { storage } from 'orca'
 import { linksSection, linksPage, closeLinks, loadLinks, pendingRequests, requestPage } from './links-panel'
 import { groupedAttention } from './model'
 import { connectionStates, connectionsList, addConnection, connectionPage, loadConnection, clearConnectionDraft } from './connections-panel'
-import { bindingRows, agentName, takeoverText } from './main-agent-view'
+import { bindingRows, agentName, takeoverText, mainAgentStates } from './main-agent-view'
 
 
 type Page = { kind: 'home' | 'project' | 'task' | 'project-settings' | 'settings' | 'main' | 'connections' | 'connection' | 'add-connection' | 'new-connection' | 'machines' | 'links' | 'request'; projectId?: string; id?: string }
@@ -372,8 +372,9 @@ function workspacePage(all: Overview) {
     const active = p.counts.working + p.counts.rework + p.counts.decision + p.counts.blocked
     return <ListItem key={p.ref.id} onPress={() => choose(p.ref.id)}><Stack gap="xs"><Text weight="medium">{fit(p.ref.name, 44)}</Text><Text muted>{active ? `${active} 个任务在做` : p.counts.review ? '等你验收' : '都做完了'}{p.updatedAt ? ' · ' : ''}{p.updatedAt ? <RelativeTime at={Date.parse(p.updatedAt)} /> : null}</Text></Stack>{count(p.ref.id) ? <Badge tone="accent">{`${count(p.ref.id)} 件待处理`}</Badge> : null}</ListItem>
   }
-  return <Stack gap="lg"><Row justify="between"><Heading>工作间</Heading><Badge tone={all.workspace.session?.online === 'online' ? 'success' : 'warning'}>{all.workspace.session?.online === 'online' ? '主 agent 在线' : '主 agent 离线'}</Badge></Row>
-    {!all.workspace.runId || all.workspace.session?.online !== 'online' || all.workspace.takeover ? <Callout tone="warning" title={!all.workspace.runId ? '主 agent 未绑定' : all.workspace.takeover ? '等待主 agent 接管' : '主 agent 不在线'}><Button onPress={() => go({ kind: 'main' })}>查看主 agent</Button></Callout> : null}
+  const online = all.workspace.session?.online ?? 'offline', status = mainAgentStates[online]
+  return <Stack gap="lg"><Row justify="between"><Heading>工作间</Heading><Badge tone={status.tone}>{`主 agent ${status.label}`}</Badge></Row>
+    {!all.workspace.runId || online === 'offline' || all.workspace.takeover ? <Callout tone="warning" title={!all.workspace.runId ? '主 agent 未绑定' : all.workspace.takeover ? '等待主 agent 接管' : '主 agent 不在线'}><Button onPress={() => go({ kind: 'main' })}>查看主 agent</Button></Callout> : null}
     {all.connections?.filter(c => c.enabled && c.state === 'error').map(c => <Callout key={c.id} tone="warning" title={`外部连接「${c.name}」连不上`}><Button onPress={() => openConnection(c.id)}>查看连接</Button></Callout>)}
     {all.links?.error ? <Callout tone="danger" title="工作间连接异常"><Text>{all.links.error}</Text><Button onPress={() => openLinks('settings')}>连接设置</Button></Callout> : null}
     {all.error ? <Callout tone="danger" title="项目列表读取失败"><Text>{all.error}</Text><Button onPress={list}>重试</Button></Callout> : null}
@@ -390,7 +391,7 @@ async function openConnection(id: string) { return act('', '读取连接未成�
 async function openLinks(tab: string) { return act('', '读取工作间未成功', async () => { go({ kind: 'links' }); await loadLinks(); set(linksTab, tab) }) }
 function workspaceSettings(all: Overview) {
   return <Stack gap="lg"><Heading>设置</Heading><List label="工作间设置">
-    <ListItem onPress={() => go({ kind: 'main' })}><Text>主 agent</Text><Text muted>{`${agentName(all.workspace.session?.agent)} · ${all.workspace.session?.online === 'online' ? '在线' : '离线'}`}</Text></ListItem>
+    <ListItem onPress={() => go({ kind: 'main' })}><Text>主 agent</Text><Text muted>{`${agentName(all.workspace.session?.agent)} · ${mainAgentStates[all.workspace.session?.online ?? 'offline'].label}`}</Text></ListItem>
     <ListItem onPress={() => go({ kind: 'connections' })}><Text>外部连接</Text><Text muted>{all.connections?.map(c => `${c.name} ${connectionStates[c.state]}`).join(' · ') || '还没有'}</Text>{all.connections?.some(c => c.state === 'error') ? <Badge tone="warning">要处理</Badge> : null}</ListItem>
     <ListItem onPress={() => openLinks('activity')}><Text>其他工作间</Text><Text muted>{`已连接 ${all.links?.peers.filter(p => p.state === 'active').length || 0} 个`}</Text></ListItem>
     <ListItem onPress={() => go({ kind: 'machines' })}><Text>机器</Text><Text muted>{all.machines?.map(m => m.name).join(' · ') || '主机'}</Text></ListItem>
@@ -398,9 +399,9 @@ function workspaceSettings(all: Overview) {
   </List>{all.hidden?.length ? <Collapsible title={`隐藏的项目 ${all.hidden.length} 个`}>{all.hidden.map(ref => <Stack key={ref.id}><Button onPress={() => choose(ref.id)}>{fit(ref.name, 40)}</Button><Button onPress={() => act('', '恢复未成功', () => visibility(ref.id, false))}>恢复显示</Button></Stack>)}</Collapsible> : null}</Stack>
 }
 function mainPage(all: Overview) {
-  const w = all.workspace, rows = bindingRows(w)
-  return <Stack gap="md"><Row justify="between"><Heading>主 agent</Heading><Badge>{w.session?.online === 'online' ? '在线' : '离线'}</Badge></Row><Text>统筹工作间，转达项目消息与用户反馈。</Text>
-    {!w.runId || w.session?.online !== 'online' ? <Callout tone="warning" title={w.runId ? '主 agent 不在线' : '主 agent 未绑定'}>选择一个在线会话，或新开主 agent。</Callout> : null}
+  const w = all.workspace, rows = bindingRows(w), online = w.session?.online ?? 'offline', status = mainAgentStates[online]
+  return <Stack gap="md"><Row justify="between"><Heading>主 agent</Heading><Badge tone={status.tone}>{status.label}</Badge></Row><Text>统筹工作间，转达项目消息与用户反馈。</Text>
+    {!w.runId || online === 'offline' ? <Callout tone="warning" title={w.runId ? '主 agent 不在线' : '主 agent 未绑定'}>选择一个在线会话，或新开主 agent。</Callout> : null}
     {takeoverText(w) ? <Callout tone="warning" title="主 agent 接管">{takeoverText(w)}</Callout> : null}
     {w.previousNotice && w.previousNotice !== 'sent' ? <Callout tone="warning" title="原主 agent 通知待核对" /> : null}
     <KeyValue items={rows.filter(r => ['会话', 'Agent', '目录', '同时担任项目主 agent'].includes(r.label))} />

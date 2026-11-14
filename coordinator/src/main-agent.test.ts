@@ -107,12 +107,13 @@ for (const mode of ['existing', 'new'] as const) test(`main takeover ${mode}: ta
 
 test('chatNotDeclarable: plugin independently reads Run and sessions, never queries run-current for a chat', async () => {
   const runtime = new OrcaRuntime(async () => 'unused'), calls: string[][] = []
+  let observation = 'live'
   ;(runtime as any).call = async (args: string[]) => {
     calls.push(args)
     if (args[1] === 'run-current') throw Error('chatNotDeclarable: cannot declare another chat')
     if (args[1] === 'run-show') return { run: { id: args[3] } }
     if (args[0] === 'terminal') return { terminals: [] }
-    return { worktrees: [{ address: { environment: 'local', worktree: session.workspace }, path: session.path, agents: [{ paneKey: 'structured-agent-session-test-next:pane', agentType: 'claude', subagentObservation: 'live' }] }] }
+    return { worktrees: [{ address: { environment: 'local', worktree: session.workspace }, path: session.path, agents: [{ paneKey: 'structured-agent-session-test-next:pane', agentType: 'claude', subagentObservation: observation }] }] }
   }
   await assert.rejects(() => (runtime as any).call(['orchestration', 'run-current', '--from', session.handle]), /chatNotDeclarable/)
   calls.length = 0
@@ -121,6 +122,8 @@ test('chatNotDeclarable: plugin independently reads Run and sessions, never quer
   await assert.rejects(() => runtime.identify(session.handle, 'run_next', 'run_other'), /自报/)
   await assert.rejects(() => runtime.identify(session.handle, 'run_next'), /自报/)
   await assert.rejects(() => runtime.identify('orca_session_id:missing', 'run_next', 'run_next'), /在线/)
+  observation = 'unverifiable'
+  await assert.rejects(() => runtime.identify(session.handle, 'run_next', 'run_next'), /在线/)
   assert.ok(calls.some(a => a[1] === 'run-show'))
   assert.equal(calls.some(a => a.includes('run-current') || a.includes('--from')), false)
 })
@@ -191,11 +194,13 @@ test('Orca send and takeover subjects have one project-coordinator prefix withou
 test('runtime target parser uses exact chat session and terminal pane; unknown liveness is never online', () => {
   const ws = { address: { environment: 'local', worktree: 'identity:workspace' }, path: '/test', displayName: '工作区', agents: [
     { paneKey: 'structured-agent-session-test-session:pane', conversationName: '会话', agentType: 'claude', subagentObservation: 'live' },
+    { paneKey: 'structured-agent-session-idle:pane', agentType: 'claude', subagentObservation: 'unverifiable' },
+    { paneKey: 'structured-agent-session-closed:pane', agentType: 'claude', subagentObservation: 'exited' },
     { paneKey: 'tab:leaf', agentType: 'codex', agentWait: { liveness: 'live' } },
     { paneKey: 'structured-agent-session-stale:pane', agentType: 'claude', state: 'working' },
     { paneKey: 'structured-agent-session-child:pane', parentPaneKey: 'parent', subagentObservation: 'live' }
   ] }
   const t = mainTargets([ws], [{ tabId: 'tab', leafId: 'leaf', handle: 'terminal-exact', connected: true, writable: true }])
-  assert.deepEqual(t.sessions.map(s => [s.handle, s.online]), [['orca_session_id:test-session', 'online'], ['terminal-exact', 'online'], ['orca_session_id:stale', 'unknown']])
+  assert.deepEqual(t.sessions.map(s => [s.handle, s.online]), [['orca_session_id:test-session', 'online'], ['orca_session_id:idle', 'unknown'], ['orca_session_id:closed', 'offline'], ['terminal-exact', 'online'], ['orca_session_id:stale', 'unknown']])
   assert.equal(mainTargets([{ ...ws, hostId: 'remote' }], []).sessions.length, 0)
 })

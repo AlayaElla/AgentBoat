@@ -4,6 +4,47 @@ import { refs, sample, longSample, deliverable } from './fixtures'
 import { fresh, feedback, overview, submitTask } from './store'
 import type { LinksSnapshot } from './links'
 import { requestState, type WorkspaceRequest } from './model'
+import { bindingRows } from './main-agent-view'
+
+for (const [online, label, tone] of [['online', '在线', 'success'], ['unknown', '待命', 'neutral'], ['offline', '离线', 'warning']] as const) {
+  test(`main agent ${online}: home, settings and identity share status and only offline warns`, async () => {
+    const session = { handle: 'orca_session_id:test-main', title: '测试主会话', workspace: 'identity:test', workspaceName: '测试工作区', path: '/test', agent: 'claude', online }
+    const binding = { version: 1 as const, revision: 0, runId: 'run_main', requests: [], session }
+    const host = mockHost({ requests: { 'projects.list': () => ({ projects: [] }), 'workspace.overview': () => ({ ...overview([], binding), workspace: binding }) } })
+    const view = await mount(panel, { host })
+    try {
+      assert.equal(view.find({ type: 'Badge', text: `主 agent ${label}` })!.props.tone, tone)
+      assert.deepEqual(view.findAll({ type: 'Callout' }).map(c => [c.props.title, c.props.tone]), online === 'offline' ? [['主 agent 不在线', 'warning']] : [])
+      assert.equal(!!view.find({ text: '查看主 agent' }), online === 'offline')
+      assert.equal(bindingRows(binding).find(r => r.label === '在线状态')!.value, label)
+      await view.press({ label: '设置' })
+      assert.ok(view.find({ type: 'Text', text: `Claude · ${label}` }))
+      await view.press({ type: 'ListItem', text: /^主 agent/ })
+      assert.equal(view.find({ type: 'Badge', text: label })!.props.tone, tone)
+      assert.deepEqual(view.findAll({ type: 'Callout' }).map(c => [c.props.title, c.props.tone]), online === 'offline' ? [['主 agent 不在线', 'warning']] : [])
+      clean(view)
+    } finally { await view.unmount() }
+  })
+}
+
+test('home still warns for an unbound main agent, a missing session and a pending takeover', async () => {
+  const session = { handle: 'orca_session_id:test-main', title: '测试主会话', workspace: 'identity:test', workspaceName: '测试工作区', path: '/test', agent: 'claude', online: 'unknown' as const }
+  for (const [binding, title] of [
+    [{ revision: 0, runId: '' }, '主 agent 未绑定'],
+    [{ revision: 0, runId: 'run_legacy' }, '主 agent 不在线'],
+    [{ revision: 0, runId: 'run_main', session, takeover: { id: 'test', state: 'waiting' as const, expiresAt: new Date(Date.now() + 60000).toISOString(), target: session } }, '等待主 agent 接管']
+  ] as const) {
+    const host = mockHost({ requests: { 'projects.list': () => ({ projects: [] }), 'workspace.overview': () => ({ ...overview([], { version: 1, revision: binding.revision, runId: binding.runId, requests: [] }), workspace: binding }) } })
+    const view = await mount(panel, { host })
+    try {
+      assert.deepEqual(view.findAll({ type: 'Callout' }).map(c => c.props.title), [title])
+      await view.press({ text: '查看主 agent' })
+      assert.ok(view.find({ type: 'Heading', text: '主 agent' }))
+      assert.deepEqual(view.findAll({ type: 'Callout' }).map(c => c.props.title), [binding.runId === 'run_main' ? '主 agent 接管' : title])
+      clean(view)
+    } finally { await view.unmount() }
+  }
+})
 
 test('connection navigation clears secrets and saves/checks by stable connection id', async () => {
   const c = { id: 'butler', type: 'a2a' as const, name: 'Hermes', enabled: true, state: 'unchecked' as const, message: '' }

@@ -1,6 +1,11 @@
 import type { WorkspaceBinding } from './model'
 
 export const agentName = (v = '') => ({ claude: 'Claude', codex: 'Codex', opencode: 'OpenCode' }[v] || v || '未知')
+export const mainAgentStates = {
+  online: { label: '在线', tone: 'success' },
+  unknown: { label: '待命', tone: 'neutral' },
+  offline: { label: '离线', tone: 'warning' }
+} as const
 export function bindingRows(w: WorkspaceBinding) {
   const s = w.session
   return [
@@ -10,7 +15,7 @@ export function bindingRows(w: WorkspaceBinding) {
     { label: 'Run', value: w.runId || '未绑定' }, { label: '绑定时间', value: w.boundAt || '未知' },
     { label: '身份资料', value: w.verification ? 'Run 存在、会话资料：插件核实；Run 归属：会话自报' : '旧记录核实来源未知' },
     ...(w.securityBoundary ? [{ label: '授权边界', value: w.securityBoundary }] : []),
-    { label: '在线状态', value: s?.online === 'online' ? '在线' : s?.online === 'offline' ? '离线' : '未知' },
+    { label: '在线状态', value: s ? mainAgentStates[s.online].label : '未知' },
     { label: '同时担任项目主 agent', value: w.projectNames?.length ? w.projectNames.join('、') : w.projectNames ? '无' : '未知' },
     ...(w.previousNotice ? [{ label: '原主 agent 通知', value: w.previousNotice === 'sent' ? '已发送' : w.previousNotice === 'uncertain' ? '结果待核对，不会自动重发' : '待发送' }] : [])
   ]
