@@ -15,6 +15,9 @@ export interface CoordinatorRuntime {
   requestTakeover?(handle: string, prompt: string): Promise<void>
   launchMain?(workspace: string, agent: string, prompt: string): Promise<string>
   openOverview?(): Promise<void>
+  removeProject?(ref: ProjectRef): Promise<void>
+  openCanvas?(): Promise<void>
+  hermesApprovalMode?(): Promise<string>
   send(runId: string, delivery: Delivery): Promise<{ requestId?: string }>
 }
 export class OrcaRuntime implements CoordinatorRuntime {
@@ -85,6 +88,29 @@ export class OrcaRuntime implements CoordinatorRuntime {
     return handle as string
   }
   async openOverview() { await this.call(['plugin', 'open', 'local.project-coordinator', '--panel', 'project-coordinator']) }
+  async openCanvas() { await this.call(['plugin', 'open', 'local.project-coordinator', '--panel', 'org-canvas']) }
+  async hermesApprovalMode() {
+    const home = process.env.HERMES_HOME || path.join(process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local'), 'hermes')
+    const { stdout } = await execute(process.platform === 'win32' ? path.join(home, 'bin', 'hermes.exe') : 'hermes', ['config', 'get', 'approvals.mode', '--json'], { timeout: 15000, windowsHide: true, maxBuffer: 65536 })
+    const mode = JSON.parse(stdout)
+    return ['manual', 'smart', 'off'].includes(mode) ? mode : 'unknown'
+  }
+  async removeProject(ref: ProjectRef) {
+    if (ref.hostId !== 'local') fail('只能移除本机项目')
+    const setups = await this.call(['project', 'setups'])
+    if (!Array.isArray(setups.setups) || setups.truncated) fail('无法确认项目登记，未移除')
+    const found = setups.setups.filter((s: any) => s.repoId === ref.repoId && s.hostId === ref.hostId && path.resolve(s.path) === path.resolve(ref.path))
+    if (found.length > 1) fail('项目登记不唯一，未移除')
+    if (!found.length) {
+      if ((await this.projects()).some(p => p.id === ref.id)) fail('无法定位项目登记，未移除')
+      return
+    }
+    // --force also bypasses open-session guards; inspect every worktree and terminal immediately before removal.
+    const [ps, terminals] = await Promise.all([this.call(['worktree', 'ps', '--limit', '10000', '--agent-wait']), this.call(['terminal', 'list', '--limit', '10000'])])
+    assertProjectIdle(ref, ps, terminals)
+    await this.call(['project', 'setup-delete', '--setup', found[0].id, '--force'])
+    if ((await this.projects()).some(p => p.id === ref.id)) fail('Orca 尚未确认移除，工作间记录保留')
+  }
   async mainAgent(id: string): Promise<'claude' | 'codex' | undefined> {
     const result = await this.call(['orchestration', 'run-show', '--id', id])
     const handle = result.run?.coordinator_handle
@@ -101,6 +127,11 @@ export class OrcaRuntime implements CoordinatorRuntime {
       '--subject', delivery.subject.startsWith('【项目协作】') ? delivery.subject : `【项目协作】${delivery.subject}`, '--body', delivery.body])
     return { requestId: result.mutation?.requestId }
   }
+}
+export function assertProjectIdle(ref: ProjectRef, ps: any, list: any) {
+  if (!Array.isArray(ps.worktrees) || !Array.isArray(list.terminals) || ps.truncated || list.truncated || [ps, list].some(s => s.hostScope?.omittedHostIds?.includes('local'))) fail('终端或会话列表不完整，未移除项目')
+  const rows = ps.worktrees.filter((w: any) => w.repoId === ref.repoId && (w.hostId ?? 'local') === ref.hostId)
+  if (rows.some((w: any) => (w.agents?.length ?? 0) > 0 || w.liveTerminalCount > 0 || w.unverifiableTerminalCount > 0 || w.hasAttachedPty) || list.terminals.some((t: any) => t.repoId === ref.repoId || rows.some((w: any) => t.worktreeId === w.worktreeId || t.workspaceId === w.worktreeId || t.tabId === w.worktreeId))) fail('这个项目还有打开的终端或会话，先关掉再删')
 }
 // Only runtime-issued handles and explicit liveness are used; saved activity alone is not online evidence.
 export function mainTargets(rows: any[], terminals: any[]) {

@@ -158,15 +158,15 @@ test('status count follows submissions, feedback, hide and restore; command open
   }) } }, { host })
   const count = async () => { await c.updateStatus(); return (host.callsOf('statusBar.update').at(-1) as any).text }
   try {
-    assert.equal(await count(), '项目协作 · 待处理 0')
+    assert.equal(await count(), '工作间 · 待处理 0')
     let p = (await worker.request('project.agent', { operation: 'submit', projectId: 'p1', revision: 0, requestId: 'status', task: { id: 't', title: '测试数量', goal: '测试', phase: 'working', decisions: [{ id: 'd', question: '测试问题', options: ['是'] }] } })).project!
-    assert.equal(await count(), '项目协作 · 待处理 1')
+    assert.equal(await count(), '工作间 · 待处理 1')
     p = (await worker.request('project.visibility', { projectId: 'p1', revision: p.revision, hidden: true })).project!
-    assert.equal(await count(), '项目协作 · 待处理 0')
+    assert.equal(await count(), '工作间 · 待处理 0')
     p = (await worker.request('project.visibility', { projectId: 'p1', revision: p.revision, hidden: false })).project!
-    assert.equal(await count(), '项目协作 · 待处理 1')
+    assert.equal(await count(), '工作间 · 待处理 1')
     await worker.request('project.feedback', { projectId: 'p1', revision: p.revision, taskId: 't', kind: 'decision', itemId: 'd', answer: '是' })
-    assert.equal(await count(), '项目协作 · 待处理 0')
+    assert.equal(await count(), '工作间 · 待处理 0')
     await worker.command('workspace.overview'); assert.equal(opened.length, 1)
     assert.ok(worker.posts.some(p => p.event === 'workspace.open'))
     assert.deepEqual(worker.refusals, [])

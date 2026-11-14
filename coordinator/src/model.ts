@@ -93,6 +93,8 @@ export interface Attention {
   itemId: string; title: string; summary: string
 }
 export interface Overview {
+  connections?: import('./connections').Connection[]
+  machines?: { id: string; name: string; role: 'host' | 'client'; online?: boolean }[]
   butler?: import('./butler').ButlerSnapshot
   hidden?: ProjectRef[]
   links?: import('./links').LinksSnapshot
@@ -112,4 +114,15 @@ export function taskState(task: Task): 'working' | 'decision' | 'review' | 'rewo
   if (task.phase === 'ready' && task.acceptance.some(x => x.status === 'pending')) return 'review'
   if (task.phase === 'ready') return 'completed'
   return task.phase
+}
+
+export function groupedAttention(items: Attention[]) {
+  const groups = new Map<string, Attention & { count: number }>()
+  for (const item of items.filter(i => i.kind !== 'rework')) {
+    const key = JSON.stringify([item.projectId, item.taskId, item.kind]), prior = groups.get(key)
+    if (prior) prior.count++
+    else groups.set(key, { ...item, count: 1 })
+  }
+  const order = { decision: 0, blocked: 1, review: 3, rework: 4 }
+  return [...groups.values()].sort((a, b) => order[a.kind] - order[b.kind])
 }

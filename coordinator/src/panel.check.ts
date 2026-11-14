@@ -31,7 +31,7 @@ const links: LinksSnapshot = { version: 1, revision: 0, workspaceId: 'preview-ow
 const state = (s: Snapshot, tab = 'inbox', view: unknown = null, list = refs) => ({
   requests: { 'projects.list': () => ({ projects: list }), 'project.read': () => s,
     'workspace.overview': () => overview([s.project!], { version: 1, revision: 0, runId: '', requests: [] }) },
-  persisted: { plugin: { 'project.selection': 'p1', 'project.tab': tab, 'project.view': view } }
+  persisted: { plugin: { 'project.selection': 'p1', 'project.tab': tab, 'workspace.page': { page: { kind: view && typeof view === 'object' ? (view as any).kind === 'settings' ? 'project-settings' : 'task' : 'project', projectId: 'p1', ...(view && typeof view === 'object' ? { id: (view as any).id } : {}) }, stack: [{ kind: 'home' }] } } }
 })
 export default defineCheck({
   otherWorkspaces: { requests: { 'projects.list': () => ({ projects: [] }), 'workspace.overview': () => ({ ...overview([], { version: 1, revision: 0, runId: '', requests: [] }), links }) } },

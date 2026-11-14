@@ -89,7 +89,6 @@ export class ProjectStore {
     return this.serial(async () => {
       const project = await this.get(id)
       if (project.revision !== expected) fail('项目已更新，请刷新后再删除')
-      await absent()
       await mkdir(this.exportDirectory, { recursive: true })
       // The filename never contains input; an exclusive, flushed export must succeed before deletion.
       const exportPath = path.join(this.exportDirectory, `project-${fingerprint(id).slice(0, 24)}-${randomUUID()}.json`)

@@ -51,3 +51,20 @@ syncBuiltinESMExports();`);
     assert.throws(() => call(true, {TEST_NO_RUN:'1'}), /没有协调 Run/);
   } finally { rmSync(dir, {recursive:true,force:true}); }
 });
+
+test('named connection CLI maps read/check/send/reply and takes message JSON only from stdin', () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'butler-client-'));
+  const fixture = path.join(dir, 'orca-fixture.mjs');
+  writeFileSync(fixture, `import cp from 'node:child_process';
+import {syncBuiltinESMExports} from 'node:module';
+cp.execFileSync = (_exe, args) => JSON.stringify({handler:args[4],input:JSON.parse(args[args.indexOf('--data')+1])});
+syncBuiltinESMExports();`);
+  try {
+    for (const operation of ['read', 'check', 'send', 'reply']) {
+      const input = {name:'Hermes',runId:'mock-main',requestId:'mock-request',contextId:'mock-context',id:'mock-task',text:'模拟日常消息'};
+      const value = JSON.parse(execFileSync(process.execPath, ['--import', pathToFileURL(fixture).href, 'scripts/client.mjs', 'connection-'+operation, 'Hermes'], {encoding:'utf8',windowsHide:true,input:JSON.stringify(input)}));
+      assert.equal(value.handler, 'workspace.connections');
+      assert.deepEqual(value.input, ['read','check'].includes(operation) ? {operation,name:'Hermes'} : {...input,operation});
+    }
+  } finally { rmSync(dir, {recursive:true,force:true}); }
+});

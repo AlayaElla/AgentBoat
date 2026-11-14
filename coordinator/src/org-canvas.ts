@@ -66,9 +66,10 @@ export class OrgCanvas {
       if (takeoverText(w)) info.push(takeoverText(w))
       const lines = info.flatMap(s => s.match(/.{1,22}/gu) ?? [])
       add({ id: 'main', title: '工作间主 agent', detail: info.join('\n'), lines, x: 40, y: 100 })
-      const b = this.overview.butler
-      add({ id: 'butler', title: '管家 · Hermes', detail: b?.enabled ? b.connection : '未启用', x: 40, y: 430 })
-      edges.push({ id: 'butler-main', from: 'butler', to: 'main', lines: [] })
+      for (const [i, c] of (this.overview.connections ?? []).entries()) {
+        add({ id: c.id, title: `${c.name} · ${c.type === 'a2a' ? 'A2A' : '飞书'}`, detail: { off: '未启用', connecting: '连接中', connected: '已连接', error: '连接异常', unchecked: '未检查' }[c.state], x: 40, y: 430 + i * 100 })
+        edges.push({ id: `${c.id}-main`, from: c.id, to: 'main', lines: [] })
+      }
       this.projects.forEach((p, i) => {
         add({ id: `project:${p.ref.id}`, title: p.ref.name, detail: p.runId ? `主 agent：${p.mainAgent ? agents[p.mainAgent] : '种类未知'}` : '主 agent：未绑定', projectId: p.ref.id, x: 450, y: 40 + i * 300 })
         edges.push({ id: `main:${p.ref.id}`, from: 'main', to: `project:${p.ref.id}`, projectId: p.ref.id, lines: [] })

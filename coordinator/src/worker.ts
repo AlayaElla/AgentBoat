@@ -1,10 +1,12 @@
+import os from 'node:os'
+import { Connections } from './connections'
 import type { OrcaWorkerApi } from 'orca/worker'
 import type { Project, ProjectRef, Snapshot, SourceEvent, Delivery, MessagingSnapshot } from './model'
 import { FeishuSources, notifyFeishu, type MessageTransport } from './feishu'
 import { OrcaRuntime, defaultExecutable, type CoordinatorRuntime } from './runtime'
 import { ProjectStore, artifactUrl, fail, feedback, fingerprint, fresh, notifyWorkspace, object, overview, receiveEvent, strings, submitTask, text } from './store'
 import { WorkspaceLinks } from './links'
-import { requestState, requestStates } from './model'
+import { groupedAttention, requestState, requestStates } from './model'
 import { mainAgent } from './main-agent'
 import { Butler } from './butler'
 
@@ -20,15 +22,15 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
   const busy = new Map<string, Promise<void>>()
   const changed = (projectId = '') => { orca.panels.post('project.changed', { projectId }); void updateStatus().catch(() => {}) }
   const main = mainAgent(orca, store, runtime, changed)
-  const butler = new Butler(orca, async () => (await store.workspace()).runId,
-    (runId, id, body) => runtime.send(runId, { id, subject: '来自管家', body, state: 'pending' }), () => changed())
+  const butler: Butler = new Butler(orca, async () => (await store.workspace()).runId,
+    (runId, id, body) => runtime.send(runId, { id, subject: `来自外部连接「${connections.name('butler')}」`, body, state: 'pending' }), () => changed(), 'butler', () => connections.name('butler'))
   orca.panels.handle('workspace.butler', input => butler.handle(input))
   let statusUpdates: Promise<unknown> = Promise.resolve()
   function updateStatus() {
     const work = statusUpdates.then(async () => {
       const all = overview(await store.all(), await store.workspace()), s = await links.snapshot()
-      const count = all.attention.length + (s.requests ?? []).filter(r => r.direction === 'incoming' && requestState(r) === 'confirm').length
-      await orca.host.call('statusBar.update', { id: 'coordinator', text: `项目协作 · 待处理 ${count}`, tooltip: '打开工作间总览 · Mod+Alt+Shift+J' })
+      const count = groupedAttention(all.attention).length + (s.requests ?? []).filter(r => r.direction === 'incoming' && requestState(r) === 'confirm').length
+      await orca.host.call('statusBar.update', { id: 'coordinator', text: `工作间 · 待处理 ${count}`, tooltip: '打开工作间总览 · Mod+Alt+Shift+J' })
     })
     statusUpdates = work.catch(() => {}); return work
   }
@@ -298,7 +300,7 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
     return work
   }
   const defer = (id: string) => setImmediate(() => { void flush(id).catch(() => {}) })
-  orca.panels.handle('workspace.feishu', async input => {
+  async function feishuSettings(input: import('orca').PluginRequests['workspace.feishu']['input']) {
     if (input.operation === 'save') {
       const raw = object(input.feishu)
       if (typeof raw.enabled !== 'boolean') fail('飞书启用状态不正确')
@@ -319,7 +321,21 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
       await syncSources(); changed()
     } else if (input.operation !== 'read') fail('不支持的飞书设置操作')
     return messagingSnapshot()
+  }
+  orca.panels.handle('workspace.feishu', feishuSettings)
+  const connections: Connections = new Connections(orca, butler, async () => (await store.workspace()).runId,
+    (run, id, body, name) => runtime.send(run, { id, subject: `来自外部连接「${name}」`, body, state: 'pending' }), () => changed(), messagingSnapshot, feishuSettings, async () => {
+      await store.mutateMessaging(m => { m.feishu = fresh({} as ProjectRef).feishu; m.inbox = []; m.deliveries = [] })
+      await orca.secrets.delete(`feishu:${mailbox}`); await syncSources()
+    })
+  orca.panels.handle('workspace.connections', async input => {
+    const result = await connections.handle(input)
+    if (!Array.isArray(result) && result.connection.id === 'butler') {
+      try { result.approvalMode = await runtime.hermesApprovalMode?.() || 'unknown' } catch { result.approvalMode = 'unknown' }
+    }
+    return result
   })
+  orca.panels.handle('workspace.canvas', async () => { if (!runtime.openCanvas) fail('当前 Orca 不支持打开画布'); await runtime.openCanvas(); return { opened: true } })
   orca.panels.handle('workspace.reply', async input => {
     const w = await store.workspace()
     if (!w.runId || w.runId !== input.runId) fail('请使用已绑定的工作间主 agent Run')
@@ -339,7 +355,7 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
     await projects()
     const saved = await store.all()
     // Include stored projects even when their worktree is currently closed; overview never registers or rewrites them.
-    return { ...overview([...saved, ...catalog.filter(ref => !saved.some(p => p.ref.id === ref.id)).map(fresh)], await store.workspace(), runtimeError), workspace: await main.read(), links: await links.snapshot(), butler: await butler.snapshot() }
+    return { ...overview([...saved, ...catalog.filter(ref => !saved.some(p => p.ref.id === ref.id)).map(fresh)], await store.workspace(), runtimeError), workspace: await main.read(), links: await links.snapshot(), butler: await butler.snapshot(), connections: await connections.list(), machines: [{ id: 'local', name: os.hostname(), role: 'host' as const, online: true }] }
   })
   orca.panels.handle('workspace.message', async input => {
     const id = text(input.projectId, '项目编号', 200)
@@ -369,13 +385,22 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
     const id = text(input.projectId, '项目编号', 200)
     if (input.confirm !== id) fail('删除前请确认项目编号；会删除任务、成果、决定、验收、来源、通知及项目设置记录，并先导出 JSON')
     await busy.get(id)
+    await projects()
+    if (runtimeError) fail('无法确认 Orca 项目列表，未删除记录；请恢复连接后重试')
     const exportPath = await store.remove(id, revision(input.revision), async () => {
       await projects()
       if (runtimeError) fail('无法确认 Orca 项目列表，未删除记录；请恢复连接后重试')
-      if (catalog.some(p => p.id === id)) fail('项目仍在 Orca 中，只能隐藏，不能删除记录')
+      if (catalog.some(p => p.id === id)) {
+        if (!runtime.removeProject) fail('当前 Orca 不支持安全移除项目')
+        await runtime.removeProject((await store.get(id)).ref)
+        await projects()
+        if (runtimeError || catalog.some(p => p.id === id)) fail('Orca 未确认移除，工作间记录保留')
+      }
     })
     changed(id)
-    return { deleted: id, exportPath }
+    await orca.secrets.delete(`feishu:${id}`)
+    await syncSources()
+    return { deleted: id, exportPath, removedFromOrca: true }
   })
   orca.panels.handle('project.read', input => snapshot(text(input.projectId, '项目编号', 200)))
   orca.panels.handle('project.settings', async input => {
@@ -460,9 +485,10 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
   })
 
   let refreshMain: ReturnType<typeof setInterval> | undefined
-  return { store, links, butler, ingest, flush, flushMailbox, flushRequestNotifications, updateStatus, stop: () => { clearInterval(refreshMain); butler.stop(); links.stop(); sources.stop() }, async start() {
+  return { store, links, butler, connections, ingest, flush, flushMailbox, flushRequestNotifications, updateStatus, stop: () => { clearInterval(refreshMain); connections.stop(); links.stop(); sources.stop() }, async start() {
     await links.start()
     await butler.start()
+    await connections.start()
     await main.recover()
     clearInterval(refreshMain)
     refreshMain = setInterval(() => { orca.panels.post('project.changed', { projectId: '' }) }, 10000)

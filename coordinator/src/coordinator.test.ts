@@ -1,7 +1,7 @@
 import { assert, mockHost, mountWorker, test } from 'orca/testing'
 import { createCoordinator } from './worker'
 import { refs, deliverable } from './fixtures'
-import { fresh, feedback, submitTask, ProjectStore } from './store'
+import { fresh, feedback, submitTask, ProjectStore, overview } from './store'
 import { report } from './links'
 import { mkdtemp, readFile, readdir, writeFile } from 'node:fs/promises'
 import os from 'node:os'
@@ -9,7 +9,68 @@ import path from 'node:path'
 import { normalizeFeishu } from './feishu'
 import type { OrcaWorkerApi } from 'orca/worker'
 import type { CoordinatorRuntime } from './runtime'
+import { assertProjectIdle, OrcaRuntime } from './runtime'
+import { groupedAttention } from './model'
 const mainSession = { handle: 'orca_session_id:test-main', title: '测试主会话', workspace: 'id:test', workspaceName: '测试工作区', path: '/test', agent: 'claude', online: 'online' as const }
+
+test('connections retain legacy keys and isolate multiple A2A configs, tokens, histories and old commands', async () => {
+  const legacy = { version: 1, revision: 2, enabled: false, port: 9901, url: 'http://127.0.0.1:9900', entries: [] }
+  const token = 'test-only-token-12345678901234567890', host = mockHost({ storage: { 'workspace.butler': legacy, workspace: { version: 1, revision: 0, runId: 'run_main', requests: [] } }, secrets: { 'butler:inbound': token, 'butler:outbound': token } })
+  let c!: ReturnType<typeof createCoordinator>
+  const worker = await mountWorker({ default: (api: OrcaWorkerApi) => { c = createCoordinator(api, { projects: async () => [], verifyRun: async () => {}, hermesApprovalMode: async () => 'smart', send: async () => ({}) }) } }, { host })
+  try {
+    const list = await worker.request('workspace.connections', { operation: 'read' }) as import('./connections').Connection[]
+    assert.equal(list[0].name, 'Hermes'); assert.equal(list[0].id, 'butler')
+    assert.equal((await worker.request('workspace.connections', { operation: 'read', name: 'Hermes' }) as import('./connections').ConnectionDetail).approvalMode, 'smart')
+    await assert.rejects(() => worker.request('workspace.connections', { operation: 'save', type: 'a2a', name: 'Hermes', enabled: false, port: 0, url: legacy.url }), /名字不能重复/)
+    assert.deepEqual((await worker.request('workspace.butler', { operation: 'read' })).entries, [])
+    assert.deepEqual(host.data().storage['workspace.butler'], legacy)
+    const added = await worker.request('workspace.connections', { operation: 'save', type: 'a2a', name: 'Second', enabled: true, port: 0, url: 'http://127.0.0.1:9999', inboundToken: token + 'second', outboundToken: token + 'peer' }) as import('./connections').ConnectionDetail
+    assert.notEqual(added.connection.id, 'butler'); assert.ok(added.a2a!.listening)
+    assert.deepEqual(host.data().storage['workspace.butler'], legacy); assert.equal(host.data().secrets['butler:inbound'], token)
+    const rpc = async (bearer: string) => fetch(added.a2a!.listening, { method: 'POST', headers: { Authorization: `Bearer ${bearer}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'GetTask', params: { id: 'missing' } }) })
+    assert.equal((await rpc(token)).status, 401)
+    assert.equal(((await (await rpc(token + 'second')).json()) as any).error.code, -32001)
+    const inbound = await fetch(added.a2a!.listening, { method: 'POST', headers: { Authorization: `Bearer ${token}second`, 'Content-Type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'SendMessage', params: { message: { messageId: 'second-only', role: 'ROLE_USER', parts: [{ text: 'mock isolated message' }] }, configuration: { returnImmediately: true } } }) })
+    assert.equal(inbound.status, 200)
+    const isolated = await worker.request('workspace.connections', { operation: 'read', connectionId: added.connection.id }) as import('./connections').ConnectionDetail
+    assert.equal(isolated.a2a!.entries.length, 1); assert.deepEqual(host.data().storage['workspace.butler'], legacy)
+    await assert.rejects(() => worker.request('workspace.connections', { operation: 'save', connectionId: added.connection.id, name: 'Second', enabled: true, port: 0, url: added.a2a!.url, revision: isolated.a2a!.revision, inboundToken: token + 'changed', outboundToken: 'short' }))
+    assert.equal(host.data().secrets[`${added.connection.id}:inbound`], token + 'second')
+    const renamed = await worker.request('workspace.connections', { operation: 'save', connectionId: added.connection.id, name: 'Renamed', enabled: true, port: 0, url: added.a2a!.url, revision: isolated.a2a!.revision }) as import('./connections').ConnectionDetail
+    assert.equal(renamed.connection.name, 'Renamed')
+    assert.equal((await worker.request('workspace.connections', { operation: 'read', name: 'Renamed' }) as import('./connections').ConnectionDetail).a2a!.inboundSecretSaved, true)
+    assert.equal((await worker.request('workspace.butler', { operation: 'read' })).port, 9901)
+    await assert.rejects(() => worker.request('workspace.connections', { operation: 'send', name: 'Renamed', runId: 'wrong', requestId: 'x', text: 'mock' }))
+    await worker.request('workspace.connections', { operation: 'delete', connectionId: added.connection.id, confirm: true })
+    assert.equal(host.data().secrets[`${added.connection.id}:inbound`], undefined)
+    assert.equal((await worker.request('workspace.connections', { operation: 'read' }) as any[]).length, 1)
+    assert.deepEqual(host.data().storage['workspace.butler'], legacy)
+    assert.equal(JSON.stringify(host.data().storage).includes(token), false)
+  } finally { c.stop(); await worker.deactivate() }
+})
+
+test('remove uses exact setup, checks every session and terminal, and fails closed on incomplete inventory', async () => {
+  const ref = refs[0], idle = { repoId: ref.repoId, hostId: ref.hostId, path: ref.path, worktreeId: 'w', agents: [], liveTerminalCount: 0, unverifiableTerminalCount: 0, hasAttachedPty: false }
+  for (const patch of [{ agents: [{ subagentObservation: 'live' }] }, { liveTerminalCount: 1 }, { unverifiableTerminalCount: 1 }, { hasAttachedPty: true }]) assert.throws(() => assertProjectIdle(ref, { worktrees: [{ ...idle, ...patch }] }, { terminals: [] }), /先关掉/)
+  assert.throws(() => assertProjectIdle(ref, { worktrees: [idle], truncated: true }, { terminals: [] }), /不完整/)
+  assert.throws(() => assertProjectIdle(ref, { worktrees: [idle] }, { terminals: [{ repoId: ref.repoId }] }), /先关掉/)
+  assertProjectIdle(ref, { worktrees: [idle] }, { terminals: [] })
+  const calls: string[][] = [], runtime = new OrcaRuntime(async () => 'unused')
+  ;(runtime as any).call = async (args: string[]) => { calls.push(args); return args[0] === 'project' && args[1] === 'setups' ? { setups: [{ ...idle, id: 'exact' }] } : args[0] === 'terminal' ? { terminals: [] } : { worktrees: args.includes('ps') && !calls.some(a => a[1] === 'setup-delete') ? [idle] : [] } }
+  await runtime.removeProject(ref)
+  assert.deepEqual(calls.find(a => a[1] === 'setup-delete'), ['project', 'setup-delete', '--setup', 'exact', '--force'])
+})
+
+test('attention counts reviews per task and excludes rework consistently', () => {
+  const p = fresh(refs[0]); submitTask(p, deliverable)
+  p.tasks[0].acceptance.push({ ...p.tasks[0].acceptance[0], id: 'second' })
+  const all = requireOverview(p)
+  assert.equal(groupedAttention(all.attention).length, 1); assert.equal(groupedAttention(all.attention)[0].count, 2)
+  p.tasks[0].acceptance.forEach(a => a.status = 'changes_requested')
+  assert.equal(groupedAttention(requireOverview(p).attention).length, 0)
+})
+function requireOverview(p: import('./model').Project) { return overview(p ? [p] : [], { version: 1, revision: 0, runId: '', requests: [] }) }
 
 test('hide preserves legacy records and agent writes, excludes all workspace surfaces and pauses queued reminders until restore', async () => {
   const p = fresh(refs[0]); p.runId = 'run_project'
@@ -71,7 +132,7 @@ test('delete refreshes Orca catalog, requires exact confirmation and revision, e
     await assert.rejects(() => worker.request('project.delete', input))
     catalog = [refs[1]]; unavailable = true
     await assert.rejects(() => worker.request('project.delete', input))
-    assert.deepEqual(await readdir(directory), [])
+    assert.equal((await readdir(directory)).length, 1)
     assert.deepEqual(await c.store.get('p1'), p)
     unavailable = false
     const answer = await worker.request('project.delete', input)
@@ -81,7 +142,7 @@ test('delete refreshes Orca catalog, requires exact confirmation and revision, e
     assert.deepEqual(await c.store.all(), [other]); assert.deepEqual(await c.store.get('p2'), other)
     assert.deepEqual((await worker.request('workspace.overview')).projects.map(p => p.ref.id), ['p2'])
     await assert.rejects(() => worker.request('project.delete', input))
-    assert.equal((await readdir(directory)).length, 1)
+    assert.equal((await readdir(directory)).length, 2)
   } finally { c.stop(); await worker.deactivate() }
 })
 
@@ -197,7 +258,7 @@ test('overview reads legacy and closed projects without writing and includes eve
   assert.equal(all.projects[0].agents[0].dispatchId, 'dispatch')
   assert.equal(all.projects[0].agents[0].projectTaskId, 'task-1')
   assert.deepEqual((await worker.request('project.agent', { operation: 'read', projectId: 'p1' })).project, p)
-  assert.deepEqual(host.data().storage, before)
+  assert.deepEqual({ ...host.data().storage, 'workspace.connections': undefined }, { ...before, 'workspace.connections': undefined })
   await worker.deactivate()
 })
 
@@ -303,4 +364,27 @@ test('unbound main produces no notifications; restart keeps uncertain main deliv
   assert.equal((await coordinator.store.get('p1')).deliveries[0].state, 'uncertain')
   assert.equal(sends, 1)
   coordinator.stop(); await worker.deactivate()
+})
+
+
+test('Feishu connection rename/delete/recreate keeps project data and credentials isolated', async () => {
+  const project = fresh(refs[0]), feishu = { enabled: false, appId: 'test-workspace-app', chatIds: ['test-chat'], senderIds: ['test-user'] }
+  const host = mockHost({ storage: { 'project:p1': project as any, 'workspace.messaging': { version: 1, revision: 4, feishu, inbox: [], deliveries: [] } }, secrets: { 'feishu:@workspace': 'test-workspace-secret', 'feishu:p1': 'test-project-secret' } })
+  let c!: ReturnType<typeof createCoordinator>
+  const worker = await mountWorker({ default: (api: OrcaWorkerApi) => { c = createCoordinator(api, { projects: async () => refs, verifyRun: async () => {}, send: async () => ({}) }, { state: () => ({ state: 'off', message: '' }), sync: async () => {}, stop() {}, send: async () => 'sent' }) } }, { host })
+  try {
+    const list = await worker.request('workspace.connections', { operation: 'read' }) as import('./connections').Connection[]
+    assert.deepEqual(list.map(c => c.type), ['feishu'])
+    const renamed = await worker.request('workspace.connections', { operation: 'save', connectionId: 'feishu', name: 'Notifications', revision: 4, feishu }) as import('./connections').ConnectionDetail
+    assert.equal(renamed.connection.name, 'Notifications'); assert.equal(host.data().secrets['feishu:@workspace'], 'test-workspace-secret')
+    await assert.rejects(() => worker.request('workspace.connections', { operation: 'save', type: 'feishu', name: 'Another', revision: 0, feishu }), /已经有飞书/)
+    await assert.rejects(() => worker.request('workspace.connections', { operation: 'delete', connectionId: 'feishu' }), /请确认/)
+    await worker.request('workspace.connections', { operation: 'delete', connectionId: 'feishu', confirm: true })
+    assert.equal(host.data().secrets['feishu:@workspace'], undefined)
+    assert.deepEqual(await worker.request('workspace.connections', { operation: 'read' }), [])
+    const recreated = await worker.request('workspace.connections', { operation: 'save', type: 'feishu', name: 'New notifications', revision: 0, feishu, appSecret: 'test-new-secret' }) as import('./connections').ConnectionDetail
+    assert.equal(recreated.connection.id, 'feishu'); assert.ok(recreated.feishu!.revision > renamed.feishu!.revision)
+    assert.equal(host.data().secrets['feishu:@workspace'], 'test-new-secret')
+    assert.equal(host.data().secrets['feishu:p1'], 'test-project-secret'); assert.deepEqual(host.data().storage['project:p1'], project)
+  } finally { c.stop(); await worker.deactivate() }
 })

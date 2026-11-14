@@ -19,7 +19,7 @@ async function rpc(b: Butler, method: string, params: any, bearer = token) {
   const r = await fetch(b.listening, { method: 'POST', headers: { Authorization: `Bearer ${bearer}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 'rpc-test', method, params }) })
   return { code: r.status, body: await r.json() as any }
 }
-const params = (id: string, text = '模拟管家提醒', immediate = true) => ({ message: { messageId: id, role: 'ROLE_USER', contextId: 'ctx-daily', parts: [{ text }] }, configuration: { returnImmediately: immediate } })
+const params = (id: string, text = '模拟Hermes提醒', immediate = true) => ({ message: { messageId: id, role: 'ROLE_USER', contextId: 'ctx-daily', parts: [{ text }] }, configuration: { returnImmediately: immediate } })
 async function until(fn: () => Promise<boolean>) { for (let i = 0; i < 100; i++) { if (await fn()) return; await new Promise(r => setTimeout(r, 10)) }; throw Error('Condition timed out') }
 
 test('Hermes → main → reply → Hermes: v1 async, blocking, deduplication, auth, loopback and project isolation', async () => {
@@ -39,7 +39,7 @@ test('Hermes → main → reply → Hermes: v1 async, blocking, deduplication, a
     const first = (await rpc(b, 'SendMessage', params('incoming-1'))).body.result.task
     assert.equal(first.status.state, 'TASK_STATE_SUBMITTED')
     await b.tick()
-    assert.equal(notices.length, 1); assert.ok(notices[0].body.includes('来自管家')); assert.equal(notices[0].runId, 'run_mock')
+    assert.equal(notices.length, 1); assert.ok(notices[0].body.includes('来自外部连接「Hermes」')); assert.equal(notices[0].runId, 'run_mock')
     const duplicate = (await rpc(b, 'SendMessage', params('incoming-1'))).body.result.task
     assert.equal(duplicate.id, first.id); await b.tick(); assert.equal(notices.length, 1)
     assert.equal((await rpc(b, 'SendMessage', params('incoming-1', '不同内容'))).body.error.code, -32602)
@@ -122,7 +122,7 @@ test('main → mock Hermes → result → main preserves context, polls durable 
 })
 
 for (const [httpStatus, rpcCode, reason, connection, action] of [
-  [401, -32050, 'unauthorized', '令牌错误', 'Hermes 令牌'],
+  [401, -32050, 'unauthorized', '令牌错误', '对方的令牌'],
   [403, -32052, "peer 'ip:127.0.0.1' not trusted", '对方不信任', 'A2A_TRUSTED_PEERS'],
   [200, -32001, 'Task not found', '已连接', ''],
   [200, -32601, 'Method not found', '连接失败', 'A2A 接口'],
@@ -164,7 +164,7 @@ test('connection check: unreachable service records network type and directs use
   try {
     const s = await b.handle({ operation: 'check' })
     assert.equal(s.connection, '服务不可达')
-    for (const expected of ['TypeError', 'ECONNREFUSED', 'gateway', 'Hermes A2A 地址']) assert.ok(s.error.includes(expected))
+    for (const expected of ['TypeError', 'ECONNREFUSED', 'gateway', '对方的地址']) assert.ok(s.error.includes(expected))
     assert.deepEqual(notices, [])
     console.log(JSON.stringify({ check: s.connection, error: s.error, notifications: notices.length }))
   } finally { b.stop() }

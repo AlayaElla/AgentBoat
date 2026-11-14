@@ -14,11 +14,11 @@
     "settings": [{ "key": "cliPath", "title": "Orca CLI 路径", "type": "string", "default": "" }],
     "commands": [{ "id": "workspace.overview", "title": "打开工作间总览", "when": "global" }],
     "keybindings": [{ "command": "workspace.overview", "key": "Mod+Alt+Shift+J", "when": "global" }],
-    "statusBarItems": [{ "id": "coordinator", "text": "项目协作", "icon": "blocks", "command": "workspace.overview" }],
+    "statusBarItems": [{ "id": "coordinator", "text": "工作间", "icon": "blocks", "command": "workspace.overview" }],
     "panels": [
       {
         "id": "project-coordinator",
-        "title": "项目协作",
+        "title": "工作间",
         "icon": "blocks",
         "entry": "src/panel.tsx",
         "ui": "components"

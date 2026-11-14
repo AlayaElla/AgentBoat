@@ -91,7 +91,7 @@ export function startCanvas(root: HTMLElement, api: Pick<OrcaFrameApi, 'plugin' 
   function connect() {
     if (!model.links) return
     const f = form('添加连接')
-    f.append(el('p', model.links.listening ? `正在监听 ${model.links.listening}` : '生成连接码前，请在项目协作 → 总览 → 管理连接中启用监听。'))
+    f.append(el('p', model.links.listening ? `正在监听 ${model.links.listening}` : '生成连接码前，请在工作间 → 设置 → 其他工作间 → 连接设置中启用监听。'))
     const invite = button('生成连接码', () => run(async () => {
       const s = await api.plugin.request('workspace.links', { operation: 'invite' })
       const code = el('textarea'); code.readOnly = true; code.value = s.invitation!.code
@@ -108,11 +108,11 @@ export function startCanvas(root: HTMLElement, api: Pick<OrcaFrameApi, 'plugin' 
   }
   function open(item: Node | Edge) {
     if (busy) return
-    if (item.id === 'butler' || item.id === 'butler-main') {
-      const f = form('管家 · Hermes'), b = model.overview.butler
-      f.append(el('p', b?.enabled ? b.connection : '未启用'))
-      if (b?.error) f.append(el('p', b.error))
-      f.append(button('打开总览', () => run(() => api.plugin.request('workspace.entry')))); return
+    const connection = model.overview.connections?.find(c => item.id === c.id || item.id === `${c.id}-main`)
+    if (connection) {
+      const f = form(connection.name)
+      f.append(el('p', connection.enabled ? connection.message || '已启用' : '未启用'))
+      f.append(el('p', '在工作间 → 设置 → 外部连接中查看和修改这个连接。')); return
     }
     if (item.projectId) { void openProject(item.projectId); return }
     if (item.peerId) { openPeer(item.peerId); return }
