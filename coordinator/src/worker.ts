@@ -3,6 +3,7 @@ import type { Project, ProjectRef, Snapshot, SourceEvent, Delivery, MessagingSna
 import { FeishuSources, notifyFeishu, type MessageTransport } from './feishu'
 import { OrcaRuntime, defaultExecutable, type CoordinatorRuntime } from './runtime'
 import { ProjectStore, artifactUrl, fail, feedback, fingerprint, fresh, notifyWorkspace, object, overview, receiveEvent, strings, submitTask, text } from './store'
+import { WorkspaceLinks } from './links'
 
 const revision = (value: unknown): number => {
   if (!Number.isSafeInteger(value) || (value as number) < 0) fail('请先读取项目当前版本')
@@ -15,6 +16,25 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
   let runtimeError = ''
   const busy = new Map<string, Promise<void>>()
   const changed = (projectId = '') => orca.panels.post('project.changed', { projectId })
+  const links = new WorkspaceLinks(orca, async () => {
+    await projects()
+    if (runtimeError) fail('本机项目列表不可用，请恢复后再上报')
+    const saved = await store.all()
+    return [...saved, ...catalog.filter(ref => !saved.some(p => p.ref.id === ref.id)).map(fresh)]
+  }, () => changed())
+  orca.panels.handle('workspace.links', async input => {
+    switch (input.operation) {
+      case 'read': return links.snapshot()
+      case 'configure': return links.configure(input)
+      case 'invite': return links.invite()
+      case 'cancel-invite': return links.cancelInvite()
+      case 'join': return links.join(text(input.code, '连接码', 6000))
+      case 'share': return links.share(input)
+      case 'revoke': return links.revoke(text(input.id, '连接编号', 64))
+      case 'refresh': return links.refresh()
+      default: return fail('不支持的工作间连接操作')
+    }
+  })
   const secret = (id: string) => orca.secrets.get(`feishu:${id}`)
   const sources = transport ?? new FeishuSources(ingest, () => changed())
   const mailbox = '@workspace'
@@ -231,7 +251,7 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
     await projects()
     const saved = await store.all()
     // Include stored projects even when their worktree is currently closed; overview never registers or rewrites them.
-    return overview([...saved, ...catalog.filter(ref => !saved.some(p => p.ref.id === ref.id)).map(fresh)], await store.workspace(), runtimeError)
+    return { ...overview([...saved, ...catalog.filter(ref => !saved.some(p => p.ref.id === ref.id)).map(fresh)], await store.workspace(), runtimeError), links: await links.snapshot() }
   })
   orca.panels.handle('workspace.agent', async input => {
     if (input.operation === 'bind') {
@@ -341,7 +361,8 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
     return { opened: true }
   })
 
-  return { store, ingest, flush, flushMailbox, stop: () => sources.stop(), async start() {
+  return { store, links, ingest, flush, flushMailbox, stop: () => { links.stop(); sources.stop() }, async start() {
+    await links.start()
     for (const p of await store.all()) {
       if (p.deliveries.some(x => x.state === 'sending')) await store.mutate(p.ref.id, undefined, p => {
         for (const d of p.deliveries.filter(x => x.state === 'sending')) { d.state = 'uncertain'; d.error = '插件重启前通知结果待核对' }

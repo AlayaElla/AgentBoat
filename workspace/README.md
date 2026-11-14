@@ -15,6 +15,8 @@ node workspace/workspace.mjs templates
 
 ## 模板与立项
 
+工作间互联在插件总览的“其他工作间”中管理；现读命令是 `node coordinator/scripts/client.mjs links-refresh` 与 `links-read`。外部信息按 workspaceId 独立保存、只向主人汇总，不写回本方项目或转给第三个工作间；步骤和验证边界见 [工作间连接](../coordinator/LINKS.md)。
+
 默认 [templates/code.json](templates/code.json)：项目主 agent Claude，设计 Claude，编码和审查 Codex，来源 empty。模板可直接编辑 JSON；agent 支持 claude/codex，可附 model 和 effort，effort 需要 model。没有指定模型时跟随 Orca 设置。每项工作只起需要的 agent。
 
 保存 UTF-8 JSON 后调用（支持 BOM）：

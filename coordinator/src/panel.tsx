@@ -1,6 +1,7 @@
 ﻿import { atom, read, set, update, plugin, shell, files, Stack, Row, Box, Heading, Text, Button, IconButton, Badge, List, ListItem, Link,
   Select, Input, Textarea, Switch, RadioGroup, Field, Tabs, Tab, Collapsible, EmptyState, Callout, Skeleton, KeyValue, type PanelContext, type Tone } from 'orca'
 import { taskState, type Acceptance, type Decision, type Project, type ProjectRef, type Snapshot, type Task, type Overview, type MessagingSnapshot } from './model'
+import { linksSection, linksOpened, linksPage } from './links-panel'
 
 type View = { kind: 'task'; id: string } | { kind: 'settings' } | null
 const OTHER = ' other' // options are stored trimmed, so a leading space cannot collide with one
@@ -333,6 +334,7 @@ async function openOverviewTask(projectId: string, taskId: string) {
   if (read(selected) === projectId && read(snapshot)?.project?.tasks.some(t => t.id === taskId)) show({ kind: 'task', id: taskId })
 }
 function workspacePage(all: Overview) {
+  if (linksOpened()) return linksPage(all.projects.map(p => p.ref))
   if (read(workspaceFeishuOpen)) return workspaceFeishuPage()
   const kinds = { decision: '待决定', review: '待验收', blocked: '受阻', rework: '要求返修' }
   return <Stack gap="lg">
@@ -350,6 +352,7 @@ function workspacePage(all: Overview) {
         <Button onPress={() => openOverviewTask(item.projectId, item.taskId)}>查看任务</Button>
       </Box>) : <EmptyState icon="check" title="没有待用户处理的事项" />}
     </Stack>
+    {linksSection(all.links)}
     <Stack gap="sm"><Heading level={2}>{`项目 ${all.projects.length}`}</Heading>
       {all.projects.map(p => <Box key={p.ref.id} border radius="lg" padding="md" gap="sm" background="card">
         <Row justify="between" gap="sm" wrap><Text weight="semibold">{fit(p.ref.name, 70)}</Text><Badge tone={p.bound ? 'success' : 'neutral'}>{p.bound ? '项目主 agent 已绑定' : '项目主 agent 未绑定'}</Badge></Row>

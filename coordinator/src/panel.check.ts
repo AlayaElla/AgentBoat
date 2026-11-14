@@ -2,6 +2,7 @@
 import { sample, longSample, refs, deliverable } from './fixtures'
 import { fresh, overview, receiveEvent, submitTask } from './store'
 import type { Snapshot } from './model'
+import type { LinksSnapshot } from './links'
 
 const pending = sample()
 const unbound: Snapshot = { ...sample(), project: fresh(refs[0]) }
@@ -22,6 +23,10 @@ const enabled = sample()
 enabled.project!.feishu = { enabled: true, appId: 'cli_example', chatIds: ['oc_example'], senderIds: ['ou_example'] }
 
 const long = longSample()
+const links: LinksSnapshot = { version: 1, revision: 0, workspaceId: 'preview-own', name: '我的工作间', enabled: false, host: '127.0.0.1', port: 0, publicUrl: '', tls: false, listening: '', error: '',
+  peers: [{ id: 'preview-connection', workspaceId: 'preview-other', name: '设计工作间', endpoint: '', state: 'active', status: 'connected', scope: 'none', projectIds: [], acceptTasks: 'deny', receivedAt: '2026-11-14T10:00:00Z',
+    report: { workspaceId: 'preview-other', name: '设计工作间', scope: 'details', updatedAt: '2026-11-14T10:00:00Z', projects: [{ id: 'shared-project', name: '展览网页', updatedAt: '', counts: { working: 1, review: 1 }, pending: 1,
+      tasks: [{ title: '首页设计', phase: 'ready', decisions: [], acceptance: ['核对首页布局'] }, { title: '移动端适配', phase: 'working', decisions: [], acceptance: [] }] }] } }] }
 
 const state = (s: Snapshot, tab = 'inbox', view: unknown = null, list = refs) => ({
   requests: { 'projects.list': () => ({ projects: list }), 'project.read': () => s,
@@ -29,6 +34,7 @@ const state = (s: Snapshot, tab = 'inbox', view: unknown = null, list = refs) =>
   persisted: { plugin: { 'project.selection': 'p1', 'project.tab': tab, 'project.view': view } }
 })
 export default defineCheck({
+  otherWorkspaces: { requests: { 'projects.list': () => ({ projects: [] }), 'workspace.overview': () => ({ ...overview([], { version: 1, revision: 0, runId: '', requests: [] }), links }) } },
   fresh: { requests: { 'projects.list': () => ({ projects: refs }), 'workspace.overview': () => overview([pending.project!, fresh(refs[1])], { version: 1, revision: 0, runId: '', requests: [] }) } },
   noProjects: { requests: { 'projects.list': () => ({ projects: [] }), 'workspace.overview': () => overview([], { version: 1, revision: 0, runId: '', requests: [] }) } },
   listError: { requests: { 'projects.list': () => ({ projects: [], error: '无法读取 Orca 项目：请检查 Orca 与 CLI 路径' }), 'workspace.overview': () => overview([], { version: 1, revision: 0, runId: '', requests: [] }) } },

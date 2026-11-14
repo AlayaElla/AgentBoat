@@ -2,6 +2,54 @@
 import * as panel from './panel'
 import { refs, sample, longSample, deliverable } from './fixtures'
 import { fresh, feedback, overview, submitTask } from './store'
+import type { LinksSnapshot } from './links'
+
+test('workspace links manage scopes, preserve failed drafts, show external reports and clear private input on exit', async () => {
+  let reject = false
+  const s: LinksSnapshot = { version: 1, revision: 0, workspaceId: 'own', name: '本工作间', enabled: false, host: '127.0.0.1', port: 0, publicUrl: '', tls: false, listening: '', error: '',
+    peers: [{ id: 'connection1', workspaceId: 'other', name: '合作工作间', endpoint: '', state: 'active', status: 'connected', scope: 'none', projectIds: [], acceptTasks: 'deny', receivedAt: '2026-11-14T10:00:00Z',
+      report: { workspaceId: 'other', name: '合作工作间', scope: 'summary', updatedAt: '2026-11-14T10:00:00Z', projects: [{ id: 'external', name: '共享项目', updatedAt: '', counts: { working: 1 }, pending: 0 }] } }] }
+  const writes: any[] = []
+  const host = mockHost({ requests: {
+    'projects.list': () => ({ projects: refs }),
+    'workspace.overview': () => ({ ...overview([fresh(refs[0])], { version: 1, revision: 0, runId: '', requests: [] }), links: structuredClone(s) }),
+    'workspace.links': input => {
+      if (input.operation === 'configure') {
+        if (reject) throw hostError('invalid_request', '保存失败，请重试')
+        writes.push(input); s.name = input.name!; s.revision++
+      }
+      if (input.operation === 'share') { writes.push(input); Object.assign(s.peers[0], { scope: input.scope, projectIds: input.projectIds, acceptTasks: input.acceptTasks }); s.revision++ }
+      return structuredClone(s)
+    }
+  } })
+  const view = await mount(panel, { host })
+  assert.ok(view.find({ text: '共享项目 · 待处理 0' }))
+  await view.press({ text: '管理连接' })
+  assert.ok(view.find({ text: '工作间连接' }))
+  await view.type({ label: '工作间名称' }, '工作间新名称', { replace: true })
+  reject = true
+  await view.press({ text: '保存连接设置' })
+  assert.equal(view.valueOf({ label: '工作间名称' }), '工作间新名称')
+  assert.ok(JSON.stringify(view.tree()).includes('保存失败，请重试'))
+  reject = false
+  await view.press({ text: '保存连接设置' })
+  await view.select({ label: '向对方开放' }, 'details')
+  await view.toggle({ label: `${refs[0].name} · ${refs[0].path}` })
+  await view.select({ label: '接受对方派活' }, 'confirm')
+  await view.press({ text: '保存开放范围' })
+  assert.deepEqual(writes.at(-1).projectIds, ['p1'])
+  assert.equal(writes.at(-1).acceptTasks, 'confirm')
+  await view.type({ label: '对方的连接码' }, 'temporary-code')
+  await view.toggle({ label: '使用 TLS' })
+  await view.type({ label: 'TLS 私钥' }, 'private-input')
+  await view.press({ text: '返回总览' })
+  await view.press({ text: '管理连接' })
+  assert.equal(view.valueOf({ label: '对方的连接码' }), '')
+  assert.deepEqual(view.errors, [])
+  assert.deepEqual(view.warnings, [])
+  assert.deepEqual(view.refusals, [])
+  await view.unmount()
+})
 
 test('workspace Feishu settings open in overview, preserve drafts on failure and clear secret on success', async () => {
   let reject = true, saved: any

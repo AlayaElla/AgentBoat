@@ -64,6 +64,7 @@ export interface Attention {
   itemId: string; title: string; summary: string
 }
 export interface Overview {
+  links?: import('./links').LinksSnapshot
   workspace: WorkspaceBinding
   attention: Attention[]
   projects: {
