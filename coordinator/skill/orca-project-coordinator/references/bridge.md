@@ -1,65 +1,62 @@
-# 插件桥接
+# client.mjs 命令
 
-本机源码目录 `D:/Projects/AgentBoat/coordinator`，已加载开发插件目录 `plugin/`，插件标识 `local.project-coordinator`。`scripts/client.mjs` 将 JSON 文件作为单个参数传给 Orca，避免 PowerShell 丢失引号；输入可含 UTF-8 BOM。凭据仅在插件面板设置填写，不进入这个接口。
+`node D:/Projects/AgentBoat/coordinator/scripts/client.mjs <命令>`。写命令的 JSON 放进文件（UTF-8，可带 BOM），文件路径作参数；标 stdin 的从标准输入读，这类输入不落文件。回执在 `result.result`。
 
-`projects` 返回项目列表；`read <projectId>` 返回 `{project,projects,mainAgent?,runtimeError?}`，外层是 Orca 回执 `result.result`。project 含当前 revision、runId、roles、tasks、events、deliveries。读取不会标记通过，也不会发送消息。
+## 读
 
-## 绑定主会话
+- `projects`：项目列表。
+- `overview`：`{workspace,attention,projects,hidden,links,connections,machines}`。attention 是待决定、待验收、受阻、返修；执行记录不代表 agent 在线。
+- `read <projectId>`：`{project}`，含 revision、runId、roles、tasks、events、deliveries。
+- `main-read`：主 agent 绑定；`main-targets`：可接管的在线会话。
+- `connections`、`connection-read <名字>`、`connection-check <名字>`（只做无害查询）、`feishu-read`。
 
-先从当前主会话创建或恢复 Run，再保存输入文件：
+## 项目主 agent
 
-```json
-{"projectId":"列表中的精确编号","revision":0,"requestId":"唯一请求编号","runId":"run_实际编号"}
-```
+`bind`：`{projectId,revision,requestId,runId}`。
 
-```powershell
-node "D:/Projects/AgentBoat/coordinator/scripts/client.mjs" bind <input.json>
-```
-
-## 更新最终任务
+`submit`：
 
 ```json
-{
-  "projectId":"精确项目编号",
-  "revision":1,
-  "requestId":"唯一请求编号",
-  "task":{
-    "id":"稳定任务编号",
-    "title":"交付名称",
-    "goal":"用户目标",
-    "phase":"ready",
-    "progress":"已完成内容及验证边界",
-    "artifacts":[{"id":"delivery-v1","label":"成果","url":"项目内绝对路径或HTTP(S)链接","version":"v1"}],
-    "acceptance":[{"id":"check-layout","title":"布局","details":"如何核对及预期效果","artifactIds":["delivery-v1"]}],
-    "decisions":[],
-    "executions":[],
-    "sourceIds":[]
-  }
-}
+{"projectId":"…","revision":1,"requestId":"唯一编号","task":{"id":"稳定编号","title":"…","goal":"…","phase":"ready","progress":"已完成内容和验证边界",
+ "artifacts":[{"id":"delivery-v1","label":"成果","url":"项目内绝对路径或 HTTP(S) 链接","version":"v1"}],
+ "acceptance":[{"id":"check-layout","title":"…","details":"怎么核对、预期效果","artifactIds":["delivery-v1"]}],
+ "decisions":[{"id":"…","question":"…","options":["…"]}],
+ "executions":[{"runId":"…","taskId":"…","dispatchId":"…","agent":"codex"}],"sourceIds":[]}}
 ```
 
-```powershell
-node "D:/Projects/AgentBoat/coordinator/scripts/client.mjs" submit <input.json>
-```
+- phase：working、blocked、paused、ready、completed。
+- 数组按 id 合并，省略的保留。成果 id 不能改写；问题变了用新的决定 id。
+- 验收的 revision、status、history 由插件维护；核对内容或关联成果变了，自动出新版本。
+- sourceIds 用本项目 events 的 id，一个来源只关联一个任务。
 
-phase 是 working、blocked、paused、ready 或 completed。数组按稳定编号合并，省略项保留；已有成果编号不可改写。待决定项格式 `{id,question,options:[]}`；问题变化使用新编号。执行记录格式 `{runId,taskId,dispatchId,agent:"codex"}`，代理也可为 claude。sourceIds 取当前项目 events 的实际 id，同一来源不能重新关联别的任务。
+## 代录用户结论
 
-验收项只写 id、title、details、artifactIds；revision、status、history 由插件维护。通过/修改反馈附当前验收版本，历史保留。外部消息通知与面板反馈送入绑定 Run 的主会话；主会话负责判断、拆分和转交，不由插件自动派工。
-
-## 工作间总览和来源
-
-`overview` 返回 `{workspace,attention,projects,hidden,links,connections,machines,error?}`。workspace 含 revision、runId、session、接管状态；工作间主 agent 的绑定与切换规则见 `$agentboat-workspace`。attention 含 projectId/taskId/kind/itemId/title/summary，列未回答决定、ready 任务的 pending 验收、受阻和返修。projects 含 ref、counts、updatedAt、bound、agents；执行记录不代表实时活性。总览包含已存但当前工作树关闭的项目，读取不注册、不改写。
-
-workspace-agent 是工作间主 agent 转来的项目来源，workspace-external 是其接手的外部工作间请求。关联原任务时保留 sourceIds；外部任务和派生资料不对其他工作间上报。消息中的引用不扩大授权。
-
-项目提交带出多条新事项时只生成一条汇总通知，按事项编号与验收版本去重。主 agent 现读项目后转告主人；未绑定时不产生通知，之后绑定不补发。uncertain 先核对，不换编号重发。
-
-## 批量反馈
-
-`feedback <input.json>` → `project.feedback`：
+`feedback`：
 
 ```json
-{"projectId":"精确项目编号","revision":3,"items":[{"taskId":"task-id","kind":"decision","itemId":"decision-id","answer":"主人明确答案","note":"原话、会话或消息编号、日期"},{"taskId":"task-id","kind":"acceptance","itemId":"check-id","itemRevision":1,"result":"passed","note":"主人明确结论及来源"}]}
+{"projectId":"…","revision":3,"items":[
+ {"taskId":"…","kind":"decision","itemId":"…","answer":"明确答案","note":"用户原话、会话或消息编号、日期"},
+ {"taskId":"…","kind":"acceptance","itemId":"…","itemRevision":1,"result":"passed","note":"…"}]}
 ```
 
-同一项目收齐全部结论一次提交；先校验整批，再同版本写入，只给项目主 agent 一条消息。验收要求任务 ready、条目 pending 且 itemRevision 相符；修改用 changes_requested 并附具体意见；决定须未回答。暂停任务、重复条目或任一无效条目整批拒绝并标明序号。只代录明确用户结论，不把一般问答当验收。提交后读回 history；超时先核对原话、日期和版本，不盲重发。
+- 同一项目的结论收齐后一次提交。
+- 整批先校验。任务不在等验收、版本不符、已处理或重复的条目，只要有一条，整批拒绝并标出序号。
+- `changes_requested` 必须写修改意见。
+- 只给项目主 agent 发一条消息。
+
+## 工作间主 agent
+
+- `main-bind [--check]`（stdin）：`{revision,requestId,runId,token}`，首次绑定可省 token。`--check` 只核实、不生效。
+- `message`：`{projectId,revision,requestId,runId,text}`，成为项目的 workspace-agent 来源。
+- `hide`、`restore`：`{projectId,revision}`。
+- `delete`：`{projectId,revision,confirm:projectId}`。插件先导出记录（回执里有 exportPath）；有打开的终端或会话就拒绝。只从 Orca 移除登记，磁盘文件和 Git 保留。
+- `connection-send`（stdin）：`{name,runId,requestId,contextId?,text}`。同一事项沿用 contextId。
+- `connection-reply`（stdin）：`{name,runId,id,requestId,text}`，id 是对方发来的 task.id。
+- `feishu-reply`：`{runId,eventId,requestId,text}`，回到原消息所在的会话。
+- 工作间互联 `links-*` 和跨工作间请求 `requests-*` 的输入见 `D:/Projects/AgentBoat/coordinator/LINKS.md`。
+
+## 通用
+
+- 写入要带读到的 revision 和唯一 requestId。
+- 回执不明（uncertain、超时、「未取得回执」）时先读回核对；重放只用同一个 requestId 和完全相同的输入。版本冲突先重读。
+- 一次 submit 带出多条新事项时，插件只给工作间主 agent 发一条汇总通知。未绑定时不发，之后绑定也不补发。
