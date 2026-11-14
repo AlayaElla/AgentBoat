@@ -5,16 +5,16 @@ import path from 'node:path';
 import os from 'node:os';
 
 const [operation, argument] = process.argv.slice(2);
-const allowed = ['projects', 'overview', 'main-read', 'main-bind', 'message', 'read', 'bind', 'submit'];
-if (!allowed.includes(operation)) throw new Error('用法：node client.mjs projects | overview | main-read | read <projectId> | bind|submit|main-bind|message <input.json>');
+const allowed = ['projects', 'overview', 'main-read', 'main-bind', 'message', 'read', 'bind', 'submit', 'feedback'];
+if (!allowed.includes(operation)) throw new Error('用法：node client.mjs projects | overview | main-read | read <projectId> | bind|submit|main-bind|message|feedback <input.json>');
 const target = fileURLToPath(new URL('../plugin/', import.meta.url));
 const executable = process.env.ORCA_CLI_COMMAND || (process.platform === 'win32'
   ? path.join(os.homedir(), 'AppData/Local/Programs/orca/resources/bin/orca.exe') : 'orca');
 const input = ['projects', 'overview'].includes(operation) ? null : operation === 'main-read' ? { operation: 'read' } : operation === 'read'
   ? { operation, projectId: argument }
-  : { ...JSON.parse(readFileSync(argument, 'utf8').replace(/^\uFEFF/, '')), ...(operation === 'message' ? {} : { operation: operation === 'main-bind' ? 'bind' : operation }) };
+  : { ...JSON.parse(readFileSync(argument, 'utf8').replace(/^\uFEFF/, '')), ...(['message', 'feedback'].includes(operation) ? {} : { operation: operation === 'main-bind' ? 'bind' : operation }) };
 const name = operation === 'projects' ? 'projects.list' : operation === 'overview' ? 'workspace.overview'
-  : operation.startsWith('main-') ? 'workspace.agent' : operation === 'message' ? 'workspace.message' : 'project.agent';
+  : operation.startsWith('main-') ? 'workspace.agent' : operation === 'message' ? 'workspace.message' : operation === 'feedback' ? 'project.feedback' : 'project.agent';
 const args = ['plugin', 'dev', 'request', target, name, '--json'];
 if (input) args.push('--data', JSON.stringify(input));
 try {

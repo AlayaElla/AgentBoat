@@ -1,0 +1,12 @@
+{
+  "id": "code",
+  "name": "代码项目：Claude 设计，Codex 编码和审查",
+  "mainAgent": { "agent": "claude" },
+  "roles": {
+    "design": { "agent": "claude" },
+    "code": { "agent": "codex" },
+    "review": { "agent": "codex" }
+  },
+  "source": { "kind": "empty" },
+  "firstMessage": "开启项目协作。先核对当前项目与目标，按模板分工；只在有明确工作时派工，用户的决定与验收必须保留原话。"
+}
