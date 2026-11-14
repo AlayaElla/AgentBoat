@@ -12,8 +12,8 @@ description: 用户明确说“开启项目协作”或“项目协作：”时�
 使用 `orca-cli`、`orchestration` 的版本匹配指南。下面的桥接脚本只访问本地“项目协作”插件：
 
 ```powershell
-node "D:/Projects/test2/project-coordinator/scripts/client.mjs" projects
-node "D:/Projects/test2/project-coordinator/scripts/client.mjs" read <projectId>
+node "D:/Projects/AgentBoat/coordinator/scripts/client.mjs" projects
+node "D:/Projects/AgentBoat/coordinator/scripts/client.mjs" read <projectId>
 ```
 
 从列表按 Orca 当前项目的完整路径、repoId、hostId 核对项目；同名不能代替身份。每个项目只绑定一个当前主会话 Run，不能将一个 Run 复用到不同项目。
