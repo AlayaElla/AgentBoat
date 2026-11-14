@@ -6,6 +6,7 @@ import type { LinksSnapshot } from './links'
 import { requestState, type WorkspaceRequest } from './model'
 
 test('butler settings save real state, clear secrets, and show connection failures without screenshots', async () => {
+  const diagnostic = "HTTP 403；JSON-RPC -32052：peer 'ip:127.0.0.1' not trusted"
   let s: import('./butler').ButlerSnapshot = { version: 1, revision: 0, enabled: false, port: 9901, url: 'http://127.0.0.1:9900', entries: [], listening: '', connection: '未检查', error: '', inboundSecretSaved: false, outboundSecretSaved: false }
   const saves: any[] = []
   const host = mockHost({ requests: {
@@ -13,7 +14,7 @@ test('butler settings save real state, clear secrets, and show connection failur
     'workspace.overview': () => ({ ...overview([], { version: 1, revision: 0, runId: '', requests: [] }), butler: s }),
     'workspace.butler': input => {
       if (input.operation === 'save') { saves.push(input); s = { ...s, enabled: input.enabled!, revision: 1, inboundSecretSaved: true, outboundSecretSaved: true, listening: 'http://127.0.0.1:9901' } }
-      if (input.operation === 'check') s = { ...s, connection: '连接失败', error: '模拟 Hermes 尚未启动。'.repeat(40) }
+      if (input.operation === 'check') s = { ...s, connection: '对方不信任', error: `${diagnostic}；请检查 Hermes 的 A2A_TRUSTED_PEERS。`.repeat(20), entries: [{ id: 'mock-failed-send', direction: 'outgoing', hash: 'mock-hash', error: diagnostic, notification: 'none', task: { id: 'mock-failed-send', contextId: 'mock-context', status: { state: 'TASK_STATE_FAILED', timestamp: '2026-11-14T00:00:00Z' }, history: [] } }] }
       return s
     }
   } })
@@ -28,10 +29,13 @@ test('butler settings save real state, clear secrets, and show connection failur
     assert.equal(saves.length, 1); assert.equal(saves[0].port, 9901)
     assert.equal(view.valueOf({ label: 'Hermes 令牌' }), ''); assert.equal(view.valueOf({ label: '主 agent 令牌' }), '')
     await view.press({ text: '检查连接' })
-    assert.ok(JSON.stringify(view.tree()).includes('模拟 Hermes 尚未启动'))
+    assert.ok(JSON.stringify(view.tree()).includes(diagnostic))
+    await view.toggle({ label: '消息记录' })
+    assert.ok(JSON.stringify(view.tree()).includes('mock-failed-send'))
+    assert.ok(JSON.stringify(view.tree()).includes(diagnostic))
     await view.press({ text: '返回' })
     await view.post('project.changed', { projectId: '' }); await view.settled()
-    assert.ok(JSON.stringify(view.tree()).includes('连接失败'))
+    assert.ok(JSON.stringify(view.tree()).includes('对方不信任'))
     assert.deepEqual(view.errors, []); assert.deepEqual(view.warnings, []); assert.deepEqual(view.refusals, [])
   } finally { await view.unmount() }
 })

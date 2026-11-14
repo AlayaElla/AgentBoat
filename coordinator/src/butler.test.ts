@@ -6,12 +6,12 @@ import { createCoordinator } from './worker'
 import { refs, sample } from './fixtures'
 
 const token = 'test-only-inbound-token-1234567890123456789', other = 'test-only-outbound-token-1234567890123456789'
-async function instance(url = 'http://127.0.0.1:9900') {
+async function instance(url = 'http://127.0.0.1:9900', failNotification = false) {
   const storage = new Map<string, any>([['project:p1', sample().project]]), secrets = new Map<string, string>(), notices: any[] = []
   const before = structuredClone(storage.get('project:p1'))
   const api = { storage: { get: async (k: string) => structuredClone(storage.get(k) ?? null), set: async (k: string, v: any) => { assert.equal(k, 'workspace.butler'); storage.set(k, structuredClone(v)) } },
     secrets: { get: async (k: string) => secrets.get(k) ?? null, set: async (k: string, v: string) => { secrets.set(k, v) } } }
-  const b = new Butler(api as any, async () => 'run_mock', async (runId, id, body) => { notices.push({ runId, id, body }) }, () => {})
+  const b = new Butler(api as any, async () => 'run_mock', async (runId, id, body) => { notices.push({ runId, id, body }); if (failNotification) throw Error('Mock notification unavailable') }, () => {})
   await b.handle({ operation: 'save', revision: 0, enabled: true, port: 0, url, inboundToken: token, outboundToken: other })
   return { b, storage, secrets, notices, before }
 }
@@ -94,7 +94,10 @@ test('main → mock Hermes → result → main preserves context, polls durable 
     let raw = ''; for await (const c of req) raw += c
     const r = JSON.parse(raw)
     if (r.method === 'SendMessage') { sends++; contexts.push(r.params.message.contextId); if (reject) { res.writeHead(401); res.end('{}'); return } }
-    else polls++
+    else {
+      if (r.params.id.startsWith('orca-connection-check:')) { res.end(JSON.stringify({ jsonrpc: '2.0', id: r.id, error: { code: -32001, message: 'Task not found' } })); return }
+      polls++
+    }
     const task = { id: `remote-${sends}`, contextId: 'ctx-daily', status: { state: r.method === 'GetTask' ? 'TASK_STATE_COMPLETED' : 'TASK_STATE_WORKING' }, ...(r.method === 'GetTask' ? { artifacts: [{ artifactId: 'mock-result', parts: [{ text: '模拟查资料结果' }] }] } : {}) }
     res.end(JSON.stringify({ jsonrpc: '2.0', id: r.id, result: r.method === 'GetTask' ? task : { task } }))
   })
@@ -112,9 +115,103 @@ test('main → mock Hermes → result → main preserves context, polls durable 
     reject = true
     await b.handle({ ...send, requestId: 'send-failed' }); await b.tick(); await b.tick()
     const failed = (await b.snapshot()).entries.find(e => e.id === 'send-failed')!
-    assert.equal(failed.task.status.state, 'TASK_STATE_FAILED'); assert.ok(failed.error!.includes('不会自动重发'))
+    assert.equal(failed.task.status.state, 'TASK_STATE_FAILED'); assert.ok(failed.error!.includes('不会自动重发')); assert.ok(failed.error!.includes('HTTP 401'))
     assert.equal(sends, 3); b.stop(); await b.start(); await b.tick(); assert.equal(sends, 3)
     assert.deepEqual(storage.get('project:p1'), before)
+  } finally { b.stop(); server.closeAllConnections(); await new Promise<void>(r => server.close(() => r())) }
+})
+
+for (const [httpStatus, rpcCode, reason, connection, action] of [
+  [401, -32050, 'unauthorized', '令牌错误', 'Hermes 令牌'],
+  [403, -32052, "peer 'ip:127.0.0.1' not trusted", '对方不信任', 'A2A_TRUSTED_PEERS'],
+  [200, -32001, 'Task not found', '已连接', ''],
+  [200, -32601, 'Method not found', '连接失败', 'A2A 接口'],
+] as const) test(`connection check: HTTP ${httpStatus} / JSON-RPC ${rpcCode} → ${connection}`, async () => {
+  const queries: any[] = []
+  const server = http.createServer(async (req, res) => {
+    res.setHeader('Content-Type', 'application/json')
+    if (req.method === 'GET') { res.end(JSON.stringify({ name: 'public mock Hermes', supportedInterfaces: [{ protocolBinding: 'JSONRPC', protocolVersion: '1.0' }] })); return }
+    assert.equal(req.headers.authorization, `Bearer ${other}`)
+    assert.equal(req.headers['a2a-version'], '1.0')
+    let raw = ''; for await (const c of req) raw += c
+    const r = JSON.parse(raw); queries.push(r)
+    res.writeHead(httpStatus)
+    res.end(JSON.stringify({ jsonrpc: '2.0', id: r.id, error: { code: rpcCode, message: `${reason} ${other} ${token}` } }))
+  })
+  await new Promise<void>(r => server.listen(0, '127.0.0.1', r))
+  const { b, storage, notices } = await instance(`http://127.0.0.1:${(server.address() as any).port}`)
+  try {
+    const before = structuredClone([...storage])
+    const s = await b.handle({ operation: 'check' })
+    assert.equal(s.connection, connection)
+    assert.equal(queries.length, 1); assert.equal(queries[0].method, 'GetTask')
+    assert.ok(queries[0].params.id.startsWith('orca-connection-check:')); assert.equal(queries[0].params.historyLength, 0)
+    if (connection !== '已连接') {
+      for (const expected of [`HTTP ${httpStatus}`, `JSON-RPC ${rpcCode}`, reason, action]) assert.ok(s.error.includes(expected))
+    } else assert.equal(s.error, '')
+    assert.equal(JSON.stringify(s).includes(other), false); assert.equal(JSON.stringify(s).includes(token), false)
+    assert.deepEqual([...storage], before); assert.deepEqual(notices, [])
+    console.log(JSON.stringify({ check: connection, error: s.error, method: queries[0].method, writes: 0, notifications: notices.length }))
+  } finally { b.stop(); server.closeAllConnections(); await new Promise<void>(r => server.close(() => r())) }
+})
+
+test('connection check: unreachable service records network type and directs user to service/address', async () => {
+  const server = http.createServer()
+  await new Promise<void>(r => server.listen(0, '127.0.0.1', r))
+  const url = `http://127.0.0.1:${(server.address() as any).port}`
+  await new Promise<void>(r => server.close(() => r()))
+  const { b, notices } = await instance(url)
+  try {
+    const s = await b.handle({ operation: 'check' })
+    assert.equal(s.connection, '服务不可达')
+    for (const expected of ['TypeError', 'ECONNREFUSED', 'gateway', 'Hermes A2A 地址']) assert.ok(s.error.includes(expected))
+    assert.deepEqual(notices, [])
+    console.log(JSON.stringify({ check: s.connection, error: s.error, notifications: notices.length }))
+  } finally { b.stop() }
+})
+
+test('send and poll failures preserve HTTP/RPC diagnostics, redact echoes, and never resend failed writes', async () => {
+  let sends = 0, polls = 0, rejectPoll = true
+  const privateText = '模拟私密请求正文，不能进入错误日志'
+  const server = http.createServer(async (req, res) => {
+    let raw = ''; for await (const c of req) raw += c
+    const r = JSON.parse(raw)
+    res.setHeader('Content-Type', 'application/json')
+    if (r.method === 'SendMessage') {
+      sends++
+      if (sends === 1) {
+        res.writeHead(403)
+        res.end(JSON.stringify({ jsonrpc: '2.0', id: r.id, error: { code: -32052, message: `peer 'ip:127.0.0.1' not trusted ${other} ${token} ${privateText} ${raw}`, data: { token: other, request: raw } } }))
+        return
+      }
+    } else {
+      polls++
+      if (rejectPoll) { res.end(JSON.stringify({ jsonrpc: '2.0', id: r.id, error: { code: -32602, message: 'Invalid parameters' } })); return }
+    }
+    const task = { id: 'remote-diagnostic', contextId: 'ctx-daily', status: { state: r.method === 'GetTask' ? 'TASK_STATE_COMPLETED' : 'TASK_STATE_WORKING' } }
+    res.end(JSON.stringify({ jsonrpc: '2.0', id: r.id, result: r.method === 'GetTask' ? task : { task } }))
+  })
+  await new Promise<void>(r => server.listen(0, '127.0.0.1', r))
+  const { b, storage, notices, before } = await instance(`http://127.0.0.1:${(server.address() as any).port}`, true)
+  try {
+    const send = { operation: 'send' as const, runId: 'run_mock', requestId: 'diagnostic-failed', text: privateText }
+    await b.handle(send); await b.tick(); await b.tick()
+    const failed = (await b.handle({ operation: 'read' })).entries[0]
+    for (const expected of ['HTTP 403', 'JSON-RPC -32052', "peer 'ip:127.0.0.1' not trusted", '不会自动重发']) assert.ok(failed.error!.includes(expected))
+    for (const hidden of [other, token, privateText, '"jsonrpc"']) assert.equal(failed.error!.includes(hidden), false)
+    assert.equal(failed.task.status.state, 'TASK_STATE_FAILED')
+    assert.equal(failed.notification, 'uncertain'); assert.ok(failed.error!.includes('主 agent 通知结果待核对'))
+    assert.equal(notices[0].body.includes(privateText), false)
+    await b.handle(send); await b.tick(); assert.equal(sends, 1)
+    await b.handle({ ...send, requestId: 'diagnostic-poll' }); await b.tick(); await b.tick()
+    const polled = (await b.snapshot()).entries[1]
+    for (const expected of ['HTTP 200', 'JSON-RPC -32602', 'Invalid parameters', '继续查询原任务']) assert.ok(polled.error!.includes(expected))
+    assert.equal(polled.remoteId, 'remote-diagnostic'); assert.equal(polled.task.status.state, 'TASK_STATE_WORKING')
+    assert.equal(sends, 2); assert.equal(polls, 1)
+    rejectPoll = false; await b.tick()
+    assert.equal((await b.snapshot()).entries[1].error, '主 agent 通知结果待核对，不自动重发'); assert.equal(sends, 2)
+    assert.deepEqual(storage.get('project:p1'), before)
+    console.log(JSON.stringify({ sendError: failed.error, pollError: polled.error, tokensRedacted: true, requestBodyRedacted: true, sends }))
   } finally { b.stop(); server.closeAllConnections(); await new Promise<void>(r => server.close(() => r())) }
 })
 

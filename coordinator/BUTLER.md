@@ -21,7 +21,7 @@ Hermes 当前 Windows 服务安装器可能主动提出 UAC。脚本设置非交
 1. 打开一个新的本机 PowerShell，运行 `hermes model`。若 PATH 尚未更新，运行 `& "$env:LOCALAPPDATA\hermes\bin\hermes.exe" model`。
 2. 选择 **ChatGPT or Codex Subscription**。按终端显示的验证网址和设备码，在自己的浏览器登录 ChatGPT 并确认授权。不要把设备码、登录文件或凭据交给 agent。
 3. 返回终端，等待登录成功，按提示选可用的 Codex 模型。订阅额度和开发用 Codex 共用。
-4. 运行 `hermes gateway start` 和 `hermes gateway status`，然后在 Orca 总览打开“管家设置 → 检查连接”。连接检查只证明 A2A Agent Card 可达，不证明模型调用成功。
+4. 运行 `hermes gateway start` 和 `hermes gateway status`，然后在 Orca 总览打开“管家设置 → 检查连接”。检查会读取 Agent Card，再用已保存的 Hermes 出站令牌查询随机的不存在任务；只有 HTTP 200、JSON-RPC `-32001`（任务不存在）才显示“已连接”，证明 A2A 可达、鉴权和对端信任检查通过，不证明模型调用成功。检查不会创建任务、通知主 agent 或写入消息记录。
 5. 告知主会话“登录完成”，再安排真实模型、定时提醒和双向通信验收。登录前不得把模拟结果当成真实端到端结果。
 
 登录流程见 [Hermes 模型文档](https://hermes-agent.nousresearch.com/docs/integrations/providers)。
@@ -70,7 +70,7 @@ send/reply 的 JSON **从标准输入读取**：
 
 出站发送以 requestId 作为 messageId，同一事项传回同一个 contextId。命令先返回持久化记录，后台发送，返回任务未完成时查询原 remoteId；结果生成稳定的 `requestId:result` artifact，作为来源送回主 Run。Hermes 稳定版会阻塞 SendMessage，插件允许它的 300 秒回复窗口，并仍能独立递交入站提醒和确认，避免相互等待。
 
-任务、回复和通知有独立状态。网络中断、发送后崩溃、通知结果未知时保留 uncertain/可见错误，禁止自动重发未知写入。已取得远端任务编号的只继续 GetTask。不要换 requestId 绕过保护。失败记录在“管家设置 → 消息记录”和 butler-read 中查看；重新打开设置可刷新状态。历史接近 190 KB 时拒绝新增、保留原记录，需要后续分页后再扩大容量。
+任务、回复和通知有独立状态。网络中断、发送后崩溃、通知结果未知时保留 uncertain/可见错误，禁止自动重发未知写入。已取得远端任务编号的只继续 GetTask。不要换 requestId 绕过保护。失败记录在“管家设置 → 消息记录”和 butler-read 中查看；错误保留 HTTP 状态、JSON-RPC 错误码和消息，或网络错误类型（如 TypeError / ECONNREFUSED、TimeoutError），不记录令牌、请求正文或错误响应的 data 字段，并对错误消息中原样回显的凭据和正文脱敏。重新打开设置可刷新状态。历史接近 190 KB 时拒绝新增、保留原记录，需要后续分页后再扩大容量。
 
 ## 资料边界、提醒与 skill
 
@@ -86,4 +86,11 @@ send/reply 的 JSON **从标准输入读取**：
 
 测试通过后才 `npm run build`，重新加载同一个开发插件目录，再用 release-evidence.mjs snapshot/compare 比对所有项目、目录和主绑定。项目正常并发写入时先核对变更来源、再取新快照比对；无法解释的丢失或差异立即回退旧插件并回报。不要修改插件清单或向真实项目写测试数据。
 
-连接失败先 `hermes gateway status`，检查 Hermes home 下 logs/gateway.log 与 a2a_audit.jsonl、端口、令牌和 `.env` 的回环地址；不要把日志中的凭据转发到会话或 Git。`A2A_TRUSTED_PEERS` 要与实际认证身份一致。订阅/额度问题需用户在 hermes model 核对。审批被拒应报告具体待确认动作，不能开启 skip/off 模式。
+连接失败先 `hermes gateway status`，检查 Hermes home 下 logs/gateway.log 与 a2a_audit.jsonl、端口、令牌和 `.env` 的回环地址；不要把日志中的凭据转发到会话或 Git。
+
+- “服务不可达”：检查 gateway 是否运行，以及管家设置的「Hermes A2A 地址」。
+- “令牌错误”（HTTP 401）：管家设置的「Hermes 令牌」须与 Hermes 的 `A2A_BEARER_TOKEN` 一致，修改后保存。
+- “对方不信任”（HTTP 403）：检查 Hermes `.env` 的 `A2A_TRUSTED_PEERS`。共享令牌的回环调用方身份是 **`ip:127.0.0.1`**，不能只写 `127.0.0.1`；修改后重启 gateway。这次故障就是身份不匹配，Hermes 返回 `JSON-RPC -32052: peer 'ip:127.0.0.1' not trusted`。公开的 Agent Card 可达仍不代表能通过此检查。
+- 其他“连接失败”：按返回的 HTTP / JSON-RPC 详情检查 A2A 版本、接口及 gateway 日志。
+
+订阅/额度问题需用户在 hermes model 核对。审批被拒应报告具体待确认动作，不能开启 skip/off 模式。
