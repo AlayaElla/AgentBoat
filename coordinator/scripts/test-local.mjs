@@ -15,4 +15,4 @@ await build({
   banner: {js:"import { createRequire as __testRequire } from 'node:module'; import { fileURLToPath as __testFile } from 'node:url'; import __testPath from 'node:path'; const require = __testRequire(import.meta.url); const __filename = __testFile(import.meta.url); const __dirname = __testPath.dirname(__filename);"},
   outExtension:{'.js':'.mjs'}
 });
-execFileSync(process.execPath, ['--test', '.orca/local-test/coordinator.test.mjs', '.orca/local-test/feishu.test.mjs', '.orca/local-test/interface.test.mjs', '.orca/local-test/links.test.mjs', '.orca/local-test/requests.test.mjs', '.orca/local-test/org-canvas.test.mjs', '.orca/local-test/main-agent.test.mjs'], {stdio:'inherit'});
+execFileSync(process.execPath, ['--test', '.orca/local-test/coordinator.test.mjs', '.orca/local-test/feishu.test.mjs', '.orca/local-test/interface.test.mjs', '.orca/local-test/links.test.mjs', '.orca/local-test/requests.test.mjs', '.orca/local-test/org-canvas.test.mjs', '.orca/local-test/main-agent.test.mjs', 'scripts/client.test.mjs'], {stdio:'inherit'});

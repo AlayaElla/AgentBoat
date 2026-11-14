@@ -17,9 +17,18 @@ const input = operation.startsWith('requests-') ? { ...(operation === 'requests-
   : operation === 'main-targets' ? null
   : { ...JSON.parse(readFileSync(operation === 'main-bind' ? 0 : argument, 'utf8').replace(/^\uFEFF/, '')), ...(['message', 'feedback', 'feishu-reply'].includes(operation) ? {} : { operation: operation === 'main-bind' ? 'bind' : operation }) };
 if (operation === 'main-bind') {
+  if (argument && argument !== '--check') throw new Error('用法：main-bind [--check] < stdin；--check 只核实，不生效');
   const caller = process.env.ORCA_AGENT_SESSION_ID ? `orca_session_id:${process.env.ORCA_AGENT_SESSION_ID}` : process.env.ORCA_TERMINAL_HANDLE;
   if (!caller) throw new Error('请在承担主 agent 的 Orca 会话中调用 main-bind');
   input.caller = caller;
+  // Chat identity is only declarable in the session's own process; never pass --from here.
+  let current;
+  try {
+    current = JSON.parse(execFileSync(executable, ['orchestration', 'run-current', '--json', '--full'], { encoding: 'utf8', windowsHide: true, timeout: 25000, maxBuffer: 1024 * 1024 }));
+  } catch { throw new Error('无法读取当前会话的 Run；请在目标 Orca 会话重试 run-current，勿填写其他会话身份'); }
+  if (!current.ok || !current.result?.run?.id) throw new Error('当前会话没有协调 Run；请先在本会话运行 orca orchestration run-create --objective "工作间主 agent"');
+  input.currentRunId = current.result.run.id;
+  if (argument === '--check') input.checkOnly = true;
 }
 const name = operation.startsWith('requests-') ? 'workspace.requests' : operation.startsWith('links-') ? 'workspace.links' : operation === 'projects' ? 'projects.list' : operation === 'overview' ? 'workspace.overview'
   : operation === 'feishu-read' ? 'workspace.feishu' : operation === 'feishu-reply' ? 'workspace.reply' : operation.startsWith('main-') ? 'workspace.agent' : operation === 'message' ? 'workspace.message' : operation === 'feedback' ? 'project.feedback' : 'project.agent';

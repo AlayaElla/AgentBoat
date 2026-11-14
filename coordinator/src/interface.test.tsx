@@ -9,7 +9,7 @@ test('main agent identity and both switch forms confirm once and wait for the re
   for (const mode of ['existing', 'new'] as const) {
     const session = { handle: 'orca_session_id:test-main', title: '测试原会话', workspace: 'identity:test', workspaceName: '测试工作区', path: '/test/workspace', agent: 'claude', online: 'online' as const }
     const target = { ...session, handle: 'orca_session_id:test-next', title: '测试接管会话' }
-    let binding: import('./model').WorkspaceBinding = { revision: 1, runId: 'run_old', session, boundAt: '2026-11-14T00:00:00Z', projectNames: ['测试项目'] }
+    let binding: import('./model').WorkspaceBinding = { revision: 1, runId: 'run_old', session, boundAt: '2026-11-14T00:00:00Z', projectNames: ['测试项目'], verification: { run: 'plugin', session: 'plugin', runOwnership: 'self-reported' }, securityBoundary: '替换授权来自面板一次性凭据' }
     const switches: any[] = [], host = mockHost({ requests: {
       'projects.list': () => ({ projects: refs }),
       'project.read': () => sample(),
@@ -20,6 +20,7 @@ test('main agent identity and both switch forms confirm once and wait for the re
     const view = await mount(panel, { host })
     try {
       for (const value of [session.title, session.path, session.workspaceName, 'Claude', 'run_old', '在线', '测试项目']) assert.ok(JSON.stringify(view.tree()).includes(value))
+      for (const value of ['Run 归属：会话自报', '插件核实', '替换授权来自面板一次性凭据']) assert.ok(JSON.stringify(view.tree()).includes(value))
       await view.select({ label: '项目' }, 'p1')
       host.respond('storage.get', (params: { key: string }) => ({ value: params.key === 'workspace.navigation' ? { switching: false } : null }))
       await view.post('workspace.open', { switching: false }); await view.settled()

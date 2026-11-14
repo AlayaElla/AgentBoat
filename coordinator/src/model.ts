@@ -78,6 +78,9 @@ export interface WorkspaceBinding {
   revision: number; runId: string; session?: AgentSession; boundAt?: string
   projectNames?: string[]; takeover?: MainTakeover
   previousNotice?: Delivery['state']
+  verification?: { run: 'plugin'; session: 'plugin'; runOwnership: 'self-reported' }
+  securityBoundary?: string
+  check?: { canTakeOver: true; message: string; runId: string; session: AgentSession; verification: NonNullable<WorkspaceBinding['verification']> }
 }
 export interface Workspace extends WorkspaceBinding {
   version: 1; requests: { id: string; fingerprint: string }[]

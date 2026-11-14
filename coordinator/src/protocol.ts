@@ -10,7 +10,7 @@ declare module 'orca' {
     'workspace.feishu': { input: { operation: 'read' | 'save'; revision?: number; feishu?: Project['feishu']; appSecret?: string }; output: MessagingSnapshot }
     'workspace.reply': { input: { runId: string; eventId: string; requestId: string; text: string }; output: MessagingSnapshot }
     'workspace.overview': { output: Overview }
-    'workspace.agent': { input: { operation: 'read' | 'bind'; revision?: number; requestId?: string; runId?: string; caller?: string; token?: string }; output: WorkspaceBinding }
+    'workspace.agent': { input: { operation: 'read' | 'bind'; revision?: number; requestId?: string; runId?: string; caller?: string; currentRunId?: string; token?: string; checkOnly?: boolean }; output: WorkspaceBinding }
     'workspace.agent.targets': { output: { sessions: import('./model').AgentSession[]; workspaces: { workspace: string; name: string; path: string }[] } }
     'workspace.agent.switch': { input: { revision: number; mode: 'existing' | 'new'; handle?: string; workspace?: string; agent?: string }; output: WorkspaceBinding }
     'workspace.entry': { output: { opened: boolean } }

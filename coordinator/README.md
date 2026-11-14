@@ -30,6 +30,14 @@ Orca 右侧另有“组织画布”。“工作间连接”以本工作间为中
 
 总览顶部与组织画布「工作间内部」的主 agent 节点显示绑定详情；旧记录缺少的字段显示「未知」，不回填猜测。点击「切换主 agent」，可选在线会话，或选择工作区新开 Claude（默认）、Codex、OpenCode；确认后等待目标会话自行建 Run 并绑定。原绑定保留至接管成功，之后通知和飞书工作间消息交新 Run；已发给原主 agent 的通知不会补发，接管者须读总览补齐。发送或启动结果不明不自动重试；凭据过期后才可重新发起。
 
+`main-bind --check` 从标准输入接收 `{revision,requestId,runId,token}`，只核实，返回 `check.canTakeOver=true` 表示可以接管；不消费凭据、不写绑定、请求或版本，也不发送通知。JSON 中 `checkOnly:true` 同样有效。正式生效需去掉检查模式，现读版本并使用新的请求编号。
+
+客户端在调用会话自己的进程运行不带 `--from` 的 `run-current`；`caller` 和 `currentRunId` 自动覆盖输入中的值。插件不再代查聊天会话。插件独立核实 Run 存在、未被项目占用、会话在线及其工作区/目录/agent、凭据摘要/期限/精确目标；新启动的会话必须等启动回执确认编号，不能仅凭工作区和 agent 匹配。Run 与调用会话的归属是会话自报，面板与 `main-read` 的 verification 明确区分来源，旧记录来源未知。同一系统用户的本机程序可读写插件数据，身份自报不是隔离边界，替换授权仍来自面板生成、仅存摘要、限时且一次有效的凭据。
+
+Orca 1.4.258 的启动回执位于顶层 outcome/prompt（同时兼容包在 launch 内的回执）。聊天会话用 outcome.sessionId 转为 `orca_session_id:<sessionId>`，与会话环境 ORCA_AGENT_SESSION_ID 对应；outcome.handle 是页面标识，不能用作接管身份。终端使用回执给出的终端 handle。
+
+run-show 若提供 coordinator_handle，插件还会独立核对它与调用会话一致；旧 Run 和当前聊天 Run 可能返回 null，此时不补造归属证明。
+
 ## 本地开发
 
 ```powershell

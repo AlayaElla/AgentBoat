@@ -131,21 +131,28 @@ export class ProjectStore {
       return w
     })
   }
-  async bindWorkspace(expected: number, runId: string, request: { id: string; input: unknown }, session: AgentSession, token = ''): Promise<Workspace> {
+  async bindWorkspace(expected: number, runId: string, request: { id: string; input: unknown }, session: AgentSession, token = '', checkOnly = false): Promise<Workspace> {
     return this.serial(async () => {
       const w = await this.workspace(), hash = fingerprint(request.input), prior = w.requests.find(r => r.id === request.id)
-      if (prior) { if (prior.fingerprint !== hash) fail('同一个请求编号不能用于不同内容'); return w }
+      if (prior && !checkOnly) { if (prior.fingerprint !== hash) fail('同一个请求编号不能用于不同内容'); return w }
+      if (prior) fail('检查请求编号已用于绑定；请换一个新的请求编号')
       if (w.revision !== expected) fail('工作间已更新，请刷新后再提交')
+      if ((await this.all()).some(p => p.runId === runId)) fail('该 Run 已绑定项目；请在当前会话创建独立的工作间主 agent Run')
       if (w.runId) {
         const t = w.takeover
-        if (!t || !token || t.tokenHash !== fingerprint(token) || Date.parse(t.expiresAt) <= Date.now()) fail('替换主 agent 需要面板发起的有效一次性接管凭据')
-        if (t.target.handle ? t.target.handle !== session.handle : t.target.workspace !== session.workspace || t.target.agent !== session.agent) fail('接管凭据不属于当前会话')
+        if (!t || typeof token !== 'string' || !token || t.tokenHash !== fingerprint(token) || !Number.isFinite(Date.parse(t.expiresAt)) || Date.parse(t.expiresAt) <= Date.now()) fail('替换主 agent 需要面板发起的有效一次性接管凭据；请让主人在面板重新发起切换')
+        if (!t.target.handle) fail('启动回执尚未确认目标会话；请稍后重读 main-read 再试')
+        if (t.target.handle !== session.handle) fail('接管凭据不属于当前会话；请在面板选中的目标会话调用')
+        if (t.target.workspace !== session.workspace || t.target.agent !== session.agent) fail('目标会话的工作区或 agent 已变化；请在面板重新发起切换')
         if (w.runId === runId) fail('接管会话必须创建自己的新 Run')
+        if (checkOnly) return w
         w.retired ??= []
         w.retired.push({ id: `retired:${t.id}`, targetRunId: w.runId, subject: '工作间主 agent 已切换',
           body: `你已不再是工作间主 agent。新的主 agent：${session.title || session.handle}\n工作区：${session.workspaceName || session.workspace}\n目录：${session.path}\nAgent：${session.agent}\nRun：${runId}\n请停止承担工作间主 agent。已发送的通知不会补发；新的主 agent 会读取总览补齐事项。`, state: 'pending' })
       }
+      if (checkOnly) return w
       w.session = session; w.boundAt = new Date().toISOString(); delete w.takeover
+      w.verification = { run: 'plugin', session: 'plugin', runOwnership: 'self-reported' }
       w.runId = runId; w.revision++; w.requests.push({ id: request.id, fingerprint: hash })
       await this.storage.set('workspace', w as any)
       return w

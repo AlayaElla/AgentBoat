@@ -8,10 +8,10 @@ import { fail, projectKey } from './store'
 const execute = promisify(execFile)
 export interface CoordinatorRuntime {
   projects(): Promise<ProjectRef[]>
-  verifyRun(id: string): Promise<void>
+  verifyRun(id: string, caller?: string): Promise<void>
   mainAgent?(id: string): Promise<'claude' | 'codex' | undefined>
   targets?(): Promise<{ sessions: AgentSession[]; workspaces: { workspace: string; name: string; path: string }[] }>
-  identify?(handle: string, runId: string): Promise<AgentSession>
+  identify?(handle: string, runId: string, currentRunId?: string): Promise<AgentSession>
   requestTakeover?(handle: string, prompt: string): Promise<void>
   launchMain?(workspace: string, agent: string, prompt: string): Promise<string>
   openOverview?(): Promise<void>
@@ -55,21 +55,21 @@ export class OrcaRuntime implements CoordinatorRuntime {
     }
     return [...projects.values()]
   }
-  async verifyRun(id: string): Promise<void> {
+  async verifyRun(id: string, caller?: string): Promise<void> {
     if (!/^run_[\w-]+$/.test(id)) fail('Run 编号格式不正确')
     const result = await this.call(['orchestration', 'run-show', '--id', id])
     if (result.run?.id !== id) fail('Orca 未返回对应 Run')
+    if (caller && result.run.coordinator_handle && result.run.coordinator_handle !== caller) fail('Orca 返回的 Run 协调者与当前会话不符；请在目标会话创建自己的新 Run')
   }
   async targets() {
     const [ps, list] = await Promise.all([this.call(['worktree', 'ps', '--limit', '10000', '--agent-wait']), this.call(['terminal', 'list', '--limit', '10000'])])
     if (ps.truncated || list.truncated || ps.hostScope?.omittedHostIds?.includes('local')) fail('会话列表不完整，请恢复 Orca 后重试')
     return mainTargets(ps.worktrees ?? [], list.terminals ?? [])
   }
-  async identify(handle: string, runId: string) {
-    const current = await this.call(['orchestration', 'run-current', '--from', handle])
-    if (current.run?.id !== runId) fail('Run 不是调用会话自己创建或绑定的协调 Run')
+  async identify(handle: string, runId: string, currentRunId?: string) {
+    if (currentRunId !== runId) fail('当前会话自报的 Run 与申请不一致；请在目标会话创建自己的 Run，再用 client.mjs main-bind 调用')
     const session = (await this.targets()).sessions.find(s => s.handle === handle)
-    if (!session || session.online !== 'online') fail('无法核实调用会话在线或身份，请从当前主 agent 会话调用')
+    if (!session || session.online !== 'online') fail('无法核实目标会话在线或身份；请从目标会话调用 main-bind，已关闭时请主人在面板重新选择')
     return session
   }
   async requestTakeover(handle: string, prompt: string) {
@@ -77,8 +77,10 @@ export class OrcaRuntime implements CoordinatorRuntime {
   }
   async launchMain(workspace: string, agent: string, prompt: string) {
     const result = await this.call(['agent', 'launch', '--agent', agent, '--worktree', workspace, '--prompt', prompt])
-    const launch = result.launch
-    const handle = launch?.outcome?.handle ?? result.agentTerminalHandle
+    const launch = result.launch ?? result
+    const handle = launch.outcome?.kind === 'structured'
+      ? (launch.outcome.sessionId ? `orca_session_id:${launch.outcome.sessionId}` : undefined)
+      : launch.outcome?.handle ?? result.agentTerminalHandle
     if (!handle || !['journaled', 'handed-to-terminal'].includes(launch?.prompt?.outcome)) fail('启动或提示词回执待核对，不会自动重启')
     return handle as string
   }

@@ -190,7 +190,7 @@ test('overview reads legacy and closed projects without writing and includes eve
   const runtime: CoordinatorRuntime = { projects: async () => [refs[1]], verifyRun: async () => {}, send: async () => { throw new Error('must not send') } }
   const worker = await mountWorker({ default: (orca: OrcaWorkerApi) => { createCoordinator(orca, runtime) } }, { host })
   const all = await worker.request('workspace.overview')
-  assert.deepEqual(all.workspace, { revision: 0, runId: '' })
+  assert.equal(all.workspace.revision, 0); assert.equal(all.workspace.runId, '')
   assert.deepEqual(all.attention.map(a => a.kind).sort(), ['blocked', 'decision', 'review', 'rework'])
   assert.equal(all.projects.length, 2)
   assert.equal(all.projects[0].counts.review, 1)
@@ -201,16 +201,17 @@ test('overview reads legacy and closed projects without writing and includes eve
   await worker.deactivate()
 })
 
-test('workspace binding validates Runs, revisions and request replay, and supports a project coordinator Run', async () => {
+test('workspace binding validates Runs, revisions, occupied project Runs and request replay', async () => {
   const p = fresh(refs[0]); p.runId = 'run_project'
   const host = mockHost({ storage: { 'project:p1': p as any } })
   const verified: string[] = []
   const runtime: CoordinatorRuntime = { projects: async () => refs, identify: async () => mainSession, verifyRun: async id => { verified.push(id); if (id === 'invalid') throw new Error('invalid Run') }, send: async () => ({}) }
   const worker = await mountWorker({ default: (orca: OrcaWorkerApi) => { createCoordinator(orca, runtime) } }, { host })
-  const input = { operation: 'bind' as const, revision: 0, requestId: 'main-bind', runId: 'run_project', caller: mainSession.handle }
+  const input = { operation: 'bind' as const, revision: 0, requestId: 'main-bind', runId: 'run_workspace', caller: mainSession.handle }
+  await assert.rejects(() => worker.request('workspace.agent', { ...input, runId: 'run_project', checkOnly: true }))
   await assert.rejects(() => worker.request('workspace.agent', { ...input, runId: 'invalid' }))
   const bound = await worker.request('workspace.agent', input)
-  assert.equal(bound.runId, 'run_project'); assert.equal(bound.session?.handle, mainSession.handle)
+  assert.equal(bound.runId, 'run_workspace'); assert.equal(bound.session?.handle, mainSession.handle)
   assert.deepEqual(await worker.request('workspace.agent', input), bound)
   await assert.rejects(() => worker.request('workspace.agent', { ...input, runId: 'run_other' }))
   await assert.rejects(() => worker.request('workspace.agent', { ...input, requestId: 'stale' }))
