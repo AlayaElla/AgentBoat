@@ -76,6 +76,7 @@ export function linksSection(s?: LinksSnapshot) {
   </Stack>
 }
 export const linksOpened = () => read(opened)
+export function closeLinks() { set(opened, false); set(code, ''); set(invitation, ''); set(error, ''); update(config, c => ({ ...c, certificate: '', privateKey: '' })) }
 export function linksPage(projects: ProjectRef[]) {
   const s = read(state), c = read(config)
   const edit = (k: keyof typeof c, v: string | boolean) => update(config, c => ({ ...c, [k]: v }))

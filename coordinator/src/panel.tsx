@@ -1,7 +1,9 @@
 ﻿import { atom, read, set, update, plugin, shell, files, Stack, Row, Box, Heading, Text, Button, IconButton, Badge, List, ListItem, Link,
   Select, Input, Textarea, Switch, RadioGroup, Field, Tabs, Tab, Collapsible, EmptyState, Callout, Skeleton, KeyValue, type PanelContext, type Tone } from 'orca'
 import { taskState, type Acceptance, type Decision, type Project, type ProjectRef, type Snapshot, type Task, type Overview, type MessagingSnapshot } from './model'
-import { linksSection, linksOpened, linksPage, pendingRequests, requestAttention } from './links-panel'
+import { storage } from 'orca'
+import { linksSection, linksOpened, linksPage, closeLinks, pendingRequests, requestAttention } from './links-panel'
+import { bindingRows, agentName, takeoverText } from './main-agent-view'
 
 type View = { kind: 'task'; id: string } | { kind: 'settings' } | null
 const OTHER = ' other' // options are stored trimmed, so a leading space cannot collide with one
@@ -24,6 +26,9 @@ const workspaceFeishuOpen = atom(false)
 const workspaceConfig = atom({ appId: '', appSecret: '', chatIds: '', senderIds: '', enabled: false })
 const deleting = atom('')
 const deletedExport = atom('')
+const mainSwitch = atom(false)
+const mainTargets = atom<import('orca').PluginRequests['workspace.agent.targets']['output'] | null>(null)
+const mainChoice = atom({ mode: 'existing' as 'existing' | 'new', handle: '', workspace: '', agent: 'claude', confirm: false })
 let epoch = 0
 
 function showConfig(p: Project) {
@@ -358,11 +363,19 @@ async function openOverviewTask(projectId: string, taskId: string) {
   if (read(selected) === projectId && read(snapshot)?.project?.tasks.some(t => t.id === taskId)) show({ kind: 'task', id: taskId })
 }
 function workspacePage(all: Overview) {
+  if (read(mainSwitch)) return mainSwitchPage(all)
   if (linksOpened()) return linksPage(all.projects.map(p => p.ref))
   if (read(workspaceFeishuOpen)) return workspaceFeishuPage()
   const kinds = { decision: '待决定', review: '待验收', blocked: '受阻', rework: '要求返修' }
   return <Stack gap="lg">
-    <Row justify="between" gap="sm" wrap><Heading>工作间总览</Heading><Badge tone={all.workspace.runId ? 'success' : 'neutral'}>{all.workspace.runId ? '主 agent 已绑定' : '主 agent 未绑定'}</Badge></Row>
+    <Heading>工作间总览</Heading>
+    <Box border radius="lg" padding="md" gap="sm" background="card">
+      <Heading level={2}>工作间主 agent</Heading>
+      {all.workspace.runId ? <KeyValue items={bindingRows(all.workspace)} /> : <Text>未绑定。请选择已开的会话，或新开一个主 agent。</Text>}
+      {takeoverText(all.workspace) ? <Callout tone="warning" title="主 agent 接管">{takeoverText(all.workspace)}</Callout> : null}
+      <Button disabled={read(busy)} onPress={openMainSwitch}>{all.workspace.runId ? '切换主 agent' : '设置主 agent'}</Button>
+      {problem('main-agent')}
+    </Box>
     <Button icon="settings" onPress={() => act('workspace-feishu', '读取飞书设置未成功', async () => {
       const s = await plugin.request('workspace.feishu', { operation: 'read' })
       set(workspaceFeishu, s); set(workspaceConfig, { ...s.feishu, appSecret: '', chatIds: s.feishu.chatIds.join('\n'), senderIds: s.feishu.senderIds.join('\n') }); set(workspaceFeishuOpen, true)
@@ -404,6 +417,41 @@ function workspacePage(all: Overview) {
     </Stack>
   </Stack>
 }
+function openMainSwitch() {
+  return act('main-agent', '读取可接管会话未成功', async () => {
+    set(mainTargets, await plugin.request('workspace.agent.targets'))
+    set(mainChoice, { mode: 'existing', handle: '', workspace: '', agent: 'claude', confirm: false })
+    set(mainSwitch, true)
+  })
+}
+function mainSwitchPage(all: Overview) {
+  const t = read(mainTargets), c = read(mainChoice), w = all.workspace
+  const edit = (value: Partial<typeof c>) => set(mainChoice, { ...c, ...value, confirm: false })
+  const target = c.mode === 'existing' ? t?.sessions.find(s => s.handle === c.handle) : t?.workspaces.find(w => w.workspace === c.workspace)
+  const waiting = !!w.takeover && Date.parse(w.takeover.expiresAt) > Date.now()
+  return <Stack gap="md">
+    <Button variant="ghost" onPress={() => { set(mainSwitch, false); set(failure, null) }}>返回总览</Button>
+    <Heading>切换主 agent</Heading>
+    {w.runId ? <KeyValue items={bindingRows(w)} /> : <Text>未绑定</Text>}
+    <Text>已发给原主 agent 的通知不会补发。接管后会先读总览，补齐之前的事项。</Text>
+    {takeoverText(w) ? <Callout tone="warning" title="主 agent 接管">{takeoverText(w)}</Callout> : null}
+    <RadioGroup label="切换方式" value={c.mode} options={[{ value: 'existing', label: '已开的会话' }, { value: 'new', label: '新开主 agent' }]} onChange={v => edit({ mode: v as typeof c.mode })} />
+    {c.mode === 'existing' ? <Select label="接管会话" value={c.handle} placeholder="选择在线的 agent 会话" options={(t?.sessions ?? []).filter(s => s.handle !== w.session?.handle).map(s => ({ value: s.handle, label: `${s.title || s.handle} · ${s.workspaceName} · ${agentName(s.agent)} · ${s.path}` }))} onChange={v => edit({ handle: v })} />
+      : <Stack gap="sm"><Select label="主 agent 工作区" value={c.workspace} placeholder="选择工作区" options={(t?.workspaces ?? []).map(w => ({ value: w.workspace, label: `${w.name} · ${w.path}` }))} onChange={v => edit({ workspace: v })} />
+        <Select label="主 agent 类型" value={c.agent} options={[{ value: 'claude', label: 'Claude' }, { value: 'codex', label: 'Codex' }, { value: 'opencode', label: 'OpenCode' }]} onChange={v => edit({ agent: v })} />
+        <Text>默认 Claude，可关闭主机本地工具；Codex 的本地工具约束见需求文档。</Text></Stack>}
+    {c.confirm && target ? <Callout tone="warning" title="确认请求接管？"><Text>{c.mode === 'existing' ? `${'title' in target ? target.title : ''} · ${c.handle}` : `新开 ${agentName(c.agent)}`}</Text><Text>{target.path}</Text><Text>当前绑定保留到目标会话自行完成接管。</Text></Callout> : null}
+    {problem('main-agent')}
+    <Row gap="sm" wrap><Button disabled={read(busy) || waiting || !target} variant="solid" onPress={() => {
+      if (!c.confirm) { set(mainChoice, { ...c, confirm: true }); return }
+      return act('main-agent', '请求接管未成功', async () => {
+        const binding = await plugin.request('workspace.agent.switch', { revision: w.revision, mode: c.mode, ...(c.mode === 'existing' ? { handle: c.handle } : { workspace: c.workspace, agent: c.agent }) })
+        set(workspace, { ...all, workspace: binding }); set(mainChoice, { ...c, confirm: false })
+      })
+    }}>{read(busy) ? '正在请求…' : c.confirm ? '确认请求接管' : '请求接管'}</Button>
+      <Button disabled={read(busy)} onPress={openMainSwitch}>刷新会话</Button></Row>
+  </Stack>
+}
 function workspaceFeishuPage() {
   const s = read(workspaceFeishu)!, c = read(workspaceConfig)
   const edit = (key: keyof typeof c, value: string | boolean) => update(workspaceConfig, c => ({ ...c, [key]: value }))
@@ -430,6 +478,16 @@ function workspaceFeishuPage() {
   </Stack>
 }
 export function setup(ctx: PanelContext): void {
+  async function navigate() {
+    const next = await storage.get('workspace.navigation') as { switching?: boolean } | null
+    if (!next) return
+    await storage.delete('workspace.navigation')
+    set(overviewMode, true); set(mainSwitch, false); set(workspaceFeishuOpen, false); set(view, null); closeLinks()
+    void list()
+    if (next.switching) void openMainSwitch()
+  }
+  ctx.subscriptions.push(plugin.on('workspace.open', () => { void navigate() }))
+  void navigate()
   ctx.subscriptions.push(plugin.on('project.changed', e => {
     void plugin.request('workspace.overview').then(all => set(workspace, all)).catch(e => fail('', '读取总览未成功', e))
     const id = read(selected)

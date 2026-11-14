@@ -67,8 +67,23 @@ export interface Snapshot {
   projects: ProjectRef[]; project: Project | null; connection: ConnectionState
   secretSaved: boolean; runtimeError?: string
 }
-export interface WorkspaceBinding { revision: number; runId: string }
-export interface Workspace extends WorkspaceBinding { version: 1; requests: { id: string; fingerprint: string }[] }
+export interface AgentSession {
+  handle: string; title: string; workspace: string; workspaceName: string; path: string; agent: string
+  online: 'online' | 'offline' | 'unknown'
+}
+export interface MainTakeover {
+  id: string; target: AgentSession; expiresAt: string; state: 'sending' | 'waiting' | 'uncertain'
+}
+export interface WorkspaceBinding {
+  revision: number; runId: string; session?: AgentSession; boundAt?: string
+  projectNames?: string[]; takeover?: MainTakeover
+  previousNotice?: Delivery['state']
+}
+export interface Workspace extends WorkspaceBinding {
+  version: 1; requests: { id: string; fingerprint: string }[]
+  takeover?: MainTakeover & { tokenHash: string }
+  retired?: Delivery[]
+}
 export type TaskState = ReturnType<typeof taskState>
 export interface Attention {
   projectId: string; taskId: string; kind: 'decision' | 'review' | 'blocked' | 'rework'

@@ -2,6 +2,7 @@ import { OrgCanvas, activateKey, moved, scopes, rules, agents, roles, statuses, 
 import type { Project } from './model'
 import type { Sharing } from './links'
 import type { OrcaFrameApi } from 'orca/frame'
+import { bindingRows, takeoverText } from './main-agent-view'
 
 export function startCanvas(root: HTMLElement, api: Pick<OrcaFrameApi, 'plugin' | 'storage'>) {
   const model = new OrgCanvas(api)
@@ -109,7 +110,10 @@ export function startCanvas(root: HTMLElement, api: Pick<OrcaFrameApi, 'plugin' 
     if (busy) return
     if (item.projectId) { void openProject(item.projectId); return }
     if (item.peerId) { openPeer(item.peerId); return }
-    const f = form('工作间主 agent'); f.append(el('p', model.overview.workspace.runId || '未绑定'))
+    const f = form('工作间主 agent'), w = model.overview.workspace
+    const info = el('p', w.runId ? bindingRows(w).map(r => `${r.label}：${r.value}`).join('\n') : '未绑定'); info.className = 'identity'; f.append(info)
+    if (takeoverText(w)) f.append(el('p', takeoverText(w)))
+    f.append(button(w.runId ? '切换主 agent' : '设置主 agent', () => run(() => api.plugin.request('workspace.entry'))))
   }
   const ns = <K extends keyof SVGElementTagNameMap>(tag: K, attrs: Record<string, string> = {}, text = '') => {
     const e = document.createElementNS('http://www.w3.org/2000/svg', tag); for (const [k, v] of Object.entries(attrs)) e.setAttribute(k, v); e.textContent = text; return e
@@ -129,7 +133,9 @@ export function startCanvas(root: HTMLElement, api: Pick<OrcaFrameApi, 'plugin' 
     for (const node of graph.nodes) {
       const group = ns('g', { class: 'node', tabindex: '0', role: 'button', 'aria-label': `${node.title} · ${node.detail}`, 'data-id': node.id, 'data-node': node.id })
       const short = (s: string) => [...s].length > 14 ? [...s].slice(0, 13).join('') + '…' : s
-      group.append(ns('title', {}, `${node.title}\n${node.detail}`), ns('rect', { width: '220', height: '72', rx: '10' }), ns('text', { x: '14', y: '28' }, short(node.title)), ns('text', { x: '14', y: '52', class: 'detail' }, short(node.detail)))
+      group.append(ns('title', {}, `${node.title}\n${node.detail}`), ns('rect', { width: node.lines ? '370' : '220', height: String(node.lines ? 48 + node.lines.length * 22 : 72), rx: '10' }), ns('text', { x: '14', y: '28' }, short(node.title)))
+      if (node.lines) node.lines.forEach((line, i) => group.append(ns('text', { x: '14', y: String(54 + i * 22), class: 'detail' }, line)))
+      else group.append(ns('text', { x: '14', y: '52', class: 'detail' }, short(node.detail)))
       group.onclick = () => { if (!dragged) open(node) }
       group.onkeydown = e => {
         if (busy) return
@@ -150,12 +156,12 @@ export function startCanvas(root: HTMLElement, api: Pick<OrcaFrameApi, 'plugin' 
   }
   function place() {
     const nodes = new Map(graph.nodes.map(n => [n.id, n]))
-    svg.setAttribute('width', String(Math.max(1100, ...graph.nodes.map(n => n.x + 260))))
-    svg.setAttribute('height', String(Math.max(500, ...graph.nodes.map(n => n.y + 120))))
+    svg.setAttribute('width', String(Math.max(1100, ...graph.nodes.map(n => n.x + (n.lines ? 410 : 260)))))
+    svg.setAttribute('height', String(Math.max(500, ...graph.nodes.map(n => n.y + (n.lines ? 80 + n.lines.length * 22 : 120)))))
     for (const g of Array.from(svg.querySelectorAll<SVGGElement>('.node'))) { const n = nodes.get(g.getAttribute('data-id')!)!; g.setAttribute('transform', `translate(${n.x},${n.y})`) }
     for (const g of Array.from(svg.querySelectorAll<SVGGElement>('.edge'))) {
       const edge = graph.edges.find(e => e.id === g.getAttribute('data-id'))!, a = nodes.get(edge.from)!, b = nodes.get(edge.to)!
-      const x = b.x >= a.x ? a.x + 220 : a.x, endX = b.x >= a.x ? b.x : b.x + 220, y = a.y + 36, endY = b.y + 36, mid = (x + endX) / 2
+      const x = b.x >= a.x ? a.x + (a.lines ? 370 : 220) : a.x, endX = b.x >= a.x ? b.x : b.x + (b.lines ? 370 : 220), y = a.y + 36, endY = b.y + 36, mid = (x + endX) / 2
       g.querySelectorAll('path').forEach(p => p.setAttribute('d', `M ${x} ${y} C ${mid} ${y}, ${mid} ${endY}, ${endX} ${endY}`))
       g.querySelector('rect')?.setAttribute('transform', `translate(${mid - 185},${(y + endY) / 2 - 42})`)
       g.querySelectorAll('text').forEach(t => { t.setAttribute('x', String(mid - 175)); t.setAttribute('y', String((y + endY) / 2 - 22 + Number(t.getAttribute('data-row')) * 23)) })

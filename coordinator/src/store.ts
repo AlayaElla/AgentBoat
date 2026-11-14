@@ -3,7 +3,7 @@ import path from 'node:path'
 import os from 'node:os'
 import { mkdir, writeFile } from 'node:fs/promises'
 import type { StorageApi } from 'orca'
-import { taskState, type Acceptance, type Artifact, type Project, type ProjectRef, type SourceEvent, type Task, type Workspace, type Overview, type Attention, type Messaging } from './model'
+import { taskState, type Acceptance, type Artifact, type Project, type ProjectRef, type SourceEvent, type Task, type Workspace, type Overview, type Attention, type Messaging, type AgentSession } from './model'
 
 export function fail(message: string): never { throw Object.assign(new Error(message), { code: 'invalid_request' }) }
 export function object(value: unknown): Record<string, any> {
@@ -122,11 +122,30 @@ export class ProjectStore {
     if (w.version !== 1 || !Number.isSafeInteger(w.revision) || w.revision < 0 || typeof w.runId !== 'string' || !Array.isArray(w.requests)) fail('工作间记录格式不兼容，请保留数据并检查插件版本')
     return w
   }
-  async bindWorkspace(expected: number, runId: string, request: { id: string; input: unknown }): Promise<Workspace> {
+  async mutateWorkspace(fn: (w: Workspace) => void, expected?: number): Promise<Workspace> {
+    return this.serial(async () => {
+      const w = await this.workspace()
+      if (expected !== undefined && w.revision !== expected) fail('工作间已更新，请刷新后再提交')
+      fn(w); w.revision++
+      await this.storage.set('workspace', w as any)
+      return w
+    })
+  }
+  async bindWorkspace(expected: number, runId: string, request: { id: string; input: unknown }, session: AgentSession, token = ''): Promise<Workspace> {
     return this.serial(async () => {
       const w = await this.workspace(), hash = fingerprint(request.input), prior = w.requests.find(r => r.id === request.id)
       if (prior) { if (prior.fingerprint !== hash) fail('同一个请求编号不能用于不同内容'); return w }
       if (w.revision !== expected) fail('工作间已更新，请刷新后再提交')
+      if (w.runId) {
+        const t = w.takeover
+        if (!t || !token || t.tokenHash !== fingerprint(token) || Date.parse(t.expiresAt) <= Date.now()) fail('替换主 agent 需要面板发起的有效一次性接管凭据')
+        if (t.target.handle ? t.target.handle !== session.handle : t.target.workspace !== session.workspace || t.target.agent !== session.agent) fail('接管凭据不属于当前会话')
+        if (w.runId === runId) fail('接管会话必须创建自己的新 Run')
+        w.retired ??= []
+        w.retired.push({ id: `retired:${t.id}`, targetRunId: w.runId, subject: '工作间主 agent 已切换',
+          body: `你已不再是工作间主 agent。新的主 agent：${session.title || session.handle}\n工作区：${session.workspaceName || session.workspace}\n目录：${session.path}\nAgent：${session.agent}\nRun：${runId}\n请停止承担工作间主 agent。已发送的通知不会补发；新的主 agent 会读取总览补齐事项。`, state: 'pending' })
+      }
+      w.session = session; w.boundAt = new Date().toISOString(); delete w.takeover
       w.runId = runId; w.revision++; w.requests.push({ id: request.id, fingerprint: hash })
       await this.storage.set('workspace', w as any)
       return w

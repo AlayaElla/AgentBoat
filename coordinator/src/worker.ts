@@ -5,6 +5,7 @@ import { OrcaRuntime, defaultExecutable, type CoordinatorRuntime } from './runti
 import { ProjectStore, artifactUrl, fail, feedback, fingerprint, fresh, notifyWorkspace, object, overview, receiveEvent, strings, submitTask, text } from './store'
 import { WorkspaceLinks } from './links'
 import { requestState, requestStates } from './model'
+import { mainAgent } from './main-agent'
 
 const revision = (value: unknown): number => {
   if (!Number.isSafeInteger(value) || (value as number) < 0) fail('请先读取项目当前版本')
@@ -16,7 +17,26 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
   let catalog: ProjectRef[] = []
   let runtimeError = ''
   const busy = new Map<string, Promise<void>>()
-  const changed = (projectId = '') => orca.panels.post('project.changed', { projectId })
+  const changed = (projectId = '') => { orca.panels.post('project.changed', { projectId }); void updateStatus().catch(() => {}) }
+  const main = mainAgent(orca, store, runtime, changed)
+  let statusUpdates: Promise<unknown> = Promise.resolve()
+  function updateStatus() {
+    const work = statusUpdates.then(async () => {
+      const all = overview(await store.all(), await store.workspace()), s = await links.snapshot()
+      const count = all.attention.length + (s.requests ?? []).filter(r => r.direction === 'incoming' && requestState(r) === 'confirm').length
+      await orca.host.call('statusBar.update', { id: 'coordinator', text: `项目协作 · 待处理 ${count}`, tooltip: '打开工作间总览 · Mod+Alt+Shift+J' })
+    })
+    statusUpdates = work.catch(() => {}); return work
+  }
+  async function openOverview(switching = false) {
+    if (!runtime.openOverview) fail('当前 Orca 不支持打开面板')
+    await orca.storage.set('workspace.navigation', { switching })
+    await runtime.openOverview()
+    orca.panels.post('workspace.open', { switching })
+    return { opened: true }
+  }
+  orca.commands.register('workspace.overview', () => openOverview())
+  orca.panels.handle('workspace.entry', () => openOverview(true))
   const links = new WorkspaceLinks(orca, async () => {
     await projects()
     if (runtimeError) fail('本机项目列表不可用，请恢复后再上报')
@@ -315,17 +335,7 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
     await projects()
     const saved = await store.all()
     // Include stored projects even when their worktree is currently closed; overview never registers or rewrites them.
-    return { ...overview([...saved, ...catalog.filter(ref => !saved.some(p => p.ref.id === ref.id)).map(fresh)], await store.workspace(), runtimeError), links: await links.snapshot() }
-  })
-  orca.panels.handle('workspace.agent', async input => {
-    if (input.operation === 'bind') {
-      const runId = text(input.runId, 'Run 编号', 200)
-      await runtime.verifyRun(runId)
-      await store.bindWorkspace(revision(input.revision), runId, { id: text(input.requestId, '请求编号', 200), input })
-      changed()
-    } else if (input.operation !== 'read') fail('不支持的工作间操作')
-    const w = await store.workspace()
-    return { revision: w.revision, runId: w.runId }
+    return { ...overview([...saved, ...catalog.filter(ref => !saved.some(p => p.ref.id === ref.id)).map(fresh)], await store.workspace(), runtimeError), workspace: await main.read(), links: await links.snapshot() }
   })
   orca.panels.handle('workspace.message', async input => {
     const id = text(input.projectId, '项目编号', 200)
@@ -445,8 +455,14 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
     return { opened: true }
   })
 
-  return { store, links, ingest, flush, flushMailbox, flushRequestNotifications, stop: () => { links.stop(); sources.stop() }, async start() {
+  let refreshMain: ReturnType<typeof setInterval> | undefined
+  return { store, links, ingest, flush, flushMailbox, flushRequestNotifications, updateStatus, stop: () => { clearInterval(refreshMain); links.stop(); sources.stop() }, async start() {
     await links.start()
+    await main.recover()
+    clearInterval(refreshMain)
+    refreshMain = setInterval(() => { orca.panels.post('project.changed', { projectId: '' }) }, 10000)
+    refreshMain.unref()
+    await updateStatus()
     for (const p of await store.all()) {
       if (p.deliveries.some(x => x.state === 'sending')) await store.mutate(p.ref.id, undefined, p => {
         for (const d of p.deliveries.filter(x => x.state === 'sending')) { d.state = 'uncertain'; d.error = '插件重启前通知结果待核对' }

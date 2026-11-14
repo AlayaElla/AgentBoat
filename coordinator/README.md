@@ -24,7 +24,11 @@ Orca 右侧另有“组织画布”。“工作间连接”以本工作间为中
 
 中文触发词是“开启项目协作”或“项目协作：”。规则位于 `skill/orca-project-coordinator/`，默认设计 Claude、代码与审查 Codex，项目设置可修改。面板反馈发送到项目绑定的 Orca Run，由主会话继续处理。
 
-`node scripts/client.mjs overview` 读取同一份总览；`main-read`、`main-bind <input.json>` 管理工作间主 agent Run，`message <input.json>` 向项目主会话发送并保留来源。任务新增待决定、待验收、受阻或完成时自动通知已绑定的工作间主 agent，读取与重启不会补发历史事项；未绑定不发送。输入与去重、待核对规则见 [桥接说明](skill/orca-project-coordinator/references/bridge.md)。
+`node scripts/client.mjs overview` 读取同一份总览；`main-read` 读取主 agent 的会话、工作区、目录、种类、Run、绑定时间和在线状态，`main-targets` 列出在线会话与本机工作区。`main-bind` 从标准输入读 JSON，自动附带调用会话；替换已有绑定必须使用面板发起、十分钟内有效的一次性凭据。`message <input.json>` 向项目主会话发送并保留来源。任务新增待决定、待验收、受阻或完成时自动通知已绑定的工作间主 agent，读取与重启不会补发历史事项；未绑定不发送。输入与去重、待核对规则见 [桥接说明](skill/orca-project-coordinator/references/bridge.md)。
+
+状态栏「项目协作 · 待处理 N」或全局快捷键 **Ctrl+Alt+Shift+J**（macOS 为 **Cmd+Option+Shift+J**）打开右侧总览。该组合已对 Orca 1.4.258 的 141 项内置快捷键在 Windows、macOS、Linux 的默认组合核对，无冲突；用户自定义组合需在 Orca 设置中核对。插件工作进程使用 `orca plugin open local.project-coordinator --panel project-coordinator`，不切换当前工作区或会话焦点。
+
+总览顶部与组织画布「工作间内部」的主 agent 节点显示绑定详情；旧记录缺少的字段显示「未知」，不回填猜测。点击「切换主 agent」，可选在线会话，或选择工作区新开 Claude（默认）、Codex、OpenCode；确认后等待目标会话自行建 Run 并绑定。原绑定保留至接管成功，之后通知和飞书工作间消息交新 Run；已发给原主 agent 的通知不会补发，接管者须读总览补齐。发送或启动结果不明不自动重试；凭据过期后才可重新发起。
 
 ## 本地开发
 

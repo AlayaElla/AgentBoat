@@ -25,7 +25,7 @@ if (operation === 'backup' || operation === 'snapshot') {
   const raw = await json(path.join(data, 'storage.json'));
   const projects = {};
   for (const key of Object.keys(raw).filter(k => k.startsWith('project:'))) projects[key.slice(8)] = request('read', key.slice(8)).project;
-  const snapshot = { at: new Date().toISOString(), workspace: request('main-read'), catalog: request('projects'), projects };
+  const snapshot = { at: new Date().toISOString(), workspace: request('main-read'), workspaceRecord: raw.workspace ?? null, catalog: request('projects'), projects };
   await save(path.join(destination, `snapshot-${name}.json`), snapshot);
   console.log(JSON.stringify({ snapshot: name, projects: Object.keys(projects).length, path: destination }));
 } else {
@@ -33,7 +33,9 @@ if (operation === 'backup' || operation === 'snapshot') {
   const after = await json(path.join(destination, `snapshot-${name}.json`));
   const ids = [...new Set([...Object.keys(before.projects), ...Object.keys(after.projects)])];
   const differences = ids.filter(id => !isDeepStrictEqual(before.projects[id], after.projects[id]));
-  const workspaceEqual = isDeepStrictEqual(before.workspace, after.workspace);
+  // Compare stored binding, not live session status or newly exposed display fields.
+  const originalWorkspace = before.workspaceRecord ?? (await json(path.join(destination, 'plugins-data', 'storage.json'))).workspace ?? null;
+  const workspaceEqual = isDeepStrictEqual(originalWorkspace, after.workspaceRecord ?? null);
   const catalog = value => ({ ...value, projects: [...value.projects].sort((a, b) => a.id.localeCompare(b.id)) });
   const catalogEqual = isDeepStrictEqual(catalog(before.catalog), catalog(after.catalog));
   const result = { projects: ids.length, differences, workspaceEqual, catalogEqual };

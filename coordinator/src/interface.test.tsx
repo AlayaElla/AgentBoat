@@ -5,6 +5,45 @@ import { fresh, feedback, overview, submitTask } from './store'
 import type { LinksSnapshot } from './links'
 import { requestState, type WorkspaceRequest } from './model'
 
+test('main agent identity and both switch forms confirm once and wait for the real binding; global entry returns from a project', async () => {
+  for (const mode of ['existing', 'new'] as const) {
+    const session = { handle: 'orca_session_id:test-main', title: '测试原会话', workspace: 'identity:test', workspaceName: '测试工作区', path: '/test/workspace', agent: 'claude', online: 'online' as const }
+    const target = { ...session, handle: 'orca_session_id:test-next', title: '测试接管会话' }
+    let binding: import('./model').WorkspaceBinding = { revision: 1, runId: 'run_old', session, boundAt: '2026-11-14T00:00:00Z', projectNames: ['测试项目'] }
+    const switches: any[] = [], host = mockHost({ requests: {
+      'projects.list': () => ({ projects: refs }),
+      'project.read': () => sample(),
+      'workspace.overview': () => ({ ...overview([sample().project!], { version: 1, revision: 1, runId: 'run_old', requests: [] }), workspace: structuredClone(binding) }),
+      'workspace.agent.targets': () => ({ sessions: [target], workspaces: [{ workspace: session.workspace, name: session.workspaceName, path: session.path }] }),
+      'workspace.agent.switch': input => { switches.push(input); binding = { ...binding, revision: 2, takeover: { id: 'test', state: 'waiting', expiresAt: new Date(Date.now() + 60000).toISOString(), target } }; return structuredClone(binding) }
+    } })
+    const view = await mount(panel, { host })
+    try {
+      for (const value of [session.title, session.path, session.workspaceName, 'Claude', 'run_old', '在线', '测试项目']) assert.ok(JSON.stringify(view.tree()).includes(value))
+      await view.select({ label: '项目' }, 'p1')
+      host.respond('storage.get', (params: { key: string }) => ({ value: params.key === 'workspace.navigation' ? { switching: false } : null }))
+      await view.post('workspace.open', { switching: false }); await view.settled()
+      assert.ok(view.find({ text: '工作间总览' }))
+      await view.press({ text: '切换主 agent' })
+      if (mode === 'new') {
+        await view.select({ label: '切换方式' }, 'new')
+        assert.equal(view.valueOf({ label: '主 agent 类型' }), 'claude')
+        await view.select({ label: '主 agent 工作区' }, session.workspace)
+      } else await view.select({ label: '接管会话' }, target.handle)
+      await view.press({ text: '请求接管' }); assert.equal(switches.length, 0)
+      await view.press({ text: '确认请求接管' }); assert.equal(switches.length, 1)
+      assert.equal(switches[0].mode, mode)
+      assert.ok(JSON.stringify(view.tree()).includes('等待 测试接管会话 接管'))
+      assert.ok(JSON.stringify(view.tree()).includes('run_old'))
+      assert.ok(JSON.stringify(view.tree()).includes('通知不会补发'))
+      binding = { ...binding, revision: 3, runId: 'run_new', session: target }; delete binding.takeover
+      await view.post('project.changed', { projectId: '' }); await view.settled()
+      assert.ok(JSON.stringify(view.tree()).includes('run_new'))
+      assert.deepEqual(view.errors, []); assert.deepEqual(view.warnings, []); assert.deepEqual(view.refusals, [])
+    } finally { await view.unmount() }
+  }
+})
+
 test('project settings hide and restore through overview; closed records require confirmation and show the export path', async () => {
   let p = fresh(refs[0]), catalog = refs, removed = false, deletes = 0, reject = false
   const binding = { version: 1 as const, revision: 0, runId: '', requests: [] }

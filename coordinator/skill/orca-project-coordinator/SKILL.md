@@ -19,7 +19,7 @@ node "D:/Projects/AgentBoat/coordinator/scripts/client.mjs" read <projectId>
 
 从列表按 Orca 当前项目的完整路径、repoId、hostId 核对项目；同名不能代替身份。每个项目只绑定一个当前主会话 Run，不能将一个 Run 复用到不同项目。
 
-工作间总览列出跨项目待用户处理的事项、状态计数和任务执行记录；执行记录与 Run 绑定不证明 agent 当前在线。工作间只有一个主 agent，用 `main-read` 读取绑定，用 `main-bind <input.json>` 绑定 Run；用户指定的项目主会话可以兼任工作间主 agent。主 agent 用 `message <input.json>` 向精确项目发送消息，消息保留为 `workspace-agent` 来源，并送入项目主会话；输入和回执见 [references/bridge.md](references/bridge.md)。主 agent 的模板、立项与记忆不由此插件创建。
+工作间总览列出跨项目待用户处理的事项、状态计数和任务执行记录；执行记录与 Run 绑定不证明 agent 当前在线。工作间只有一个主 agent，用 `main-read` 读取会话、工作区、Run 和实时在线状态；只有主人指定且未绑定时，或面板发起并提供有效一次性接管凭据时，当前会话才能自行创建协调 Run 并以标准输入调用 `main-bind`。替换不能用普通项目消息授权；接管后先读总览补齐旧事项，已发送的通知不补发。用户指定的项目主会话可以兼任工作间主 agent。主 agent 用 `message <input.json>` 向精确项目发送消息，消息保留为 `workspace-agent` 来源，并送入项目主会话；输入和回执见 [references/bridge.md](references/bridge.md)。主 agent 的模板、立项与记忆不由此插件创建。
 
 首次开启时，在该项目主会话创建 Orca Run，确认当前会话为该 Run 的协调者，再通过 `bind <input.json>` 保存 projectId、当前 revision、唯一 requestId、runId。重新进入会话先读取已有绑定及 Run；用版本匹配指南恢复或接管，不能猜测旧主会话已失效。插件未运行时报告实际错误和插件路径，不将本地文件写成插件成功记录。
 

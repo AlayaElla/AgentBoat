@@ -10,7 +10,10 @@ declare module 'orca' {
     'workspace.feishu': { input: { operation: 'read' | 'save'; revision?: number; feishu?: Project['feishu']; appSecret?: string }; output: MessagingSnapshot }
     'workspace.reply': { input: { runId: string; eventId: string; requestId: string; text: string }; output: MessagingSnapshot }
     'workspace.overview': { output: Overview }
-    'workspace.agent': { input: { operation: 'read' | 'bind'; revision?: number; requestId?: string; runId?: string }; output: WorkspaceBinding }
+    'workspace.agent': { input: { operation: 'read' | 'bind'; revision?: number; requestId?: string; runId?: string; caller?: string; token?: string }; output: WorkspaceBinding }
+    'workspace.agent.targets': { output: { sessions: import('./model').AgentSession[]; workspaces: { workspace: string; name: string; path: string }[] } }
+    'workspace.agent.switch': { input: { revision: number; mode: 'existing' | 'new'; handle?: string; workspace?: string; agent?: string }; output: WorkspaceBinding }
+    'workspace.entry': { output: { opened: boolean } }
     'workspace.message': { input: { projectId: string; revision: number; requestId: string; runId: string; text: string }; output: Snapshot }
     'projects.list': { output: { projects: ProjectRef[]; error?: string } }
     'project.read': { input: { projectId: string }; output: Snapshot }
@@ -20,5 +23,5 @@ declare module 'orca' {
     'project.openArtifact': { input: { projectId: string; taskId: string; artifactId: string }; output: { opened: boolean } }
     'project.agent': { input: { operation: 'read' | 'bind' | 'submit'; projectId: string; revision?: number; requestId?: string; runId?: string; task?: unknown }; output: Snapshot }
   }
-  interface PluginPanelEvents { 'project.changed': { projectId: string } }
+  interface PluginPanelEvents { 'project.changed': { projectId: string }; 'workspace.open': { switching: boolean } }
 }

@@ -1,6 +1,7 @@
 import type { OrcaFrameApi } from 'orca/frame'
 import type { Overview, Project, Snapshot } from './model'
 import type { LinksSnapshot, Sharing } from './links'
+import { bindingRows, takeoverText } from './main-agent-view'
 
 export const scopes = { none: '不开放', summary: '项目摘要', details: '含任务详情' }
 export const rules = { deny: '不接受', confirm: '需我确认', auto: '自动受理' }
@@ -9,7 +10,7 @@ export const agents = { claude: 'Claude', codex: 'Codex' }
 export const roles = { design: '设计', code: '编码', review: '审查' }
 export type Layer = 'links' | 'projects'
 export type Point = { x: number; y: number }
-export type Node = Point & { id: string; title: string; detail: string; projectId?: string; peerId?: string }
+export type Node = Point & { id: string; title: string; detail: string; lines?: string[]; projectId?: string; peerId?: string }
 export type Edge = { id: string; from: string; to: string; lines: string[]; projectId?: string; peerId?: string }
 export type Layout = { version: 1; positions: Record<string, Point> }
 export const layoutKey = 'org.canvas.layout'
@@ -61,9 +62,12 @@ export class OrgCanvas {
         ] })
       })
     } else {
-      add({ id: 'main', title: '工作间主 agent', detail: this.overview.workspace.runId ? '已绑定' : '未绑定', x: 40, y: 100 })
+      const w = this.overview.workspace, info = w.runId ? bindingRows(w).map(r => `${r.label}：${r.value}`) : ['未绑定 · 点击设置主 agent']
+      if (takeoverText(w)) info.push(takeoverText(w))
+      const lines = info.flatMap(s => s.match(/.{1,22}/gu) ?? [])
+      add({ id: 'main', title: '工作间主 agent', detail: info.join('\n'), lines, x: 40, y: 100 })
       this.projects.forEach((p, i) => {
-        add({ id: `project:${p.ref.id}`, title: p.ref.name, detail: p.runId ? `主 agent：${p.mainAgent ? agents[p.mainAgent] : '种类未知'}` : '主 agent：未绑定', projectId: p.ref.id, x: 390, y: 40 + i * 300 })
+        add({ id: `project:${p.ref.id}`, title: p.ref.name, detail: p.runId ? `主 agent：${p.mainAgent ? agents[p.mainAgent] : '种类未知'}` : '主 agent：未绑定', projectId: p.ref.id, x: 450, y: 40 + i * 300 })
         edges.push({ id: `main:${p.ref.id}`, from: 'main', to: `project:${p.ref.id}`, projectId: p.ref.id, lines: [] })
         Object.entries(roles).forEach(([role, title], j) => {
           const id = `role:${p.ref.id}:${role}`

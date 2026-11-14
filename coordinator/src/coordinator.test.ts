@@ -9,6 +9,7 @@ import path from 'node:path'
 import { normalizeFeishu } from './feishu'
 import type { OrcaWorkerApi } from 'orca/worker'
 import type { CoordinatorRuntime } from './runtime'
+const mainSession = { handle: 'orca_session_id:test-main', title: '测试主会话', workspace: 'id:test', workspaceName: '测试工作区', path: '/test', agent: 'claude', online: 'online' as const }
 
 test('hide preserves legacy records and agent writes, excludes all workspace surfaces and pauses queued reminders until restore', async () => {
   const p = fresh(refs[0]); p.runId = 'run_project'
@@ -204,17 +205,18 @@ test('workspace binding validates Runs, revisions and request replay, and suppor
   const p = fresh(refs[0]); p.runId = 'run_project'
   const host = mockHost({ storage: { 'project:p1': p as any } })
   const verified: string[] = []
-  const runtime: CoordinatorRuntime = { projects: async () => refs, verifyRun: async id => { verified.push(id); if (id === 'invalid') throw new Error('invalid Run') }, send: async () => ({}) }
+  const runtime: CoordinatorRuntime = { projects: async () => refs, identify: async () => mainSession, verifyRun: async id => { verified.push(id); if (id === 'invalid') throw new Error('invalid Run') }, send: async () => ({}) }
   const worker = await mountWorker({ default: (orca: OrcaWorkerApi) => { createCoordinator(orca, runtime) } }, { host })
-  const input = { operation: 'bind' as const, revision: 0, requestId: 'main-bind', runId: 'run_project' }
+  const input = { operation: 'bind' as const, revision: 0, requestId: 'main-bind', runId: 'run_project', caller: mainSession.handle }
   await assert.rejects(() => worker.request('workspace.agent', { ...input, runId: 'invalid' }))
-  assert.deepEqual(await worker.request('workspace.agent', input), { revision: 1, runId: 'run_project' })
-  assert.deepEqual(await worker.request('workspace.agent', input), { revision: 1, runId: 'run_project' })
+  const bound = await worker.request('workspace.agent', input)
+  assert.equal(bound.runId, 'run_project'); assert.equal(bound.session?.handle, mainSession.handle)
+  assert.deepEqual(await worker.request('workspace.agent', input), bound)
   await assert.rejects(() => worker.request('workspace.agent', { ...input, runId: 'run_other' }))
   await assert.rejects(() => worker.request('workspace.agent', { ...input, requestId: 'stale' }))
   await assert.rejects(() => worker.request('project.agent', { operation: 'bind', projectId: 'p2', revision: 0, requestId: 'reuse', runId: 'run_project' }))
   assert.ok(verified.includes('run_project'))
-  assert.deepEqual((await worker.request('workspace.overview')).workspace, { revision: 1, runId: 'run_project' })
+  assert.deepEqual((await worker.request('workspace.overview')).workspace, bound)
   await worker.deactivate()
 })
 
@@ -279,11 +281,11 @@ test('project transitions notify main once, including new acceptance versions an
 test('unbound main produces no notifications; restart keeps uncertain main delivery without resend', async () => {
   const host = mockHost()
   let coordinator!: ReturnType<typeof createCoordinator>, sends = 0
-  const runtime: CoordinatorRuntime = { projects: async () => refs, verifyRun: async () => {}, send: async () => { sends++; throw new Error('timeout') } }
+  const runtime: CoordinatorRuntime = { projects: async () => refs, identify: async () => mainSession, verifyRun: async () => {}, send: async () => { sends++; throw new Error('timeout') } }
   const worker = await mountWorker({ default: (orca: OrcaWorkerApi) => { coordinator = createCoordinator(orca, runtime) } }, { host })
   await worker.request('project.agent', { operation: 'submit', projectId: 'p1', revision: 0, requestId: 'unbound', task: deliverable })
   assert.equal((await coordinator.store.get('p1')).deliveries.length, 0)
-  await worker.request('workspace.agent', { operation: 'bind', revision: 0, requestId: 'main', runId: 'run_main' })
+  await worker.request('workspace.agent', { operation: 'bind', revision: 0, requestId: 'main', runId: 'run_main', caller: mainSession.handle })
   // Binding and restarting never backfill old pending acceptance.
   await coordinator.start(); await coordinator.flush('p1')
   assert.equal(sends, 0)
