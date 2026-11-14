@@ -29,6 +29,12 @@ description: 用户说“开启工作间管理”或“工作间：”时，在 
 
 提交后读回核对 history，告诉主人“已记录”以及对应项目和版本。feedback 只有 revision 并发保护，没有 requestId 幂等机制：超时先读回，核对原话、日期和版本，不能盲目重发。冲突重新读取，不能覆盖新版本反馈。测试里的模拟原话必须标明测试，不当作真实用户结论。
 
+## 隐藏、恢复与删除项目记录
+
+只在主人明确要求时隐藏或删除，删除前向主人说明范围并确认。先现读 `projects` 和 `read <projectId>` 核对精确编号、完整路径与 revision；`hide <input.json>`、`restore <input.json>` 输入 `{projectId,revision}`。隐藏保留全部记录和项目主 agent 的读写，移出总览、待用户处理、飞书提醒与对外上报；恢复后照常显示。
+
+`delete <input.json>` 输入 `{projectId,revision,confirm:projectId}`，confirm 只能在主人明确确认删除后填写。只允许删除不在当前 Orca 本机项目列表里的记录；列表读取失败时不得删除。删除前自动将完整记录（不含 Secret）导出到插件数据目录的 exports/，成功回执含 exportPath，向主人报告该路径；项目文件和 Orca 会话保留。请求超时先核对原记录与导出，不直接重试。总览的 hidden 列表可读已隐藏项目，不能拿显示项目数量判断记录丢失。
+
 ## 立项和直接派活
 
 使用 `workspace.mjs init`、`templates` 读取本工作间模板。按主人指定模板与目录来源运行 `create <input.json>`；模板定义项目主 agent、design/code/review 角色、empty/existing/clone 来源与首句话。已有目录不清空、不初始化用户 Git、不覆盖已绑定主 agent。新空目录登记为 folder；独立工作树任务需要主人准备有提交的 Git 仓库。一个仓库一个项目，一个项目放在一台机器；未具备远程执行条件时不声称已在附属机器开工。
@@ -63,7 +69,7 @@ description: 用户说“开启工作间管理”或“工作间：”时，在 
 
 收到请求先现读 `requests-read`。不接受会自动拒绝；需我确认在总览“待用户处理”和本工作间飞书提醒里处理，主人可接受或拒绝并附说明。只有主人明确作出决定时才代调用 `requests-decide`，输入 `{peerId,id,requestId,status:"accepted"|"rejected",note}`；也可以让主人直接回复对应飞书提醒“接受：说明”或“拒绝：说明”。不替主人确认；待确认时不执行。
 
-已接受和自动受理的请求交本工作间主 agent 判断。自动受理只表示递交，不是无条件执行、不是主人扩大授权。按已有授权与模板，核对已有项目或用 `workspace.mjs create` 建项目、等项目主 Run 绑定，再用 `requests-attach` 输入 `{runId,peerId,id,projectId}`。插件登记独立的 `workspace-external` 来源并通知项目主 agent；不要改成普通 workspace-agent 消息，也不要自己把外部文字复制进项目。含外部来源的项目不会再出现在任何对外项目报告里。
+已接受和自动受理的请求交本工作间主 agent 判断。自动受理只表示递交，不是无条件执行、不是主人扩大授权。按已有授权与模板，核对已有项目或用 `workspace.mjs create` 建项目、等项目主 Run 绑定，再用 `requests-attach` 输入 `{runId,peerId,id,projectId}`。插件登记独立的 `workspace-external` 来源并通知项目主 agent；不要改成普通 workspace-agent 消息，也不要自己把外部文字复制进项目。项目仍按开放范围上报；插件排除与 workspace-external 来源关联的整条任务，包含标题、决定、验收及计数。外部派生内容必须保留 sourceIds，不能复制成无来源的本地任务。
 
 跟进项目记录，将真实进展和结果用 `requests-update` 回到原连接，输入 `{runId,peerId,id,requestId,status:"working"|"completed"|"failed",note,links}`。每次更新用唯一 requestId；同编号同内容可核对重试，不换编号重复提交。完成需要文字结果，可附链接；项目成果仍遵守本侧的决定和验收流程。不能给自己发出的请求伪造对方进展。
 

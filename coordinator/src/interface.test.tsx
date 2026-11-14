@@ -5,6 +5,43 @@ import { fresh, feedback, overview, submitTask } from './store'
 import type { LinksSnapshot } from './links'
 import { requestState, type WorkspaceRequest } from './model'
 
+test('project settings hide and restore through overview; closed records require confirmation and show the export path', async () => {
+  let p = fresh(refs[0]), catalog = refs, removed = false, deletes = 0, reject = false
+  const binding = { version: 1 as const, revision: 0, runId: '', requests: [] }
+  const host = mockHost({ requests: {
+    'projects.list': () => ({ projects: catalog }),
+    'workspace.overview': () => overview(removed ? [] : [p], binding),
+    'project.read': () => ({ projects: catalog, project: structuredClone(p), secretSaved: false, connection: { state: 'off', message: '' } }),
+    'project.visibility': input => { p.hidden = input.hidden; p.revision++; return { projects: catalog, project: structuredClone(p), secretSaved: false, connection: { state: 'off', message: '' } } },
+    'project.delete': input => {
+      if (reject) throw hostError('invalid_request', '测试导出失败，原记录保留')
+      assert.equal(input.confirm, p.ref.id); assert.equal(input.revision, p.revision)
+      removed = true; deletes++; return { deleted: p.ref.id, exportPath: 'C:\\test-data\\exports\\record.json' }
+    }
+  } })
+  const view = await mount(panel, { host })
+  await view.select({ label: '项目' }, 'p1'); await view.press({ label: '项目设置' })
+  assert.equal(view.find({ text: '删除项目记录' }), null)
+  await view.press({ text: '隐藏项目' })
+  await view.press({ text: '总览' }); assert.ok(view.find({ text: '项目 0' }))
+  await view.toggle({ label: '已隐藏 1 个' })
+  await view.press({ text: '恢复显示' })
+  assert.ok(view.find({ text: '项目 1' })); assert.equal(p.hidden, false)
+  catalog = []
+  await view.select({ label: '项目' }, 'p1'); await view.press({ label: '项目设置' })
+  await view.press({ text: '删除项目记录' })
+  assert.equal(deletes, 0); assert.ok(JSON.stringify(view.tree()).includes('确认删除项目记录？'))
+  await view.press({ text: '取消' }); assert.equal(deletes, 0)
+  await view.press({ text: '删除项目记录' }); reject = true
+  await view.press({ text: '确认删除记录' }); assert.equal(deletes, 0)
+  assert.ok(JSON.stringify(view.tree()).includes('测试导出失败'))
+  reject = false; await view.press({ text: '确认删除记录' })
+  assert.equal(deletes, 1); assert.ok(JSON.stringify(view.tree()).includes('项目记录已删除'))
+  assert.ok(JSON.stringify(view.tree()).includes('C:\\\\test-data\\\\exports\\\\record.json'))
+  assert.deepEqual(view.errors, []); assert.deepEqual(view.warnings, []); assert.deepEqual(view.refusals, [])
+  await view.unmount()
+})
+
 test('overview confirms or rejects external requests, keeps failed notes, and displays returned result links', async () => {
   for (const status of ['accepted', 'rejected'] as const) {
     let reject = true

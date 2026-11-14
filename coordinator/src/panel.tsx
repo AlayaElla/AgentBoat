@@ -22,6 +22,8 @@ const configOwner = atom('')
 const workspaceFeishu = atom<MessagingSnapshot | null>(null)
 const workspaceFeishuOpen = atom(false)
 const workspaceConfig = atom({ appId: '', appSecret: '', chatIds: '', senderIds: '', enabled: false })
+const deleting = atom('')
+const deletedExport = atom('')
 let epoch = 0
 
 function showConfig(p: Project) {
@@ -36,9 +38,10 @@ async function load(id: string, reset = false) {
     if (request !== epoch || read(selected) !== id) return
     set(snapshot, s)
     if (s.project && (reset || read(configOwner) !== id)) showConfig(s.project)
-  } catch (e) { if (request === epoch) fail('', '读取未成功', e) }
+  } catch (e) { if (request === epoch && read(selected) === id) fail('', '读取未成功', e) }
 }
 async function choose(id: string) {
+  set(deleting, '')
   set(overviewMode, false)
   set(selected, id); set(snapshot, null); set(notes, {}); set(picks, {}); set(failure, null); set(view, null); set(editing, '')
   set(configOwner, ''); update(config, c => ({ ...c, appSecret: '' }))
@@ -48,9 +51,10 @@ async function list() {
   try {
     const [answer, all] = await Promise.all([plugin.request('projects.list'), plugin.request('workspace.overview')])
     set(workspace, all)
-    set(projects, all.projects.map(p => p.ref)); set(failure, answer.error ? { at: '', title: '读取未成功', text: answer.error } : null)
+    const refs = [...all.projects.map(p => p.ref), ...(all.hidden ?? [])]
+    set(projects, refs); set(failure, answer.error ? { at: '', title: '读取未成功', text: answer.error } : null)
     const id = read(selected)
-    if (id && all.projects.some(p => p.ref.id === id)) { if (!read(overviewMode)) await load(id, !read(snapshot)) }
+    if (id && refs.some(p => p.id === id)) { if (!read(overviewMode)) await load(id, !read(snapshot)) }
     else if (id && !answer.error) { set(selected, ''); set(snapshot, null); set(view, null) }
   } catch (e) { fail('', '读取未成功', e) }
 }
@@ -62,7 +66,13 @@ async function act(at: string, title: string, work: () => Promise<unknown>) {
 }
 const note = (key: string) => read(notes)[key] ?? ''
 const write = (key: string, value: string) => update(notes, n => ({ ...n, [key]: value }))
-function show(next: View) { set(view, next); set(failure, null); set(editing, '') }
+function show(next: View) { set(view, next); set(failure, null); set(editing, ''); set(deleting, '') }
+async function visibility(id: string, hidden: boolean) {
+  const s = await plugin.request('project.read', { projectId: id })
+  const answer = await plugin.request('project.visibility', { projectId: id, revision: s.project!.revision, hidden })
+  if (read(selected) === id) set(snapshot, answer)
+  await list()
+}
 function openSettings() {
   const p = read(snapshot)?.project
   if (p) { showConfig(p); show({ kind: 'settings' }) }
@@ -326,6 +336,20 @@ function settingsPage(s: Snapshot, p: Project) {
     <Collapsible title="项目信息">
       <KeyValue items={[{ label: '路径', value: p.ref.path }, { label: '项目编号', value: p.ref.id, code: true }, ...(p.runId ? [{ label: '主会话 Run', value: p.runId, code: true }] : [])]} />
     </Collapsible>
+    <Stack gap="sm"><Heading level={2}>项目记录</Heading>
+      {p.hidden ? <Badge>已隐藏</Badge> : null}
+      <Button disabled={read(busy)} onPress={() => act('project-record', '显示状态未保存', () => visibility(p.ref.id, !p.hidden))}>{p.hidden ? '恢复显示' : '隐藏项目'}</Button>
+      {s.runtimeError ? <Text>无法确认 Orca 项目列表，请刷新后再删除记录。</Text> : s.projects.some(ref => ref.id === p.ref.id) ? <Text>项目仍在 Orca 中，可隐藏。</Text> : read(deleting) === p.ref.id ? <Callout tone="warning" title="确认删除项目记录？">
+        <Text>{`${p.ref.name} · ${p.ref.id}`}</Text>
+        <Text>将删除任务、成果、决定、验收、来源、通知、项目设置与主会话绑定记录。删除前自动导出 JSON 到插件数据目录，完成后显示路径。项目文件与 Orca 会话保留。</Text>
+        <Row gap="sm" wrap><Button tone="danger" disabled={read(busy)} onPress={() => act('project-record', '删除未成功', async () => {
+          const answer = await plugin.request('project.delete', { projectId: p.ref.id, revision: p.revision, confirm: p.ref.id })
+          set(deletedExport, answer.exportPath); set(deleting, ''); set(selected, ''); set(snapshot, null); set(view, null); set(overviewMode, true)
+          await list()
+        })}>确认删除记录</Button><Button disabled={read(busy)} onPress={() => set(deleting, '')}>取消</Button></Row>
+      </Callout> : <Button tone="danger" disabled={read(busy)} onPress={() => set(deleting, p.ref.id)}>删除项目记录</Button>}
+      {problem('project-record')}
+    </Stack>
   </Stack>
 }
 
@@ -354,6 +378,14 @@ function workspacePage(all: Overview) {
       </Box>) : pendingRequests(all.links).length ? null : <EmptyState icon="check" title="没有待用户处理的事项" />}
     </Stack>
     {linksSection(all.links)}
+    {all.hidden?.length ? <Collapsible title={`已隐藏 ${all.hidden.length} 个`}>
+      {all.hidden.map(ref => <Stack key={ref.id} gap="sm">
+        <Text weight="semibold">{fit(ref.name, 70)}</Text><Text muted>{ref.path}</Text>
+        <Row gap="sm" wrap><Button onPress={() => choose(ref.id)}>打开项目</Button>
+          <Button disabled={read(busy)} onPress={() => act(`restore:${ref.id}`, '恢复未成功', () => visibility(ref.id, false))}>恢复显示</Button></Row>
+        {problem(`restore:${ref.id}`)}
+      </Stack>)}
+    </Collapsible> : null}
     <Stack gap="sm"><Heading level={2}>{`项目 ${all.projects.length}`}</Heading>
       {all.projects.map(p => <Box key={p.ref.id} border radius="lg" padding="md" gap="sm" background="card">
         <Row justify="between" gap="sm" wrap><Text weight="semibold">{fit(p.ref.name, 70)}</Text><Badge tone={p.bound ? 'success' : 'neutral'}>{p.bound ? '项目主 agent 已绑定' : '项目主 agent 未绑定'}</Badge></Row>
@@ -417,6 +449,7 @@ export default function Panel() {
       <IconButton icon="refresh" label="刷新" onPress={list} />
       {!read(overviewMode) && p && v?.kind !== 'settings' ? <IconButton icon="settings" label="项目设置" onPress={openSettings} /> : null}
     </Box>
+    {read(deletedExport) ? <Callout tone="success" title="项目记录已删除"><Text>{`删除前导出：${read(deletedExport)}`}</Text><Button variant="ghost" onPress={() => set(deletedExport, '')}>关闭</Button></Callout> : null}
     {f?.at === '' ? <Callout tone="danger" title={f.title}>{paragraphs(f.text)}<Button onPress={list}>重试</Button></Callout> : null}
     {read(overviewMode) ? read(workspace) ? workspacePage(read(workspace)!) : f?.at === '' ? null : <Skeleton lines={3} label="正在读取总览" />
       : s && p ? v?.kind === 'settings' ? settingsPage(s, p) : task ? taskPage(p, task) : home(s, p)

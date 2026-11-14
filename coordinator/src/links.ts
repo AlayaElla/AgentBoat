@@ -51,12 +51,14 @@ function sharing(raw: unknown): Sharing {
 // Only locally owned project records enter this projection. Incoming reports have no route into it.
 export function report(projects: Project[], peer: Sharing, workspaceId: string, name: string): SharedReport {
   return { workspaceId, name, scope: peer.scope, updatedAt: new Date().toISOString(), projects: peer.scope === 'none' ? [] :
-    projects.filter(p => peer.projectIds.includes(p.ref.id) && !p.events.some(e => e.source === 'workspace-external')).map(p => {
+    projects.filter(p => !p.hidden && peer.projectIds.includes(p.ref.id)).map(p => {
+      const external = p.events.filter(e => e.source === 'workspace-external')
+      const tasks = p.tasks.filter(t => !external.some(e => e.taskId === t.id || t.sourceIds.includes(e.id)))
       const counts: Record<string, number> = {}
-      for (const t of p.tasks) { const state = taskState(t); counts[state] = (counts[state] || 0) + 1 }
+      for (const t of tasks) { const state = taskState(t); counts[state] = (counts[state] || 0) + 1 }
       return { id: p.ref.id, name: p.ref.name, updatedAt: p.updatedAt || '', counts,
-        pending: p.tasks.reduce((n, t) => n + t.decisions.filter(d => d.answer === undefined).length + (t.phase === 'ready' ? t.acceptance.filter(a => a.status === 'pending').length : 0), 0),
-        ...(peer.scope === 'details' ? { tasks: p.tasks.map(t => ({ title: t.title, phase: t.phase,
+        pending: tasks.reduce((n, t) => n + t.decisions.filter(d => d.answer === undefined).length + (t.phase === 'ready' ? t.acceptance.filter(a => a.status === 'pending').length : 0), 0),
+        ...(peer.scope === 'details' ? { tasks: tasks.map(t => ({ title: t.title, phase: t.phase,
           decisions: t.decisions.filter(d => d.answer === undefined).map(d => d.question),
           acceptance: t.phase === 'ready' ? t.acceptance.filter(a => a.status === 'pending').map(a => a.title) : [] })) } : {}) }
     }) }

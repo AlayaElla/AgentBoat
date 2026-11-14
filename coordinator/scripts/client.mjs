@@ -6,7 +6,8 @@ import os from 'node:os';
 
 const [operation, argument] = process.argv.slice(2);
 const allowed = ['projects', 'overview', 'main-read', 'main-bind', 'message', 'read', 'bind', 'submit', 'feedback', 'feishu-read', 'feishu-reply', 'links-read', 'links-refresh', 'links-invite', 'links-cancel-invite', 'links-join', 'links-configure', 'links-share', 'links-revoke', 'requests-read', 'requests-send', 'requests-decide', 'requests-update', 'requests-attach'];
-if (!allowed.includes(operation)) throw new Error('用法：node client.mjs projects|overview|main-read|feishu-read | read <projectId> | bind|submit|main-bind|message|feedback|feishu-reply <input.json>');
+allowed.push('hide', 'restore', 'delete');
+if (!allowed.includes(operation)) throw new Error('用法：node client.mjs projects|overview|main-read|feishu-read | read <projectId> | bind|submit|main-bind|message|feedback|feishu-reply|hide|restore|delete <input.json>');
 const target = fileURLToPath(new URL('../plugin/', import.meta.url));
 const executable = process.env.ORCA_CLI_COMMAND || (process.platform === 'win32'
   ? path.join(os.homedir(), 'AppData/Local/Programs/orca/resources/bin/orca.exe') : 'orca');
@@ -15,7 +16,9 @@ const input = operation.startsWith('requests-') ? { ...(operation === 'requests-
   : { ...JSON.parse(readFileSync(argument, 'utf8').replace(/^\uFEFF/, '')), ...(['message', 'feedback', 'feishu-reply'].includes(operation) ? {} : { operation: operation === 'main-bind' ? 'bind' : operation }) };
 const name = operation.startsWith('requests-') ? 'workspace.requests' : operation.startsWith('links-') ? 'workspace.links' : operation === 'projects' ? 'projects.list' : operation === 'overview' ? 'workspace.overview'
   : operation === 'feishu-read' ? 'workspace.feishu' : operation === 'feishu-reply' ? 'workspace.reply' : operation.startsWith('main-') ? 'workspace.agent' : operation === 'message' ? 'workspace.message' : operation === 'feedback' ? 'project.feedback' : 'project.agent';
-const args = ['plugin', 'dev', 'request', target, name, '--json'];
+const maintenance = ['hide', 'restore', 'delete'].includes(operation);
+const args = ['plugin', 'dev', 'request', target, maintenance ? operation === 'delete' ? 'project.delete' : 'project.visibility' : name, '--json'];
+if (maintenance) { delete input.operation; if (operation !== 'delete') input.hidden = operation === 'hide'; }
 if (input) args.push('--data', JSON.stringify(input));
 try {
   process.stdout.write(execFileSync(executable, args, { encoding: 'utf8', windowsHide: true, timeout: 40000, maxBuffer: 1024 * 1024 }));

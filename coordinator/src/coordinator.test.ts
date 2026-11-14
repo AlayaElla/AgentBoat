@@ -1,10 +1,98 @@
 import { assert, mockHost, mountWorker, test } from 'orca/testing'
 import { createCoordinator } from './worker'
 import { refs, deliverable } from './fixtures'
-import { fresh, feedback, submitTask } from './store'
+import { fresh, feedback, submitTask, ProjectStore } from './store'
+import { report } from './links'
+import { mkdtemp, readFile, readdir, writeFile } from 'node:fs/promises'
+import os from 'node:os'
+import path from 'node:path'
 import { normalizeFeishu } from './feishu'
 import type { OrcaWorkerApi } from 'orca/worker'
 import type { CoordinatorRuntime } from './runtime'
+
+test('hide preserves legacy records and agent writes, excludes all workspace surfaces and pauses queued reminders until restore', async () => {
+  const p = fresh(refs[0]); p.runId = 'run_project'
+  submitTask(p, deliverable)
+  p.deliveries.push({ id: 'queued-feishu', subject: 'queued', body: 'queued', state: 'pending', external: { channel: 'feishu', appId: 'test', chatId: 'chat' } },
+    { id: 'queued-agent', subject: 'agent', body: 'agent', state: 'pending' })
+  const host = mockHost({ storage: { 'project:p1': p as any, workspace: { version: 1, revision: 0, runId: 'run_main', requests: [] },
+    'workspace.messaging': { version: 1, revision: 0, feishu: { enabled: true, appId: 'test', chatIds: ['chat'], senderIds: ['user'] }, inbox: [], deliveries: [] } } })
+  const sends: string[] = [], agents: string[] = []
+  let c!: ReturnType<typeof createCoordinator>
+  const worker = await mountWorker({ default: (api: OrcaWorkerApi) => { c = createCoordinator(api, {
+    projects: async () => refs, verifyRun: async () => {}, send: async run => { agents.push(run); return {} }
+  }, { state: () => ({ state: 'connected', message: '' }), sync: async () => {}, stop() {}, send: async d => { sends.push(d.id); return 'sent' } }) } }, { host })
+  try {
+    assert.deepEqual((await worker.request('project.read', { projectId: 'p1' })).project, p)
+    const hidden = (await worker.request('project.visibility', { projectId: 'p1', revision: 0, hidden: true })).project!
+    assert.deepEqual(hidden.tasks, p.tasks)
+    const all = await worker.request('workspace.overview')
+    assert.deepEqual(all.projects.map(p => p.ref.id), ['p2']); assert.deepEqual(all.hidden, [refs[0]])
+    assert.deepEqual(all.attention, [])
+    assert.deepEqual(report([hidden], { scope: 'details', projectIds: ['p1'], acceptTasks: 'deny' }, 'own', 'own').projects, [])
+    await worker.request('project.agent', { operation: 'submit', projectId: 'p1', revision: hidden.revision, requestId: 'hidden-submit', task: {
+      id: 'hidden-task', title: '隐藏中继续工作', goal: '目标', phase: 'blocked', decisions: [{ id: 'ask', question: '隐藏中的问题' }]
+    } })
+    await c.flush('p1')
+    assert.deepEqual(sends, []); assert.deepEqual(agents, ['run_project'])
+    const saved = await c.store.get('p1')
+    assert.equal(saved.tasks.length, 2)
+    assert.equal(saved.deliveries.filter(d => d.external).length, 1)
+    assert.equal(saved.deliveries.find(d => d.id === 'queued-feishu')!.state, 'pending')
+    const restored = (await worker.request('project.visibility', { projectId: 'p1', revision: saved.revision, hidden: false })).project!
+    await c.flush('p1')
+    assert.deepEqual(sends, ['queued-feishu'])
+    const visible = await worker.request('workspace.overview')
+    assert.ok(visible.projects.some(p => p.ref.id === 'p1')); assert.equal(visible.hidden!.length, 0)
+    assert.equal(visible.attention.length, 3)
+    assert.equal(report([restored], { scope: 'details', projectIds: ['p1'], acceptTasks: 'deny' }, 'own', 'own').projects.length, 1)
+    const current = await c.store.get('p1')
+    await worker.request('project.agent', { operation: 'submit', projectId: 'p1', revision: current.revision, requestId: 'visible-submit', task: {
+      id: 'visible-task', title: '恢复后提醒', goal: '目标', phase: 'blocked'
+    } })
+    await c.flush('p1'); assert.equal(sends.length, 2)
+    assert.deepEqual(worker.refusals, [])
+  } finally { c.stop(); await worker.deactivate() }
+})
+
+test('delete refreshes Orca catalog, requires exact confirmation and revision, exports the complete record before removing only its key', async () => {
+  const p = fresh(refs[0]); submitTask(p, deliverable)
+  const other = fresh(refs[1]), directory = await mkdtemp(path.join(os.tmpdir(), 'agentboat-delete-test-'))
+  let catalog = refs, unavailable = false, c!: ReturnType<typeof createCoordinator>
+  const host = mockHost({ storage: { 'project:p1': p as any, 'project:p2': other as any } })
+  const worker = await mountWorker({ default: (api: OrcaWorkerApi) => { c = createCoordinator(api, {
+    projects: async () => { if (unavailable) throw Error('offline'); return catalog }, verifyRun: async () => {}, send: async () => ({})
+  }, undefined, directory) } }, { host })
+  const input = { projectId: 'p1', revision: 0, confirm: 'p1' }
+  try {
+    await assert.rejects(() => worker.request('project.delete', { ...input, confirm: 'wrong' }))
+    await assert.rejects(() => worker.request('project.delete', { ...input, revision: 99 }))
+    await assert.rejects(() => worker.request('project.delete', input))
+    catalog = [refs[1]]; unavailable = true
+    await assert.rejects(() => worker.request('project.delete', input))
+    assert.deepEqual(await readdir(directory), [])
+    assert.deepEqual(await c.store.get('p1'), p)
+    unavailable = false
+    const answer = await worker.request('project.delete', input)
+    assert.equal(answer.deleted, 'p1')
+    assert.equal(path.dirname(answer.exportPath), directory)
+    assert.deepEqual(JSON.parse(await readFile(answer.exportPath, 'utf8')), p)
+    assert.deepEqual(await c.store.all(), [other]); assert.deepEqual(await c.store.get('p2'), other)
+    assert.deepEqual((await worker.request('workspace.overview')).projects.map(p => p.ref.id), ['p2'])
+    await assert.rejects(() => worker.request('project.delete', input))
+    assert.equal((await readdir(directory)).length, 1)
+  } finally { c.stop(); await worker.deactivate() }
+})
+
+test('failed export never deletes or alters a project', async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'agentboat-export-failure-')), blocked = path.join(directory, 'file')
+  await writeFile(blocked, 'not a directory')
+  const p = fresh(refs[0]), values = new Map<string, any>([['project:p1', p]])
+  const store = new ProjectStore({ get: async k => values.get(k), set: async (k, v) => { values.set(k, v) }, keys: async () => [...values.keys()],
+    delete: async k => { values.delete(k) } }, blocked)
+  await assert.rejects(() => store.remove('p1', 0, async () => {}))
+  assert.deepEqual(await store.get('p1'), p)
+})
 
 test('concurrent requests, replay and project boundaries preserve records', async () => {
   const runtime: CoordinatorRuntime = { projects: async () => refs, verifyRun: async () => {}, send: async () => ({}) }

@@ -1,5 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto'
 import path from 'node:path'
+import os from 'node:os'
+import { mkdir, writeFile } from 'node:fs/promises'
 import type { StorageApi } from 'orca'
 import { taskState, type Acceptance, type Artifact, type Project, type ProjectRef, type SourceEvent, type Task, type Workspace, type Overview, type Attention, type Messaging } from './model'
 
@@ -35,6 +37,7 @@ export function artifactUrl(value: unknown, root: string): string {
 export function statusOf(project: Project) { return project.tasks.map(task => ({ id: task.id, title: task.title, state: taskState(task) })) }
 
 export function attention(project: Project): Attention[] {
+  if (project.hidden) return []
   return project.tasks.flatMap(task => {
     const base = { projectId: project.ref.id, taskId: task.id, title: task.title }
     const items: Attention[] = task.decisions.filter(d => d.answer === undefined).map(d => ({ ...base, kind: 'decision', itemId: d.id, summary: d.question }))
@@ -45,7 +48,10 @@ export function attention(project: Project): Attention[] {
   })
 }
 export function overview(projects: Project[], workspace: Workspace, error = ''): Overview {
+  const hidden = projects.filter(p => p.hidden).map(p => p.ref)
+  projects = projects.filter(p => !p.hidden)
   return { workspace: { revision: workspace.revision, runId: workspace.runId }, attention: projects.flatMap(attention),
+    hidden,
     projects: projects.map(p => {
       const counts: Overview['projects'][number]['counts'] = { working: 0, decision: 0, review: 0, rework: 0, completed: 0, blocked: 0, paused: 0 }
       for (const task of p.tasks) counts[taskState(task)]++
@@ -55,7 +61,7 @@ export function overview(projects: Project[], workspace: Workspace, error = ''):
 }
 
 // Transition keys include acceptance revisions; old records are never backfilled on read or restart.
-export const workspaceNotices = (p: Project) => p.tasks.flatMap(t => [
+export const workspaceNotices = (p: Project) => (p.hidden ? [] : p.tasks).flatMap(t => [
     ...t.decisions.filter(d => d.answer === undefined).map(d => ({ key: [t.id, 'decision', d.id], task: t, action: `请向用户确认：${d.question}` })),
     ...t.acceptance.filter(a => t.phase === 'ready' && a.status === 'pending').map(a => ({ key: [t.id, 'review', a.id, a.revision], task: t, action: `请用户验收：${a.title}` })),
     ...((t.phase === 'blocked' || taskState(t) === 'completed') ? [{ key: [t.id, t.phase === 'blocked' ? 'blocked' : 'completed'], task: t, action: t.phase === 'blocked' ? `请协调解除受阻：${t.progress || t.goal}` : '任务已完成，请汇总告知用户' }] : [])
@@ -73,7 +79,26 @@ export function notifyWorkspace(before: Project, after: Project, runId: string):
 
 export class ProjectStore {
   private chain: Promise<unknown> = Promise.resolve()
-  constructor(private storage: Pick<StorageApi, 'get' | 'set' | 'keys'>) {}
+  constructor(private storage: Pick<StorageApi, 'get' | 'set' | 'keys' | 'delete'>,
+    private exportDirectory = path.join(process.env.ORCA_USER_DATA_PATH || (
+      process.platform === 'win32' ? path.join(process.env.APPDATA || path.join(os.homedir(), 'AppData', 'Roaming'), 'orca') :
+      process.platform === 'darwin' ? path.join(os.homedir(), 'Library', 'Application Support', 'orca') :
+      path.join(process.env.XDG_CONFIG_HOME || path.join(os.homedir(), '.config'), 'orca')
+    ), 'plugins-data', 'local.project-coordinator', 'exports')) {}
+  async remove(id: string, expected: number, absent: () => Promise<void>): Promise<string> {
+    return this.serial(async () => {
+      const project = await this.get(id)
+      if (project.revision !== expected) fail('项目已更新，请刷新后再删除')
+      await absent()
+      await mkdir(this.exportDirectory, { recursive: true })
+      // The filename never contains input; an exclusive, flushed export must succeed before deletion.
+      const exportPath = path.join(this.exportDirectory, `project-${fingerprint(id).slice(0, 24)}-${randomUUID()}.json`)
+      await writeFile(exportPath, JSON.stringify(project, null, 2) + '\n', { flag: 'wx', flush: true })
+      await absent()
+      await this.storage.delete(`project:${id}`)
+      return exportPath
+    })
+  }
   async messaging(): Promise<Messaging> {
     const value = await this.storage.get('workspace.messaging')
     const m = value ? structuredClone(object(value)) as Messaging : { version: 1 as const, revision: 0, feishu: fresh({} as ProjectRef).feishu, inbox: [], deliveries: [] }

@@ -55,6 +55,7 @@ export interface Messaging {
 export interface MessagingSnapshot extends Messaging { secretSaved: boolean; connection: ConnectionState }
 export interface Project {
   version: 1; ref: ProjectRef; revision: number; runId: string
+  hidden?: boolean
   updatedAt?: string
   roles: { design: 'codex' | 'claude'; code: 'codex' | 'claude'; review: 'codex' | 'claude' }
   feishu: { appId: string; chatIds: string[]; senderIds: string[]; enabled: boolean }
@@ -73,6 +74,7 @@ export interface Attention {
   itemId: string; title: string; summary: string
 }
 export interface Overview {
+  hidden?: ProjectRef[]
   links?: import('./links').LinksSnapshot
   workspace: WorkspaceBinding
   attention: Attention[]

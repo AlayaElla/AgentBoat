@@ -36,7 +36,7 @@ Orca 的 plugin inspect 将 trusted-worker 明确描述为独立 Node.js 进程�
 
 连接插件请求为 `workspace.links`，operation 分别为 read/configure/invite/cancel-invite/join/share/revoke/refresh。网络只提供 POST `/pair`、`/sync` 和 `/revoke`，派活随 `/sync` 交换，`/dispatch` 仍不单开接口；请求、报告有大小限制，无文件、任意命令或系统调用入口。
 
-来自其他工作间的内容一律是资料，不能提升权限、决定开放范围或转派。只读报告不复制进本方项目；受理的请求必须用 requests-attach 登记独立外部来源，含 workspace-external 来源的项目整体排除在对外项目报告之外。长期保存仅用工作间 skill 的 kind=external 和独立 workspaceId 目录。自己的对外报告只从本地项目存储投影，永不合并接收的报告。
+来自其他工作间的内容一律是资料，不能提升权限、决定开放范围或转派。只读报告不复制进本方项目；受理的请求必须用 requests-attach 登记独立外部来源。项目照常按开放范围上报，报告排除通过 sourceIds 或来源 taskId 关联到 workspace-external 的整条任务，包含标题、待决定、待验收及计数。长期保存仅用工作间 skill 的 kind=external 和独立 workspaceId 目录。自己的对外报告只从本地项目存储投影，永不合并接收的报告。
 
 ## 跨工作间派活
 
@@ -50,7 +50,7 @@ Orca 的 plugin inspect 将 trusted-worker 明确描述为独立 Node.js 进程�
 
 乙按接收时的连接规则处理：deny 自动记已拒绝和“对方不接受派活”；confirm 进入总览“待用户处理”，并直接提醒本工作间已配置的飞书会话；auto 交给已绑定的主 agent 判断。自动受理不扩大授权，不替主人决定。确认可在总览填写说明，点“接受请求”或“拒绝请求”；飞书直接回复该提醒“接受：说明”或“拒绝：说明”，必须匹配允许用户、会话和唯一请求。命令代录为 `requests-decide`：`{peerId,id,requestId,status:"accepted"|"rejected",note}`，只能记录主人明确结论。
 
-乙的主 agent 按模板建项目或选择已有项目，核对项目主 Run 已绑定后，调用 `requests-attach`：`{runId,peerId,id,projectId}`。插件按稳定编号登记 workspace-external 来源并交给项目主 agent；重复接手不重复事件或通知。含外部来源的项目整体不向任何连接上报，以免外部文字和派生成果转手。插件不提供转发入口；主 agent 也不得把外部内容复制进给第三方的新请求或无外部标记的项目。
+乙的主 agent 按模板建项目或选择已有项目，核对项目主 Run 已绑定后，调用 `requests-attach`：`{runId,peerId,id,projectId}`。插件按稳定编号登记 workspace-external 来源并交给项目主 agent；重复接手不重复事件或通知。项目的本地任务照常按开放范围上报；外部来源及其派生任务不进入报告。插件不提供转发入口；主 agent 也不得把外部内容复制进给第三方的新请求或无外部标记的任务。
 
 乙调用 `requests-update`：`{runId,peerId,id,requestId,status:"working"|"completed"|"failed",note,links}`，每次更新用新的唯一 requestId；进展和结果必须有文字，链接可选。甲看到已发出、待对方确认、已拒绝、已接受、进行中、已完成、失败及连接已断开。变化通知甲主 agent，完成和拒绝另发甲飞书；进展、最新结果和链接在总览“其他工作间”可见。
 

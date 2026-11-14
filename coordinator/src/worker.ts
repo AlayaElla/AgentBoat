@@ -11,8 +11,8 @@ const revision = (value: unknown): number => {
   return value as number
 }
 
-export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRuntime, transport?: MessageTransport) {
-  const store = new ProjectStore(orca.storage)
+export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRuntime, transport?: MessageTransport, exportDirectory?: string) {
+  const store = new ProjectStore(orca.storage, exportDirectory)
   let catalog: ProjectRef[] = []
   let runtimeError = ''
   const busy = new Map<string, Promise<void>>()
@@ -243,9 +243,14 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
         while (true) {
           const p = await store.get(id)
           const f = (await store.messaging()).feishu
-          const delivery = p.deliveries.find(x => x.state === 'pending' && (x.external ? f.enabled && x.external.appId === f.appId && f.chatIds.includes(x.external.chatId) : x.targetRunId || p.runId))
+          const delivery = p.deliveries.find(x => x.state === 'pending' && (x.external ? !p.hidden && f.enabled && x.external.appId === f.appId && f.chatIds.includes(x.external.chatId) : (!p.hidden || !x.targetRunId) && (x.targetRunId || p.runId)))
           if (!delivery) break
-          await store.mutate(id, undefined, p => { p.deliveries.find(x => x.id === delivery.id)!.state = 'sending' })
+          let claimed = false
+          await store.mutate(id, undefined, p => {
+            if (p.hidden && (delivery.external || delivery.targetRunId)) return
+            p.deliveries.find(x => x.id === delivery.id)!.state = 'sending'; claimed = true
+          })
+          if (!claimed) continue
           try {
             const receipt = await sendDelivery(delivery, p.runId)
             await store.mutate(id, undefined, p => {
@@ -336,6 +341,26 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
     return snapshot(id)
   })
   orca.panels.handle('projects.list', projects)
+  orca.panels.handle('project.visibility', async input => {
+    const id = text(input.projectId, '项目编号', 200)
+    if (typeof input.hidden !== 'boolean') fail('隐藏状态不正确')
+    await snapshot(id)
+    await store.mutate(id, revision(input.revision), p => { p.hidden = input.hidden })
+    changed(id); if (!input.hidden) defer(id)
+    return snapshot(id)
+  })
+  orca.panels.handle('project.delete', async input => {
+    const id = text(input.projectId, '项目编号', 200)
+    if (input.confirm !== id) fail('删除前请确认项目编号；会删除任务、成果、决定、验收、来源、通知及项目设置记录，并先导出 JSON')
+    await busy.get(id)
+    const exportPath = await store.remove(id, revision(input.revision), async () => {
+      await projects()
+      if (runtimeError) fail('无法确认 Orca 项目列表，未删除记录；请恢复连接后重试')
+      if (catalog.some(p => p.id === id)) fail('项目仍在 Orca 中，只能隐藏，不能删除记录')
+    })
+    changed(id)
+    return { deleted: id, exportPath }
+  })
   orca.panels.handle('project.read', input => snapshot(text(input.projectId, '项目编号', 200)))
   orca.panels.handle('project.settings', async input => {
     const id = text(input.projectId, '项目编号', 200)

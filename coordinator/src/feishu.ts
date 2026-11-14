@@ -63,7 +63,7 @@ export interface MessageTransport {
 }
 
 export function notifyFeishu(before: Project, after: Project, config: Project['feishu']): void {
-  if (!config.enabled) return
+  if (!config.enabled || after.hidden) return
   const prior = new Set(workspaceNotices(before).map(n => fingerprint(n.key)))
   for (const n of workspaceNotices(after)) {
     if (prior.has(fingerprint(n.key))) continue

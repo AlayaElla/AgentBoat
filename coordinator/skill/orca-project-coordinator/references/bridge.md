@@ -1,5 +1,9 @@
 # 插件桥接
 
+## 项目记录管理
+
+只在用户明确要求时运行 `hide <input.json>` 或 `delete <input.json>`，删除前向用户说明范围并确认；`restore <input.json>` 恢复显示。隐藏/恢复输入 `{projectId,revision}`，删除输入 `{projectId,revision,confirm:projectId}`，先现读编号、路径和版本。项目仍在 Orca 或列表读取失败时禁止删除；完整记录先导出到插件数据目录 exports/，回执含 exportPath，再移除项目的存储键，不删除项目文件或 Orca 会话。总览返回 hidden（已隐藏项目的 ref 列表），隐藏记录仍可现读与提交，提醒与上报暂停，恢复后照常。
+
 本机源码目录 `D:/Projects/AgentBoat/coordinator`，已加载开发插件目录 `plugin/`，插件标识 `local.project-coordinator`。`scripts/client.mjs` 将 JSON 文件作为单个参数传给 Orca，避免 PowerShell 丢失引号；输入可含 UTF-8 BOM。凭据仅在插件面板设置填写，不进入这个接口。
 
 `projects` 返回项目列表；`read <projectId>` 返回 `{project,projects,connection,secretSaved}`，外层是 Orca 回执 `result.result`。project 含当前 revision、runId、roles、tasks、events、deliveries。读取不会标记通过，也不会发送消息。

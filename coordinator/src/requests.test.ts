@@ -3,7 +3,7 @@ import type { OrcaWorkerApi } from 'orca/worker'
 import type { Delivery } from './model'
 import { createCoordinator } from './worker'
 import { normalizeFeishu, type MessageTransport } from './feishu'
-import { fresh } from './store'
+import { fresh, submitTask } from './store'
 import { refs } from './fixtures'
 import { requestState } from './model'
 import { WorkspaceRequests } from './requests'
@@ -145,9 +145,23 @@ test('durable retries/restart, revoke both ways, third-party isolation, auth and
     await a.request('send', { ...content(ab, 'private-request'), title: 'A PRIVATE REQUEST', context: 'A PRIVATE CONTEXT' })
     await b.coordinator.links.refresh()
     await b.request('attach', { peerId: ab, id: 'private-request', projectId: 'p1' })
+    await b.coordinator.store.mutate('p1', undefined, p => {
+      submitTask(p, { id: 'local', title: 'B LOCAL TITLE', goal: '本地目标', phase: 'working' })
+      const event = p.events.find(e => e.source === 'workspace-external')!
+      submitTask(p, { id: 'external', title: 'A PRIVATE TASK', goal: 'A PRIVATE GOAL', progress: 'A PRIVATE PROGRESS', phase: 'ready', sourceIds: [event.id],
+        decisions: [{ id: 'decision', question: 'A PRIVATE DECISION', options: ['A PRIVATE OPTION'] }],
+        artifacts: [{ id: 'artifact', label: 'A PRIVATE ARTIFACT', version: 'v1', url: 'https://example.com/private' }],
+        acceptance: [{ id: 'acceptance', title: 'A PRIVATE ACCEPTANCE', details: 'A PRIVATE DETAILS', artifactIds: ['artifact'] }] })
+      // Legacy taskId-only association must be filtered as well.
+      const legacy = structuredClone(p.tasks[1]); legacy.id = 'legacy-external'; legacy.sourceIds = []; p.tasks.push(legacy)
+      p.events.push({ ...event, id: 'legacy-source', taskId: legacy.id })
+    })
     await rule(b, bc, 'auto'); await b.coordinator.links.refresh()
     const cs = await c.coordinator.links.snapshot(), third = cs.peers.find(p => p.id === bc)!
-    assert.deepEqual(third.report!.projects, [])
+    assert.deepEqual(third.report!.projects.map(p => p.id), ['p1'])
+    assert.deepEqual(third.report!.projects[0].tasks!.map(t => t.title), ['B LOCAL TITLE'])
+    assert.deepEqual(third.report!.projects[0].counts, { working: 1 })
+    assert.equal(third.report!.projects[0].pending, 0)
     assert.equal(JSON.stringify(cs).includes('A PRIVATE'), false)
     assert.equal(JSON.stringify(await b.coordinator.links.requests.envelope(bc)).includes('A PRIVATE'), false)
     await assert.rejects(() => b.worker.request('workspace.requests', { operation: 'send', ...content(ab, 'wrong-main'), runId: 'wrong' }))
