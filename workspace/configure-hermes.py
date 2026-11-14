@@ -57,7 +57,7 @@ outbound = values.get('A2A_BEARER_TOKEN') or secrets.token_urlsafe(48)
 inbound = (config.get('a2a_agents') or {}).get('orca-main', {}).get('auth', {}).get('token') or secrets.token_urlsafe(48)
 skill = (root / 'skill/agentboat-butler/SKILL.md').read_text(encoding='utf-8')
 config = settings(config, home, skill, inbound)
-overrides = {'A2A_HOST': '127.0.0.1', 'A2A_PORT': '9900', 'A2A_AGENT_NAME': 'Hermes Butler', 'A2A_BEARER_TOKEN': outbound, 'A2A_TRUSTED_PEERS': '127.0.0.1', 'A2A_ALLOW_ALL_USERS': 'false'}
+overrides = {'A2A_HOST': '127.0.0.1', 'A2A_PORT': '9900', 'A2A_AGENT_NAME': 'Hermes Butler', 'A2A_BEARER_TOKEN': outbound, 'A2A_TRUSTED_PEERS': 'ip:127.0.0.1', 'A2A_ALLOW_ALL_USERS': 'false'}
 env = '\n'.join(line for line in env.splitlines() if line.split('=', 1)[0] not in overrides) + '\n'
 env += ''.join(f'{k}={v}\n' for k, v in overrides.items())
 exe = os.environ.get('ORCA_CLI_COMMAND') or shutil.which('orca')
