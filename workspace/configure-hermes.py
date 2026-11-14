@@ -16,14 +16,14 @@ def settings(config, home, skill, token):
             config[key] = {}
     if config['gateway'].get('platforms') is None:
         config['gateway']['platforms'] = {}
-    config.setdefault('agent', {})['system_prompt'] = skill
-    config.setdefault('terminal', {})['cwd'] = str(home / 'daily')
-    config.setdefault('skills', {})['external_dirs'] = []
-    config['approvals'] = {**config.get('approvals', {}), 'mode': 'smart', 'cron_mode': 'deny', 'single_query_mode': 'deny', 'unattended_mode': 'deny'}
-    config.setdefault('gateway', {}).setdefault('platforms', {})['a2a'] = {'enabled': True, 'extra': {'port': 9900}}
+    config['agent']['system_prompt'] = skill
+    config['terminal']['cwd'] = str(home / 'daily')
+    config['skills']['external_dirs'] = []
+    config['approvals'] = {**config['approvals'], 'mode': 'smart', 'cron_mode': 'deny', 'single_query_mode': 'deny', 'unattended_mode': 'deny'}
+    config['gateway']['platforms']['a2a'] = {'enabled': True, 'extra': {'port': 9900}}
     for name in ('cli', 'a2a', 'cron'):
-        config.setdefault('platform_toolsets', {})[name] = ['web', 'browser', 'terminal', 'file', 'skills', 'cronjob', 'memory', 'computer_use', 'a2a']
-    config.setdefault('a2a_agents', {})['orca-main'] = {'url': 'http://127.0.0.1:9901', 'auth': {'type': 'bearer', 'token': token}, 'timeout': 600, 'capabilities': ['butler']}
+        config['platform_toolsets'][name] = ['web', 'browser', 'terminal', 'file', 'skills', 'cronjob', 'memory', 'computer_use', 'a2a']
+    config['a2a_agents']['orca-main'] = {'url': 'http://127.0.0.1:9901', 'auth': {'type': 'bearer', 'token': token}, 'timeout': 600, 'capabilities': ['daily']}
     return config
 
 
@@ -50,12 +50,12 @@ if any((value or {}).get('enabled') for name, value in ((config.get('gateway') o
 stamp = datetime.now().strftime('%Y%m%d-%H%M%S')
 for file in (config_path, env_path):
     if file.exists():
-        shutil.copy2(file, file.with_name(file.name + '.before-butler-' + stamp))
+        shutil.copy2(file, file.with_name(file.name + '.before-hermes-' + stamp))
 env = env_path.read_text(encoding='utf-8-sig') if env_path.exists() else ''
 values = dict(line.split('=', 1) for line in env.splitlines() if '=' in line and not line.lstrip().startswith('#'))
 outbound = values.get('A2A_BEARER_TOKEN') or secrets.token_urlsafe(48)
 inbound = (config.get('a2a_agents') or {}).get('orca-main', {}).get('auth', {}).get('token') or secrets.token_urlsafe(48)
-skill = (root / 'skill/agentboat-butler/SKILL.md').read_text(encoding='utf-8')
+skill = (root / 'skill/agentboat-hermes/SKILL.md').read_text(encoding='utf-8')
 config = settings(config, home, skill, inbound)
 overrides = {'A2A_HOST': '127.0.0.1', 'A2A_PORT': '9900', 'A2A_AGENT_NAME': 'Hermes', 'A2A_BEARER_TOKEN': outbound, 'A2A_TRUSTED_PEERS': 'ip:127.0.0.1', 'A2A_ALLOW_ALL_USERS': 'false'}
 env = '\n'.join(line for line in env.splitlines() if line.split('=', 1)[0] not in overrides) + '\n'
@@ -65,18 +65,22 @@ if not exe:
     raise SystemExit('Run in an Orca terminal so ORCA_CLI_COMMAND identifies the host CLI')
 plugin = str(root.parent / 'coordinator/plugin')
 def request(data):
-    proc = subprocess.run([exe, 'plugin', 'dev', 'request', plugin, 'workspace.butler', '--json', '--data', json.dumps(data)], capture_output=True, text=True, encoding='utf-8', timeout=45)
+    proc = subprocess.run([exe, 'plugin', 'dev', 'request', plugin, 'workspace.connections', '--json', '--data', json.dumps(data)], capture_output=True, text=True, encoding='utf-8', timeout=45)
     if proc.returncode:
-        raise SystemExit('Orca butler settings request failed; local credentials were not printed, inspect plugin logs')
+        raise SystemExit('Orca Hermes settings request failed; local credentials were not printed, inspect plugin logs')
     return json.loads(proc.stdout)['result']['result']
-current = request({'operation': 'read'})
-if current['entries'] and (current['port'] != 9901 or current['url'] != 'http://127.0.0.1:9900'):
-    raise SystemExit('Existing butler messages use other endpoints; inspect before changing')
-request({'operation': 'save', 'revision': current['revision'], 'enabled': True, 'port': 9901, 'url': 'http://127.0.0.1:9900', 'inboundToken': inbound, 'outboundToken': outbound})
+connections = request({'operation': 'read'})
+matched = [entry for entry in connections if entry['name'] == 'Hermes']
+if len(matched) > 1 or matched and matched[0]['type'] != 'a2a':
+    raise SystemExit('Hermes name must identify exactly one A2A connection')
+current = request({'operation': 'read', 'connectionId': matched[0]['id']})['a2a'] if matched else None
+if current and current['entries'] and (current['port'] != 9901 or current['url'] != 'http://127.0.0.1:9900'):
+    raise SystemExit('Existing Hermes messages use other endpoints; inspect before changing')
+request({'operation': 'save', **({'connectionId': matched[0]['id']} if matched else {'type': 'a2a'}), 'name': 'Hermes', 'revision': current['revision'] if current else 0, 'enabled': True, 'port': 9901, 'url': 'http://127.0.0.1:9900', 'inboundToken': inbound, 'outboundToken': outbound})
 config_path.write_text(yaml.safe_dump(config, allow_unicode=True, sort_keys=False), encoding='utf-8')
 env_path.write_text(env, encoding='utf-8')
 (home / 'daily').mkdir(exist_ok=True)
-target = home / 'skills/agentboat-butler'
+target = home / 'skills/agentboat-hermes'
 target.mkdir(parents=True, exist_ok=True)
-shutil.copy2(root / 'skill/agentboat-butler/SKILL.md', target / 'SKILL.md')
+shutil.copy2(root / 'skill/agentboat-hermes/SKILL.md', target / 'SKILL.md')
 print(json.dumps({'configured': True, 'hermesPort': 9900, 'orcaPort': 9901, 'host': '127.0.0.1', 'approvals': 'smart; unattended/cron/single-query deny', 'credentialsPrinted': False}))

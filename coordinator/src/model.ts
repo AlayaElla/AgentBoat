@@ -6,7 +6,7 @@ export interface ProjectRef {
   hostId: string
   workspace: string
 }
-export const requestStates = { sent: '已发出', confirm: '待对方确认', rejected: '已拒绝', accepted: '已接受', working: '进行中', completed: '已完成', failed: '失败', disconnected: '连接已断开' }
+export const requestStates = { sent: '已发出', confirm: '待对方确认', rejected: '已拒绝', accepted: '已接受', working: '进行中', completed: '已完成', failed: '失败', disconnected: '已断开' }
 export type RequestState = keyof typeof requestStates
 export interface RequestUpdate { id: string; status: RequestState; note: string; links: string[]; at: string }
 export interface WorkspaceRequest {
@@ -42,13 +42,16 @@ export interface FeedbackTarget {
 }
 export interface Delivery {
   id: string; subject: string; body: string
+  noticeKeys?: string[]
+  receiptHash?: string
   targetRunId?: string
-  state: 'pending' | 'sending' | 'sent' | 'failed' | 'uncertain'
+  state: 'pending' | 'sending' | 'sent' | 'uncertain'
   error?: string; requestId?: string
   external?: { channel: 'feishu'; appId: string; chatId: string; replyTo?: string; messageId?: string; target?: FeedbackTarget; workspaceRequest?: { peerId: string; id: string }; artifacts?: Artifact[]; root?: string }
 }
+export interface FeishuConfig { appId: string; chatIds: string[]; senderIds: string[]; enabled: boolean }
 export interface Messaging {
-  version: 1; revision: number; feishu: Project['feishu']
+  version: 1; revision: number; feishu: FeishuConfig
   inbox: { appId: string; event: SourceEvent; state: 'pending' | 'done' }[]
   deliveries: Delivery[]
 }
@@ -58,14 +61,12 @@ export interface Project {
   hidden?: boolean
   updatedAt?: string
   roles: { design: 'codex' | 'claude'; code: 'codex' | 'claude'; review: 'codex' | 'claude' }
-  feishu: { appId: string; chatIds: string[]; senderIds: string[]; enabled: boolean }
   tasks: Task[]; events: SourceEvent[]; deliveries: Delivery[]; requests: { id: string; fingerprint: string }[]
 }
 export interface ConnectionState { state: 'off' | 'connecting' | 'connected' | 'error'; message: string }
 export interface Snapshot {
   mainAgent?: 'claude' | 'codex'
-  projects: ProjectRef[]; project: Project | null; connection: ConnectionState
-  secretSaved: boolean; runtimeError?: string
+  projects: ProjectRef[]; project: Project | null; runtimeError?: string
 }
 export interface AgentSession {
   handle: string; title: string; workspace: string; workspaceName: string; path: string; agent: string
@@ -78,9 +79,8 @@ export interface WorkspaceBinding {
   revision: number; runId: string; session?: AgentSession; boundAt?: string
   projectNames?: string[]; takeover?: MainTakeover
   previousNotice?: Delivery['state']
-  verification?: { run: 'plugin'; session: 'plugin'; runOwnership: 'self-reported' }
   securityBoundary?: string
-  check?: { canTakeOver: true; message: string; runId: string; session: AgentSession; verification: NonNullable<WorkspaceBinding['verification']> }
+  check?: { canTakeOver: true; message: string; runId: string; session: AgentSession }
 }
 export interface Workspace extends WorkspaceBinding {
   version: 1; requests: { id: string; fingerprint: string }[]
@@ -95,7 +95,6 @@ export interface Attention {
 export interface Overview {
   connections?: import('./connections').Connection[]
   machines?: { id: string; name: string; role: 'host' | 'client'; online?: boolean }[]
-  butler?: import('./butler').ButlerSnapshot
   hidden?: ProjectRef[]
   links?: import('./links').LinksSnapshot
   workspace: WorkspaceBinding
@@ -126,3 +125,22 @@ export function groupedAttention(items: Attention[]) {
   const order = { decision: 0, blocked: 1, review: 3, rework: 4 }
   return [...groups.values()].sort((a, b) => order[a.kind] - order[b.kind])
 }
+
+export const labels = { working: '进行中', decision: '待决定', review: '待验收', rework: '修改中', completed: '已完成', blocked: '受阻', paused: '已暂停' }
+export const phases: Record<string, string> = { working: labels.working, ready: labels.review, completed: labels.completed, blocked: labels.blocked, paused: labels.paused }
+export const roles = { design: '设计', code: '代码', review: '审查' }
+export const agents = { claude: 'Claude', codex: 'Codex', opencode: 'OpenCode' }
+export const agentName = (v = '') => agents[v as keyof typeof agents] || v || '未知'
+export const scopes = { none: '不开放', summary: '项目摘要', details: '含任务详情' }
+export const rules = { deny: '不接受', confirm: '需我确认', auto: '自动受理' }
+export const statuses = { connected: '已连接', offline: '离线', pending: '待核对', revoked: '已断开' }
+export const connectionStates = { off: '未启用', connecting: '连接中', connected: '已连接', error: '连接异常', unchecked: '未检查' }
+export const results: Record<string, string> = { passed: '已通过', changes_requested: '已退回修改', pending: '待验收' }
+export const deliveryStates = { pending: '待通知', sending: '正在通知', sent: '已通知', uncertain: '待核对' }
+export const sourceName = (s: string) => ({ 'workspace-agent': '主 agent', 'workspace-external': '外部工作间', feishu: '飞书' }[s] || s)
+
+export const mainAgentStates = {
+  online: { label: '在线', tone: 'success' },
+  unknown: { label: '待命', tone: 'neutral' },
+  offline: { label: '离线', tone: 'warning' }
+} as const

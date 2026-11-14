@@ -4,16 +4,10 @@ import type { OrcaWorkerApi } from 'orca/worker'
 import type { Project, ProjectRef, Snapshot, SourceEvent, Delivery, MessagingSnapshot } from './model'
 import { FeishuSources, notifyFeishu, type MessageTransport } from './feishu'
 import { OrcaRuntime, defaultExecutable, type CoordinatorRuntime } from './runtime'
-import { ProjectStore, artifactUrl, fail, feedback, fingerprint, fresh, notifyWorkspace, object, overview, receiveEvent, strings, submitTask, text } from './store'
+import { ProjectStore, artifactUrl, fail, feedback, fingerprint, notifyWorkspace, object, overview, receiveEvent, submitTask, text, revision, mergeProjects, feishuConfig } from './store'
 import { WorkspaceLinks } from './links'
 import { groupedAttention, requestState, requestStates } from './model'
 import { mainAgent } from './main-agent'
-import { Butler } from './butler'
-
-const revision = (value: unknown): number => {
-  if (!Number.isSafeInteger(value) || (value as number) < 0) fail('请先读取项目当前版本')
-  return value as number
-}
 
 export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRuntime, transport?: MessageTransport, exportDirectory?: string) {
   const store = new ProjectStore(orca.storage, exportDirectory)
@@ -22,9 +16,6 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
   const busy = new Map<string, Promise<void>>()
   const changed = (projectId = '') => { orca.panels.post('project.changed', { projectId }); void updateStatus().catch(() => {}) }
   const main = mainAgent(orca, store, runtime, changed)
-  const butler: Butler = new Butler(orca, async () => (await store.workspace()).runId,
-    (runId, id, body) => runtime.send(runId, { id, subject: `来自外部连接「${connections.name('butler')}」`, body, state: 'pending' }), () => changed(), 'butler', () => connections.name('butler'))
-  orca.panels.handle('workspace.butler', input => butler.handle(input))
   let statusUpdates: Promise<unknown> = Promise.resolve()
   function updateStatus() {
     const work = statusUpdates.then(async () => {
@@ -35,7 +26,6 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
     statusUpdates = work.catch(() => {}); return work
   }
   async function openOverview(switching = false) {
-    if (!runtime.openOverview) fail('当前 Orca 不支持打开面板')
     await orca.storage.set('workspace.navigation', { switching })
     await runtime.openOverview()
     orca.panels.post('workspace.open', { switching })
@@ -47,7 +37,7 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
     await projects()
     if (runtimeError) fail('本机项目列表不可用，请恢复后再上报')
     const saved = await store.all()
-    return [...saved, ...catalog.filter(ref => !saved.some(p => p.ref.id === ref.id)).map(fresh)]
+    return mergeProjects(saved, catalog)
   }, () => { changed(); setImmediate(() => { void flushRequestNotifications().catch(() => {}) }) })
   orca.panels.handle('workspace.requests', async input => {
     if (input.operation === 'read') return links.snapshot()
@@ -116,7 +106,7 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
   let inbound: Promise<unknown> = Promise.resolve()
   async function syncSources() {
     const m = await store.messaging()
-    await sources.sync([...(await store.all()), { ref: { id: mailbox }, feishu: m.feishu } as Project], secret)
+    await sources.sync(m.feishu, await secret(mailbox))
   }
   async function messagingSnapshot(): Promise<MessagingSnapshot> {
     const m = await store.messaging()
@@ -141,10 +131,9 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
   async function snapshot(id: string): Promise<Snapshot> {
     if (!catalog.length) await projects()
     const project = catalog.some(p => p.id === id) ? await ensure(id) : (await store.all()).find(p => p.ref.id === id) ?? await ensure(id)
-    const mainAgent = project.runId && runtime.mainAgent ? await runtime.mainAgent(project.runId).catch(() => undefined) : undefined
-    return { projects: catalog, project, secretSaved: !!await secret(id),
+    const mainAgent = project.runId ? await runtime.mainAgent(project.runId).catch(() => undefined) : undefined
+    return { projects: catalog, project,
       ...(mainAgent ? { mainAgent } : {}),
-      connection: project.feishu.enabled ? sources.state(project.feishu.appId) : { state: 'off', message: '' },
       ...(runtimeError ? { runtimeError } : {}) }
   }
   async function ingest(appId: string, event: SourceEvent): Promise<void> {
@@ -161,15 +150,8 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
       changed(); setImmediate(() => { void flushMailbox().catch(() => {}) })
       return
     }
-    const matches = (await store.all()).filter(p => p.feishu.enabled && p.feishu.appId === appId &&
-      p.feishu.chatIds.includes(event.chatId) && p.feishu.senderIds.includes(event.senderId))
-    if (matches.length !== 1) return
-    const id = matches[0].ref.id
-    if (matches[0].events.some(x => x.sourceId === event.sourceId && x.source === event.source)) return
-    await store.mutate(id, undefined, p => { receiveEvent(p, event) })
-    changed(id)
-    setImmediate(() => { void flush(id).catch(() => {}) })
   }
+
   const response = (appId: string, event: SourceEvent, body: string): Delivery => ({ id: `response:${event.id}`, subject: '工作间', body, state: 'pending',
     external: { channel: 'feishu', appId, chatId: event.chatId, replyTo: event.sourceId.slice(appId.length + 1) } })
   async function processMessage(id: string) {
@@ -195,12 +177,8 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
     } else if (target) {
       try {
         const p = all.find(p => p.ref.id === target.projectId)!, task = p?.tasks.find(t => t.id === target.taskId)
-        const d = task?.decisions.find(d => d.id === target.itemId), a = task?.acceptance.find(a => a.id === target.itemId)
-        const current = target.kind === 'decision' ? d && fingerprint([d.question, d.options]) : a?.fingerprint
+        const d = task?.decisions.find(d => d.id === target.itemId)
         const requestId = `feishu-feedback:${event.id}`
-        if (!p?.requests.some(r => r.id === requestId)) {
-          if (!task || task.phase === 'paused' || current !== target.fingerprint || (target.kind === 'acceptance' && (a?.revision !== target.itemRevision || a.status !== 'pending' || task.phase !== 'ready')) || (target.kind === 'decision' && d?.answer !== undefined)) fail('这条提醒对应的事项已经更新，请回复最新提醒或在 App 中核对')
-        }
         if (value.length > 7000) fail('反馈过长，请将决定或修改意见控制在 7000 字以内')
         let answer = '', result = ''
         if (target.kind === 'decision') {
@@ -211,10 +189,8 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
           if (!result) fail('请回复「通过」或「修改：具体意见」')
         }
         await store.mutate(p.ref.id, undefined, async p => {
-          const t = p.tasks.find(t => t.id === target.taskId), decision = t?.decisions.find(x => x.id === target.itemId), acceptance = t?.acceptance.find(x => x.id === target.itemId)
-          if (!t || t.phase === 'paused' || (target.kind === 'decision' ? !decision || decision.answer !== undefined || fingerprint([decision.question, decision.options]) !== target.fingerprint : !acceptance || t.phase !== 'ready' || acceptance.status !== 'pending' || acceptance.revision !== target.itemRevision || acceptance.fingerprint !== target.fingerprint)) fail('事项已更新，请回复最新提醒或在 App 中核对')
           const before = structuredClone(p)
-          feedback(p, { ...target, answer, result, note: `[飞书 ${event.sourceId} / ${event.senderId} / ${event.receivedAt}]\n${event.text}` })
+          feedback(p, { items: [{ ...target, answer, result, note: `[飞书 ${event.sourceId} / ${event.senderId} / ${event.receivedAt}]\n${event.text}` }] })
           await notify(before, p)
         }, { id: requestId, input: { target, event } })
         defer(p.ref.id)
@@ -256,7 +232,7 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
               if ('requestId' in receipt) saved.requestId = receipt.requestId
             })
           } catch {
-            await store.mutateMessaging(m => { const saved = m.deliveries.find(x => x.id === d.id)!; saved.state = 'uncertain'; saved.error = '发送结果待核对，不会自动重发' })
+            await store.mutateMessaging(m => { const saved = m.deliveries.find(x => x.id === d.id)!; saved.state = 'uncertain'; saved.error = '发送结果待核对，不会自动重发' }); break
           }
         }
       } finally { busy.delete(mailbox); changed() }
@@ -300,42 +276,38 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
     return work
   }
   const defer = (id: string) => setImmediate(() => { void flush(id).catch(() => {}) })
-  async function feishuSettings(input: import('orca').PluginRequests['workspace.feishu']['input']) {
-    if (input.operation === 'save') {
-      const raw = object(input.feishu)
-      if (typeof raw.enabled !== 'boolean') fail('飞书启用状态不正确')
-      const f: Project['feishu'] = { enabled: raw.enabled, appId: typeof raw.appId === 'string' ? raw.appId.trim().slice(0, 200) : '', chatIds: strings(raw.chatIds, '允许的会话'), senderIds: strings(raw.senderIds, '允许的用户') }
-      const value = input.appSecret ? text(input.appSecret, 'App Secret', 1000) : ''
-      await store.mutateMessaging(async m => {
-        const saved = value || (m.feishu.appId === f.appId ? await secret(mailbox) : '')
-        if (f.enabled && (!f.appId || !saved || !f.chatIds.length || !f.senderIds.length)) fail('请填写应用、凭据、允许的会话和用户')
-        for (const p of await store.all()) if (p.feishu.appId === f.appId) {
-          if (f.chatIds.some(c => p.feishu.chatIds.includes(c))) fail('这个飞书会话已绑定项目，请为工作间使用其他会话')
-          const other = await secret(p.ref.id)
-          if (saved && other && other !== saved) fail('相同飞书应用必须使用相同凭据')
-        }
-        if (value) await orca.secrets.set(`feishu:${mailbox}`, value)
-        else if (m.feishu.appId !== f.appId) await orca.secrets.delete(`feishu:${mailbox}`)
-        m.feishu = f
-      }, revision(input.revision))
-      await syncSources(); changed()
-    } else if (input.operation !== 'read') fail('不支持的飞书设置操作')
+  async function validateFeishu(config: import('./model').FeishuConfig, newSecret: string) {
+    const previous = (await store.messaging()).feishu
+    const saved = newSecret || (previous.appId === config.appId ? await secret(mailbox) : '')
+    if (config.enabled && (!config.appId || !saved || !config.chatIds.length || !config.senderIds.length)) fail('请填写应用、凭据、允许的会话和用户')
+    return previous.appId !== config.appId
+  }
+  async function saveSecret(id: string, value: string, remove: boolean) {
+    if (value) await orca.secrets.set(`feishu:${id}`, value)
+    else if (remove) await orca.secrets.delete(`feishu:${id}`)
+  }
+  async function feishuSettings(input: import('./connections').ConnectionsInput) {
+    const f = feishuConfig(input.feishu), value = input.appSecret ? text(input.appSecret, 'App Secret', 1000) : ''
+    let remove = false
+    await store.mutateMessaging(async m => { remove = await validateFeishu(f, value); m.feishu = f }, revision(input.revision))
+    await saveSecret(mailbox, value, remove)
+    await syncSources(); changed()
     return messagingSnapshot()
   }
-  orca.panels.handle('workspace.feishu', feishuSettings)
-  const connections: Connections = new Connections(orca, butler, async () => (await store.workspace()).runId,
+  orca.panels.handle('workspace.feishu', input => { if (input.operation !== 'read') fail('飞书配置请在外部连接中保存'); return messagingSnapshot() })
+  const connections = new Connections(orca, async () => (await store.workspace()).runId,
     (run, id, body, name) => runtime.send(run, { id, subject: `来自外部连接「${name}」`, body, state: 'pending' }), () => changed(), messagingSnapshot, feishuSettings, async () => {
-      await store.mutateMessaging(m => { m.feishu = fresh({} as ProjectRef).feishu; m.inbox = []; m.deliveries = [] })
+      await store.mutateMessaging(m => { m.feishu = { enabled: false, appId: '', chatIds: [], senderIds: [] }; m.inbox = []; m.deliveries = m.deliveries.filter(d => !d.external) })
       await orca.secrets.delete(`feishu:${mailbox}`); await syncSources()
     })
   orca.panels.handle('workspace.connections', async input => {
     const result = await connections.handle(input)
-    if (!Array.isArray(result) && result.connection.id === 'butler') {
-      try { result.approvalMode = await runtime.hermesApprovalMode?.() || 'unknown' } catch { result.approvalMode = 'unknown' }
+    if (!Array.isArray(result) && result.connection.type === 'a2a') {
+      try { const mode = await runtime.hermesApprovalMode(); if (mode) result.approvalMode = mode } catch { /* A peer need not expose local approval settings. */ }
     }
     return result
   })
-  orca.panels.handle('workspace.canvas', async () => { if (!runtime.openCanvas) fail('当前 Orca 不支持打开画布'); await runtime.openCanvas(); return { opened: true } })
+  orca.panels.handle('workspace.canvas', async () => { await runtime.openCanvas(); return { opened: true } })
   orca.panels.handle('workspace.reply', async input => {
     const w = await store.workspace()
     if (!w.runId || w.runId !== input.runId) fail('请使用已绑定的工作间主 agent Run')
@@ -345,7 +317,7 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
       if (!entry || !m.deliveries.some(d => d.id === id && !d.external)) fail('请选择已送入主 agent 的工作间飞书消息')
       const d = { ...response(entry.appId, entry.event, body), id: `agent-reply:${requestId}` }
       const prior = m.deliveries.find(x => x.id === d.id)
-      if (prior) { if (prior.body !== d.body || prior.external?.replyTo !== d.external?.replyTo || prior.external?.appId !== d.external?.appId) fail('请求编号已用于其他回复'); return }
+      if (prior) { if ((prior.receiptHash || fingerprint([prior.body, prior.external?.replyTo, prior.external?.appId])) !== fingerprint([d.body, d.external?.replyTo, d.external?.appId])) fail('请求编号已用于其他回复'); return }
       if (!m.feishu.enabled || m.feishu.appId !== entry.appId || !m.feishu.chatIds.includes(entry.event.chatId) || !m.feishu.senderIds.includes(entry.event.senderId)) fail('来源已不在工作间飞书允许范围内')
       m.deliveries.push(d)
     })
@@ -355,7 +327,7 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
     await projects()
     const saved = await store.all()
     // Include stored projects even when their worktree is currently closed; overview never registers or rewrites them.
-    return { ...overview([...saved, ...catalog.filter(ref => !saved.some(p => p.ref.id === ref.id)).map(fresh)], await store.workspace(), runtimeError), workspace: await main.read(), links: await links.snapshot(), butler: await butler.snapshot(), connections: await connections.list(), machines: [{ id: 'local', name: os.hostname(), role: 'host' as const, online: true }] }
+    return { ...overview(mergeProjects(saved, catalog), await store.workspace(), runtimeError), workspace: await main.read(), links: await links.snapshot(), connections: await connections.list(), machines: [{ id: 'local', name: os.hostname(), role: 'host' as const, online: true }] }
   })
   orca.panels.handle('workspace.message', async input => {
     const id = text(input.projectId, '项目编号', 200)
@@ -391,16 +363,14 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
       await projects()
       if (runtimeError) fail('无法确认 Orca 项目列表，未删除记录；请恢复连接后重试')
       if (catalog.some(p => p.id === id)) {
-        if (!runtime.removeProject) fail('当前 Orca 不支持安全移除项目')
         await runtime.removeProject((await store.get(id)).ref)
         await projects()
         if (runtimeError || catalog.some(p => p.id === id)) fail('Orca 未确认移除，工作间记录保留')
       }
     })
     changed(id)
-    await orca.secrets.delete(`feishu:${id}`)
     await syncSources()
-    return { deleted: id, exportPath, removedFromOrca: true }
+    return { deleted: id, exportPath }
   })
   orca.panels.handle('project.read', input => snapshot(text(input.projectId, '项目编号', 200)))
   orca.panels.handle('project.settings', async input => {
@@ -408,31 +378,7 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
     await ensure(id)
     const roles = object(input.roles)
     if (['design', 'code', 'review'].some(k => !['codex', 'claude'].includes(roles[k]))) fail('请选择 Codex 或 Claude')
-    const f = object(input.feishu)
-    if (typeof f.enabled !== 'boolean') fail('飞书启用状态不正确')
-    const config: Project['feishu'] = { appId: typeof f.appId === 'string' ? f.appId.trim().slice(0, 200) : '',
-      chatIds: strings(f.chatIds, '群聊编号'), senderIds: strings(f.senderIds, '允许的发送者'), enabled: f.enabled }
-    const newSecret = input.appSecret ? text(input.appSecret, 'App Secret', 1000) : ''
-    await store.mutate(id, revision(input.revision), async p => {
-      const value = newSecret || (p.feishu.appId === config.appId ? await secret(id) : '')
-      if (config.enabled && (!config.appId || !value || !config.chatIds.length || !config.senderIds.length)) fail('启用飞书需要 App ID、App Secret、群聊编号和允许的发送者')
-      for (const other of await store.all()) {
-        if (other.ref.id === id || other.feishu.appId !== config.appId) continue
-        if (config.chatIds.some(chat => other.feishu.chatIds.includes(chat))) fail('同一飞书应用的群聊已绑定其他项目')
-        const otherSecret = await secret(other.ref.id)
-        if (value && otherSecret && otherSecret !== value) fail('共用飞书应用的项目必须使用相同凭据')
-      }
-      const workspaceConfig = (await store.messaging()).feishu
-      if (workspaceConfig.appId === config.appId) {
-        if (config.chatIds.some(c => workspaceConfig.chatIds.includes(c))) fail('这个飞书会话已绑定工作间')
-        const other = await secret(mailbox)
-        if (value && other && value !== other) fail('相同飞书应用必须使用相同凭据')
-      }
-      if (newSecret) await orca.secrets.set(`feishu:${id}`, newSecret)
-      else if (p.feishu.appId !== config.appId) await orca.secrets.delete(`feishu:${id}`)
-      p.roles = roles as Project['roles']; p.feishu = config
-    })
-    await syncSources()
+    await store.mutate(id, revision(input.revision), p => { p.roles = roles as Project['roles'] })
     changed(id)
     return snapshot(id)
   })
@@ -485,9 +431,8 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
   })
 
   let refreshMain: ReturnType<typeof setInterval> | undefined
-  return { store, links, butler, connections, ingest, flush, flushMailbox, flushRequestNotifications, updateStatus, stop: () => { clearInterval(refreshMain); connections.stop(); links.stop(); sources.stop() }, async start() {
+  return { store, links, connections, ingest, flush, flushMailbox, flushRequestNotifications, updateStatus, stop: () => { clearInterval(refreshMain); connections.stop(); links.stop(); sources.stop() }, async start() {
     await links.start()
-    await butler.start()
     await connections.start()
     await main.recover()
     clearInterval(refreshMain)
@@ -512,7 +457,7 @@ let coordinator: ReturnType<typeof createCoordinator> | undefined
 export default async function activate(orca: OrcaWorkerApi): Promise<void> {
   const runtime = new OrcaRuntime(async () => {
     const configured = await orca.settings.get('cliPath')
-    return typeof configured === 'string' && configured.trim() ? configured.trim() : defaultExecutable()
+    return typeof configured === 'string' && configured.trim() ? configured.trim() : defaultExecutable
   })
   coordinator = createCoordinator(orca, runtime)
   await coordinator.start()

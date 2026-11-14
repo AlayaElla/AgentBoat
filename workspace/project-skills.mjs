@@ -98,7 +98,7 @@ export function list(root) {
   return [source, proposals].flatMap(base => {
     const directory = location(root, base);
     if (!fs.existsSync(directory)) return [];
-    return fs.readdirSync(directory, { withFileTypes: true }).filter(item => !item.name.startsWith('.')).map(item => {
+    return fs.readdirSync(directory, { withFileTypes: true }).filter(item => !item.name.startsWith('.') && (item.isDirectory() || item.isSymbolicLink())).map(item => {
       const skill = validate(location(root, `${base}/${item.name}`));
       const approved = records[skill.name]?.sha256 === skill.sha256;
       return { ...skill, status: base === proposals ? 'proposal' : approved ? 'approved' : 'unreviewed' };

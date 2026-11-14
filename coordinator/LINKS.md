@@ -12,7 +12,7 @@ Orca 的 plugin inspect 将 trusted-worker 明确描述为独立 Node.js 进程�
 4. 双方各自设定开放范围、逐项目勾选，保存后生效。摘要含项目名称、各阶段数量、待处理事项数量和更新时间；详情另含任务标题、阶段、未回答的决定标题与待验收标题。不给出项目路径、会话、来源消息、反馈历史、文件或订阅凭据。派活按本侧的三档规则处理，流程见下文。
 5. 加入方每十秒向邀请方发一次 `/sync`：提交本方允许的报告，并取回对方当前允许的报告。因此只需要加入方能访问邀请方，不要求反向入站可达，也没有中转服务器。保存范围及手动刷新会立即尝试同步；邀请方的修改在加入方下一次同步可见。
 
-连接元数据使用独立的 `workspace.links` version=1 键，不迁移、不重写原项目、工作间或飞书记录。每条连接凭据只存 Orca secrets 的 `workspace-link:<connectionId>`；TLS 证书和私钥只存 secrets 的 `workspace-links-tls`，不进普通存储、报告或日志。对端报告不持久化；重启后等待新报告，超过 35 秒未成功同步或发生同步错误时隐藏旧内容并标离线，页面保留最近收到时间。状态描述通信新鲜度，不代表远端 agent 在线。
+连接元数据使用独立的 `workspace.links` version=1 键。每条连接凭据只存 Orca secrets 的 `workspace-link:<connectionId>`；TLS 证书和私钥只存 secrets 的 `workspace-links-tls`，不进普通存储、报告或日志。对端报告不持久化；重启后等待新报告，超过 35 秒未成功同步或发生同步错误时隐藏旧内容并标离线，页面保留最近收到时间。状态描述通信新鲜度，不代表远端 agent 在线。
 
 双方均可断开。撤销先使本方鉴权失效并删除连接密钥，再尝试通知可达的对端；后续请求立即返回 401。单向可达时，邀请方的撤销会由加入方下次同步得知，通常不超过十秒；网络断开时无法即时通知远端。对方已经读取的文字无法远程收回。撤销记录保留；重新连接需新连接码、新连接编号和新凭据。
 
@@ -26,7 +26,7 @@ Orca 的 plugin inspect 将 trusted-worker 明确描述为独立 Node.js 进程�
 - 已有 SSH 访问：邀请方只监听回环固定端口；加入方用已有 SSH 连接做本地转发 `ssh -N -L <加入方端口>:127.0.0.1:<邀请方端口> <已有SSH主机>`。邀请方把“对方访问地址”填为 `http://127.0.0.1:<加入方端口>`，再生成码。保持隧道开启即可；可先在同机确认端口。不会把 SSH 密钥或密码交给插件。
 - 双方都没有可达地址、已有 VPN 或 SSH 路径时，连接条件尚未具备，先安排网络路径；连接码本身不穿透 NAT。
 
-两人各自在自己的 Orca 打开“设置 → 其他工作间 → 连接设置”，完成上述配对，再独立选择愿意开放的项目。另一侧可以不开监听，只作主动连接方。第一版不传文件，组织画布留到后续。
+两人各自在自己的 Orca 打开“设置 → 其他工作间 → 连接设置”，完成上述配对，再独立选择愿意开放的项目。另一侧可以不开监听，只作主动连接方。不传文件；组织画布可查看和修改双方开放规则。
 
 ## 主 agent 命令
 
@@ -34,13 +34,13 @@ Orca 的 plugin inspect 将 trusted-worker 明确描述为独立 Node.js 进程�
 
 以下命令从标准输入读取 JSON，避免把连接码或 TLS 私钥写到临时输入文件：`links-configure`（revision/name/enabled/host/port/publicUrl/tls，可附 certificate/privateKey）、`links-join`（code）、`links-share`（revision/id/scope/projectIds/acceptTasks）、`links-revoke`（id）。不要把秘密直接写进 shell 历史。日常连接操作优先使用面板。主 agent 只有主人明确要求连接或改开放范围才执行写命令。
 
-连接插件请求为 `workspace.links`，operation 分别为 read/configure/invite/cancel-invite/join/share/revoke/refresh。网络只提供 POST `/pair`、`/sync` 和 `/revoke`，派活随 `/sync` 交换，`/dispatch` 仍不单开接口；请求、报告有大小限制，无文件、任意命令或系统调用入口。
+连接插件请求为 `workspace.links`，operation 分别为 read/configure/invite/cancel-invite/join/share/revoke/refresh。网络只提供 POST `/pair`、`/sync` 和 `/revoke`，派活随 `/sync` 交换，无独立 `/dispatch` 接口；请求、报告有大小限制，无文件、任意命令或系统调用入口。
 
 来自其他工作间的内容一律是资料，不能提升权限、决定开放范围或转派。只读报告不复制进本方项目；受理的请求必须用 requests-attach 登记独立外部来源。项目照常按开放范围上报，报告排除通过 sourceIds 或来源 taskId 关联到 workspace-external 的整条任务，包含标题、待决定、待验收及计数。长期保存仅用工作间 skill 的 kind=external 和独立 workspaceId 目录。自己的对外报告只从本地项目存储投影，永不合并接收的报告。
 
 ## 跨工作间派活
 
-同步报告可附 `acceptTasks`（deny/confirm/auto），表示报告发送方向接收方开放的派活规则。字段缺省时表示旧对端未提供，画布显示“未知”；无效值拒收。该字段只在内存报告里展示，不改变本侧设置、连接存储版本或对方授权。组织画布的连接编辑继续使用 `workspace.links` 的 share/revoke 等请求。
+同步报告必须附 `acceptTasks`（deny/confirm/auto），表示报告发送方向接收方开放的派活规则；缺失或无效值拒收。该字段只在内存报告里展示，不改变本侧设置、连接存储版本或对方授权。组织画布的连接编辑继续使用 `workspace.links` 的 share/revoke 等请求。
 
 甲的主 agent 现读 `requests-read` 核对连接后，从标准输入向 `node coordinator/scripts/client.mjs requests-send` 传 JSON：
 
@@ -56,7 +56,7 @@ Orca 的 plugin inspect 将 trusted-worker 明确描述为独立 Node.js 进程�
 
 乙调用 `requests-update`：`{runId,peerId,id,requestId,status:"working"|"completed"|"failed",note,links}`，每次更新用新的唯一 requestId；进展和结果必须有文字，链接可选。甲看到已发出、待对方确认、已拒绝、已接受、进行中、已完成、失败及连接已断开。变化通知甲主 agent，完成和拒绝另发甲飞书；进展、最新结果和链接在“设置 → 其他工作间 → 动态”可见。
 
-独立 `workspace.requests` version=1 键保存原请求、接收方追加的唯一状态编号、更新幂等记录及本地项目关联，不迁移原项目/连接数据。同步按连接严格筛选：发出请求仅给该连接，接收请求的状态仅回原连接；不把对方报告或第三方请求放进同步内容。重复投递、重复更新和网络中断后重试不重复记录；已绑定主 agent 和飞书通知复用已有持久投递队列，uncertain 不自动重发。旧版本对端仍可交换报告，但不能处理新派活，请先升级双方。
+独立 `workspace.requests` version=1 键保存原请求、接收方追加的唯一状态编号、更新幂等记录及本地项目关联。同步按连接严格筛选：发出请求仅给该连接，接收请求的状态仅回原连接；不把对方报告或第三方请求放进同步内容。重复投递、重复更新和网络中断后重试不重复记录；已绑定主 agent 和飞书通知复用已有持久投递队列，uncertain 不自动重发。
 
 只有加入方可访问邀请方时，双方派活及状态都随加入方每十秒 `/sync` 双向交换，无须反向监听。不开放项目也可以单独接受派活。撤销先禁用本侧鉴权并把本侧未完成请求标为“连接已断开”；可达对端立即收到，否则加入方下一次同步的 401 使它断开并标记。离线时无法即时通知。已完成、已拒绝和失败保留终态。
 
@@ -64,4 +64,4 @@ Orca 的 plugin inspect 将 trusted-worker 明确描述为独立 Node.js 进程�
 
 ## 验证边界
 
-自动测试使用回环、内存存储和模拟项目，覆盖配对、短期码、单次使用、独立密钥、范围切换、指定项目、鉴权、撤销、重启、反转报和旧存储兼容。实际插件监听和重载后项目快照另存仓库外证据。不同机器、真实公网/VPN、生产证书和长时间运行需有对应环境才能验证。
+自动测试使用回环、内存存储和模拟项目，覆盖配对、短期码、单次使用、独立密钥、范围切换、指定项目、鉴权、撤销、重启、反转报和持久化恢复。实际插件监听和重载后项目快照另存仓库外证据。不同机器、真实公网/VPN、生产证书和长时间运行需有对应环境才能验证。

@@ -1,11 +1,12 @@
-﻿import { atom, read, set, update, plugin, shell, files, Stack, Row, Box, Heading, Text, Button, IconButton, Badge, List, ListItem, Link,
-  Select, Input, Textarea, Switch, RadioGroup, Field, Tabs, Tab, Collapsible, EmptyState, Callout, Skeleton, KeyValue, Checkbox, RelativeTime, type PanelContext, type Tone } from 'orca'
-import { taskState, type Acceptance, type Decision, type Project, type ProjectRef, type Snapshot, type Task, type Overview, type MessagingSnapshot } from './model'
+import { labels, mainAgentStates, results, deliveryStates, agentName, sourceName, roles, agents, connectionStates } from './model'
+import { atom, read, set, update, plugin, shell, files, Stack, Row, Box, Heading, Text, Button, IconButton, Badge, List, ListItem, Link,
+  Select, Textarea, RadioGroup, Field, Tabs, Tab, Collapsible, EmptyState, Callout, Skeleton, KeyValue, Checkbox, RelativeTime, type PanelContext, type Tone } from 'orca'
+import { taskState, type Acceptance, type Decision, type Project, type ProjectRef, type Snapshot, type Task, type Overview } from './model'
 import { storage } from 'orca'
 import { linksSection, linksPage, closeLinks, loadLinks, pendingRequests, requestPage } from './links-panel'
 import { groupedAttention } from './model'
-import { connectionStates, connectionsList, addConnection, connectionPage, loadConnection, clearConnectionDraft } from './connections-panel'
-import { bindingRows, agentName, takeoverText, mainAgentStates } from './main-agent-view'
+import { connectionsList, addConnection, connectionPage, loadConnection, clearConnectionDraft } from './connections-panel'
+import { bindingRows, takeoverText } from './main-agent-view'
 
 
 type Page = { kind: 'home' | 'project' | 'task' | 'project-settings' | 'settings' | 'main' | 'connections' | 'connection' | 'add-connection' | 'new-connection' | 'machines' | 'links' | 'request'; projectId?: string; id?: string }
@@ -13,22 +14,22 @@ const navigation = atom<{ page: Page; stack: Page[] }>('workspace.page', { page:
 const page = () => read(navigation).page
 const selectedId = () => page().projectId || ''
 const filter = atom(''), expanded = atom(false), deleteConfirmed = atom(false), linksTab = atom('activity')
-function clearDrafts() { set(notes, {}); set(picks, {}); set(editing, ''); clearConnectionDraft(); closeLinks(); update(config, c => ({ ...c, appSecret: '' })); set(deleting, ''); set(deleteConfirmed, false); set(mainSwitch, false); set(mainChoice, { mode: 'existing', handle: '', workspace: '', agent: 'claude', confirm: false }); set(failure, null) }
+function clearDrafts() { set(notes, {}); set(picks, {}); set(editing, ''); clearConnectionDraft(); closeLinks(); set(deleting, ''); set(deleteConfirmed, false); set(mainSwitch, false); set(mainChoice, { mode: 'existing', handle: '', workspace: '', agent: 'claude', confirm: false }); set(failure, null) }
 function go(next: Page, reset = false) { clearDrafts(); update(navigation, n => ({ page: next, stack: reset ? [] : [...n.stack, n.page] })) }
 function back() { clearDrafts(); update(navigation, n => ({ page: n.stack.at(-1) || { kind: 'home' }, stack: n.stack.slice(0, -1) })); void restorePage() }
-async function restorePage() { try { if (selectedId()) await load(selectedId(), page().kind === 'project-settings'); if (page().kind === 'links') await loadLinks(); if (page().kind === 'connection' && page().id) await loadConnection(page().id!) } catch (e) { fail('', '读取未成功', e) } }
+async function restorePage(project = true) { try { if (project && selectedId()) await load(selectedId(), page().kind === 'project-settings'); if (page().kind === 'links') await loadLinks(); if (page().kind === 'connection' && page().id) await loadConnection(page().id!) } catch (e) { fail('', '读取未成功', e) } }
 
 const OTHER = ' other' // options are stored trimmed, so a leading space cannot collide with one
 const projects = atom<ProjectRef[] | null>(null)
 const workspace = atom<Overview | null>(null)
 const snapshot = atom<Snapshot | null>(null)
-const tab = atom('project.tab', 'inbox', { persist: 'plugin' })
+const tab = atom('inbox')
 const failure = atom<{ at: string; title: string; text: string } | null>(null)
 const busy = atom(false)
 const notes = atom<Record<string, string>>({})
 const picks = atom<Record<string, string>>({})
 const editing = atom('')
-const config = atom({ design: 'claude', code: 'codex', review: 'codex', appId: '', appSecret: '', chatIds: '', senderIds: '', enabled: false })
+const config = atom({ design: 'claude', code: 'codex', review: 'codex' })
 const configOwner = atom('')
 const deleting = atom('')
 const deletedExport = atom('')
@@ -39,7 +40,7 @@ let epoch = 0
 
 function showConfig(p: Project) {
   set(configOwner, p.ref.id)
-  set(config, { ...p.roles, appId: p.feishu.appId, appSecret: '', chatIds: p.feishu.chatIds.join('\n'), senderIds: p.feishu.senderIds.join('\n'), enabled: p.feishu.enabled })
+  set(config, { ...p.roles })
 }
 function fail(at: string, title: string, e: unknown) { set(failure, { at, title, text: e instanceof Error && e.message ? e.message : '请刷新后重试' }) }
 async function load(id: string, reset = false) {
@@ -54,20 +55,19 @@ async function load(id: string, reset = false) {
 async function choose(id: string) {
   if (id === '@home') id = ''
   set(tab, 'inbox')
-  set(deleting, '')
-  go({ kind: id ? 'project' : 'home', ...(id ? { projectId: id } : {}) }, true);  set(snapshot, null); set(notes, {}); set(picks, {}); set(failure, null);  set(editing, '')
-  set(configOwner, ''); update(config, c => ({ ...c, appSecret: '' }))
+  go({ kind: id ? 'project' : 'home', ...(id ? { projectId: id } : {}) }, true); set(snapshot, null)
+  set(configOwner, '')
   if (id) await load(id, true)
 }
 async function list() {
   try {
-    const [answer, all] = await Promise.all([plugin.request('projects.list'), plugin.request('workspace.overview')])
+    const all = await plugin.request('workspace.overview')
     set(workspace, all)
     const refs = [...all.projects.map(p => p.ref), ...(all.hidden ?? [])]
-    set(projects, refs); set(failure, answer.error ? { at: '', title: '读取未成功', text: answer.error } : null)
+    set(projects, refs); set(failure, null)
     const id = selectedId()
-    if (id && refs.some(p => p.id === id)) { if (selectedId()) await load(id, !read(snapshot)) }
-    else if (id && !answer.error) { go({ kind: 'home' }, true); set(snapshot, null) }
+    if (id && refs.some(p => p.id === id)) await load(id, !read(snapshot))
+    else if (id && !all.error) { go({ kind: 'home' }, true); set(snapshot, null) }
   } catch (e) { fail('', '读取未成功', e) }
 }
 async function act(at: string, title: string, work: () => Promise<unknown>) {
@@ -93,19 +93,15 @@ function respond(task: Task, kind: 'decision' | 'acceptance', id: string, value:
   const p = read(snapshot)?.project, key = `${task.id}/${kind}/${id}`
   if (!p) return
   return act(key, '提交未成功', async () => {
-    const answer = await plugin.request('project.feedback', { projectId: p.ref.id, revision: p.revision, taskId: task.id, kind, itemId: id,
-      ...(kind === 'decision' ? { answer: value } : { result, note: value, itemRevision: task.acceptance.find(x => x.id === id)!.revision }) })
+    const answer = await plugin.request('project.feedback', { projectId: p.ref.id, revision: p.revision, items: [{ taskId: task.id, kind, itemId: id,
+      ...(kind === 'decision' ? { answer: value } : { result, note: value, itemRevision: task.acceptance.find(x => x.id === id)!.revision }) }] })
     if (selectedId() === p.ref.id) { set(snapshot, answer); write(key, ''); set(editing, '') }
   })
 }
 
-const labels = { working: '进行中', decision: '待决定', review: '待验收', rework: '修改中', completed: '已完成', blocked: '受阻', paused: '已暂停' }
 const tones: Record<keyof typeof labels, Tone> = { working: 'neutral', decision: 'accent', review: 'accent', rework: 'warning', completed: 'success', blocked: 'danger', paused: 'neutral' }
-const results: Record<string, string> = { passed: '已通过', changes_requested: '已退回修改', pending: '待验收' }
 const resultTones: Record<string, Tone> = { passed: 'success', changes_requested: 'warning', pending: 'accent' }
-const tabs: Record<string, string> = { inbox: '待处理', tasks: '任务记录', messages: '消息' }
-// Earlier versions stored other values under project.tab; anything that is not a current tab opens the inbox.
-const currentTab = () => Object.hasOwn(tabs, read(tab)) ? read(tab) : 'inbox'
+const currentTab = () => read(tab)
 const clip = (value: string, max: number) => value.length > max ? `${value.slice(0, max)}…` : value
 // Display width in half-width units: CJK and other wide characters count as two. Orca buttons and control labels never wrap or
 // break a long word, so their text has to be cut to a width that still fits a 300px panel.
@@ -134,13 +130,6 @@ function paragraphs(text: string) {
 function problem(at: string) {
   const f = read(failure)
   return f?.at === at ? <Callout tone="danger" title={f.title}>{paragraphs(f.text)}</Callout> : null
-}
-function feishu(s: Snapshot): { label: string; tone: Tone; message?: string } {
-  if (!s.project!.feishu.enabled) return { label: '未启用', tone: 'neutral' }
-  if (s.connection.state === 'connected') return { label: '已连接', tone: 'success' }
-  if (s.connection.state === 'connecting') return { label: '连接中', tone: 'neutral' }
-  if (s.connection.state === 'error') return { label: '连接异常', tone: 'danger', message: s.connection.message || '请检查应用凭据、网络和事件订阅设置。' }
-  return { label: '未连接', tone: 'warning', message: '已启用，但没有建立连接。请检查设置并重新保存。' }
 }
 function pending(p: Project) {
   return {
@@ -236,11 +225,10 @@ function tasks(p: Project) {
 }
 function messages(p: Project) {
   const waiting = p.deliveries.filter(d => d.state !== 'sent')
-  const states = { pending: '待通知', sending: '正在通知', sent: '已通知', failed: '通知失败', uncertain: '待核对' }
   if (!p.events.length && !waiting.length) return <EmptyState icon="bell" title="还没有消息" />
   return <Stack gap="lg">
     {waiting.length ? <Stack gap="sm"><Heading level={2}>未送达通知</Heading>{waiting.map(d => <Box key={d.id} border radius="lg" padding="md" gap="sm" background="card">
-      <Row justify="between" gap="sm" align="start"><Text weight="medium">{d.subject}</Text><Badge tone={d.state === 'pending' || d.state === 'sending' ? 'neutral' : 'warning'}>{states[d.state]}</Badge></Row>
+      <Row justify="between" gap="sm" align="start"><Text weight="medium">{d.subject}</Text><Badge tone={d.state === 'pending' || d.state === 'sending' ? 'neutral' : 'warning'}>{deliveryStates[d.state]}</Badge></Row>
       {d.external ? <Text muted>发往飞书</Text> : d.targetRunId ? <Text muted>发往工作间主 agent</Text> : null}
       {summary(d.error ?? d.body)}
       {d.state === 'pending' && (d.external || p.runId) ? <Button disabled={read(busy)} onPress={() => act(d.id, '通知未成功', async () => {
@@ -254,17 +242,16 @@ function messages(p: Project) {
       {[...p.events].reverse().map(e => {
         const linked = p.tasks.find(t => t.id === e.taskId)
         return <Collapsible key={e.id} title={clip(e.text.trim().split('\n')[0], 60)} description={linked ? `关联任务：${clip(linked.title, 40)}` : '未关联任务'}>
-          <Badge>{e.source === 'workspace-agent' ? '主 agent' : e.source === 'workspace-external' ? '外部工作间' : '飞书'}</Badge>
           {paragraphs(e.text)}
-          <Text muted size="xs">{`${e.source === 'workspace-agent' ? '主 agent' : e.source === 'workspace-external' ? '外部工作间' : '飞书'} · ${when(e.receivedAt)}`}</Text>
+          <Text muted size="xs">{`${sourceName(e.source)} · ${when(e.receivedAt)}`}</Text>
           {linked ? <Button variant="ghost" onPress={() => open(linked)}>查看任务</Button> : null}
         </Collapsible>
       })}
     </Stack> : null}
   </Stack>
 }
-function home(s: Snapshot, p: Project) {
-  const f = feishu(s), { decisions, checks } = pending(p), count = decisions.length + checks.length + p.tasks.filter(t => t.phase === 'blocked').length
+function home(p: Project) {
+  const { decisions, checks } = pending(p), count = decisions.length + checks.length + p.tasks.filter(t => t.phase === 'blocked').length
   // Binding is not liveness: the latest settled notification is the only evidence that the bound session still receives feedback.
   const latest = [...p.deliveries].reverse().find(d => !d.targetRunId && d.state !== 'pending' && d.state !== 'sending')
   return <Stack gap="md">
@@ -274,7 +261,6 @@ function home(s: Snapshot, p: Project) {
         {paragraphs(latest.error ?? '请在主会话核对。')}
         <Button onPress={() => set(tab, 'messages')}>查看消息</Button>
       </Callout> : null}
-      {f.message ? <Callout tone={f.tone} title={`飞书${f.label}`}>{paragraphs(f.message)}<Button onPress={openSettings}>飞书设置</Button></Callout> : null}
     </Stack>
     <Tabs label="视图" value={currentTab()} onChange={v => { set(tab, v); set(failure, null); set(editing, '') }}>
       <Tab value="inbox" label={count ? `待处理 ${count}` : '待处理'}>{inbox(p)}</Tab>
@@ -299,50 +285,36 @@ function taskPage(p: Project, task: Task) {
     {task.acceptance.length ? <Stack gap="sm"><Heading level={2}>验收</Heading>{task.acceptance.map(a => check(p, task, a))}</Stack> : null}
     {rest.length ? <Stack gap="sm"><Heading level={2}>{shown.length ? '其他成果' : '成果'}</Heading>{artifacts(p, task, rest, task.id)}{problem(task.id)}</Stack> : null}
     {sources.length ? <Collapsible title="来源消息">{sources.map(e => <Stack key={e.id} gap="xs">
-      <Text muted size="xs">{`${e.source === 'workspace-agent' ? '主 agent' : e.source === 'workspace-external' ? '外部工作间' : '飞书'} · ${when(e.receivedAt)}`}</Text>
+      <Text muted size="xs">{`${sourceName(e.source)} · ${when(e.receivedAt)}`}</Text>
       {paragraphs(e.text)}
     </Stack>)}</Collapsible> : null}
 
   </Stack>
 }
 function settingsPage(s: Snapshot, p: Project) {
-  const c = read(config), f = feishu(s)
-  const agents = [{ value: 'claude', label: 'Claude' }, { value: 'codex', label: 'Codex' }]
+  const c = read(config)
+  const choices = Object.entries(agents).filter(([key]) => key !== 'opencode').map(([value, label]) => ({ value, label }))
   const edit = (key: keyof typeof c, value: string | boolean) => update(config, c => ({ ...c, [key]: value }))
-  const split = (value: string) => value.split(/[\n,，]/).map(x => x.trim()).filter(Boolean)
   return <Stack gap="lg">
     <Heading>项目设置</Heading>
     <Stack gap="sm"><Heading level={2}>代理分工</Heading>
-      {([['design', '设计'], ['code', '代码'], ['review', '审查']] as const).map(([key, label]) => <Row key={key} justify="between" gap="sm">
+      {Object.entries(roles).map(([key, label]) => <Row key={key} justify="between" gap="sm">
         <Text weight="medium">{label}</Text>
-        <Box width={128} shrink={false}><Select label={label} labelHidden value={c[key]} options={agents} onChange={v => edit(key, v)} /></Box>
+        <Box width={128} shrink={false}><Select label={label} labelHidden value={c[key as keyof typeof c]} options={choices} onChange={v => edit(key as keyof typeof c, v)} /></Box>
       </Row>)}
-    </Stack>
-    <Stack gap="sm">
-      <Row justify="between" gap="sm"><Heading level={2}>飞书</Heading><Badge tone={f.tone}>{f.label}</Badge></Row>
-      {f.message ? <Text tone={f.tone}>{f.message}</Text> : null}
-      <Switch label="接收飞书消息" checked={c.enabled} onChange={v => edit('enabled', v)} />
-      {c.enabled ? <Collapsible title="应用和群聊">
-      <Input label="App ID" value={c.appId} onChange={v => edit('appId', v)} />
-      <Input label="App Secret" type="password" value={c.appSecret} placeholder={s.secretSaved ? '已保存，留空保留' : ''} onChange={v => edit('appSecret', v)} />
-      <Textarea label="群聊 Chat ID" value={c.chatIds} placeholder="每行一个" rows={2} onChange={v => edit('chatIds', v)} />
-      <Textarea label="允许的发送者 Open ID" value={c.senderIds} placeholder="每行一个" rows={2} onChange={v => edit('senderIds', v)} />
-      <Text>在飞书自建应用中启用长连接，订阅 im.message.receive_v1，并将应用加入绑定群聊。</Text></Collapsible> : null}
     </Stack>
     <Stack gap="sm">
       {problem('settings')}
       <Button variant="solid" tone="accent" disabled={read(busy)} onPress={() => act('settings', '保存未成功', async () => {
         const answer = await plugin.request('project.settings', { projectId: p.ref.id, revision: p.revision,
-          roles: { design: c.design, code: c.code, review: c.review } as Project['roles'],
-          feishu: { appId: c.appId, chatIds: split(c.chatIds), senderIds: split(c.senderIds), enabled: c.enabled },
-          ...(c.appSecret ? { appSecret: c.appSecret } : {}) })
+          roles: { design: c.design, code: c.code, review: c.review } as Project['roles'] })
         if (selectedId() === p.ref.id) { set(snapshot, answer); showConfig(answer.project!); set(tab, 'inbox'); show(null) }
       })}>{read(busy) ? '正在保存…' : '保存设置'}</Button>
     </Stack>
     <Stack gap="sm"><Heading level={2}>项目记录</Heading>
       <Text muted>{`${machineName(p.ref.hostId)} · ${p.ref.path}`}</Text>
       <Button disabled={read(busy)} onPress={() => act('project-record', '导出未成功', () => files.saveAs({ suggestedName: `${p.ref.name}-协作记录.json`, mimeType: 'application/json', data: JSON.stringify(p, null, 2) }))}>导出记录</Button>
-      <Button disabled={read(busy)} onPress={() => act('project-record', '显示状态未保存', async () => { await visibility(p.ref.id, !p.hidden); if (!p.hidden) { go({ kind: 'home' }, true); await list() } })}>{p.hidden ? '恢复显示' : '隐藏项目'}</Button>
+      <Button disabled={read(busy)} onPress={() => act('project-record', '显示状态未保存', async () => { await visibility(p.ref.id, !p.hidden); if (!p.hidden) go({ kind: 'home' }, true) })}>{p.hidden ? '恢复显示' : '隐藏项目'}</Button>
       <Text muted>隐藏后不再显示、提醒和对外上报，记录保留，可在设置里恢复。</Text>
       {read(deleting) === p.ref.id ? <Callout tone="warning" title="从工作间删除？"><Text>{p.ref.name}</Text>
         <Text>会删除任务、成果、决定、验收、来源消息、通知、项目设置和主会话绑定，并从 Orca 项目列表移除。磁盘文件和 Git 仓库不动。会先导出记录，删除后不能恢复。</Text>
@@ -457,14 +429,14 @@ export function setup(ctx: PanelContext): void {
     void plugin.request('workspace.overview').then(all => set(workspace, all)).catch(e => fail('', '读取总览未成功', e))
     const id = selectedId(); if (id && (!e.projectId || e.projectId === id)) void load(id)
   }))
-  void list().then(restorePage)
+  void list().then(() => restorePage(false))
 }
 export default function Panel() {
   const refs = read(projects), all = read(workspace), s = read(snapshot), p = s?.project, v = page(), f = read(failure)
   const names: Record<Page['kind'], string> = { home: '工作间首页', project: p?.ref.name || '项目', task: '任务', 'project-settings': '项目设置', settings: '设置', main: '主 agent', connections: '外部连接', connection: '连接', 'add-connection': '添加连接', 'new-connection': '连接信息', machines: '机器', links: '其他工作间', request: '外部请求' }
   const previous = read(navigation).stack.at(-1), task = p?.tasks.find(t => t.id === v.id)
   let content
-  if (selectedId()) content = s && p ? v.kind === 'project-settings' ? settingsPage(s, p) : v.kind === 'task' && task ? taskPage(p, task) : <Stack gap="md"><Row justify="between"><Heading>{p.ref.name}</Heading><IconButton icon="settings" label="项目设置" onPress={openSettings} /></Row><Text muted>{machineName(p.ref.hostId)}</Text>{home(s, p)}</Stack> : <Skeleton lines={3} label="正在读取项目" />
+  if (selectedId()) content = s && p ? v.kind === 'project-settings' ? settingsPage(s, p) : v.kind === 'task' && task ? taskPage(p, task) : <Stack gap="md"><Row justify="between"><Heading>{p.ref.name}</Heading><IconButton icon="settings" label="项目设置" onPress={openSettings} /></Row><Text muted>{machineName(p.ref.hostId)}</Text>{home(p)}</Stack> : <Skeleton lines={3} label="正在读取项目" />
   else if (!all) content = <Skeleton lines={3} label="正在读取工作间" />
   else switch (v.kind) {
     case 'settings': content = workspaceSettings(all); break
@@ -477,7 +449,7 @@ export default function Panel() {
     case 'request': content = requestPage(all.links, v.id || '', links => set(workspace, { ...all, links })); break
     default: content = workspacePage(all)
   }
-  return <Stack gap="md"><Box direction="row" gap="xs" align="center"><Box grow><Select label="项目" labelHidden value={selectedId() || '@home'} options={[{ value: '@home', label: '工作间首页' }, ...(refs || []).map(x => ({ value: x.id, label: fit(`${x.name}${refs!.filter(r => r.name === x.name).length > 1 ? ` · ${x.path.split(/[\\/]/).filter(Boolean).at(-1)}` : ''}`, 36) }))]} onChange={choose} /></Box><IconButton icon="refresh" label="刷新" onPress={() => list().then(restorePage)} /><IconButton icon="settings" label="设置" onPress={() => go({ kind: 'settings' })} /></Box>
+  return <Stack gap="md"><Box direction="row" gap="xs" align="center"><Box grow><Select label="项目" labelHidden value={selectedId() || '@home'} options={[{ value: '@home', label: '工作间首页' }, ...(refs || []).map(x => ({ value: x.id, label: fit(`${x.name}${refs!.filter(r => r.name === x.name).length > 1 ? ` · ${x.path.split(/[\\/]/).filter(Boolean).at(-1)}` : ''}`, 36) }))]} onChange={choose} /></Box><IconButton icon="refresh" label="刷新" onPress={() => list().then(() => restorePage(false))} /><IconButton icon="settings" label="设置" onPress={() => go({ kind: 'settings' })} /></Box>
     {v.kind !== 'home' ? <Button variant="ghost" onPress={back}>{`‹ ${fit(previous ? names[previous.kind] : '工作间首页', 32)}`}</Button> : null}
     {read(deletedExport) ? <Callout tone="success" title="项目已删除"><Text>{read(deletedExport)}</Text><Button onPress={() => set(deletedExport, '')}>关闭</Button></Callout> : null}
     {f?.at === '' ? <Callout tone="danger" title={f.title}><Text>{f.text}</Text><Button onPress={list}>重试</Button></Callout> : null}{content}

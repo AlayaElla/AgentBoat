@@ -12,7 +12,7 @@ export function sample(): Snapshot {
   const p = fresh(refs[0]); p.runId = 'run_example'
   submitTask(p, deliverable)
   submitTask(p, { id: 'task-2', title: '确定首页风格', goal: '选择希望采用的视觉方向', phase: 'blocked', decisions: [{ id: 'style', question: '首页采用哪种风格？', options: ['简洁明亮', '深色科技'] }] })
-  return { project: p, projects: refs, secretSaved: false, connection: { state: 'off', message: '' } }
+  return { project: p, projects: refs }
 }
 // Long names and long content: what a narrow panel has to wrap, cut or hand over to the task record.
 export function longSample(): Snapshot {
@@ -24,5 +24,5 @@ export function longSample(): Snapshot {
     decisions: [{ id: 'style', question: '首页采用哪种风格？'.repeat(120), options: ['选项说明很长'.repeat(30), '深色科技'] }] })
   submitTask(p, { id: 'task-3', title: '确定导航结构', goal: '选择导航方案', phase: 'blocked',
     decisions: [{ id: 'nav', question: '导航采用哪个方案？', options: ['顶部导航，参考 https://example.com/design/navigation/top-bar-with-search', '侧边导航'] }] })
-  return { project: p, projects: [ref, refs[1]], secretSaved: false, connection: { state: 'off', message: '' } }
+  return { project: p, projects: [ref, refs[1]] }
 }

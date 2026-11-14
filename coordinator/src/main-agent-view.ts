@@ -1,11 +1,6 @@
 import type { WorkspaceBinding } from './model'
 
-export const agentName = (v = '') => ({ claude: 'Claude', codex: 'Codex', opencode: 'OpenCode' }[v] || v || '未知')
-export const mainAgentStates = {
-  online: { label: '在线', tone: 'success' },
-  unknown: { label: '待命', tone: 'neutral' },
-  offline: { label: '离线', tone: 'warning' }
-} as const
+import { agentName, mainAgentStates } from './model'
 export function bindingRows(w: WorkspaceBinding) {
   const s = w.session
   return [
@@ -13,7 +8,6 @@ export function bindingRows(w: WorkspaceBinding) {
     { label: '工作区', value: s?.workspaceName || '未知' }, { label: '工作区编号', value: s?.workspace || '未知' },
     { label: '目录', value: s?.path || '未知' }, { label: 'Agent', value: agentName(s?.agent) },
     { label: 'Run', value: w.runId || '未绑定' }, { label: '绑定时间', value: w.boundAt || '未知' },
-    { label: '身份资料', value: w.verification ? 'Run 存在、会话资料：插件核实；Run 归属：会话自报' : '旧记录核实来源未知' },
     ...(w.securityBoundary ? [{ label: '授权边界', value: w.securityBoundary }] : []),
     { label: '在线状态', value: s ? mainAgentStates[s.online].label : '未知' },
     { label: '同时担任项目主 agent', value: w.projectNames?.length ? w.projectNames.join('、') : w.projectNames ? '无' : '未知' },

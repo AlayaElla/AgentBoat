@@ -43,9 +43,9 @@ test('初始化不覆盖模板；记忆按来源隔离、带日期、重复记�
     assert.throws(() => api.testPath(path.join(sandbox, 'real-project')));
     assert.equal(existsSync(path.join(testHome, 'memory/.git')), true);
     const launch = { outcome: { handle: 'agent-1' }, prompt: { outcome: 'journaled' } };
-    assert.equal(api.launchReceipt(launch), 'agent-1');
+    assert.throws(() => api.launchReceipt(launch));
     assert.equal(api.launchReceipt({ launch }), 'agent-1');
-    assert.throws(() => api.launchReceipt({ outcome: { handle: 'agent-1' }, prompt: { outcome: 'unknown' } }));
+    assert.throws(() => api.launchReceipt({ launch: { outcome: { handle: 'agent-1' }, prompt: { outcome: 'unknown' } } }));
   } finally {
     const resolved = path.resolve(testHome);
     assert.equal(path.dirname(resolved), sandbox);

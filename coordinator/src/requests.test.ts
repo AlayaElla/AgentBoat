@@ -1,7 +1,7 @@
 import { assert, test, mockHost, mountWorker } from 'orca/testing'
 import type { OrcaWorkerApi } from 'orca/worker'
 import type { Delivery } from './model'
-import { createCoordinator } from './worker'
+import { testCoordinator as createCoordinator } from './test-runtime'
 import { normalizeFeishu, type MessageTransport } from './feishu'
 import { fresh, submitTask } from './store'
 import { refs } from './fixtures'

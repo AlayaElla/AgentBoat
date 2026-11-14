@@ -19,39 +19,31 @@ receiveEvent(withMessages.project!, { id: 'feishu:1', source: 'feishu', sourceId
 submitTask(withMessages.project!, { ...deliverable, sourceIds: ['feishu:1'] })
 withMessages.project!.deliveries[0] = { ...withMessages.project!.deliveries[0], state: 'uncertain', error: '通知结果待核对，请在主会话检查；原消息已保存' }
 
-const enabled = sample()
-enabled.project!.feishu = { enabled: true, appId: 'cli_example', chatIds: ['oc_example'], senderIds: ['ou_example'] }
-
 const long = longSample()
 const links: LinksSnapshot = { version: 1, revision: 0, workspaceId: 'preview-own', name: '我的工作间', enabled: false, host: '127.0.0.1', port: 0, publicUrl: '', tls: false, listening: '', error: '',
   peers: [{ id: 'preview-connection', workspaceId: 'preview-other', name: '设计工作间', endpoint: '', state: 'active', status: 'connected', scope: 'none', projectIds: [], acceptTasks: 'deny', receivedAt: '2026-11-14T10:00:00Z',
-    report: { workspaceId: 'preview-other', name: '设计工作间', scope: 'details', updatedAt: '2026-11-14T10:00:00Z', projects: [{ id: 'shared-project', name: '展览网页', updatedAt: '', counts: { working: 1, review: 1 }, pending: 1,
+    report: { workspaceId: 'preview-other', name: '设计工作间', scope: 'details', acceptTasks: 'confirm', updatedAt: '2026-11-14T10:00:00Z', projects: [{ id: 'shared-project', name: '展览网页', updatedAt: '', counts: { working: 1, review: 1 }, pending: 1,
       tasks: [{ title: '首页设计', phase: 'ready', decisions: [], acceptance: ['核对首页布局'] }, { title: '移动端适配', phase: 'working', decisions: [], acceptance: [] }] }] } }] }
 
-const state = (s: Snapshot, tab = 'inbox', view: unknown = null, list = refs) => ({
+const state = (s: Snapshot, view: unknown = null, list = refs) => ({
   requests: { 'projects.list': () => ({ projects: list }), 'project.read': () => s,
     'workspace.overview': () => overview([s.project!], { version: 1, revision: 0, runId: '', requests: [] }) },
-  persisted: { plugin: { 'project.selection': 'p1', 'project.tab': tab, 'workspace.page': { page: { kind: view && typeof view === 'object' ? (view as any).kind === 'settings' ? 'project-settings' : 'task' : 'project', projectId: 'p1', ...(view && typeof view === 'object' ? { id: (view as any).id } : {}) }, stack: [{ kind: 'home' }] } } }
+  persisted: { plugin: { 'workspace.page': { page: { kind: view && typeof view === 'object' ? (view as any).kind === 'settings' ? 'project-settings' : 'task' : 'project', projectId: 'p1', ...(view && typeof view === 'object' ? { id: (view as any).id } : {}) }, stack: [{ kind: 'home' }] } } }
 })
 export default defineCheck({
   otherWorkspaces: { requests: { 'projects.list': () => ({ projects: [] }), 'workspace.overview': () => ({ ...overview([], { version: 1, revision: 0, runId: '', requests: [] }), links }) } },
   fresh: { requests: { 'projects.list': () => ({ projects: refs }), 'workspace.overview': () => overview([pending.project!, fresh(refs[1])], { version: 1, revision: 0, runId: '', requests: [] }) } },
   noProjects: { requests: { 'projects.list': () => ({ projects: [] }), 'workspace.overview': () => overview([], { version: 1, revision: 0, runId: '', requests: [] }) } },
-  listError: { requests: { 'projects.list': () => ({ projects: [], error: '无法读取 Orca 项目：请检查 Orca 与 CLI 路径' }), 'workspace.overview': () => overview([], { version: 1, revision: 0, runId: '', requests: [] }) } },
+  listError: { requests: { 'workspace.overview': () => overview([], { version: 1, revision: 0, runId: '', requests: [] }, '无法读取 Orca 项目：请检查 Orca 与 CLI 路径') } },
   unbound: state(unbound),
   inbox: state(pending),
-  legacyTab: state(pending, 'decision', 'history'),
   rereview: state(secondVersion),
-  tasks: state(modifying, 'tasks'),
-  taskRecord: state(modifying, 'tasks', { kind: 'task', id: 'task-1' }),
-  messages: state(withMessages, 'messages'),
+  tasks: state(modifying),
+  taskRecord: state(modifying, { kind: 'task', id: 'task-1' }),
+  messages: state(withMessages),
   unconfirmed: state(withMessages),
-  settings: state(pending, 'inbox', { kind: 'settings' }),
-  connecting: state({ ...enabled, connection: { state: 'connecting', message: '' } }),
-  connected: state({ ...enabled, secretSaved: true, connection: { state: 'connected', message: '' } }),
-  connectionError: state({ ...enabled, connection: { state: 'error', message: '飞书连接失败，请检查应用凭据、网络和事件订阅设置' } }),
-  connectionErrorSettings: state({ ...enabled, connection: { state: 'error', message: '飞书连接失败，请检查应用凭据、网络和事件订阅设置' } }, 'inbox', { kind: 'settings' }),
-  long: state(long, 'inbox', null, long.projects),
-  longTask: state(long, 'tasks', { kind: 'task', id: 'task-1' }, long.projects),
-  longDecision: state(long, 'inbox', { kind: 'task', id: 'task-2' }, long.projects)
+  settings: state(pending, { kind: 'settings' }),
+  long: state(long, null, long.projects),
+  longTask: state(long, { kind: 'task', id: 'task-1' }, long.projects),
+  longDecision: state(long, { kind: 'task', id: 'task-2' }, long.projects)
 })

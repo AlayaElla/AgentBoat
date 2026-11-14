@@ -9,7 +9,7 @@ node workspace/workspace.mjs init
 node workspace/workspace.mjs templates
 ```
 
-安装只复制到 `~/.agents/skills/agentboat-workspace`，让 `~/.claude/skills/agentboat-workspace` 指向它；Windows 用 junction，不弹管理员授权。已有其他链接/目录会拒绝覆盖。skill 全文在 [skill/agentboat-workspace/SKILL.md](skill/agentboat-workspace/SKILL.md)，加载后说“开启工作间管理”。安装不启动 agent，不改变主 Run。仓库搬迁后更新 skill 中两个脚本路径再安装。
+安装只复制到 `~/.agents/skills/agentboat-workspace`，让 `~/.claude/skills/agentboat-workspace` 指向它；Windows 用 junction，不弹管理员授权。已有其他链接/目录会拒绝覆盖。skill 全文在 [skill/agentboat-workspace/SKILL.md](skill/agentboat-workspace/SKILL.md)，加载后说“开启工作间管理”。安装不启动 agent，不改变主 Run。
 
 `AGENTBOAT_HOME` 默认 `~/.agentboat`；init 保留已有模板和记忆，不覆盖定制。目录有 templates、memory、projects（立项日志）、assignments（派活日志）、requests（插件请求原文）。记忆有独立 Git 仓库，脚本只暂存不提交；主人的明确内容和推断分开，外部工作间单独目录。所有来源与日志可能含用户原话，按本机私有资料保管，不放凭据。
 
@@ -17,7 +17,7 @@ node workspace/workspace.mjs templates
 
 工作间互联在插件“设置 → 其他工作间”中管理；现读命令是 `node coordinator/scripts/client.mjs links-refresh` 与 `links-read`。跨工作间派活用 `requests-read/send/decide/attach/update`，写命令均从标准输入接收 JSON；受理后由主 agent 通过 attach 登记独立外部来源，不能转给第三个工作间。外部记忆按 workspaceId 独立保存。输入格式和验证边界见 [工作间连接](../coordinator/LINKS.md)。
 
-默认 [templates/code.json](templates/code.json)：项目主 agent Claude，设计 Claude，编码和审查 Codex，来源 empty。模板可直接编辑 JSON；agent 支持 claude/codex，可附 model 和 effort，effort 需要 model。没有指定模型时跟随 Orca 设置。每项工作只起需要的 agent。
+默认 [templates/code.json](templates/code.json)：项目主 agent Claude，设计 Claude，代码和审查 Codex，来源 empty。模板可直接编辑 JSON；agent 支持 claude/codex，可附 model 和 effort，effort 需要 model。没有指定模型时跟随 Orca 设置。每项工作只起需要的 agent。
 
 保存 UTF-8 JSON 后调用（支持 BOM）：
 
@@ -103,22 +103,24 @@ node workspace/workspace.mjs dispatch dispatch.json
 {
   "projectId": "精确项目编号",
   "revision": 3,
-  "taskId": "task-id",
-  "kind": "decision",
-  "itemId": "decision-id",
-  "answer": "采用方案 A",
-  "note": "用户原话：采用方案 A。来源：会话/消息编号；日期：2026-11-14"
+  "items": [{
+    "taskId": "task-id",
+    "kind": "decision",
+    "itemId": "decision-id",
+    "answer": "采用方案 A",
+    "note": "用户原话、会话或消息编号、日期"
+  }]
 }
 ```
 
-验收输入同样带 projectId/revision/taskId/itemId，kind=acceptance，附 itemRevision（当前验收版本）、result=passed 或 changes_requested，note 保留用户原话和来源。changes_requested 必须填写修改意见。
+同项目的全部结论放进 items 一次提交，先校验再同版本写入，一项无效则整批拒绝。验收条目 kind=acceptance，带 taskId/itemId，附 itemRevision（当前验收版本）、result=passed 或 changes_requested，note 保留用户原话和来源。changes_requested 必须填写修改意见。
 
 ```powershell
 node coordinator/scripts/client.mjs feedback feedback.json
 node coordinator/scripts/client.mjs read <projectId>
 ```
 
-feedback 调用已有 project.feedback，不发起新任务、不带虚构 requestId。超时读 history 确认，不能盲重发；冲突重新读取。项目完成状态仍由项目主 agent 跟进。主 agent 用 overview 现读状态，用 message 转达用户原话，输入详见现有项目协作 skill 的 references/bridge.md。
+feedback 调用 project.feedback，不发起新任务、不带虚构 requestId。超时读 history 确认，不能盲重发；冲突重新读取。项目完成状态仍由项目主 agent 跟进。主 agent 用 overview 现读状态，用 message 转达用户原话，输入详见现有项目协作 skill 的 references/bridge.md。
 
 ## 长期记忆
 
@@ -139,13 +141,6 @@ git -C "$env:AGENTBOAT_HOME/memory" diff --cached
 
 kind=inference 存 inferences.md；kind=external 要加 workspaceId，存 external/<workspaceId>.md。来源可包含检索链接、证据和外部开放范围，重复 id 拒绝追加。脚本不自行判断一段话是否为主人授权，由主 agent 按 skill 核实；项目状态留在插件，对话原文用 Orca search。
 
-## 验证
+## 开发和验证
 
-```powershell
-$env:AGENTBOAT_SANDBOX = 'D:\agentboat-sandbox'   # 不设时用系统临时目录下的 agentboat-sandbox
-$env:AGENTBOAT_HOME = 'D:\agentboat-sandbox\agentboat-demo-home'
-$env:AGENTBOAT_TEST_ONLY = '1'
-node --test workspace/workspace.test.mjs
-```
-
-测试模式将立项/派活限制在 sandbox 下名称含 agentboat-demo 的目录，并核对目录链接。测试主 agent 用明确设置的便宜模型和短目标；不得向真实项目写入，不改工作间主绑定。实时立项、派活与清理证据见本目录 T6-delivery.md；单元检查不代替真实 Orca 启动结果。
+开发、测试、备份、构建与重载流程统一见 [coordinator/README.md](../coordinator/README.md)。辅助脚本测试只操作沙盒下 agentboat-demo 临时目录；不向真实项目写入、不改主绑定，模拟检查不代替真实 Orca 启动结果。

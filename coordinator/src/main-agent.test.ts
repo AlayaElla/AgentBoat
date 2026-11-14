@@ -1,7 +1,7 @@
 import { assert, mockHost, mountWorker, test } from 'orca/testing'
 import type { OrcaWorkerApi } from 'orca/worker'
 import type { AgentSession } from './model'
-import { createCoordinator } from './worker'
+import { testCoordinator as createCoordinator } from './test-runtime'
 import { fresh } from './store'
 import { refs } from './fixtures'
 import { mainTargets, OrcaRuntime } from './runtime'
@@ -69,7 +69,7 @@ for (const mode of ['existing', 'new'] as const) test(`main takeover ${mode}: ta
     const good = { ...bind, revision: (await current()).revision, token }
     const savedBeforeCheck = structuredClone(host.data().storage), sendsBeforeCheck = sends.length
     const checked = await worker.request('workspace.agent', { ...good, checkOnly: true })
-    assert.equal(checked.check?.canTakeOver, true); assert.equal(checked.check?.verification.runOwnership, 'self-reported')
+    assert.equal(checked.check?.canTakeOver, true)
     assert.deepEqual(host.data().storage, savedBeforeCheck); assert.equal(sends.length, sendsBeforeCheck)
     assert.equal((await worker.request('workspace.agent', { ...good, checkOnly: true })).check?.canTakeOver, true)
     await assert.rejects(() => worker.request('workspace.agent', { ...good, checkOnly: true, token: undefined }))
@@ -79,7 +79,7 @@ for (const mode of ['existing', 'new'] as const) test(`main takeover ${mode}: ta
     good.revision = (await current()).revision
     const bound = await worker.request('workspace.agent', good)
     assert.equal(bound.runId, 'run_next'); assert.equal(bound.session?.title, session.title); assert.equal(bound.session?.online, 'online')
-    assert.equal(bound.verification?.runOwnership, 'self-reported'); assert.ok(bound.securityBoundary?.includes('一次性凭据'))
+    assert.ok(bound.securityBoundary?.includes('一次性凭据'))
     assert.ok(bound.boundAt); assert.equal(bound.takeover, undefined)
     assert.deepEqual(await worker.request('workspace.agent', good), bound)
     await assert.rejects(() => worker.request('workspace.agent', { ...good, revision: bound.revision, requestId: 'reused-token' }))
@@ -97,7 +97,6 @@ for (const mode of ['existing', 'new'] as const) test(`main takeover ${mode}: ta
     await canvas.load()
     const node = canvas.graph('projects').nodes.find(n => n.id === 'main')!
     for (const value of [session.title, session.path, session.workspaceName, 'Claude', 'run_next', '在线']) assert.ok(node.detail.includes(value))
-    assert.ok(node.detail.includes('Run 归属：会话自报')); assert.ok(node.detail.includes('插件核实'))
     const saved = JSON.stringify(host.data().storage)
     await worker.request('workspace.overview'); await worker.request('project.read', { projectId: 'p1' })
     assert.equal(JSON.stringify(host.data().storage), saved)
@@ -131,7 +130,7 @@ test('chatNotDeclarable: plugin independently reads Run and sessions, never quer
 test('new-agent launch accepts Orca 1.4.258 flat receipts and uses the chat session ID, not its tab handle', async () => {
   const runtime = new OrcaRuntime(async () => 'unused')
   const chat = { outcome: { kind: 'structured', sessionId: 'claude_test', handle: 'structured-agent-session-claude_test' }, prompt: { outcome: 'journaled' } }
-  for (const result of [chat, { launch: chat }]) {
+  for (const result of [chat]) {
     ;(runtime as any).call = async () => result
     assert.equal(await runtime.launchMain('workspace', 'claude', 'test'), 'orca_session_id:claude_test')
   }
@@ -168,7 +167,7 @@ test('status count follows submissions, feedback, hide and restore; command open
     assert.equal(await count(), '工作间 · 待处理 0')
     p = (await worker.request('project.visibility', { projectId: 'p1', revision: p.revision, hidden: false })).project!
     assert.equal(await count(), '工作间 · 待处理 1')
-    await worker.request('project.feedback', { projectId: 'p1', revision: p.revision, taskId: 't', kind: 'decision', itemId: 'd', answer: '是' })
+    await worker.request('project.feedback', { projectId: 'p1', revision: p.revision, items: [{ taskId: 't', kind: 'decision', itemId: 'd', answer: '是'  }] })
     assert.equal(await count(), '工作间 · 待处理 0')
     await worker.command('workspace.overview'); assert.equal(opened.length, 1)
     assert.ok(worker.posts.some(p => p.event === 'workspace.open'))

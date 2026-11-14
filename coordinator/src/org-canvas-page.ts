@@ -1,4 +1,5 @@
-import { OrgCanvas, activateKey, moved, scopes, rules, agents, roles, statuses, type Layer, type Node, type Edge, type Point } from './org-canvas'
+import { scopes, rules, agents, roles, statuses } from './model'
+import { OrgCanvas, activateKey, moved, type Layer, type Node, type Edge, type Point } from './org-canvas'
 import type { Project } from './model'
 import type { Sharing } from './links'
 import type { OrcaFrameApi } from 'orca/frame'
@@ -37,7 +38,7 @@ export function startCanvas(root: HTMLElement, api: Pick<OrcaFrameApi, 'plugin' 
   async function refresh() {
     if (loading) { reload = true; return }
     loading = true
-    try { await model.load(); if (!closed) { draw(); notice.textContent = model.overview.error || model.links.error || (layer === 'projects' && model.overview.hidden?.length ? `已隐藏 ${model.overview.hidden.length} 个项目` : '') } }
+    try { await model.load(); if (!closed) draw() }
     catch (e) { report(e) }
     finally { loading = false; if (reload && !busy) { reload = false; void refresh() } }
   }
@@ -45,19 +46,19 @@ export function startCanvas(root: HTMLElement, api: Pick<OrcaFrameApi, 'plugin' 
   function form(title: string) {
     editor.replaceChildren(); editor.hidden = false
     const f = el('form'), h = el('h2', title), close = button('关闭', () => { dismiss(); viewport.focus() })
-    f.append(h, close); editor.append(f); h.tabIndex = -1; h.focus(); return f
+    f.onsubmit = e => e.preventDefault(); f.append(h, close); editor.append(f); h.tabIndex = -1; h.focus(); return f
   }
   function field<T extends HTMLElement>(f: HTMLElement, title: string, control: T): T { const label = el('label', title); label.append(control); f.append(label); return control }
   function select(f: HTMLElement, title: string, values: Record<string, string>, value: string) {
     const s = el('select'); Object.entries(values).forEach(([value, text]) => { const o = el('option', text); o.value = value; s.append(o) }); s.value = value; return field(f, title, s)
   }
-  function submit(f: HTMLFormElement, work: () => Promise<unknown>) { const b = el('button', '保存'); b.className = 'primary'; b.type = 'submit'; f.append(b); f.onsubmit = e => { e.preventDefault(); void run(work) } }
+  function saveButton(f: HTMLFormElement, work: () => Promise<unknown>) { const b = button('保存', () => run(work)); b.className = 'primary'; f.append(b) }
   async function openProject(id: string) {
     await run(async () => {
       const p = await model.project(id), f = form(p.ref.name)
       const info = el('p', `${p.ref.path}\n${p.ref.id}\n主 Run：${p.runId || '未绑定'}\n主 agent：${p.mainAgent ? agents[p.mainAgent] : p.runId ? '种类未知' : '未绑定'}`); info.className = 'identity'; f.append(info)
       const controls = Object.entries(roles).map(([key, label]) => [key, select(f, label, agents, p.roles[key as keyof typeof roles])] as const)
-      submit(f, async () => { await model.saveRoles(p, Object.fromEntries(controls.map(([key, s]) => [key, s.value])) as Project['roles']); dismiss(); draw(); notice.textContent = '角色分工已保存' })
+      saveButton(f, async () => { await model.saveRoles(p, Object.fromEntries(controls.map(([key, s]) => [key, s.value])) as Project['roles']); dismiss(); draw(); notice.textContent = '角色分工已保存' })
     })
   }
   function openPeer(id: string) {
@@ -65,7 +66,7 @@ export function startCanvas(root: HTMLElement, api: Pick<OrcaFrameApi, 'plugin' 
     const p = model.links.peers.find(p => p.id === id)
     if (!p) return
     const revision = model.links.revision
-    const f = form(p.name), state = el('p', `${statuses[p.status]}\n对方开放：${p.report ? scopes[p.report.scope] : '未知'}\n对方接受派活：${p.report?.acceptTasks ? rules[p.report.acceptTasks] : '未知'}`)
+    const f = form(p.name), state = el('p', `${statuses[p.status]}\n对方开放：${p.report ? scopes[p.report.scope] : '离线'}\n对方接受派活：${p.report ? rules[p.report.acceptTasks] : '离线'}`)
     state.className = 'identity'; f.append(state)
     if (p.receivedAt) f.append(el('p', `最近收到：${new Date(p.receivedAt).toLocaleString('zh-CN')}`))
     const scope = select(f, '向对方开放', scopes, p.scope), rule = select(f, '接受对方派活', rules, p.acceptTasks), projects = el('fieldset')
@@ -76,7 +77,7 @@ export function startCanvas(root: HTMLElement, api: Pick<OrcaFrameApi, 'plugin' 
       const label = el('label'); label.className = 'check'; label.append(check, el('span', `${project.ref.name} · ${project.ref.path}`)); projects.append(label)
     }
     f.append(projects)
-    if (p.state === 'active') submit(f, async () => {
+    if (p.state === 'active') saveButton(f, async () => {
       // Hidden or temporarily unavailable projects are kept unless explicitly changed in the original settings.
       const projectIds = [...p.projectIds.filter(id => !checks.some(c => c.value === id)), ...checks.filter(c => c.checked).map(c => c.value)]
       await model.share(id, { scope: scope.value as Sharing['scope'], acceptTasks: rule.value as Sharing['acceptTasks'], projectIds }, revision); dismiss(); draw(); notice.textContent = '连接规则已保存'
@@ -104,7 +105,6 @@ export function startCanvas(root: HTMLElement, api: Pick<OrcaFrameApi, 'plugin' 
       const pending = model.links.peers.some(p => p.state === 'pending')
       dismiss(); draw(); notice.textContent = pending ? '连接结果待核对，请刷新原连接。不要重复配对。' : '已连接'
     })))
-    f.onsubmit = e => e.preventDefault()
   }
   function open(item: Node | Edge) {
     if (busy) return
@@ -129,7 +129,7 @@ export function startCanvas(root: HTMLElement, api: Pick<OrcaFrameApi, 'plugin' 
     const focus = document.activeElement?.getAttribute('data-id')
     graph = model.graph(layer); svg.replaceChildren()
     tabs.forEach((tab, i) => tab.setAttribute('aria-pressed', String((i === 0 ? 'links' : 'projects') === layer)))
-    notice.textContent = layer === 'projects' && model.overview.hidden?.length ? `已隐藏 ${model.overview.hidden.length} 个项目` : ''
+    notice.textContent = model.overview.error || model.links.error || (layer === 'projects' && model.overview.hidden?.length ? `已隐藏 ${model.overview.hidden.length} 个项目` : layer === 'links' && !graph.edges.length ? '尚未连接其他工作间' : '')
     for (const edge of graph.edges) {
       const group = ns('g', { class: 'edge', tabindex: '0', role: 'button', 'aria-label': edge.lines.length ? `${model.links.peers.find(p => p.id === edge.peerId)?.name} · ${edge.lines.join('；')}` : '编辑项目分工', 'data-id': edge.id })
       group.append(ns('path', { class: 'hit' }), ns('path', { class: 'line' }))
@@ -150,7 +150,6 @@ export function startCanvas(root: HTMLElement, api: Pick<OrcaFrameApi, 'plugin' 
         if (next) { e.preventDefault(); Object.assign(node, next); place(); void model.savePosition(layer, node.id, next).catch(report) }
       }; svg.append(group)
     }
-    if (!graph.edges.length && layer === 'links') notice.textContent = '尚未连接其他工作间'
     place()
     if (centered !== layer) {
       centered = layer

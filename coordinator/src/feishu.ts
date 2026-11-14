@@ -57,12 +57,12 @@ async function imageBytes(url: string, root?: string): Promise<Buffer> {
 
 export interface MessageTransport {
   state(appId: string): ConnectionState
-  sync(projects: Project[], secret: (id: string) => Promise<string | null>): Promise<void>
+  sync(config: import('./model').FeishuConfig, secret: string | null): Promise<void>
   send(delivery: Delivery): Promise<string>
   stop(): void
 }
 
-export function notifyFeishu(before: Project, after: Project, config: Project['feishu']): void {
+export function notifyFeishu(before: Project, after: Project, config: import('./model').FeishuConfig): void {
   if (!config.enabled || after.hidden) return
   const prior = new Set(workspaceNotices(before).map(n => fingerprint(n.key)))
   for (const n of workspaceNotices(after)) {
@@ -112,15 +112,9 @@ export class FeishuSources implements MessageTransport {
   private clients = new Map<string, { client: WSClient; api: Client; signature: string; state: ConnectionState }>()
   constructor(private receive: (appId: string, event: SourceEvent) => Promise<void>, private changed: () => void, private loadImage = imageBytes) {}
   state(appId: string): ConnectionState { return this.clients.get(appId)?.state ?? { state: 'off', message: '' } }
-  async sync(projects: Project[], secret: (id: string) => Promise<string | null>): Promise<void> {
+  async sync(config: import('./model').FeishuConfig, secret: string | null): Promise<void> {
     const wanted = new Map<string, string>()
-    for (const p of projects.filter(x => x.feishu.enabled)) {
-      const value = await secret(p.ref.id)
-      if (!value || !p.feishu.appId) continue
-      const previous = wanted.get(p.feishu.appId)
-      if (previous && previous !== value) throw new Error('共用同一个飞书应用的项目需要使用相同凭据')
-      wanted.set(p.feishu.appId, value)
-    }
+    if (config.enabled && config.appId && secret) wanted.set(config.appId, secret)
     for (const [id, entry] of this.clients) {
       const value = wanted.get(id)
       if (!value || entry.signature !== fingerprint(value)) { entry.client.close({ force: true }); this.clients.delete(id) }

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { initialize, create, validate, publish, list } from './project-skills.mjs';
+import { initialize, create, validate, publish, list, digest } from './project-skills.mjs';
 
 const sandbox = path.resolve(process.env.AGENTBOAT_SANDBOX || path.join(os.tmpdir(), 'agentboat-sandbox'));
 test('提议不进入发现目录；审核后发布同内容副本；更新保护外来文件和已编辑副本', () => {
@@ -17,6 +17,7 @@ test('提议不进入发现目录；审核后发布同内容副本；更新保�
     fs.writeFileSync(path.join(draft, 'SKILL.md'), '---\nname: demo-check\ndescription: "在检查 demo 时使用"\n---\n\n回复 DEMO_OK。\n');
     fs.mkdirSync(path.join(draft, 'references'));
     fs.writeFileSync(path.join(draft, 'references/check.md'), '检查正文');
+    fs.writeFileSync(path.join(root, '.agents/skills/notes.txt'), 'not a skill');
     assert.equal(list(root)[0].status, 'proposal');
     assert.equal(fs.existsSync(path.join(root, '.claude')), false);
     assert.throws(() => publish(root, 'demo-check'), /reviewer/);
@@ -38,4 +39,8 @@ test('提议不进入发现目录；审核后发布同内容副本；更新保�
     assert.equal(path.dirname(root), sandbox);
     fs.rmSync(root, { recursive: true, force: true });
   }
+});
+
+test('skill digest has a fixed UTF-8 LF contract shared with hands', () => {
+  assert.equal(digest({ 'SKILL.md': Buffer.from('---\nname: demo-check\ndescription: "在检查 demo 时使用"\n---\n\n回复 DEMO_OK。\n'), 'references/check.md': Buffer.from('检查正文') }), 'd3bc45171dec7cd7bb88f2d02f2738735cd501f0ae62e71d356e8d1a5f0baa94');
 });

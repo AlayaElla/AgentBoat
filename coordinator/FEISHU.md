@@ -1,6 +1,6 @@
 # 工作间飞书接入
 
-在插件“设置 → 外部连接 → 飞书”配置。使用企业自建应用的机器人，主机需开着 Orca 和插件并能访问飞书；不需要公网回调地址。原项目飞书设置继续可用；同一应用的同一个会话只能属于工作间或一个项目，相同应用共用一个长连接且凭据必须一致。
+在插件“设置 → 外部连接 → 飞书”配置。使用企业自建应用的机器人，主机需开着 Orca 和插件并能访问飞书；不需要公网回调地址。飞书仅有一个工作间连接，允许用户与会话名单统一设置。普通消息交工作间主 agent，项目资料由它用 message 转达。
 
 ## 飞书开放平台设置
 
@@ -11,7 +11,7 @@
 5. 在后台的 API 调试台，用“发送消息”或“接收消息”事件的调试记录取得当前应用下自己的 `open_id` 和会话 `chat_id`。群 ID 也可通过官方[获取群信息](https://open.feishu.cn/document/server-docs/group/chat/get)调试取得。单聊可先发布，再用开发平台“事件与回调”的调试记录查看自己发给机器人的那条事件：`sender.sender_id.open_id`、`message.chat_id`。这些 ID 是应用作用域的，不从其他应用复制。
 6. 在 Orca“工作间 → 设置 → 外部连接 → 飞书”填写 App ID、App Secret、允许用户 Open ID、允许会话 Chat ID 并启用。每行一个。提醒会发送到**全部允许会话**，群成员也能看见项目内容；个人使用优先填与机器人的单聊。App Secret 只输入密码框，进入 Orca 密钥存储；不要写 JSON 配置、聊天、截图或命令行。
 7. 如果控制台保存长连接订阅时要求应用在线，先在插件保存并启用配置，待长连接建立再到控制台保存订阅、发布。插件显示“连接中”仅说明正在建连，“已连接”才是 SDK 建连回报；收发仍需自己配置应用后验证。
-8. 绑定工作间主 agent（沿用 `main-read` / `main-bind`），在飞书发一句普通消息，主 agent 收到后通过 `feishu-reply` 回复。工作间提醒直接由插件推送，主 agent 未绑定或不在线也不影响新提醒发送。
+8. 绑定工作间主 agent（见工作间 skill），在飞书发一句普通消息，主 agent 收到后通过 `feishu-reply` 回复。工作间提醒直接由插件推送，主 agent 未绑定或不在线也不影响新提醒发送。
 
 依据：[消息常见问题](https://open.feishu.cn/document/uAjLw4CM/ukTMukTMukTM/reference/im-v1/guide/faq)、[接收消息事件](https://open.feishu.cn/document/server-docs/im-v1/message/events/receive)、[发送消息](https://open.feishu.cn/document/server-docs/im-v1/message/create)、[回复消息](https://open.feishu.cn/document/server-docs/im-v1/message/reply)、[上传图片](https://open.feishu.cn/document/server-docs/im-v1/image/create)。这些步骤依据官方文档整理，未用真实应用实测。
 
@@ -23,7 +23,7 @@
 - 必须回复准确提醒。普通会话里的“通过”、不明消息、已处理或已更新的提醒会追问，不推断为全部通过。项目、任务、事项、版本由发出的提醒记录确定，不能通过回复内容改成其他项目。只允许用户名单内的人记录反馈，且会话也必须被允许；未授权消息忽略，不发送项目内容给它。
 - 图片成果支持 PNG/JPEG/GIF/WebP/BMP 文件或带这些扩展名的 HTTP(S) 图片链接，上传飞书后以富文本图片展示。本机文件仅从成果所属项目真实目录内读取，拒绝越界符号链接；网络图片拒绝本地/私有地址和私有 DNS 解析，逐次校验重定向，上限 10 MB。文件路径不会发送到飞书，只显示“在 App 里查看”；图片上传失败也明确标明。无图片扩展名的下载页保留为链接。
 - 新受阻和完成也直接提醒；读记录、启用飞书或重启不会补发历史事项。每个验收新版本独立提醒。原话、发送者、消息编号和接收时间保留在项目反馈历史中；同一消息重复事件不重复登记。
-- 发送超时或重启前正在发送的消息保留 `uncertain`，不自动重发。`sent` 表示飞书 API 或 Orca 已接受，不证明用户阅读，也不证明主 agent 已响应。每项目和工作间消息记录各有 200 KB 上限，达到上限会保留旧记录、拒绝新写入，当前无分页归档入口。
+- 发送超时或重启前正在发送的消息保留 `uncertain`，不自动重发。`sent` 表示飞书 API 或 Orca 已接受，不证明用户阅读，也不证明主 agent 已响应。工作间收发记录接近 200 KB 前裁剪已结束消息的正文，保留来源编号、投递回执摘要和去重编号；待处理与结果待核对的正文保留。若活动内容仍超过容量，拒绝本次写入并保留原记录。
 
 ## 卡片回调结论
 
@@ -31,10 +31,10 @@
 
 ## 新请求与数据
 
-`workspace.feishu`：`{operation:'read'}` 读取配置、连接状态、来源与发送记录；`{operation:'save',revision,feishu:{enabled,appId,senderIds,chatIds},appSecret?}` 保存。Secret 只能存入 `secrets:own`，读取仅返回 `secretSaved`。CLI 仅提供 `feishu-read`，避免把凭据放入输入文件。
+`workspace.feishu` 只接受 `{operation:'read'}`，读取配置、状态、来源与发送记录。配置保存走 `workspace.connections`：`{operation:'save',connectionId,name,revision,feishu:{enabled,appId,senderIds,chatIds},appSecret?}`；新建时用 type=feishu。Secret 进入 Orca 加密存储，读取仅返回 secretSaved；存储写入成功后才更新密钥。
 
-`workspace.reply`：`{runId,eventId,requestId,text}`，对应 CLI `feishu-reply`。来源来自工作间收信记录，目标会话不可由 agent 指定；绑定 Run 和允许范围均会检查。
+`workspace.reply` 输入 `{runId,eventId,requestId,text}`，对应 CLI `feishu-reply`。来源决定回复目标，绑定 Run 和允许范围均会检查。相同 requestId 必须有相同正文与来源；裁剪后仍可校验去重摘要。
 
-新存储键 `workspace.messaging` 按需写入；旧项目保持 version 1，只在真实产生飞书提醒时给已有 Delivery 增加可选 `external`，保存渠道、目标与消息 ID。接收消息新增可选 `replyToIds`。旧项目飞书路由、反馈、任务、请求、验收历史和 workspace 主 Run 结构不迁移。没有新增 manifest 权限、面板、命令或状态栏入口。
+回复决定和验收提醒会调用批量 project.feedback（items 只有当前一项），校验事项尚待用户处理，写入反馈原话与来源。删除飞书连接只清除其配置、密钥、收发记录，其他工作间请求通知的去重回执保留。
 
-企业微信可复用消息队列、Delivery 发送状态和 FeedbackTarget；飞书 SDK、事件格式、图片上传、富文本及提醒排版集中在 `src/feishu.ts`。
+开发和发布流程见 [README](README.md)。

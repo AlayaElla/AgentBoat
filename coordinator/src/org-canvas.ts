@@ -3,11 +3,7 @@ import type { Overview, Project, Snapshot } from './model'
 import type { LinksSnapshot, Sharing } from './links'
 import { bindingRows, takeoverText } from './main-agent-view'
 
-export const scopes = { none: '不开放', summary: '项目摘要', details: '含任务详情' }
-export const rules = { deny: '不接受', confirm: '需我确认', auto: '自动受理' }
-export const statuses = { connected: '已连接', offline: '离线', pending: '待核对', revoked: '已断开' }
-export const agents = { claude: 'Claude', codex: 'Codex' }
-export const roles = { design: '设计', code: '编码', review: '审查' }
+import { scopes, rules, statuses, agents, roles, connectionStates } from './model'
 export type Layer = 'links' | 'projects'
 export type Point = { x: number; y: number }
 export type Node = Point & { id: string; title: string; detail: string; lines?: string[]; projectId?: string; peerId?: string }
@@ -40,9 +36,9 @@ export class OrgCanvas {
   constructor(readonly api: Pick<OrcaFrameApi, 'plugin' | 'storage'>) {}
   async load() {
     await this.writes
-    const [all, links, positions] = await Promise.all([this.api.plugin.request('workspace.overview'), this.api.plugin.request('workspace.links', { operation: 'read' }), this.api.storage.get(layoutKey)])
+    const [all, positions] = await Promise.all([this.api.plugin.request('workspace.overview'), this.api.storage.get(layoutKey)])
     const snapshots = await Promise.all(all.projects.map(p => this.api.plugin.request('project.read', { projectId: p.ref.id })))
-    this.overview = all; this.links = links; this.positions = layout(positions)
+    this.overview = all; this.links = all.links!; this.positions = layout(positions)
     this.projects = snapshots.flatMap(s => s.project && !s.project.hidden ? [{ ...s.project, mainAgent: s.mainAgent }] : [])
   }
   graph(layer: Layer): { nodes: Node[]; edges: Edge[] } {
@@ -57,7 +53,7 @@ export class OrgCanvas {
         add({ id: `peer:${p.id}`, title: p.name, detail: statuses[p.status], peerId: p.id, x: Math.round(center.x + Math.cos(angle) * radius), y: Math.round(center.y + Math.sin(angle) * radius) })
         edges.push({ id: `link:${p.id}`, from: 'own', to: `peer:${p.id}`, peerId: p.id, lines: [
           `我 → 对方：${scopes[p.scope]} · ${rules[p.acceptTasks]}`,
-          `对方 → 我：${p.report ? scopes[p.report.scope] : '未知'} · ${p.report?.acceptTasks ? rules[p.report.acceptTasks] : '未知'}`,
+          `对方 → 我：${p.report ? scopes[p.report.scope] : '离线'} · ${p.report ? rules[p.report.acceptTasks] : '离线'}`,
           statuses[p.status]
         ] })
       })
@@ -67,7 +63,7 @@ export class OrgCanvas {
       const lines = info.flatMap(s => s.match(/.{1,22}/gu) ?? [])
       add({ id: 'main', title: '工作间主 agent', detail: info.join('\n'), lines, x: 40, y: 100 })
       for (const [i, c] of (this.overview.connections ?? []).entries()) {
-        add({ id: c.id, title: `${c.name} · ${c.type === 'a2a' ? 'A2A' : '飞书'}`, detail: { off: '未启用', connecting: '连接中', connected: '已连接', error: '连接异常', unchecked: '未检查' }[c.state], x: 40, y: 430 + i * 100 })
+        add({ id: c.id, title: `${c.name} · ${c.type === 'a2a' ? 'A2A' : '飞书'}`, detail: connectionStates[c.state], x: 40, y: 430 + i * 100 })
         edges.push({ id: `${c.id}-main`, from: c.id, to: 'main', lines: [] })
       }
       this.projects.forEach((p, i) => {
@@ -103,7 +99,7 @@ export class OrgCanvas {
     return { ...s.project, mainAgent: s.mainAgent }
   }
   async saveRoles(p: Project, value: Project['roles']) {
-    const s = await this.api.plugin.request('project.settings', { projectId: p.ref.id, revision: p.revision, roles: value, feishu: p.feishu })
+    const s = await this.api.plugin.request('project.settings', { projectId: p.ref.id, revision: p.revision, roles: value })
     this.projects = this.projects.map(p => p.ref.id === s.project?.ref.id ? { ...s.project, mainAgent: s.mainAgent } : p)
   }
 }

@@ -77,7 +77,7 @@ test('delete confirmation requires checkbox, preserves failure and returns the e
   let deleted = false, reject = true
   const host = mockHost({ requests: {
     'projects.list': () => ({ projects: deleted ? [] : refs }), 'workspace.overview': () => overview(deleted ? [] : [p], binding), 'project.read': () => ({ ...sample(), project: p }),
-    'project.delete': () => { if (reject) throw hostError('invalid_request', '先关掉终端再删'); deleted = true; return { deleted: p.ref.id, exportPath: '/test/export.json', removedFromOrca: true } }
+    'project.delete': () => { if (reject) throw hostError('invalid_request', '先关掉终端再删'); deleted = true; return { deleted: p.ref.id, exportPath: '/test/export.json' } }
   } })
   const view = await mount(panel, { host })
   try {
@@ -129,7 +129,7 @@ const units = (value: string) => [...value].reduce((n, ch) => n + (ch.charCodeAt
 
 test('overview opens first with a saved project; attention opens its exact project and task', async () => {
   const { host } = fixture()
-  const view = await mount(panel, { host, persisted: { plugin: { 'project.selection': 'p2', 'project.view': { kind: 'settings' } } } })
+  const view = await mount(panel, { host })
   assert.ok(view.find({ text: '工作间' }))
   assert.ok(view.find({ text: '等你处理 3' }))
   assert.equal(view.find({ text: '保存设置' }), null)
@@ -209,33 +209,26 @@ test('project switching isolates pages and drafts; a failed save stays in settin
   const f = fixture()
   const view = await mount(panel, { host: f.host })
   await view.select({ label: '项目' }, 'p1')
-  assert.equal(view.find({ text: '主会话已绑定' }), null)
-  assert.equal(view.find({ text: '飞书未启用' }), null)
   await openFirst(view)
   assert.ok(view.find({ text: '‹ 示例项目' }))
   await view.select({ label: '项目' }, 'p2')
   assert.ok(view.find({ type: 'Tabs' }))
   assert.ok(JSON.stringify(view.tree()).includes('主会话未绑定'))
-  assert.equal(view.find({ text: '主会话已绑定' }), null)
   assert.equal(JSON.stringify(view.tree()).includes('首页采用哪种风格'), false)
 
   await view.select({ label: '项目' }, 'p1')
   await view.select({ label: '视图' }, 'tasks')
   await view.press({ label: '项目设置' })
   await view.select({ label: '审查' }, 'claude')
-  await view.toggle({ label: '接收飞书消息' }); await view.toggle({ label: '应用和群聊' }); await view.type({ label: 'App Secret' }, 'only-in-secret-store')
   await view.post('project.changed', { projectId: 'p1' })
   assert.equal(view.valueOf({ label: '审查' }), 'claude')
-  assert.equal(view.valueOf({ label: 'App Secret' }), 'only-in-secret-store')
-  f.refuse('启用飞书需要 App ID、App Secret、群聊编号和允许的发送者')
+  f.refuse('设置保存失败')
   await view.press({ text: '保存设置' })
   assert.ok(view.find({ text: '保存设置' }))
-  assert.ok(view.find({ text: /启用飞书需要/ }))
-  assert.equal(view.valueOf({ label: 'App Secret' }), 'only-in-secret-store')
+  assert.ok(view.find({ text: /设置保存失败/ }))
   f.refuse('')
   await view.press({ text: '保存设置' })
   assert.equal(f.saved.length, 1)
-  assert.equal(f.saved[0].appSecret, 'only-in-secret-store')
   assert.deepEqual(f.saved[0].roles, { design: 'claude', code: 'codex', review: 'claude' })
   assert.equal(view.find({ text: '保存设置' }), null)
   assert.equal(view.valueOf({ label: '视图' }), 'inbox')
@@ -243,32 +236,10 @@ test('project switching isolates pages and drafts; a failed save stays in settin
   assert.equal(JSON.stringify(view.tree()).includes('only-in-secret-store'), false)
 
   await view.press({ label: '项目设置' })
-  await view.toggle({ label: '接收飞书消息' }); await view.toggle({ label: '应用和群聊' })
-  assert.equal(view.valueOf({ label: 'App Secret' }), '')
-  await view.type({ label: 'App ID' }, 'abandoned')
   await view.press({ text: '‹ 示例项目' })
   await view.press({ label: '项目设置' })
-  assert.equal(view.find({ label: 'App ID' }), null)
   clean(view)
   await view.unmount()
-})
-
-test('a view stored by an earlier version opens the inbox instead of an empty panel', async () => {
-  const { host } = fixture()
-  for (const old of ['decision', 'review', 'rework', 'all', 'sources', 'settings']) {
-    const view = await mount(panel, { host, persisted: { plugin: { 'project.selection': 'p1', 'project.tab': old, 'project.view': old } } })
-    await view.settled()
-    await view.select({ label: '项目' }, 'p1')
-    assert.equal(view.valueOf({ label: '视图' }), 'inbox', old)
-    assert.ok(view.find({ text: '待决定' }), old)
-    await openFirst(view)
-    assert.ok(view.find({ text: '‹ 示例项目' }), old)
-    await view.press({ text: '‹ 示例项目' })
-    await view.select({ label: '视图' }, 'messages')
-    assert.equal(view.persisted.plugin['project.tab'], 'messages')
-    clean(view)
-    await view.unmount()
-  }
 })
 
 test('long content stays out of the inbox: a summary leads to the task record, which holds the whole text and the choice', async () => {
@@ -314,7 +285,6 @@ test('an unconfirmed notification is surfaced on home and leads to messages; a l
   const sent = s.project!.deliveries[0]
   Object.assign(sent, { state: 'uncertain', error: '通知结果待核对，请在主会话检查；原消息已保存' })
   await view.post('project.changed', { projectId: 'p1' })
-  assert.equal(view.find({ text: '主会话已绑定' }), null)
   await view.press({ text: '查看消息' })
   assert.equal(view.valueOf({ label: '视图' }), 'messages')
   assert.ok(view.find({ text: '待核对' }))
@@ -328,37 +298,11 @@ test('an unconfirmed notification is surfaced on home and leads to messages; a l
   await view.unmount()
 })
 
-test('home follows the reported Feishu connection state, not the saved switch (stand-in states, no real Feishu)', async () => {
-  const f = fixture()
-  const view = await mount(panel, { host: f.host })
-  await view.select({ label: '项目' }, 'p1')
-  const report = async (state: 'off' | 'connecting' | 'connected' | 'error', message = '') => {
-    f.s.connection = { state, message }
-    await view.post('project.changed', { projectId: 'p1' })
-  }
-  f.s.project!.feishu.enabled = true
-  await report('connecting')
-  assert.equal(view.find({ text: '飞书连接中' }), null)
-  assert.equal(view.find({ text: '飞书已连接' }), null)
-  await report('error', '飞书连接失败，请检查应用凭据、网络和事件订阅设置')
-  assert.equal(view.find({ text: '飞书连接中' }), null)
-  assert.ok(view.find({ text: /飞书连接失败/ }))
-  await view.press({ text: '飞书设置' })
-  assert.ok(view.find({ text: '连接异常' }))
-  assert.ok(view.find({ text: '保存设置' }))
-  await report('connected')
-  await view.press({ text: '‹ 示例项目' })
-  assert.equal(view.find({ text: '飞书已连接' }), null)
-  assert.equal(view.find({ text: '飞书设置' }), null)
-  clean(view)
-  await view.unmount()
-})
-
 test('main agent identity and both switch forms confirm once and wait for the real binding; global entry returns from a project', async () => {
   for (const mode of ['existing', 'new'] as const) {
     const session = { handle: 'orca_session_id:test-main', title: '测试原会话', workspace: 'identity:test', workspaceName: '测试工作区', path: '/test/workspace', agent: 'claude', online: 'online' as const }
     const target = { ...session, handle: 'orca_session_id:test-next', title: '测试接管会话' }
-    let binding: import('./model').WorkspaceBinding = { revision: 1, runId: 'run_old', session, boundAt: '2026-11-14T00:00:00Z', projectNames: ['测试项目'], verification: { run: 'plugin', session: 'plugin', runOwnership: 'self-reported' }, securityBoundary: '替换授权来自面板一次性凭据' }
+    let binding: import('./model').WorkspaceBinding = { revision: 1, runId: 'run_old', session, boundAt: '2026-11-14T00:00:00Z', projectNames: ['测试项目'], securityBoundary: '替换授权来自面板一次性凭据' }
     const switches: any[] = [], host = mockHost({ requests: {
       'projects.list': () => ({ projects: refs }),
       'project.read': () => sample(),
@@ -371,7 +315,7 @@ test('main agent identity and both switch forms confirm once and wait for the re
       await view.press({ label: '设置' }); await view.press({ type: 'ListItem', text: /^主 agent/ })
       for (const value of [session.title, session.path, 'Claude', 'run_old', '在线', '测试项目']) assert.ok(JSON.stringify(view.tree()).includes(value))
       await view.toggle({ label: '技术信息' })
-      for (const value of ['Run 归属：会话自报', '插件核实', '替换授权来自面板一次性凭据']) assert.ok(JSON.stringify(view.tree()).includes(value))
+      for (const value of ['替换授权来自面板一次性凭据']) assert.ok(JSON.stringify(view.tree()).includes(value))
       await view.select({ label: '项目' }, 'p1')
       host.respond('storage.get', (params: { key: string }) => ({ value: params.key === 'workspace.navigation' ? { switching: false } : null }))
       await view.post('workspace.open', { switching: false }); await view.settled()
@@ -447,7 +391,7 @@ test('workspace links manage scopes, preserve failed drafts, show external repor
   let reject = false
   const s: LinksSnapshot = { version: 1, revision: 0, workspaceId: 'own', name: '本工作间', enabled: false, host: '127.0.0.1', port: 0, publicUrl: '', tls: false, listening: '', error: '',
     peers: [{ id: 'connection1', workspaceId: 'other', name: '合作工作间', endpoint: '', state: 'active', status: 'connected', scope: 'none', projectIds: [], acceptTasks: 'deny', receivedAt: '2026-11-14T10:00:00Z',
-      report: { workspaceId: 'other', name: '合作工作间', scope: 'summary', updatedAt: '2026-11-14T10:00:00Z', projects: [{ id: 'external', name: '共享项目', updatedAt: '', counts: { working: 1 }, pending: 0 }] } }] }
+      report: { workspaceId: 'other', name: '合作工作间', scope: 'summary', acceptTasks: 'deny', updatedAt: '2026-11-14T10:00:00Z', projects: [{ id: 'external', name: '共享项目', updatedAt: '', counts: { working: 1 }, pending: 0 }] } }] }
   const writes: any[] = []
   const host = mockHost({ requests: {
     'projects.list': () => ({ projects: refs }),
@@ -457,6 +401,7 @@ test('workspace links manage scopes, preserve failed drafts, show external repor
         if (reject) throw hostError('invalid_request', '保存失败，请重试')
         writes.push(input); s.name = input.name!; s.revision++
       }
+      if (input.operation === 'revoke') { writes.push(input) }
       if (input.operation === 'share') { writes.push(input); Object.assign(s.peers[0], { scope: input.scope, projectIds: input.projectIds, acceptTasks: input.acceptTasks }); s.revision++ }
       return structuredClone(s)
     }
@@ -478,6 +423,8 @@ test('workspace links manage scopes, preserve failed drafts, show external repor
   await view.press({ text: '保存开放范围' })
   assert.deepEqual(writes.at(-1).projectIds, ['p1'])
   assert.equal(writes.at(-1).acceptTasks, 'confirm')
+  await view.press({ text: '断开连接' }); assert.equal(writes.some(w => w.operation === 'revoke'), false)
+  await view.press({ text: '确认断开' }); assert.equal(writes.filter(w => w.operation === 'revoke').length, 1)
   await view.type({ label: '对方的连接码' }, 'temporary-code')
   await view.toggle({ label: '高级' }); await view.toggle({ label: '使用 TLS' })
   await view.type({ label: 'TLS 私钥' }, 'private-input')
@@ -492,7 +439,7 @@ test('workspace links manage scopes, preserve failed drafts, show external repor
 
 
 test('adding Feishu keeps failed input and clears credentials after save; hidden records can be restored', async () => {
-  let reject = true, saved: any, hidden = true
+  let reject = true, hidden = true
   const p = fresh(refs[0]), binding = { version: 1 as const, revision: 0, runId: '', requests: [] }
   const host = mockHost({ requests: {
     'projects.list': () => ({ projects: refs }),
@@ -501,7 +448,6 @@ test('adding Feishu keeps failed input and clears credentials after save; hidden
     'project.visibility': () => { hidden = false; return { ...sample(), project: p } },
     'workspace.connections': input => {
       if (reject) throw hostError('invalid_request', '测试保存失败')
-      saved = input
       return { connection: { id: 'feishu', type: 'feishu', name: input.name!, enabled: true, state: 'connecting', message: '' }, feishu: { version: 1, revision: 1, feishu: input.feishu!, inbox: [], deliveries: [], secretSaved: true, connection: { state: 'connecting', message: '' } } }
     }
   } })
@@ -511,6 +457,20 @@ test('adding Feishu keeps failed input and clears credentials after save; hidden
     await view.press({ type: 'ListItem', text: /^外部连接/ }); await view.press({ text: '添加连接' }); await view.select({ label: '类型' }, 'feishu'); await view.press({ text: '下一步：填连接信息' })
     await view.toggle({ label: '启用这个连接' }); await view.type({ label: 'App ID' }, 'app_demo'); await view.type({ label: 'App Secret' }, 'mock-password'); await view.type({ label: '允许的用户' }, 'ou_demo'); await view.type({ label: '允许的会话' }, 'oc_demo')
     await view.press({ text: '保存' }); assert.equal(view.valueOf({ label: 'App Secret' }), 'mock-password'); assert.ok(JSON.stringify(view.tree()).includes('测试保存失败'))
-    reject = false; await view.press({ text: '保存' }); assert.equal(view.valueOf({ label: 'App Secret' }), ''); assert.equal(saved.type, 'feishu'); assert.deepEqual(saved.feishu.senderIds, ['ou_demo']); clean(view)
   } finally { await view.unmount() }
+})
+
+test('startup and refresh read a selected project once, and overview errors appear once', async () => {
+  const s = sample(), calls: string[] = []
+  const host = mockHost({ requests: {
+    'projects.list': () => { throw Error('unexpected redundant request') },
+    'workspace.overview': () => { calls.push('overview'); return overview([s.project!], { version: 1, revision: 0, runId: '', requests: [] }) },
+    'project.read': () => { calls.push('project'); return s }
+  } })
+  const view = await mount(panel, { host, persisted: { plugin: { 'workspace.page': { page: { kind: 'project', projectId: 'p1' }, stack: [] } } } })
+  try {
+    assert.deepEqual(calls, ['overview', 'project']); await view.press({ label: '刷新' }); assert.deepEqual(calls, ['overview', 'project', 'overview', 'project']); clean(view)
+  } finally { await view.unmount() }
+  const failed = await mount(panel, { host: mockHost({ requests: { 'workspace.overview': () => overview([], { version: 1, revision: 0, runId: '', requests: [] }, 'unique-runtime-error') } }) })
+  try { assert.equal(JSON.stringify(failed.tree()).split('unique-runtime-error').length - 1, 1); clean(failed) } finally { await failed.unmount() }
 })

@@ -1,17 +1,15 @@
-import { assert, test, mockHost, mountWorker } from 'orca/testing'
+import { assert, test } from 'orca/testing'
 import http from 'node:http'
-import type { OrcaWorkerApi } from 'orca/worker'
 import { Butler, butlerUrl } from './butler'
-import { createCoordinator } from './worker'
-import { refs, sample } from './fixtures'
+import { sample } from './fixtures'
 
 const token = 'test-only-inbound-token-1234567890123456789', other = 'test-only-outbound-token-1234567890123456789'
 async function instance(url = 'http://127.0.0.1:9900', failNotification = false) {
   const storage = new Map<string, any>([['project:p1', sample().project]]), secrets = new Map<string, string>(), notices: any[] = []
   const before = structuredClone(storage.get('project:p1'))
-  const api = { storage: { get: async (k: string) => structuredClone(storage.get(k) ?? null), set: async (k: string, v: any) => { assert.equal(k, 'workspace.butler'); storage.set(k, structuredClone(v)) } },
+  const api = { storage: { get: async (k: string) => structuredClone(storage.get(k) ?? null), set: async (k: string, v: any) => { assert.equal(k, 'workspace.a2a:butler'); storage.set(k, structuredClone(v)) } },
     secrets: { get: async (k: string) => secrets.get(k) ?? null, set: async (k: string, v: string) => { secrets.set(k, v) } } }
-  const b = new Butler(api as any, async () => 'run_mock', async (runId, id, body) => { notices.push({ runId, id, body }); if (failNotification) throw Error('Mock notification unavailable') }, () => {})
+  const b = new Butler(api as any, async () => 'run_mock', async (runId, id, body) => { notices.push({ runId, id, body }); if (failNotification) throw Error('Mock notification unavailable') }, () => {}, 'butler', () => 'Hermes')
   await b.handle({ operation: 'save', revision: 0, enabled: true, port: 0, url, inboundToken: token, outboundToken: other })
   return { b, storage, secrets, notices, before }
 }
@@ -123,7 +121,7 @@ test('main → mock Hermes → result → main preserves context, polls durable 
 
 for (const [httpStatus, rpcCode, reason, connection, action] of [
   [401, -32050, 'unauthorized', '令牌错误', '对方的令牌'],
-  [403, -32052, "peer 'ip:127.0.0.1' not trusted", '对方不信任', 'A2A_TRUSTED_PEERS'],
+  [403, -32052, "peer 'ip:127.0.0.1' not trusted", '对方不信任', '信任名单'],
   [200, -32001, 'Task not found', '已连接', ''],
   [200, -32601, 'Method not found', '连接失败', 'A2A 接口'],
 ] as const) test(`connection check: HTTP ${httpStatus} / JSON-RPC ${rpcCode} → ${connection}`, async () => {
@@ -164,7 +162,7 @@ test('connection check: unreachable service records network type and directs use
   try {
     const s = await b.handle({ operation: 'check' })
     assert.equal(s.connection, '服务不可达')
-    for (const expected of ['TypeError', 'ECONNREFUSED', 'gateway', '对方的地址']) assert.ok(s.error.includes(expected))
+    for (const expected of ['TypeError', 'ECONNREFUSED', '对端服务', '对方的地址']) assert.ok(s.error.includes(expected))
     assert.deepEqual(notices, [])
     console.log(JSON.stringify({ check: s.connection, error: s.error, notifications: notices.length }))
   } finally { b.stop() }
@@ -237,16 +235,30 @@ test('disabling while Hermes is busy leaves queued messages unsent', async () =>
   } finally { release(); b.stop(); server.closeAllConnections(); await new Promise<void>(r => server.close(() => r())) }
 })
 
-test('legacy storage and coordinator handlers keep all existing records and require bound main Run', async () => {
-  const p = sample().project!, host = mockHost({ storage: { 'project:p1': p as any, workspace: { version: 1, revision: 0, runId: 'mock-main', requests: [] } } })
-  let c!: ReturnType<typeof createCoordinator>
-  const worker = await mountWorker({ default: (api: OrcaWorkerApi) => { c = createCoordinator(api, { projects: async () => refs, verifyRun: async () => {}, send: async () => ({}) }) } }, { host })
+
+test('A2A compacts completed payloads and keeps exact deduplication, failures stop one round', async () => {
+  const f = await instance(undefined, true)
   try {
-    const s = await worker.request('workspace.butler', { operation: 'read' })
-    assert.equal(s.enabled, false); assert.deepEqual(s.entries, [])
-    assert.equal((await worker.request('workspace.overview')).butler!.enabled, false)
-    assert.deepEqual(host.data().storage['project:p1'], p)
-    await assert.rejects(() => worker.request('workspace.butler', { operation: 'send', runId: 'project-run', requestId: 'no', text: '模拟拒绝' }))
-    assert.deepEqual(host.data().storage['project:p1'], p)
-  } finally { c.stop(); await worker.deactivate() }
+    const entry = (id: string, notification: string, state: string, size = 1) => ({ id, direction: 'incoming', hash: id, notification,
+      task: { id: 'task-' + id, contextId: 'context', status: { state, timestamp: new Date().toISOString() }, history: [{ messageId: id, role: 'ROLE_USER', parts: [{ text: 'x'.repeat(size) }] }] } })
+    f.storage.set('workspace.a2a:butler', { version: 1, revision: 1, enabled: true, port: 0, url: 'http://127.0.0.1:9900', entries: [
+      entry('ended', 'sent', 'TASK_STATE_COMPLETED', 185000), entry('first', 'pending', 'TASK_STATE_SUBMITTED'), entry('second', 'pending', 'TASK_STATE_SUBMITTED')] })
+    await f.b.handle({ operation: 'save', revision: 1, enabled: false, port: 0, url: 'http://127.0.0.1:9900' })
+    const compact = await f.b.snapshot()
+    assert.equal(compact.entries[0].id, 'ended'); assert.equal(compact.entries[0].hash, 'ended'); assert.deepEqual(compact.entries[0].task.history, [])
+    assert.equal(compact.entries[1].task.history.length, 1)
+    f.storage.get('workspace.a2a:butler').enabled = true
+    await (f.b as any).flushNotifications()
+    assert.deepEqual((await f.b.snapshot()).entries.map(e => e.notification), ['sent', 'uncertain', 'pending']); assert.equal(f.notices.length, 1)
+  } finally { f.b.stop() }
+})
+
+test('A2A rejected storage writes never replace credentials', async () => {
+  const f = await instance()
+  try {
+    await assert.rejects(() => f.b.handle({ operation: 'save', revision: 0, enabled: false, port: 0, url: 'http://127.0.0.1:9900', inboundToken: other, outboundToken: token }))
+    const data = f.storage.get('workspace.a2a:butler'); data.entries = [{ id: 'pending', notification: 'pending', task: { status: { state: 'TASK_STATE_SUBMITTED' }, history: ['x'.repeat(200000)] } }]; f.storage.set('workspace.a2a:butler', data)
+    await assert.rejects(() => f.b.handle({ operation: 'save', revision: data.revision, enabled: false, port: 0, url: data.url, inboundToken: other, outboundToken: token }))
+    assert.equal(f.secrets.get('butler:inbound'), token); assert.equal(f.secrets.get('butler:outbound'), other)
+  } finally { f.b.stop() }
 })

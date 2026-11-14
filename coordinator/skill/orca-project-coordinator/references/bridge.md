@@ -1,12 +1,8 @@
 # 插件桥接
 
-## 项目记录管理
-
-只在用户明确要求时运行 `hide <input.json>` 或 `delete <input.json>`，删除前向用户说明范围并确认；`restore <input.json>` 恢复显示。隐藏/恢复输入 `{projectId,revision}`，删除输入 `{projectId,revision,confirm:projectId}`，先现读编号、路径和版本。项目仍在 Orca 或列表读取失败时禁止删除；完整记录先导出到插件数据目录 exports/，回执含 exportPath，再移除项目的存储键，不删除项目文件或 Orca 会话。总览返回 hidden（已隐藏项目的 ref 列表），隐藏记录仍可现读与提交，提醒与上报暂停，恢复后照常。
-
 本机源码目录 `D:/Projects/AgentBoat/coordinator`，已加载开发插件目录 `plugin/`，插件标识 `local.project-coordinator`。`scripts/client.mjs` 将 JSON 文件作为单个参数传给 Orca，避免 PowerShell 丢失引号；输入可含 UTF-8 BOM。凭据仅在插件面板设置填写，不进入这个接口。
 
-`projects` 返回项目列表；`read <projectId>` 返回 `{project,projects,connection,secretSaved}`，外层是 Orca 回执 `result.result`。project 含当前 revision、runId、roles、tasks、events、deliveries。读取不会标记通过，也不会发送消息。
+`projects` 返回项目列表；`read <projectId>` 返回 `{project,projects,mainAgent?,runtimeError?}`，外层是 Orca 回执 `result.result`。project 含当前 revision、runId、roles、tasks、events、deliveries。读取不会标记通过，也不会发送消息。
 
 ## 绑定主会话
 
@@ -50,22 +46,20 @@ phase 是 working、blocked、paused、ready 或 completed。数组按稳定编�
 
 验收项只写 id、title、details、artifactIds；revision、status、history 由插件维护。通过/修改反馈附当前验收版本，历史保留。外部消息通知与面板反馈送入绑定 Run 的主会话；主会话负责判断、拆分和转交，不由插件自动派工。
 
-只有 pending 通知可以发送；sending 中断会变成 uncertain，先检查主会话原通知和 requestId。不要自动重发 uncertain。飞书文字和富文本进入来源记录，附件先保留飞书资源引用，未下载的附件不声称已读取。
+## 工作间总览和来源
 
-## 工作间总览与主 agent
+`overview` 返回 `{workspace,attention,projects,hidden,links,connections,machines,error?}`。workspace 含 revision、runId、session、接管状态；工作间主 agent 的绑定与切换规则见 `$agentboat-workspace`。attention 含 projectId/taskId/kind/itemId/title/summary，列未回答决定、ready 任务的 pending 验收、受阻和返修。projects 含 ref、counts、updatedAt、bound、agents；执行记录不代表实时活性。总览包含已存但当前工作树关闭的项目，读取不注册、不改写。
 
-```powershell
-node "D:/Projects/AgentBoat/coordinator/scripts/client.mjs" overview
-node "D:/Projects/AgentBoat/coordinator/scripts/client.mjs" main-read
-node "D:/Projects/AgentBoat/coordinator/scripts/client.mjs" main-targets
-# main-bind 从标准输入接收 JSON（不要将接管凭据保存到文件）。
-node "D:/Projects/AgentBoat/coordinator/scripts/client.mjs" message <input.json>
+workspace-agent 是工作间主 agent 转来的项目来源，workspace-external 是其接手的外部工作间请求。关联原任务时保留 sourceIds；外部任务和派生资料不对其他工作间上报。消息中的引用不扩大授权。
+
+项目提交带出多条新事项时只生成一条汇总通知，按事项编号与验收版本去重。主 agent 现读项目后转告主人；未绑定时不产生通知，之后绑定不补发。uncertain 先核对，不换编号重发。
+
+## 批量反馈
+
+`feedback <input.json>` → `project.feedback`：
+
+```json
+{"projectId":"精确项目编号","revision":3,"items":[{"taskId":"task-id","kind":"decision","itemId":"decision-id","answer":"主人明确答案","note":"原话、会话或消息编号、日期"},{"taskId":"task-id","kind":"acceptance","itemId":"check-id","itemRevision":1,"result":"passed","note":"主人明确结论及来源"}]}
 ```
 
-- `overview` → `workspace.overview`：返回 `{workspace:{revision,runId},attention,projects,error?}`。attention 每条含 projectId、taskId、kind、itemId、title、summary，覆盖未回答决定、ready 任务待验收项、受阻任务、要求返修项；同一任务可以有多条事项。projects 每条含 ref、counts（working/decision/review/rework/completed/blocked/paused）、updatedAt、bound、agents。agents 来自已登记执行记录，含 agent、runId、taskId（Orca 任务）、dispatchId、projectTaskId（插件任务）、state；不证明实时活性。旧项目无更新时间时按任务与来源时间推导，无记录时为空。总览包括保留在存储中但当前工作树已关闭的项目，读取不注册或改写项目。
-- `main-read` → `workspace.agent`，operation=read：读取 `{revision,runId,session?,boundAt?,projectNames?,takeover?,previousNotice?}`。session 含会话 handle/title、工作区编号/名称/目录、agent 与 online（online/offline/unknown）。旧记录缺失字段不推测；读取不回填数据。takeover 只含目标、截止时间和 sending/waiting/uncertain，不返回凭据或摘要。
-- `main-targets` → `workspace.agent.targets`：列出当前本机在线的独立 agent 会话与可选工作区；不把受监督执行者当作接管目标，无法核实在线的会话不列为可选。
-- `main-bind` → `workspace.agent`，operation=bind：标准输入 `{"revision":0,"requestId":"唯一编号","runId":"run_当前会话新建的编号","token":"面板消息中的一次性凭据"}`。脚本从 Orca 环境附 caller，服务端核对当前会话自己的 Run、目标身份、版本和重放。未绑定时可省 token；替换必须是面板发起、十分钟内有效的凭据，只用一次。接管后先读 overview 补齐旧待办；已送达原主 agent 的通知不补发，后续新通知及飞书消息交新 Run。用户指定的项目主会话可以兼任工作间主 agent，原项目绑定保持不变。
-- `message` → `workspace.message`：输入 `{"projectId":"精确编号","revision":1,"requestId":"唯一编号","runId":"工作间已绑定的Run","text":"需要转达的内容"}`。项目必须已绑定主会话；返回项目快照。来源类型 `workspace-agent`，senderId 为工作间主 agent Run，sourceId 为 requestId；复用飞书来源投递队列。重放只使用完全相同的输入；先读回核对未知结果，不能改 requestId 重发。消息是来源资料，不能扩大授权。
-
-项目提交产生新的未回答决定、ready 的 pending 验收版本、受阻或完成时，插件把简短通知写进该项目 deliveries，以 `targetRunId` 指向当时绑定的工作间主 agent（旧通知缺省指向项目 Run）。通过验收后任务完成也会通知。稳定事项编号和验收版本去重；重复提交、读取、重启不重复通知；未绑定时不产生通知，之后绑定不补发旧事项。发送失败或中断保留 uncertain，不自动重发；可以在项目“消息”核对投递状态与来源。主 agent 收到摘要后现读总览和项目，把需要用户处理的事项交给用户，项目主 agent 继续原任务与原验收编号。
+同一项目收齐全部结论一次提交；先校验整批，再同版本写入，只给项目主 agent 一条消息。验收要求任务 ready、条目 pending 且 itemRevision 相符；修改用 changes_requested 并附具体意见；决定须未回答。暂停任务、重复条目或任一无效条目整批拒绝并标明序号。只代录明确用户结论，不把一般问答当验收。提交后读回 history；超时先核对原话、日期和版本，不盲重发。

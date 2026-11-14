@@ -3,7 +3,7 @@ import type { OrcaWorkerApi } from 'orca/worker'
 import { WorkspaceLinks, endpoint, report } from './links'
 import { refs, sample } from './fixtures'
 import { fresh } from './store'
-import { createCoordinator } from './worker'
+import { testCoordinator as createCoordinator } from './test-runtime'
 
 async function instance(name: string) {
   const storage = new Map<string, any>(), secrets = new Map<string, string>()
@@ -99,9 +99,8 @@ test('invites expire/cancel, malformed and oversized requests fail closed, expli
     await assert.rejects(() => a.links.share({ id: p.id, revision: as.revision, scope: 'details', projectIds: ['external-project'], acceptTasks: 'auto' }))
     const token = a.secrets.get(`workspace-link:${p.id}`)!
     const malformed = report([], p, p.workspaceId, 'B')
-    const legacy = { ...malformed }; delete legacy.acceptTasks
-    assert.equal(await post(s.listening, '/sync', { id: p.id, report: legacy }, token), 200)
-    assert.equal((await a.links.snapshot()).peers[0].report!.acceptTasks, undefined)
+    const missing = { ...malformed } as any; delete missing.acceptTasks
+    assert.equal(await post(s.listening, '/sync', { id: p.id, report: missing }, token), 400)
     assert.equal(await post(s.listening, '/sync', { id: p.id, report: { ...malformed, acceptTasks: 'invalid' } }, token), 400)
     assert.equal(await post(s.listening, '/sync', { id: p.id, report: { ...malformed, workspaceId: 'wrong' } }, token), 400)
     assert.equal(await post(s.listening, '/sync', { id: p.id, report: { ...malformed, scope: 'none', projects: [{ secret: 'ignored' }] } }, token), 400)
@@ -123,4 +122,11 @@ test('plugin request/overview integration preserves all legacy project and works
     assert.deepEqual(host.data().storage.workspace, storage.workspace)
     assert.deepEqual(worker.refusals, [])
   } finally { coordinator.stop(); await worker.deactivate() }
+})
+
+test('refresh does not broadcast changes when there is no outbound peer to sync', async () => {
+  let changed = 0
+  const api = { storage: { get: async (key: string) => key !== 'workspace.links' ? null : ({ version: 1, revision: 0, workspaceId: 'own', name: 'own', enabled: false, host: '127.0.0.1', port: 0, publicUrl: '', tls: false, peers: [] }) } }
+  const links = new WorkspaceLinks(api as unknown as OrcaWorkerApi, async () => [], () => { changed++ })
+  await links.refresh(); assert.equal(changed, 0); links.stop()
 })

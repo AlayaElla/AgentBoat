@@ -5,12 +5,11 @@ declare module 'orca' {
   interface PluginRequests {
     'workspace.connections': { input: import('./connections').ConnectionsInput; output: import('./connections').Connection[] | import('./connections').ConnectionDetail }
     'workspace.canvas': { output: { opened: boolean } }
-    'workspace.butler': { input: import('./butler').ButlerInput; output: import('./butler').ButlerSnapshot }
     'project.visibility': { input: { projectId: string; revision: number; hidden: boolean }; output: Snapshot }
-    'project.delete': { input: { projectId: string; revision: number; confirm: string }; output: { deleted: string; exportPath: string; removedFromOrca?: boolean } }
+    'project.delete': { input: { projectId: string; revision: number; confirm: string }; output: { deleted: string; exportPath: string } }
     'workspace.requests': { input: { operation: 'read' | 'send' | 'decide' | 'update' | 'attach'; runId?: string; requestId?: string; peerId?: string; id?: string; title?: string; context?: string; expected?: string; links?: string[]; status?: import('./model').RequestState; note?: string; projectId?: string }; output: LinksSnapshot }
     'workspace.links': { input: { operation: 'read' | 'configure' | 'invite' | 'cancel-invite' | 'join' | 'share' | 'revoke' | 'refresh'; revision?: number; id?: string; code?: string; name?: string; enabled?: boolean; host?: string; port?: number; publicUrl?: string; tls?: boolean; certificate?: string; privateKey?: string; scope?: Sharing['scope']; projectIds?: string[]; acceptTasks?: Sharing['acceptTasks'] }; output: LinksSnapshot }
-    'workspace.feishu': { input: { operation: 'read' | 'save'; revision?: number; feishu?: Project['feishu']; appSecret?: string }; output: MessagingSnapshot }
+    'workspace.feishu': { input: { operation: 'read' }; output: MessagingSnapshot }
     'workspace.reply': { input: { runId: string; eventId: string; requestId: string; text: string }; output: MessagingSnapshot }
     'workspace.overview': { output: Overview }
     'workspace.agent': { input: { operation: 'read' | 'bind'; revision?: number; requestId?: string; runId?: string; caller?: string; currentRunId?: string; token?: string; checkOnly?: boolean }; output: WorkspaceBinding }
@@ -20,8 +19,8 @@ declare module 'orca' {
     'workspace.message': { input: { projectId: string; revision: number; requestId: string; runId: string; text: string }; output: Snapshot }
     'projects.list': { output: { projects: ProjectRef[]; error?: string } }
     'project.read': { input: { projectId: string }; output: Snapshot }
-    'project.settings': { input: { projectId: string; revision: number; roles: Project['roles']; feishu: Project['feishu']; appSecret?: string }; output: Snapshot }
-    'project.feedback': { input: { projectId: string; revision: number; taskId: string; kind: 'acceptance' | 'decision'; itemId: string; itemRevision?: number; result?: string; answer?: string; note?: string }; output: Snapshot }
+    'project.settings': { input: { projectId: string; revision: number; roles: Project['roles'] }; output: Snapshot }
+    'project.feedback': { input: { projectId: string; revision: number; items: import('./store').FeedbackItem[] }; output: Snapshot }
     'project.deliver': { input: { projectId: string; deliveryId: string }; output: Snapshot }
     'project.openArtifact': { input: { projectId: string; taskId: string; artifactId: string }; output: { opened: boolean } }
     'project.agent': { input: { operation: 'read' | 'bind' | 'submit'; projectId: string; revision?: number; requestId?: string; runId?: string; task?: unknown }; output: Snapshot }

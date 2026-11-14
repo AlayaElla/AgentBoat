@@ -11,7 +11,7 @@ export type Scope = 'none' | 'summary' | 'details'
 export interface Sharing { scope: Scope; projectIds: string[]; acceptTasks: 'deny' | 'confirm' | 'auto' }
 export interface SharedReport {
   workspaceId: string; name: string; scope: Scope; updatedAt: string
-  acceptTasks?: Sharing['acceptTasks']
+  acceptTasks: Sharing['acceptTasks']
   projects: { id: string; name: string; updatedAt: string; counts: Record<string, number>; pending: number
     tasks?: { title: string; phase: string; decisions: string[]; acceptance: string[] }[] }[]
 }
@@ -67,10 +67,10 @@ export function report(projects: Project[], peer: Sharing, workspaceId: string, 
 function received(raw: unknown, peer: Peer): SharedReport {
   const r = object(raw)
   if (r.workspaceId !== peer.workspaceId || !['none', 'summary', 'details'].includes(r.scope) || !Array.isArray(r.projects) || r.projects.length > 100 || r.scope === 'none' && r.projects.length) fail('对端上报格式不正确')
-  if (r.acceptTasks !== undefined && !['deny', 'confirm', 'auto'].includes(r.acceptTasks)) fail('对端派活规则不正确')
+  if (!['deny', 'confirm', 'auto'].includes(r.acceptTasks)) fail('对端派活规则不正确')
   const str = (v: unknown, max = 4000) => typeof v === 'string' && v.length <= max ? v : fail('对端文字格式不正确')
   const titles = (v: unknown) => { if (!Array.isArray(v) || v.length > 100) fail('对端标题格式不正确'); return v.map(x => str(x)) }
-  return { workspaceId: peer.workspaceId, name: str(r.name, 200), scope: r.scope, ...(r.acceptTasks !== undefined ? { acceptTasks: r.acceptTasks } : {}), updatedAt: str(r.updatedAt, 100), projects: r.projects.map((raw: unknown) => {
+  return { workspaceId: peer.workspaceId, name: str(r.name, 200), scope: r.scope, acceptTasks: r.acceptTasks, updatedAt: str(r.updatedAt, 100), projects: r.projects.map((raw: unknown) => {
     const p = object(raw), c = object(p.counts), counts: Record<string, number> = {}
     for (const k of ['working', 'decision', 'review', 'rework', 'completed', 'blocked', 'paused']) if (c[k] !== undefined) {
       if (!Number.isSafeInteger(c[k]) || c[k] < 0) fail('对端计数不正确'); counts[k] = c[k]
@@ -97,7 +97,7 @@ async function call(url: string, route: string, body: unknown, token = ''): Prom
     const req = (u.protocol === 'https:' ? https : http).request(u, { method: 'POST', headers: {
       'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(data), ...(token ? { Authorization: `Bearer ${token}` } : {})
     } }, res => {
-      if (res.statusCode !== 200) { res.resume(); reject(Object.assign(new Error(res.statusCode === 401 ? '连接已撤销或凭据无效' : '对端未接受请求，请核对连接状态'), { status: res.statusCode })); return }
+      if (res.statusCode !== 200) { res.resume(); reject(Object.assign(new Error(res.statusCode === 401 ? '连接已断开或凭据无效' : '对端未接受请求，请核对连接状态'), { status: res.statusCode })); return }
       void jsonBody(res).then(resolve, () => reject(new Error('对端未返回有效的工作间消息')))
     })
     req.setTimeout(5000, () => req.destroy()); req.once('error', () => reject(new Error('无法连接对端，请核对地址和网络'))); req.end(data)
@@ -224,7 +224,7 @@ export class WorkspaceLinks {
     })
     await this.sync(input.peerId); this.changed(); return this.snapshot()
   }
-  async refresh() { const d = await this.serial(() => this.data()); await Promise.all(d.peers.filter(p => p.endpoint && p.state !== 'revoked').map(p => this.sync(p.id))); this.changed(); return this.snapshot() }
+  async refresh() { const d = await this.serial(() => this.data()); const peers = d.peers.filter(p => p.state !== 'revoked' && p.endpoint); await Promise.all(peers.map(p => this.sync(p.id))); if (peers.length) this.changed(); return this.snapshot() }
   private async sync(connectionId: string): Promise<void> {
     const running = this.syncing.get(connectionId)
     if (running) { await running; return this.sync(connectionId) }
@@ -251,7 +251,7 @@ export class WorkspaceLinks {
         const d = await this.data(), p = d.peers.find(p => p.id === connectionId)
         if (p && p.state !== 'revoked') { p.state = 'revoked'; d.revision++; await this.save(d); await this.requests.disconnect(p.id); await this.orca.secrets.delete(secretKey(p.id)) }
       })
-      this.failures.set(connectionId, '对端离线、连接已撤销或凭据无效'); this.incoming.delete(connectionId)
+      this.failures.set(connectionId, '对端离线、连接已断开或凭据无效'); this.incoming.delete(connectionId)
     }
   }
   private async serve(req: http.IncomingMessage, res: http.ServerResponse) {

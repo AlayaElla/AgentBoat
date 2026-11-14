@@ -34,7 +34,7 @@ if (operation === 'backup' || operation === 'snapshot') {
   const ids = [...new Set([...Object.keys(before.projects), ...Object.keys(after.projects)])];
   const differences = ids.filter(id => !isDeepStrictEqual(before.projects[id], after.projects[id]));
   // Compare stored binding, not live session status or newly exposed display fields.
-  const originalWorkspace = before.workspaceRecord ?? (await json(path.join(destination, 'plugins-data', 'storage.json'))).workspace ?? null;
+  const originalWorkspace = before.workspaceRecord;
   const workspaceEqual = isDeepStrictEqual(originalWorkspace, after.workspaceRecord ?? null);
   const catalog = value => ({ ...value, projects: [...value.projects].sort((a, b) => a.id.localeCompare(b.id)) });
   const catalogEqual = isDeepStrictEqual(catalog(before.catalog), catalog(after.catalog));

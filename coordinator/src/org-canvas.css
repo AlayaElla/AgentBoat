@@ -4,7 +4,7 @@ body { margin: 0; }
 header { padding: 14px; border-bottom: 1px solid var(--orca-border, #ccd2de); }
 h1 { font-size: 18px; margin: 0 0 10px; }
 h2 { font-size: 16px; margin: 0; }
-nav, .actions { display: flex; flex-wrap: wrap; gap: 8px; }
+nav { display: flex; flex-wrap: wrap; gap: 8px; }
 button, input, select, textarea { font: inherit; color: inherit; background: var(--orca-background, #fff); border: 1px solid var(--orca-border, #aeb8c8); border-radius: 6px; padding: 7px 10px; }
 button { cursor: pointer; }
 button[aria-pressed="true"], button.primary { background: var(--orca-accent, #4664df); color: var(--orca-accent-foreground, #fff); }
@@ -27,12 +27,12 @@ svg { display: block; touch-action: none; }
 .edge rect { fill: var(--orca-background, white); opacity: .95; }
 aside { width: 300px; flex-shrink: 0; padding: 14px; border-left: 1px solid var(--orca-border, #ccd2de); overflow: auto; max-height: calc(100vh - 140px); background: var(--orca-background, #fff); }
 aside[hidden] { display: none; }
-aside form, .fields { display: grid; gap: 12px; }
+aside form { display: grid; gap: 12px; }
 label { display: grid; gap: 4px; }
 label.check { display: flex; align-items: start; gap: 8px; overflow-wrap: anywhere; }
 input[type="checkbox"] { margin-top: 5px; }
 textarea { width: 100%; min-height: 80px; resize: vertical; }
-pre, .identity { white-space: pre-wrap; overflow-wrap: anywhere; }
+.identity { white-space: pre-wrap; overflow-wrap: anywhere; }
 fieldset { border: 1px solid var(--orca-border, #ccd2de); border-radius: 6px; max-height: 220px; overflow: auto; }
 summary { cursor: pointer; }
 @media (max-width: 650px) { .workspace { flex-direction: column-reverse; } aside { width: 100%; max-height: 55vh; border-left: 0; border-bottom: 1px solid var(--orca-border, #ccd2de); } }

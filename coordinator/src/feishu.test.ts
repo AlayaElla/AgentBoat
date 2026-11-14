@@ -2,10 +2,10 @@ import { assert, mockHost, mountWorker, test } from 'orca/testing'
 import type { OrcaWorkerApi } from 'orca/worker'
 import { mkdtemp, writeFile } from 'node:fs/promises'
 import path from 'node:path'
-import { createCoordinator } from './worker'
+import { testCoordinator as createCoordinator } from './test-runtime'
 import { FeishuSources, normalizeFeishu, publicImageAddress, type MessageTransport } from './feishu'
 import { deliverable, refs } from './fixtures'
-import { fresh } from './store'
+import { fresh, ProjectStore, fingerprint } from './store'
 import type { Delivery, SourceEvent } from './model'
 
 const config = { enabled: true, appId: 'app_demo', chatIds: ['chat_demo'], senderIds: ['user_demo'] }
@@ -39,13 +39,12 @@ async function fixture(main = true) {
 test('workspace Feishu settings preserve legacy projects and store credentials only in secrets', async () => {
   const f = await fixture()
   const before = await f.coordinator.store.all()
-  const saved = await f.worker.request('workspace.feishu', { operation: 'save', revision: 0, feishu: config, appSecret: 'mock-only-secret' })
-  assert.equal(saved.secretSaved, true)
+  const saved = await f.worker.request('workspace.connections', { operation: 'save', type: 'feishu', name: '飞书', revision: 0, feishu: config, appSecret: 'mock-only-secret' })
+  assert.equal((saved as import('./connections').ConnectionDetail).feishu!.secretSaved, true)
   assert.equal(JSON.stringify(f.host.data().storage).includes('mock-only-secret'), false)
   assert.equal(f.host.data().secrets['feishu:@workspace'], 'mock-only-secret')
   assert.deepEqual(await f.coordinator.store.all(), before)
-  await assert.rejects(() => f.worker.request('workspace.feishu', { operation: 'save', revision: 0, feishu: config }))
-  await assert.rejects(() => f.worker.request('project.settings', { projectId: 'p1', revision: 0, roles: before[0].roles, feishu: config, appSecret: 'mock-only-secret' }))
+  await assert.rejects(() => f.worker.request('workspace.connections', { operation: 'save', type: 'feishu', name: '飞书', revision: 0, feishu: config }))
   await f.worker.deactivate()
 })
 
@@ -193,4 +192,46 @@ test('Feishu API adapter posts inline local images, hides file paths, and replie
 test('image download rejects local and reserved networks', () => {
   for (const ip of ['127.0.0.1', '10.0.0.1', '169.254.169.254', '192.168.0.1', '172.16.0.1', '100.64.0.1', '0.0.0.0', '::1', '::ffff:127.0.0.1', 'fc00::1', '2001:db8::1']) assert.equal(publicImageAddress(ip), false)
   for (const ip of ['8.8.8.8', '1.1.1.1', '2606:4700:4700::1111']) assert.equal(publicImageAddress(ip), true)
+})
+
+test('deleting Feishu preserves workspace request deduplication receipts', async () => {
+  const f = await fixture()
+  await f.worker.request('workspace.connections', { operation: 'save', type: 'feishu', name: '飞书', revision: 0, feishu: config, appSecret: 'mock-secret' })
+  const receipt: Delivery = { id: 'workspace-request:peer:request:update', targetRunId: 'run_main', subject: '请求', body: '已通知', state: 'sent' }
+  await f.coordinator.store.mutateMessaging(m => { m.deliveries.push(receipt, { ...receipt, id: 'feishu-delivery', external: { channel: 'feishu', appId: config.appId, chatId: 'chat_demo' } }) })
+  await f.worker.request('workspace.connections', { operation: 'delete', connectionId: 'feishu', confirm: true })
+  assert.deepEqual((await f.coordinator.store.messaging()).deliveries, [receipt]); assert.equal(f.host.data().secrets['feishu:@workspace'], undefined)
+  await f.worker.deactivate()
+})
+
+test('mailbox stops a failed round with the remaining messages pending', async () => {
+  const f = await fixture(false); f.timeout()
+  await f.coordinator.store.mutateMessaging(m => { for (const id of ['first', 'second', 'third']) m.deliveries.push({ id, subject: 'mock', body: 'mock', state: 'pending', external: { channel: 'feishu', appId: config.appId, chatId: 'chat_demo' } }) })
+  await f.coordinator.flushMailbox()
+  assert.equal(f.sends.length, 1); assert.deepEqual((await f.coordinator.store.messaging()).deliveries.map(d => d.state), ['uncertain', 'pending', 'pending'])
+  await f.worker.deactivate()
+})
+
+test('mailbox compacts finished payloads, keeps dedup hashes and preserves unfinished messages', async () => {
+  const original = 'completed reply'.repeat(13000), pending = 'still pending'
+  const receipt: Delivery = { id: 'agent-reply:done', subject: 'reply', body: original, state: 'sent', external: { channel: 'feishu', appId: 'app_demo', chatId: 'chat_demo', replyTo: 'done' } }
+  const m = { version: 1, revision: 0, feishu: config, inbox: [{ appId: 'app_demo', event: event('done', original), state: 'done' }], deliveries: [receipt, { ...receipt, id: 'pending', state: 'pending', body: pending }] }
+  const values = new Map<string, any>([['workspace.messaging', m]])
+  const store = new ProjectStore({ get: async k => values.get(k), set: async (k,v) => { values.set(k,structuredClone(v)) }, keys: async () => [...values.keys()], delete: async k => { values.delete(k) } })
+  const saved = await store.mutateMessaging(m => { m.feishu.enabled = false })
+  assert.equal(saved.feishu.enabled, false); assert.ok(Buffer.byteLength(JSON.stringify(saved)) < 150000)
+  assert.equal(saved.inbox[0].event.id, event('done','original').id); assert.equal(saved.inbox[0].event.text, '')
+  assert.equal(saved.deliveries[0].receiptHash, fingerprint([original, 'done', 'app_demo'])); assert.equal(saved.deliveries[0].body, '')
+  assert.equal(saved.deliveries[1].body, pending); assert.equal(saved.deliveries[1].state, 'pending')
+})
+
+test('rejected Feishu saves leave existing credentials unchanged', async () => {
+  const f = await fixture()
+  await f.worker.request('workspace.connections', { operation: 'save', type: 'feishu', name: '飞书', revision: 0, feishu: config, appSecret: 'original-secret' })
+  for (const appSecret of ['replacement-secret', '']) await assert.rejects(() => f.worker.request('workspace.connections', { operation: 'save', connectionId: 'feishu', name: '飞书', revision: 0, feishu: { ...config, appId: 'other-app', enabled: false }, appSecret }))
+  assert.equal(f.host.data().secrets['feishu:@workspace'], 'original-secret')
+  f.host.respond('storage.set', () => { throw Error('mock disk rejected') })
+  for (const appSecret of ['replacement-secret', '']) await assert.rejects(() => f.worker.request('workspace.connections', { operation: 'save', connectionId: 'feishu', name: '飞书', revision: 1, feishu: { ...config, appId: 'other-app', enabled: false }, appSecret }))
+  assert.equal(f.host.data().secrets['feishu:@workspace'], 'original-secret')
+  await f.worker.deactivate()
 })

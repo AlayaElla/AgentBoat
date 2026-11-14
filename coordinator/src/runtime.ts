@@ -9,15 +9,15 @@ const execute = promisify(execFile)
 export interface CoordinatorRuntime {
   projects(): Promise<ProjectRef[]>
   verifyRun(id: string, caller?: string): Promise<void>
-  mainAgent?(id: string): Promise<'claude' | 'codex' | undefined>
-  targets?(): Promise<{ sessions: AgentSession[]; workspaces: { workspace: string; name: string; path: string }[] }>
-  identify?(handle: string, runId: string, currentRunId?: string): Promise<AgentSession>
-  requestTakeover?(handle: string, prompt: string): Promise<void>
-  launchMain?(workspace: string, agent: string, prompt: string): Promise<string>
-  openOverview?(): Promise<void>
-  removeProject?(ref: ProjectRef): Promise<void>
-  openCanvas?(): Promise<void>
-  hermesApprovalMode?(): Promise<string>
+  mainAgent(id: string): Promise<'claude' | 'codex' | undefined>
+  targets(): Promise<{ sessions: AgentSession[]; workspaces: { workspace: string; name: string; path: string }[] }>
+  identify(handle: string, runId: string, currentRunId?: string): Promise<AgentSession>
+  requestTakeover(handle: string, prompt: string): Promise<void>
+  launchMain(workspace: string, agent: string, prompt: string): Promise<string>
+  openOverview(): Promise<void>
+  removeProject(ref: ProjectRef): Promise<void>
+  openCanvas(): Promise<void>
+  hermesApprovalMode(): Promise<string>
   send(runId: string, delivery: Delivery): Promise<{ requestId?: string }>
 }
 export class OrcaRuntime implements CoordinatorRuntime {
@@ -80,10 +80,10 @@ export class OrcaRuntime implements CoordinatorRuntime {
   }
   async launchMain(workspace: string, agent: string, prompt: string) {
     const result = await this.call(['agent', 'launch', '--agent', agent, '--worktree', workspace, '--prompt', prompt])
-    const launch = result.launch ?? result
+    const launch = result
     const handle = launch.outcome?.kind === 'structured'
       ? (launch.outcome.sessionId ? `orca_session_id:${launch.outcome.sessionId}` : undefined)
-      : launch.outcome?.handle ?? result.agentTerminalHandle
+      : launch.outcome?.handle
     if (!handle || !['journaled', 'handed-to-terminal'].includes(launch?.prompt?.outcome)) fail('启动或提示词回执待核对，不会自动重启')
     return handle as string
   }
@@ -93,7 +93,7 @@ export class OrcaRuntime implements CoordinatorRuntime {
     const home = process.env.HERMES_HOME || path.join(process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local'), 'hermes')
     const { stdout } = await execute(process.platform === 'win32' ? path.join(home, 'bin', 'hermes.exe') : 'hermes', ['config', 'get', 'approvals.mode', '--json'], { timeout: 15000, windowsHide: true, maxBuffer: 65536 })
     const mode = JSON.parse(stdout)
-    return ['manual', 'smart', 'off'].includes(mode) ? mode : 'unknown'
+    return ['manual', 'smart', 'off'].includes(mode) ? mode : ''
   }
   async removeProject(ref: ProjectRef) {
     if (ref.hostId !== 'local') fail('只能移除本机项目')
@@ -115,7 +115,6 @@ export class OrcaRuntime implements CoordinatorRuntime {
     const result = await this.call(['orchestration', 'run-show', '--id', id])
     const handle = result.run?.coordinator_handle
     if (typeof handle !== 'string' || !handle) return
-    // Legacy Runs have no coordinator handle; never substitute the project template's default.
     const session = /^orca_session_id:(claude|codex)_/.exec(handle)
     if (session) return session[1] as 'claude' | 'codex'
     const terminal = await this.call(['terminal', 'show', '--terminal', handle])
@@ -153,7 +152,4 @@ export function mainTargets(rows: any[], terminals: any[]) {
   }
   return { sessions, workspaces }
 }
-export function defaultExecutable(): string {
-  return process.env.ORCA_CLI_COMMAND || (process.platform === 'win32'
-    ? path.join(process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local'), 'Programs', 'orca', 'resources', 'bin', 'orca.exe') : 'orca')
-}
+export { executable as defaultExecutable } from '../scripts/orca-cli.mjs'

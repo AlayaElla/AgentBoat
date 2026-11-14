@@ -2,8 +2,9 @@ import { build } from 'esbuild';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { execFileSync } from 'node:child_process';
 import path from 'node:path';
+import { executable } from './orca-cli.mjs';
 
-const resources = path.resolve(path.dirname(process.env.ORCA_CLI_COMMAND), '../app.asar.unpacked/resources/plugins/declarative');
+const resources = path.resolve(path.dirname(executable), '../app.asar.unpacked/resources/plugins/declarative');
 await mkdir('.orca/local-test', { recursive: true });
 await writeFile('.orca/local-test/check-entry.mjs', `
 import {mount, mockHost} from 'orca/testing';

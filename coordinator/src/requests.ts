@@ -84,7 +84,6 @@ export class WorkspaceRequests {
       updates: d.requests.filter(r => r.peerId === peerId && r.direction === 'incoming').map(r => ({ id: r.id, updates: r.updates })) }
   }
   async receive(peerId: string, workspaceId: string, rule: 'deny' | 'confirm' | 'auto', raw: unknown) {
-    if (raw === undefined) return // Older peers continue to exchange reports only.
     const wire = object(raw), d = await this.data()
     if (!Array.isArray(wire.requests) || !Array.isArray(wire.updates) || wire.requests.length > 500 || wire.updates.length > 500) fail('工作间请求格式不正确')
     let changed = false

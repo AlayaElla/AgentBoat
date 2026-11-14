@@ -6,30 +6,24 @@ import { fail, text } from './store'
 
 export interface Connection { id: string; type: 'feishu' | 'a2a'; name: string; enabled: boolean; state: 'off' | 'connecting' | 'connected' | 'error' | 'unchecked'; message: string }
 type Entry = Pick<Connection, 'id' | 'type' | 'name'>
-export interface ConnectionsInput extends Omit<ButlerInput, 'operation'> { operation: 'read' | 'save' | 'delete' | 'check' | 'send' | 'reply'; connectionId?: string; name?: string; type?: Entry['type']; confirm?: boolean; feishu?: import('./model').Project['feishu']; appSecret?: string }
+export interface ConnectionsInput extends Omit<ButlerInput, 'operation'> { operation: 'read' | 'save' | 'delete' | 'check' | 'send' | 'reply'; connectionId?: string; name?: string; type?: Entry['type']; confirm?: boolean; feishu?: import('./model').FeishuConfig; appSecret?: string }
 export interface ConnectionDetail { connection: Connection; a2a?: ButlerSnapshot; feishu?: MessagingSnapshot; approvalMode?: string }
 
-// Legacy butler storage and secret keys stay in place; only new connections receive new namespaces.
 export class Connections {
   private entries: Entry[] = []
   private instances = new Map<string, Butler>()
   private chain: Promise<unknown> = Promise.resolve()
   private started = false
-  constructor(private api: Pick<OrcaWorkerApi, 'storage' | 'secrets'>, readonly legacy: Butler, private main: () => Promise<string>, private notify: (run: string, id: string, body: string, name: string) => Promise<unknown>, private changed: () => void,
-    private messaging: () => Promise<MessagingSnapshot>, private saveFeishu: (input: any) => Promise<MessagingSnapshot>, private deleteFeishu: () => Promise<void>) { this.instances.set('butler', legacy) }
+  constructor(private api: Pick<OrcaWorkerApi, 'storage' | 'secrets'>, private main: () => Promise<string>, private notify: (run: string, id: string, body: string, name: string) => Promise<unknown>, private changed: () => void,
+    private messaging: () => Promise<MessagingSnapshot>, private saveFeishu: (input: any) => Promise<MessagingSnapshot>, private deleteFeishu: () => Promise<void>) {}
   private async directory() {
     const saved = await this.api.storage.get('workspace.connections') as { version: number; entries: Entry[] } | null
     if (saved) {
       if (saved.version !== 1 || !Array.isArray(saved.entries) || saved.entries.some(e => !e.id || !e.name || !['a2a', 'feishu'].includes(e.type))) fail('外部连接目录不兼容，请保留数据并检查版本')
       this.entries = structuredClone(saved.entries)
-    } else {
-      const m = await this.messaging()
-      this.entries = [...(m.feishu.enabled || m.feishu.appId ? [{ id: 'feishu', type: 'feishu' as const, name: '飞书' }] : []), ...(await this.api.storage.get('workspace.butler') ? [{ id: 'butler', type: 'a2a' as const, name: 'Hermes' }] : [])]
-      await this.save()
-    }
+    } else this.entries = []
     return this.entries
   }
-  name(id: string) { return this.entries.find(e => e.id === id)?.name || 'Hermes' }
   private save() { return this.api.storage.set('workspace.connections', { version: 1, entries: this.entries } as any) }
   private instance(e: Entry) {
     let b = this.instances.get(e.id)
@@ -66,7 +60,7 @@ export class Connections {
         else {
           const b = this.instance(e), s = await b.snapshot()
           await b.handle({ operation: 'save', revision: s.revision, enabled: false, port: s.port, url: s.url })
-          b.stop(); await this.api.storage.delete(e.id === 'butler' ? 'workspace.butler' : `workspace.a2a:${e.id}`)
+          b.stop(); await this.api.storage.delete(`workspace.a2a:${e.id}`)
           await this.api.secrets.delete(`${e.id}:inbound`); await this.api.secrets.delete(`${e.id}:outbound`); this.instances.delete(e.id)
         }
         this.entries = entries.filter(x => x.id !== e!.id); await this.save(); this.changed(); return this.list()
@@ -94,6 +88,6 @@ export class Connections {
     })
     this.chain = work.catch(() => {}); return work
   }
-  async start() { const entries = await this.directory(); this.started = true; for (const e of entries.filter(e => e.type === 'a2a' && e.id !== 'butler')) await this.instance(e).start() }
+  async start() { const entries = await this.directory(); this.started = true; for (const e of entries.filter(e => e.type === 'a2a')) await this.instance(e).start() }
   stop() { for (const b of this.instances.values()) b.stop() }
 }

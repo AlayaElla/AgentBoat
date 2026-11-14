@@ -13,5 +13,6 @@ if (existsSync(link) || (() => { try { lstatSync(link); return true; } catch { r
 if (existsSync(target) && lstatSync(target).isSymbolicLink()) throw new Error(`安装目标必须是普通目录：${target}`);
 mkdirSync(target, { recursive: true });
 cpSync(source, target, { recursive: true });
+mkdirSync(path.dirname(link), { recursive: true });
 if (!existsSync(link)) symlinkSync(target, link, process.platform === 'win32' ? 'junction' : 'dir');
 console.log(JSON.stringify({ installed: target, claudeLink: link, repository: fileURLToPath(new URL('../', import.meta.url)) }, null, 2));

@@ -1,3 +1,4 @@
+import { executable as orca } from '../coordinator/scripts/orca-cli.mjs';
 import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync, realpathSync, appendFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
@@ -9,8 +10,7 @@ import { initialize as initializeSkills } from './project-skills.mjs';
 export const root = fileURLToPath(new URL('../', import.meta.url));
 export const home = path.resolve(process.env.AGENTBOAT_HOME || path.join(os.homedir(), '.agentboat'));
 const client = path.join(root, 'coordinator/scripts/client.mjs');
-const orca = process.env.ORCA_CLI_COMMAND || (process.platform === 'win32'
-  ? path.join(os.homedir(), 'AppData/Local/Programs/orca/resources/bin/orca.exe') : 'orca');
+
 const json = file => JSON.parse(readFileSync(file, 'utf8').replace(/^\uFEFF/, ''));
 const save = (file, value) => writeFileSync(file, JSON.stringify(value, null, 2) + '\n');
 const run = (executable, args, cwd = root) => execFileSync(executable, args, {
@@ -99,22 +99,11 @@ function journal(dir, requestId, input) {
   return { record, update: (stage, data = {}) => { Object.assign(record, data, { stage }); save(file, record); } };
 }
 export function launchReceipt(result) {
-  const launch = result.launch || result;
+  const launch = result.launch;
   if (!launch?.outcome?.handle || !['journaled', 'handed-to-terminal'].includes(launch.prompt?.outcome)) {
     throw new Error('未确认 agent 收到提示词，请检查日志中的启动回执，不要重复启动');
   }
   return launch.outcome.handle;
-}
-function projectRecipient(p) {
-  for (const file of readdirSync(path.join(home, 'projects')).filter(f => f.endsWith('.json'))) {
-    const record = json(path.join(home, 'projects', file));
-    if (record.context?.projectId !== p.ref.id) continue;
-    const launch = record.launched?.launch || record.launched;
-    if (!launch?.outcome?.sessionId) continue;
-    if (record.boundRunId && record.boundRunId !== p.runId) continue;
-    return `orca_session_id:${launch.outcome.sessionId}`;
-  }
-  return `run:${p.runId}`;
 }
 export function create(input) {
   const t = template(input.template || 'code');
@@ -171,7 +160,6 @@ export function dispatch(input) {
   run('git', ['rev-parse', '--verify', 'HEAD'], p.ref.path);
   const name = key(input.name);
   testPath(path.join(repo.worktreeBasePath || path.dirname(p.ref.path), name));
-  const recipient = projectRecipient(p);
   const j = journal('assignments', input.requestId, input);
   const evidenceDir = path.join(p.ref.path, '.agentboat/assignments');
   mkdirSync(evidenceDir, { recursive: true });
@@ -198,10 +186,10 @@ export function dispatch(input) {
       artifacts: [{ id: `${taskId}-launch`, label: 'Orca 派活回执', url: launchFile, version: 'v1' }],
     } });
     j.update('notifying', { handle });
-    const notified = call(['orchestration', 'send', '--from', sender, '--to', recipient, '--type', 'status',
+    const notified = call(['orchestration', 'send', '--from', sender, '--to', `run:${fresh.runId}`, '--type', 'status',
       '--subject', `直接派活：${name}`, '--body', `项目 ${p.ref.id} / 插件任务 ${taskId}\n来源：${source}\n用户原话：${goal}\n已由 Orca 独立工作树启动 ${t.roles[role].agent}：${handle}\n启动回执：${JSON.stringify(launched)}\n请关联原任务并继续跟进，不能将启动当作完成；来源原文见 ${provenance}`,
       '--full'], p.ref.path);
-    if (notified.message?.run_id !== p.runId) {
+    if (notified.message?.run_id !== fresh.runId) {
       j.update('notification-target-changed', { notified });
       throw new Error('通知回执的 Run 与现读绑定不一致，请核对项目主会话变更，不自动补发');
     }
