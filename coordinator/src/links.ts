@@ -3,8 +3,9 @@ import https from 'node:https'
 import { isIP } from 'node:net'
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto'
 import type { OrcaWorkerApi } from 'orca/worker'
-import { taskState, type Project } from './model'
+import { taskState, type Project, type WorkspaceRequest } from './model'
 import { fail, object, strings, text } from './store'
+import { WorkspaceRequests } from './requests'
 
 export type Scope = 'none' | 'summary' | 'details'
 export interface Sharing { scope: Scope; projectIds: string[]; acceptTasks: 'deny' | 'confirm' | 'auto' }
@@ -19,6 +20,7 @@ interface LinkData {
   enabled: boolean; host: string; port: number; publicUrl: string; tls: boolean; peers: Peer[]
 }
 export interface LinksSnapshot extends Omit<LinkData, 'peers'> {
+  requests?: WorkspaceRequest[]
   listening: string; error: string
   peers: (Peer & { status: 'connected' | 'offline' | 'pending' | 'revoked'; receivedAt?: string; report?: SharedReport })[]
   invitation?: { code: string; expiresAt: string }
@@ -49,7 +51,7 @@ function sharing(raw: unknown): Sharing {
 // Only locally owned project records enter this projection. Incoming reports have no route into it.
 export function report(projects: Project[], peer: Sharing, workspaceId: string, name: string): SharedReport {
   return { workspaceId, name, scope: peer.scope, updatedAt: new Date().toISOString(), projects: peer.scope === 'none' ? [] :
-    projects.filter(p => peer.projectIds.includes(p.ref.id)).map(p => {
+    projects.filter(p => peer.projectIds.includes(p.ref.id) && !p.events.some(e => e.source === 'workspace-external')).map(p => {
       const counts: Record<string, number> = {}
       for (const t of p.tasks) { const state = taskState(t); counts[state] = (counts[state] || 0) + 1 }
       return { id: p.ref.id, name: p.ref.name, updatedAt: p.updatedAt || '', counts,
@@ -91,7 +93,7 @@ async function call(url: string, route: string, body: unknown, token = ''): Prom
     const req = (u.protocol === 'https:' ? https : http).request(u, { method: 'POST', headers: {
       'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(data), ...(token ? { Authorization: `Bearer ${token}` } : {})
     } }, res => {
-      if (res.statusCode !== 200) { res.resume(); reject(new Error(res.statusCode === 401 ? '连接已撤销或凭据无效' : '对端未接受请求，请核对连接状态')); return }
+      if (res.statusCode !== 200) { res.resume(); reject(Object.assign(new Error(res.statusCode === 401 ? '连接已撤销或凭据无效' : '对端未接受请求，请核对连接状态'), { status: res.statusCode })); return }
       void jsonBody(res).then(resolve, () => reject(new Error('对端未返回有效的工作间消息')))
     })
     req.setTimeout(5000, () => req.destroy()); req.once('error', () => reject(new Error('无法连接对端，请核对地址和网络'))); req.end(data)
@@ -99,6 +101,7 @@ async function call(url: string, route: string, body: unknown, token = ''): Prom
 }
 
 export class WorkspaceLinks {
+  readonly requests: WorkspaceRequests
   private initial: LinkData = { version: 1, revision: 0, workspaceId: randomUUID(), name: '我的工作间', enabled: false, host: '127.0.0.1', port: 0, publicUrl: '', tls: false, peers: [] }
   private server?: http.Server | https.Server
   private timer?: ReturnType<typeof setInterval>
@@ -109,7 +112,7 @@ export class WorkspaceLinks {
   private syncing = new Map<string, Promise<void>>()
   private listening = ''
   private error = ''
-  constructor(private orca: Pick<OrcaWorkerApi, 'storage' | 'secrets'>, private projects: () => Promise<Project[]>, private changed: () => void) {}
+  constructor(private orca: Pick<OrcaWorkerApi, 'storage' | 'secrets'>, private projects: () => Promise<Project[]>, private changed: () => void) { this.requests = new WorkspaceRequests(orca.storage) }
   private serial<T>(fn: () => Promise<T>): Promise<T> { const p = this.chain.then(fn); this.chain = p.catch(() => {}); return p }
   private async data(): Promise<LinkData> {
     const raw = await this.orca.storage.get('workspace.links')
@@ -121,7 +124,7 @@ export class WorkspaceLinks {
   private async save(d: LinkData) { if (Buffer.byteLength(JSON.stringify(d)) > 100_000) fail('连接记录已达上限'); await this.orca.storage.set('workspace.links', d as any) }
   async snapshot(): Promise<LinksSnapshot> {
     const d = await this.serial(() => this.data())
-    return { ...d, listening: this.listening, error: this.error, peers: d.peers.map(p => {
+    return { ...d, requests: (await this.requests.data()).requests, listening: this.listening, error: this.error, peers: d.peers.map(p => {
       const incoming = this.incoming.get(p.id), fresh = incoming && Date.now() - Date.parse(incoming.receivedAt) < 35_000 && !this.failures.has(p.id)
       return { ...p, status: p.state === 'revoked' ? 'revoked' : fresh ? 'connected' : p.state === 'pending' ? 'pending' : 'offline',
         ...(incoming ? { receivedAt: incoming.receivedAt } : {}), ...(p.state === 'active' && fresh ? { report: incoming!.report } : {}) }
@@ -201,10 +204,21 @@ export class WorkspaceLinks {
       const d = await this.data(), p = d.peers.find(p => p.id === connectionId)
       if (!p) fail('连接不存在')
       p.state = 'revoked'; d.revision++; await this.save(d); this.incoming.delete(p.id)
+      await this.requests.disconnect(p.id)
       const token = await this.orca.secrets.get(secretKey(p.id)); await this.orca.secrets.delete(secretKey(p.id)); return { ...p, token }
     })
     if (p.endpoint && p.token) { try { await call(p.endpoint, '/revoke', { id: p.id }, p.token) } catch { /* Local authorization is already revoked; offline peers learn on their next sync. */ } }
     this.changed(); return this.snapshot()
+  }
+  async request(input: Record<string, any>, operation: 'send' | 'decide' | 'update' | 'attach') {
+    await this.serial(async () => {
+      const d = await this.data(), p = d.peers.find(p => p.id === input.peerId && p.state === 'active')
+      if (!p) fail('请选择有效连接')
+      if (operation === 'send') await this.requests.send(p.id, p.workspaceId, input)
+      else if (operation === 'attach') await this.requests.attach(p.id, input.id, text(input.projectId, '项目编号', 200))
+      else await this.requests.update(input, operation === 'decide')
+    })
+    await this.sync(input.peerId); this.changed(); return this.snapshot()
   }
   async refresh() { const d = await this.serial(() => this.data()); await Promise.all(d.peers.filter(p => p.endpoint && p.state !== 'revoked').map(p => this.sync(p.id))); this.changed(); return this.snapshot() }
   private async sync(connectionId: string): Promise<void> {
@@ -220,13 +234,21 @@ export class WorkspaceLinks {
       if (!p || p.state === 'revoked' || !p.endpoint) return
       const token = await this.orca.secrets.get(secretKey(p.id))
       if (!token) throw Error()
-      const result = await call(p.endpoint, '/sync', { id: p.id, report: report(await this.projects(), p, d.workspaceId, d.name) }, token)
+      const exchange = await this.serial(() => this.requests.envelope(p.id))
+      const result = await call(p.endpoint, '/sync', { id: p.id, report: report(await this.projects(), p, d.workspaceId, d.name), exchange }, token)
       const incoming = received(result.report, p)
       await this.serial(async () => { const now = await this.data(), current = now.peers.find(x => x.id === p.id); if (!current || current.state === 'revoked') return
         if (current.state === 'pending') { current.state = 'active'; now.revision++; await this.save(now) }
+        await this.requests.receive(p.id, p.workspaceId, current.acceptTasks, result.exchange)
         this.incoming.set(p.id, { report: incoming, receivedAt: new Date().toISOString() }); this.failures.delete(p.id)
       })
-    } catch { this.failures.set(connectionId, '对端离线、连接已撤销或凭据无效'); this.incoming.delete(connectionId) }
+    } catch (e) {
+      if ((e as { status?: number }).status === 401) await this.serial(async () => {
+        const d = await this.data(), p = d.peers.find(p => p.id === connectionId)
+        if (p && p.state !== 'revoked') { p.state = 'revoked'; d.revision++; await this.save(d); await this.requests.disconnect(p.id); await this.orca.secrets.delete(secretKey(p.id)) }
+      })
+      this.failures.set(connectionId, '对端离线、连接已撤销或凭据无效'); this.incoming.delete(connectionId)
+    }
   }
   private async serve(req: http.IncomingMessage, res: http.ServerResponse) {
     const reply = (status: number, body: unknown) => { res.writeHead(status, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }); res.end(JSON.stringify(body)) }
@@ -248,12 +270,14 @@ export class WorkspaceLinks {
         const p = d.peers.find(p => p.id === body.id && p.state === 'active'), token = p && await this.orca.secrets.get(secretKey(p.id))
         if (!p || !token || !equal(req.headers.authorization || '', `Bearer ${token}`)) { reply(401, { error: 'Unauthorized' }); return }
         if (req.url === '/revoke') {
-          p.state = 'revoked'; d.revision++; await this.save(d); await this.orca.secrets.delete(secretKey(p.id)); this.incoming.delete(p.id); reply(200, {}); this.changed(); return
+          p.state = 'revoked'; d.revision++; await this.save(d); await this.requests.disconnect(p.id); await this.orca.secrets.delete(secretKey(p.id)); this.incoming.delete(p.id); reply(200, {}); this.changed(); return
         }
         const incoming = received(body.report, p), outgoing = report(await this.projects(), p, d.workspaceId, d.name)
-        if (Buffer.byteLength(JSON.stringify(outgoing)) > LIMIT) fail('工作间上报过大')
+        await this.requests.receive(p.id, p.workspaceId, p.acceptTasks, body.exchange)
+        const response = { report: outgoing, exchange: await this.requests.envelope(p.id) }
+        if (Buffer.byteLength(JSON.stringify(response)) > LIMIT) fail('工作间上报过大')
         this.incoming.set(p.id, { report: incoming, receivedAt: new Date().toISOString() }); this.failures.delete(p.id)
-        reply(200, { report: outgoing }); this.changed()
+        reply(200, response); this.changed()
       })
     } catch { if (!res.headersSent) reply(400, { error: 'Invalid workspace request' }); req.resume() }
   }

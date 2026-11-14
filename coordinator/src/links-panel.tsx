@@ -1,5 +1,6 @@
-import { atom, read, set, update, plugin, Stack, Row, Box, Heading, Text, Button, Badge, Input, Textarea, Switch, Select, Callout, Collapsible, EmptyState, type PluginRequests } from 'orca'
+import { atom, read, set, update, plugin, Stack, Row, Box, Heading, Text, Button, Badge, Input, Textarea, Switch, Select, Callout, Collapsible, EmptyState, Link, type PluginRequests } from 'orca'
 import type { LinksSnapshot, Sharing } from './links'
+import { requestState, requestStates, type WorkspaceRequest } from './model'
 import type { ProjectRef } from './model'
 
 const opened = atom(false)
@@ -10,6 +11,32 @@ const code = atom('')
 const invitation = atom('')
 const config = atom({ name: '', enabled: false, host: '127.0.0.1', port: '0', publicUrl: '', tls: false, certificate: '', privateKey: '' })
 const edits = atom<Record<string, Sharing>>({})
+const requestNotes = atom<Record<string, string>>({})
+export function pendingRequests(s?: LinksSnapshot) { return s?.requests?.filter(r => r.direction === 'incoming' && requestState(r) === 'confirm') ?? [] }
+function requestCard(r: WorkspaceRequest, s: LinksSnapshot, decide = false, onUpdated?: (s: LinksSnapshot) => void) {
+  const key = `${r.peerId}:${r.id}`, last = r.updates.at(-1)
+  const choose = async (status: 'accepted' | 'rejected') => {
+    if (read(working)) return
+    set(working, true); set(error, '')
+    try { const result = await plugin.request('workspace.requests', { operation: 'decide', peerId: r.peerId, id: r.id, requestId: crypto.randomUUID(), status, note: read(requestNotes)[key] || '' }); onUpdated?.(result) }
+    catch (e) { set(error, e instanceof Error ? e.message : '处理未完成，请刷新核对') }
+    finally { set(working, false) }
+  }
+  return <Box key={key} border radius="lg" padding="md" gap="sm">
+    <Row gap="sm" wrap><Text weight="semibold">{r.title}</Text><Badge>{decide ? '待你确认' : requestStates[requestState(r)]}</Badge></Row>
+    <Text muted>{`${r.direction === 'incoming' ? '来自' : '发往'} ${s.peers.find(p => p.id === r.peerId)?.name ?? r.workspaceId} · ${r.id}`}</Text>
+    {r.context ? <Text>{`背景：${r.context}`}</Text> : null}<Text>{`期望结果：${r.expected}`}</Text>
+    {r.links.map(url => <Link key={url} href={url}>{url}</Link>)}
+    {last?.note ? <Text>{last.note}</Text> : null}{last?.links.map(url => <Link key={url} href={url}>{url}</Link>)}
+    {decide ? <Stack gap="sm"><Textarea label={`处理说明 · ${r.title}`} value={read(requestNotes)[key] || ''} onChange={v => update(requestNotes, all => ({ ...all, [key]: v }))} />
+      <Row gap="sm"><Button disabled={read(working)} onPress={() => choose('accepted')}>接受请求</Button><Button disabled={read(working)} onPress={() => choose('rejected')}>拒绝请求</Button></Row>
+    </Stack> : null}
+  </Box>
+}
+export function requestAttention(s?: LinksSnapshot, onUpdated?: (s: LinksSnapshot) => void) {
+  return <Stack gap="sm">{s ? pendingRequests(s).map(r => requestCard(r, s, true, onUpdated)) : null}
+    {read(error) ? <Callout tone="danger" title="请求处理未完成">{read(error)}</Callout> : null}</Stack>
+}
 const scopes = [{ value: 'none', label: '不开放' }, { value: 'summary', label: '项目摘要' }, { value: 'details', label: '含任务详情' }]
 async function act(input: PluginRequests['workspace.links']['input'], reset = false) {
   if (read(working)) return
@@ -44,6 +71,7 @@ export function linksSection(s?: LinksSnapshot) {
         </Stack>)}
       </Stack> : p.state === 'active' ? <Text muted>刷新后读取；离线时不展示旧内容。</Text> : null}
     </Box>)}
+    {s?.requests?.filter(r => !pendingRequests(s).includes(r)).map(r => requestCard(r, s))}
     <Button disabled={read(working)} onPress={() => { void act({ operation: 'refresh' }).then(() => plugin.request('workspace.overview')) }}>刷新工作间</Button>
   </Stack>
 }
@@ -80,7 +108,6 @@ export function linksPage(projects: ProjectRef[]) {
         <Select label="向对方开放" value={e.scope} options={scopes} onChange={v => change({ scope: v as Sharing['scope'] })} />
         {e.scope !== 'none' ? projects.map(project => <Switch key={project.id} label={`${project.name} · ${project.path}`} checked={e.projectIds.includes(project.id)} onChange={v => change({ projectIds: v ? [...e.projectIds, project.id] : e.projectIds.filter(id => id !== project.id) })} />) : null}
         <Select label="接受对方派活" value={e.acceptTasks} options={[{ value: 'deny', label: '不接受' }, { value: 'confirm', label: '需我确认' }, { value: 'auto', label: '自动受理' }]} onChange={v => change({ acceptTasks: v as Sharing['acceptTasks'] })} />
-        <Text muted>派活规则仅保存设定。</Text>
         <Row gap="sm" wrap><Button disabled={read(working) || p.state !== 'active'} onPress={() => void act({ operation: 'share', revision: s.revision, id: p.id, ...e })}>保存开放范围</Button>
           <Button disabled={read(working)} onPress={() => void act({ operation: 'revoke', id: p.id })}>断开连接</Button></Row>
       </Box>

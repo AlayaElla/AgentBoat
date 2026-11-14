@@ -6,6 +6,15 @@ export interface ProjectRef {
   hostId: string
   workspace: string
 }
+export const requestStates = { sent: '已发出', confirm: '待对方确认', rejected: '已拒绝', accepted: '已接受', working: '进行中', completed: '已完成', failed: '失败', disconnected: '连接已断开' }
+export type RequestState = keyof typeof requestStates
+export interface RequestUpdate { id: string; status: RequestState; note: string; links: string[]; at: string }
+export interface WorkspaceRequest {
+  id: string; peerId: string; workspaceId: string; direction: 'incoming' | 'outgoing'
+  title: string; context: string; expected: string; links: string[]; createdAt: string
+  updates: RequestUpdate[]; projectId?: string
+}
+export const requestState = (r: WorkspaceRequest): RequestState => r.updates.at(-1)?.status ?? 'sent'
 export interface Artifact { id: string; label: string; url: string; version: string }
 export interface UserFeedback { at: string; revision: number; result: string; note: string }
 export interface Acceptance {
@@ -36,7 +45,7 @@ export interface Delivery {
   targetRunId?: string
   state: 'pending' | 'sending' | 'sent' | 'failed' | 'uncertain'
   error?: string; requestId?: string
-  external?: { channel: 'feishu'; appId: string; chatId: string; replyTo?: string; messageId?: string; target?: FeedbackTarget; artifacts?: Artifact[]; root?: string }
+  external?: { channel: 'feishu'; appId: string; chatId: string; replyTo?: string; messageId?: string; target?: FeedbackTarget; workspaceRequest?: { peerId: string; id: string }; artifacts?: Artifact[]; root?: string }
 }
 export interface Messaging {
   version: 1; revision: number; feishu: Project['feishu']

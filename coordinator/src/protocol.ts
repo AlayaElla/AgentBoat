@@ -3,6 +3,7 @@ import type { LinksSnapshot, Sharing } from './links'
 export {}
 declare module 'orca' {
   interface PluginRequests {
+    'workspace.requests': { input: { operation: 'read' | 'send' | 'decide' | 'update' | 'attach'; runId?: string; requestId?: string; peerId?: string; id?: string; title?: string; context?: string; expected?: string; links?: string[]; status?: import('./model').RequestState; note?: string; projectId?: string }; output: LinksSnapshot }
     'workspace.links': { input: { operation: 'read' | 'configure' | 'invite' | 'cancel-invite' | 'join' | 'share' | 'revoke' | 'refresh'; revision?: number; id?: string; code?: string; name?: string; enabled?: boolean; host?: string; port?: number; publicUrl?: string; tls?: boolean; certificate?: string; privateKey?: string; scope?: Sharing['scope']; projectIds?: string[]; acceptTasks?: Sharing['acceptTasks'] }; output: LinksSnapshot }
     'workspace.feishu': { input: { operation: 'read' | 'save'; revision?: number; feishu?: Project['feishu']; appSecret?: string }; output: MessagingSnapshot }
     'workspace.reply': { input: { runId: string; eventId: string; requestId: string; text: string }; output: MessagingSnapshot }

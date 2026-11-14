@@ -3,6 +3,50 @@ import * as panel from './panel'
 import { refs, sample, longSample, deliverable } from './fixtures'
 import { fresh, feedback, overview, submitTask } from './store'
 import type { LinksSnapshot } from './links'
+import { requestState, type WorkspaceRequest } from './model'
+
+test('overview confirms or rejects external requests, keeps failed notes, and displays returned result links', async () => {
+  for (const status of ['accepted', 'rejected'] as const) {
+    let reject = true
+    const r: WorkspaceRequest = { id: 'test-request', peerId: 'test-peer', workspaceId: 'other', direction: 'incoming', title: '测试外部请求', context: '测试背景', expected: '测试结果', links: ['https://example.com/input'], createdAt: '',
+      updates: [{ id: 'update', status: 'confirm', note: '', links: [], at: '' }] }
+    const links: LinksSnapshot = { version: 1, revision: 0, workspaceId: 'own', name: '本工作间', enabled: false, host: '127.0.0.1', port: 0, publicUrl: '', tls: false, listening: '', error: '', peers: [], requests: [r] }
+    const writes: any[] = [], host = mockHost({ requests: {
+      'projects.list': () => ({ projects: [] }),
+      'workspace.overview': () => ({ ...overview([], { version: 1, revision: 0, runId: '', requests: [] }), links: structuredClone(links) }),
+      'workspace.requests': input => {
+        if (reject) throw hostError('invalid_request', '测试保存失败')
+        writes.push(input); r.updates.push({ id: 'decision', status: input.status!, note: input.note!, links: [], at: '' }); return structuredClone(links)
+      }
+    } })
+    const view = await mount(panel, { host })
+    assert.ok(view.find({ text: '待用户处理 1' }))
+    assert.ok(view.find({ text: '待你确认' }))
+    await view.type({ label: '处理说明 · 测试外部请求' }, '测试主人说明', { replace: true })
+    const button = status === 'accepted' ? '接受请求' : '拒绝请求'
+    await view.press({ text: button })
+    assert.equal(view.valueOf({ label: '处理说明 · 测试外部请求' }), '测试主人说明')
+    assert.ok(JSON.stringify(view.tree()).includes('测试保存失败'))
+    reject = false; await view.press({ text: button })
+    assert.equal(writes[0].status, status)
+    assert.equal(writes[0].note, '测试主人说明')
+    assert.equal(requestState(r), status)
+    assert.ok(view.find({ text: '待用户处理 0' }))
+    assert.equal(view.find({ text: '接受请求' }), null)
+    assert.deepEqual(view.errors, []); assert.deepEqual(view.warnings, []); assert.deepEqual(view.refusals, [])
+    await view.unmount()
+  }
+  const links: LinksSnapshot = { version: 1, revision: 0, workspaceId: 'own', name: '本工作间', enabled: false, host: '127.0.0.1', port: 0, publicUrl: '', tls: false, listening: '', error: '', peers: [], requests: [{
+    id: 'result', peerId: 'peer', workspaceId: 'other', direction: 'outgoing', title: '测试返回结果', context: '', expected: '返回链接', links: [], createdAt: '',
+    updates: [{ id: 'done', status: 'completed', note: '测试已完成', links: ['https://example.com/result'], at: '' }]
+  }] }
+  const view = await mount(panel, { host: mockHost({ requests: { 'projects.list': () => ({ projects: [] }),
+    'workspace.overview': () => ({ ...overview([], { version: 1, revision: 0, runId: '', requests: [] }), links }) } }) })
+  assert.ok(view.find({ text: '测试已完成' }))
+  assert.ok(view.find({ text: 'https://example.com/result' }))
+  assert.deepEqual(view.errors, []); assert.deepEqual(view.warnings, []); assert.deepEqual(view.refusals, [])
+  await view.unmount()
+})
 
 test('workspace links manage scopes, preserve failed drafts, show external reports and clear private input on exit', async () => {
   let reject = false

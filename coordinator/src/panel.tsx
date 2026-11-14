@@ -1,7 +1,7 @@
 ﻿import { atom, read, set, update, plugin, shell, files, Stack, Row, Box, Heading, Text, Button, IconButton, Badge, List, ListItem, Link,
   Select, Input, Textarea, Switch, RadioGroup, Field, Tabs, Tab, Collapsible, EmptyState, Callout, Skeleton, KeyValue, type PanelContext, type Tone } from 'orca'
 import { taskState, type Acceptance, type Decision, type Project, type ProjectRef, type Snapshot, type Task, type Overview, type MessagingSnapshot } from './model'
-import { linksSection, linksOpened, linksPage } from './links-panel'
+import { linksSection, linksOpened, linksPage, pendingRequests, requestAttention } from './links-panel'
 
 type View = { kind: 'task'; id: string } | { kind: 'settings' } | null
 const OTHER = ' other' // options are stored trimmed, so a leading space cannot collide with one
@@ -232,7 +232,7 @@ function messages(p: Project) {
       {[...p.events].reverse().map(e => {
         const linked = p.tasks.find(t => t.id === e.taskId)
         return <Collapsible key={e.id} title={clip(e.text.trim().split('\n')[0], 60)} description={linked ? `关联任务：${clip(linked.title, 40)}` : '未关联任务'}>
-          <Badge>{e.source === 'workspace-agent' ? '主 agent' : '飞书'}</Badge>
+          <Badge>{e.source === 'workspace-agent' ? '主 agent' : e.source === 'workspace-external' ? '外部工作间' : '飞书'}</Badge>
           {paragraphs(e.text)}
           <Text muted size="xs">{`${clip(e.senderId, 80)} · ${when(e.receivedAt)}`}</Text>
           {linked ? <Button variant="ghost" onPress={() => open(linked)}>查看任务</Button> : null}
@@ -345,12 +345,13 @@ function workspacePage(all: Overview) {
     })}>工作间飞书</Button>
     {problem('workspace-feishu')}
     {all.error ? <Callout tone="danger" title="项目列表读取未成功">{paragraphs(all.error)}</Callout> : null}
-    <Stack gap="sm"><Heading level={2}>{`待用户处理 ${all.attention.length}`}</Heading>
+    <Stack gap="sm"><Heading level={2}>{`待用户处理 ${all.attention.length + pendingRequests(all.links).length}`}</Heading>
+      {requestAttention(all.links, links => set(workspace, { ...all, links }))}
       {all.attention.length ? all.attention.map(item => <Box key={`${item.projectId}/${item.taskId}/${item.kind}/${item.itemId}`} border radius="lg" padding="md" gap="sm" background="card">
         <Row gap="sm" wrap><Badge tone={tones[item.kind]}>{kinds[item.kind]}</Badge><Text muted>{fit(all.projects.find(p => p.ref.id === item.projectId)?.ref.name ?? item.projectId, 50)}</Text></Row>
         <Text weight="semibold">{fit(item.title, 100)}</Text>{summary(item.summary)}
         <Button onPress={() => openOverviewTask(item.projectId, item.taskId)}>查看任务</Button>
-      </Box>) : <EmptyState icon="check" title="没有待用户处理的事项" />}
+      </Box>) : pendingRequests(all.links).length ? null : <EmptyState icon="check" title="没有待用户处理的事项" />}
     </Stack>
     {linksSection(all.links)}
     <Stack gap="sm"><Heading level={2}>{`项目 ${all.projects.length}`}</Heading>
