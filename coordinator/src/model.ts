@@ -63,6 +63,7 @@ export interface Project {
 }
 export interface ConnectionState { state: 'off' | 'connecting' | 'connected' | 'error'; message: string }
 export interface Snapshot {
+  mainAgent?: 'claude' | 'codex'
   projects: ProjectRef[]; project: Project | null; connection: ConnectionState
   secretSaved: boolean; runtimeError?: string
 }

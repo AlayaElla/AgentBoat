@@ -41,6 +41,7 @@ test('two loopback workspaces pair once, share only selected local projects, cha
       return (await b.links.refresh()).peers[0].report!
     }
     let r = await setA('summary')
+    assert.equal(r.acceptTasks, 'confirm')
     assert.deepEqual(r.projects.map(p => p.id), ['p1'])
     assert.equal(r.projects[0].tasks, undefined)
     assert.equal(r.projects[0].pending, 2)
@@ -98,6 +99,10 @@ test('invites expire/cancel, malformed and oversized requests fail closed, expli
     await assert.rejects(() => a.links.share({ id: p.id, revision: as.revision, scope: 'details', projectIds: ['external-project'], acceptTasks: 'auto' }))
     const token = a.secrets.get(`workspace-link:${p.id}`)!
     const malformed = report([], p, p.workspaceId, 'B')
+    const legacy = { ...malformed }; delete legacy.acceptTasks
+    assert.equal(await post(s.listening, '/sync', { id: p.id, report: legacy }, token), 200)
+    assert.equal((await a.links.snapshot()).peers[0].report!.acceptTasks, undefined)
+    assert.equal(await post(s.listening, '/sync', { id: p.id, report: { ...malformed, acceptTasks: 'invalid' } }, token), 400)
     assert.equal(await post(s.listening, '/sync', { id: p.id, report: { ...malformed, workspaceId: 'wrong' } }, token), 400)
     assert.equal(await post(s.listening, '/sync', { id: p.id, report: { ...malformed, scope: 'none', projects: [{ secret: 'ignored' }] } }, token), 400)
   } finally { a.links.stop(); b.links.stop() }

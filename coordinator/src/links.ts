@@ -11,6 +11,7 @@ export type Scope = 'none' | 'summary' | 'details'
 export interface Sharing { scope: Scope; projectIds: string[]; acceptTasks: 'deny' | 'confirm' | 'auto' }
 export interface SharedReport {
   workspaceId: string; name: string; scope: Scope; updatedAt: string
+  acceptTasks?: Sharing['acceptTasks']
   projects: { id: string; name: string; updatedAt: string; counts: Record<string, number>; pending: number
     tasks?: { title: string; phase: string; decisions: string[]; acceptance: string[] }[] }[]
 }
@@ -50,7 +51,7 @@ function sharing(raw: unknown): Sharing {
 }
 // Only locally owned project records enter this projection. Incoming reports have no route into it.
 export function report(projects: Project[], peer: Sharing, workspaceId: string, name: string): SharedReport {
-  return { workspaceId, name, scope: peer.scope, updatedAt: new Date().toISOString(), projects: peer.scope === 'none' ? [] :
+  return { workspaceId, name, scope: peer.scope, acceptTasks: peer.acceptTasks, updatedAt: new Date().toISOString(), projects: peer.scope === 'none' ? [] :
     projects.filter(p => !p.hidden && peer.projectIds.includes(p.ref.id)).map(p => {
       const external = p.events.filter(e => e.source === 'workspace-external')
       const tasks = p.tasks.filter(t => !external.some(e => e.taskId === t.id || t.sourceIds.includes(e.id)))
@@ -66,9 +67,10 @@ export function report(projects: Project[], peer: Sharing, workspaceId: string, 
 function received(raw: unknown, peer: Peer): SharedReport {
   const r = object(raw)
   if (r.workspaceId !== peer.workspaceId || !['none', 'summary', 'details'].includes(r.scope) || !Array.isArray(r.projects) || r.projects.length > 100 || r.scope === 'none' && r.projects.length) fail('对端上报格式不正确')
+  if (r.acceptTasks !== undefined && !['deny', 'confirm', 'auto'].includes(r.acceptTasks)) fail('对端派活规则不正确')
   const str = (v: unknown, max = 4000) => typeof v === 'string' && v.length <= max ? v : fail('对端文字格式不正确')
   const titles = (v: unknown) => { if (!Array.isArray(v) || v.length > 100) fail('对端标题格式不正确'); return v.map(x => str(x)) }
-  return { workspaceId: peer.workspaceId, name: str(r.name, 200), scope: r.scope, updatedAt: str(r.updatedAt, 100), projects: r.projects.map((raw: unknown) => {
+  return { workspaceId: peer.workspaceId, name: str(r.name, 200), scope: r.scope, ...(r.acceptTasks !== undefined ? { acceptTasks: r.acceptTasks } : {}), updatedAt: str(r.updatedAt, 100), projects: r.projects.map((raw: unknown) => {
     const p = object(raw), c = object(p.counts), counts: Record<string, number> = {}
     for (const k of ['working', 'decision', 'review', 'rework', 'completed', 'blocked', 'paused']) if (c[k] !== undefined) {
       if (!Number.isSafeInteger(c[k]) || c[k] < 0) fail('对端计数不正确'); counts[k] = c[k]

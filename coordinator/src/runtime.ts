@@ -9,6 +9,7 @@ const execute = promisify(execFile)
 export interface CoordinatorRuntime {
   projects(): Promise<ProjectRef[]>
   verifyRun(id: string): Promise<void>
+  mainAgent?(id: string): Promise<'claude' | 'codex' | undefined>
   send(runId: string, delivery: Delivery): Promise<{ requestId?: string }>
 }
 export class OrcaRuntime implements CoordinatorRuntime {
@@ -53,6 +54,17 @@ export class OrcaRuntime implements CoordinatorRuntime {
     if (!/^run_[\w-]+$/.test(id)) fail('Run 编号格式不正确')
     const result = await this.call(['orchestration', 'run-show', '--id', id])
     if (result.run?.id !== id) fail('Orca 未返回对应 Run')
+  }
+  async mainAgent(id: string): Promise<'claude' | 'codex' | undefined> {
+    const result = await this.call(['orchestration', 'run-show', '--id', id])
+    const handle = result.run?.coordinator_handle
+    if (typeof handle !== 'string' || !handle) return
+    // Legacy Runs have no coordinator handle; never substitute the project template's default.
+    const session = /^orca_session_id:(claude|codex)_/.exec(handle)
+    if (session) return session[1] as 'claude' | 'codex'
+    const terminal = await this.call(['terminal', 'show', '--terminal', handle])
+    const agent = terminal.terminal?.agent ?? terminal.terminal?.agentType
+    return agent === 'claude' || agent === 'codex' ? agent : undefined
   }
   async send(runId: string, delivery: Delivery): Promise<{ requestId?: string }> {
     const result = await this.call(['orchestration', 'send', '--from', 'plugin:local.project-coordinator', '--to', `run:${runId}`, '--type', 'status',

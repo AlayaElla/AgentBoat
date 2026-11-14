@@ -115,7 +115,9 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
   async function snapshot(id: string): Promise<Snapshot> {
     if (!catalog.length) await projects()
     const project = catalog.some(p => p.id === id) ? await ensure(id) : (await store.all()).find(p => p.ref.id === id) ?? await ensure(id)
+    const mainAgent = project.runId && runtime.mainAgent ? await runtime.mainAgent(project.runId).catch(() => undefined) : undefined
     return { projects: catalog, project, secretSaved: !!await secret(id),
+      ...(mainAgent ? { mainAgent } : {}),
       connection: project.feishu.enabled ? sources.state(project.feishu.appId) : { state: 'off', message: '' },
       ...(runtimeError ? { runtimeError } : {}) }
   }

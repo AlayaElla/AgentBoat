@@ -40,6 +40,8 @@ Orca 的 plugin inspect 将 trusted-worker 明确描述为独立 Node.js 进程�
 
 ## 跨工作间派活
 
+同步报告可附 `acceptTasks`（deny/confirm/auto），表示报告发送方向接收方开放的派活规则。字段缺省时表示旧对端未提供，画布显示“未知”；无效值拒收。该字段只在内存报告里展示，不改变本侧设置、连接存储版本或对方授权。组织画布的连接编辑继续使用 `workspace.links` 的 share/revoke 等请求。
+
 甲的主 agent 现读 `requests-read` 核对连接后，从标准输入向 `node coordinator/scripts/client.mjs requests-send` 传 JSON：
 
 ```json
