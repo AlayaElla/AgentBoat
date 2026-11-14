@@ -4,6 +4,7 @@ import { taskState, type Acceptance, type Decision, type Project, type ProjectRe
 import { storage } from 'orca'
 import { linksSection, linksOpened, linksPage, closeLinks, pendingRequests, requestAttention } from './links-panel'
 import { bindingRows, agentName, takeoverText } from './main-agent-view'
+import { butlerSection, butlerOpened, butlerPage, closeButler } from './butler-panel'
 
 type View = { kind: 'task'; id: string } | { kind: 'settings' } | null
 const OTHER = ' other' // options are stored trimmed, so a leading space cannot collide with one
@@ -363,12 +364,14 @@ async function openOverviewTask(projectId: string, taskId: string) {
   if (read(selected) === projectId && read(snapshot)?.project?.tasks.some(t => t.id === taskId)) show({ kind: 'task', id: taskId })
 }
 function workspacePage(all: Overview) {
+  if (butlerOpened()) return butlerPage()
   if (read(mainSwitch)) return mainSwitchPage(all)
   if (linksOpened()) return linksPage(all.projects.map(p => p.ref))
   if (read(workspaceFeishuOpen)) return workspaceFeishuPage()
   const kinds = { decision: '待决定', review: '待验收', blocked: '受阻', rework: '要求返修' }
   return <Stack gap="lg">
     <Heading>工作间总览</Heading>
+    {butlerSection(all.butler)}
     <Box border radius="lg" padding="md" gap="sm" background="card">
       <Heading level={2}>工作间主 agent</Heading>
       {all.workspace.runId ? <KeyValue items={bindingRows(all.workspace)} /> : <Text>未绑定。请选择已开的会话，或新开一个主 agent。</Text>}
@@ -482,7 +485,7 @@ export function setup(ctx: PanelContext): void {
     const next = await storage.get('workspace.navigation') as { switching?: boolean } | null
     if (!next) return
     await storage.delete('workspace.navigation')
-    set(overviewMode, true); set(mainSwitch, false); set(workspaceFeishuOpen, false); set(view, null); closeLinks()
+    set(overviewMode, true); set(mainSwitch, false); set(workspaceFeishuOpen, false); set(view, null); closeLinks(); closeButler()
     void list()
     if (next.switching) void openMainSwitch()
   }

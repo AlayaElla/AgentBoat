@@ -6,6 +6,23 @@ import os from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
+test('butler CLI maps read/check/send/reply and takes message JSON only from stdin', () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'butler-client-'));
+  const fixture = path.join(dir, 'orca-fixture.mjs');
+  writeFileSync(fixture, `import cp from 'node:child_process';
+import {syncBuiltinESMExports} from 'node:module';
+cp.execFileSync = (_exe, args) => JSON.stringify({handler:args[4],input:JSON.parse(args[args.indexOf('--data')+1])});
+syncBuiltinESMExports();`);
+  try {
+    for (const operation of ['read', 'check', 'send', 'reply']) {
+      const input = {runId:'mock-main',requestId:'mock-request',contextId:'mock-context',id:'mock-task',text:'模拟日常消息'};
+      const value = JSON.parse(execFileSync(process.execPath, ['--import', pathToFileURL(fixture).href, 'scripts/client.mjs', 'butler-'+operation], {encoding:'utf8',windowsHide:true,input:JSON.stringify(input)}));
+      assert.equal(value.handler, 'workspace.butler');
+      assert.deepEqual(value.input, ['read','check'].includes(operation) ? {operation} : {...input,operation});
+    }
+  } finally { rmSync(dir, {recursive:true,force:true}); }
+});
+
 test('main-bind queries in its own process without --from and overwrites supplied identity', () => {
   const dir = mkdtempSync(path.join(os.tmpdir(), 'main-bind-client-'));
   const fixture = path.join(dir, 'orca-fixture.mjs');

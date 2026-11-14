@@ -6,6 +6,7 @@ import { ProjectStore, artifactUrl, fail, feedback, fingerprint, fresh, notifyWo
 import { WorkspaceLinks } from './links'
 import { requestState, requestStates } from './model'
 import { mainAgent } from './main-agent'
+import { Butler } from './butler'
 
 const revision = (value: unknown): number => {
   if (!Number.isSafeInteger(value) || (value as number) < 0) fail('请先读取项目当前版本')
@@ -19,6 +20,9 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
   const busy = new Map<string, Promise<void>>()
   const changed = (projectId = '') => { orca.panels.post('project.changed', { projectId }); void updateStatus().catch(() => {}) }
   const main = mainAgent(orca, store, runtime, changed)
+  const butler = new Butler(orca, async () => (await store.workspace()).runId,
+    (runId, id, body) => runtime.send(runId, { id, subject: '来自管家', body, state: 'pending' }), () => changed())
+  orca.panels.handle('workspace.butler', input => butler.handle(input))
   let statusUpdates: Promise<unknown> = Promise.resolve()
   function updateStatus() {
     const work = statusUpdates.then(async () => {
@@ -335,7 +339,7 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
     await projects()
     const saved = await store.all()
     // Include stored projects even when their worktree is currently closed; overview never registers or rewrites them.
-    return { ...overview([...saved, ...catalog.filter(ref => !saved.some(p => p.ref.id === ref.id)).map(fresh)], await store.workspace(), runtimeError), workspace: await main.read(), links: await links.snapshot() }
+    return { ...overview([...saved, ...catalog.filter(ref => !saved.some(p => p.ref.id === ref.id)).map(fresh)], await store.workspace(), runtimeError), workspace: await main.read(), links: await links.snapshot(), butler: await butler.snapshot() }
   })
   orca.panels.handle('workspace.message', async input => {
     const id = text(input.projectId, '项目编号', 200)
@@ -456,8 +460,9 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
   })
 
   let refreshMain: ReturnType<typeof setInterval> | undefined
-  return { store, links, ingest, flush, flushMailbox, flushRequestNotifications, updateStatus, stop: () => { clearInterval(refreshMain); links.stop(); sources.stop() }, async start() {
+  return { store, links, butler, ingest, flush, flushMailbox, flushRequestNotifications, updateStatus, stop: () => { clearInterval(refreshMain); butler.stop(); links.stop(); sources.stop() }, async start() {
     await links.start()
+    await butler.start()
     await main.recover()
     clearInterval(refreshMain)
     refreshMain = setInterval(() => { orca.panels.post('project.changed', { projectId: '' }) }, 10000)

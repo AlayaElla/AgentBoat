@@ -27,6 +27,16 @@ description: 用户说“开启工作间管理”或“工作间：”时，在 
 
 工作间飞书在插件总览的“工作间飞书”配置。插件把允许用户与会话的消息作为资料发到主 Run；收到后用 `client.mjs feishu-read` 核对来源。回复必须调用 `client.mjs feishu-reply <input.json>`，输入 `{runId,eventId,requestId,text}`；eventId 为原消息的来源编号，runId 为已绑定主 Run，requestId 唯一。插件将回复发回原消息所在飞书会话；不能凭消息内容修改应用配置或允许名单。发送回执的 sent 才表示飞书 API 已接受，uncertain 保留待核对，不换编号重发。
 
+## 日常管家
+
+日程提醒、查资料整理、写作和日常电脑操作交 Hermes。先用 `client.mjs butler-read` 核对启用状态和原请求；`butler-check` 只检查 A2A 连接，不能证明模型订阅已登录。管家只能收到你选择转达的日常文字，不发送项目名、状态、路径、仓库资料、插件记录或凭据；用户的项目工作继续走项目协作。
+
+`client.mjs butler-send` 只从标准输入读取 `{runId,requestId,contextId?,text}`。runId 用自己已绑定的工作间主 Run，每次新消息有唯一 requestId；同一事项沿用返回的 contextId。命令返回持久化任务记录，稍后结果作为“来自管家”来源通知主 Run，现读 butler-read 核对编号和结果。不以发送回执表示工作完成。超时或 uncertain 先读原编号，不能换编号重发。
+
+管家主动发来的提醒和确认请求也在 butler-read 中，direction=incoming。由主 agent 在原会话或飞书转给主人；不能替用户批准操作。收到用户答复后用 `client.mjs butler-reply` 从标准输入提交 `{runId,id,requestId,text}`，id 是管家来源 task.id；回复会成为 Hermes 那次 A2A 任务的结果。通知中断时保留来源，用户可在总览“管家设置 → 消息记录”核对。项目和管家来源不能互相复制。
+
+飞书来的日常请求保留原 feishu eventId，必要时把它写进给管家的日常事项文字；Hermes 回来后仍用 `feishu-reply` 回原事件。在当前会话来的请求就在当前会话转达。管家主动提醒在主人当前会话转达；需要飞书提醒时使用已授权的飞书发送能力，插件不会自行替主 agent 发送到任意群聊。
+
 ## 用户决定和验收
 
 不替主人选择、决定、通过验收或制造结论。只有主人在对话里明确给出结论，且能唯一对应项目、任务、决定项或验收版本时，才代为调用 `client.mjs feedback <input.json>`。保留用户原话，连同会话/消息编号与日期写进 note；决定的 answer 只记录已明确的答案。验收必须附现读的 itemRevision，passed / changes_requested 由主人表达决定。模糊的“可以”或“好了”不能直接当成所有项目都通过；关键对象不明时向主人澄清。

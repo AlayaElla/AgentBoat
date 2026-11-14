@@ -3,6 +3,7 @@ import type { LinksSnapshot, Sharing } from './links'
 export {}
 declare module 'orca' {
   interface PluginRequests {
+    'workspace.butler': { input: import('./butler').ButlerInput; output: import('./butler').ButlerSnapshot }
     'project.visibility': { input: { projectId: string; revision: number; hidden: boolean }; output: Snapshot }
     'project.delete': { input: { projectId: string; revision: number; confirm: string }; output: { deleted: string; exportPath: string } }
     'workspace.requests': { input: { operation: 'read' | 'send' | 'decide' | 'update' | 'attach'; runId?: string; requestId?: string; peerId?: string; id?: string; title?: string; context?: string; expected?: string; links?: string[]; status?: import('./model').RequestState; note?: string; projectId?: string }; output: LinksSnapshot }

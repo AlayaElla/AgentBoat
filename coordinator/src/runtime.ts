@@ -73,7 +73,7 @@ export class OrcaRuntime implements CoordinatorRuntime {
     return session
   }
   async requestTakeover(handle: string, prompt: string) {
-    await this.call(['orchestration', 'send', '--from', 'plugin:local.project-coordinator', '--to', handle, '--type', 'status', '--subject', '请接管工作间主 agent', '--body', prompt])
+    await this.call(['orchestration', 'send', '--from', 'plugin:local.project-coordinator', '--to', handle, '--type', 'status', '--subject', '【项目协作】请接管工作间主 agent', '--body', prompt])
   }
   async launchMain(workspace: string, agent: string, prompt: string) {
     const result = await this.call(['agent', 'launch', '--agent', agent, '--worktree', workspace, '--prompt', prompt])
@@ -98,7 +98,7 @@ export class OrcaRuntime implements CoordinatorRuntime {
   }
   async send(runId: string, delivery: Delivery): Promise<{ requestId?: string }> {
     const result = await this.call(['orchestration', 'send', '--from', 'plugin:local.project-coordinator', '--to', `run:${runId}`, '--type', 'status',
-      '--subject', delivery.subject, '--body', delivery.body])
+      '--subject', delivery.subject.startsWith('【项目协作】') ? delivery.subject : `【项目协作】${delivery.subject}`, '--body', delivery.body])
     return { requestId: result.mutation?.requestId }
   }
 }

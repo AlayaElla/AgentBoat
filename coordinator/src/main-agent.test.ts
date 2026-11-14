@@ -173,6 +173,21 @@ test('status count follows submissions, feedback, hide and restore; command open
   } finally { c.stop(); await worker.deactivate() }
 })
 
+test('Orca send and takeover subjects have one project-coordinator prefix without changing stored deliveries', async () => {
+  const runtime = new OrcaRuntime(async () => 'unused'), calls: string[][] = []
+  ;(runtime as any).call = async (args: string[]) => { calls.push(args); return { mutation: { requestId: 'mock-receipt' } } }
+  for (const subject of ['模拟提醒', '【项目协作】模拟提醒']) {
+    const delivery = { id: 'test-only', subject, body: '模拟正文', state: 'pending' as const }, before = structuredClone(delivery)
+    await runtime.send('run_mock', delivery)
+    const args = calls.at(-1)!
+    assert.equal(args[args.indexOf('--subject') + 1], '【项目协作】模拟提醒')
+    assert.deepEqual(delivery, before)
+  }
+  await runtime.requestTakeover('mock-session', '模拟接管提示')
+  const args = calls.at(-1)!
+  assert.equal(args[args.indexOf('--subject') + 1], '【项目协作】请接管工作间主 agent')
+})
+
 test('runtime target parser uses exact chat session and terminal pane; unknown liveness is never online', () => {
   const ws = { address: { environment: 'local', worktree: 'identity:workspace' }, path: '/test', displayName: '工作区', agents: [
     { paneKey: 'structured-agent-session-test-session:pane', conversationName: '会话', agentType: 'claude', subagentObservation: 'live' },

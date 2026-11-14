@@ -8,11 +8,11 @@ const resources = path.resolve(path.dirname(process.env.ORCA_CLI_COMMAND), '../a
 await mkdir('.orca/local-test', { recursive: true });
 const runtime = path.join(resources, 'orca-runtime.mjs');
 await build({
-  entryPoints: ['src/coordinator.test.ts','src/feishu.test.ts','src/interface.test.tsx','src/links.test.ts','src/requests.test.ts','src/org-canvas.test.ts','src/main-agent.test.ts'], outdir: '.orca/local-test',
+  entryPoints: ['src/butler.test.ts','src/coordinator.test.ts','src/feishu.test.ts','src/interface.test.tsx','src/links.test.ts','src/requests.test.ts','src/org-canvas.test.ts','src/main-agent.test.ts'], outdir: '.orca/local-test',
   bundle: true, platform: 'node', format: 'esm', target: 'node22', jsx: 'transform', jsxFactory: '__orcaTestH', jsxFragment: '__orcaTestFragment',
   inject: ['scripts/test-jsx.mjs'], tsconfigRaw: {compilerOptions:{jsx:'react',jsxFactory:'__orcaTestH',jsxFragmentFactory:'__orcaTestFragment'}},
   alias: { 'orca/testing': path.join(resources,'orca-testing.mjs'), 'orca': runtime },
   banner: {js:"import { createRequire as __testRequire } from 'node:module'; import { fileURLToPath as __testFile } from 'node:url'; import __testPath from 'node:path'; const require = __testRequire(import.meta.url); const __filename = __testFile(import.meta.url); const __dirname = __testPath.dirname(__filename);"},
   outExtension:{'.js':'.mjs'}
 });
-execFileSync(process.execPath, ['--test', '.orca/local-test/coordinator.test.mjs', '.orca/local-test/feishu.test.mjs', '.orca/local-test/interface.test.mjs', '.orca/local-test/links.test.mjs', '.orca/local-test/requests.test.mjs', '.orca/local-test/org-canvas.test.mjs', '.orca/local-test/main-agent.test.mjs', 'scripts/client.test.mjs'], {stdio:'inherit'});
+execFileSync(process.execPath, ['--test', '.orca/local-test/butler.test.mjs', '.orca/local-test/coordinator.test.mjs', '.orca/local-test/feishu.test.mjs', '.orca/local-test/interface.test.mjs', '.orca/local-test/links.test.mjs', '.orca/local-test/requests.test.mjs', '.orca/local-test/org-canvas.test.mjs', '.orca/local-test/main-agent.test.mjs', 'scripts/client.test.mjs'], {stdio:'inherit'});

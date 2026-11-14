@@ -93,6 +93,7 @@ export interface Attention {
   itemId: string; title: string; summary: string
 }
 export interface Overview {
+  butler?: import('./butler').ButlerSnapshot
   hidden?: ProjectRef[]
   links?: import('./links').LinksSnapshot
   workspace: WorkspaceBinding

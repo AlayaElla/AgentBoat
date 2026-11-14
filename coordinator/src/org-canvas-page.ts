@@ -108,6 +108,12 @@ export function startCanvas(root: HTMLElement, api: Pick<OrcaFrameApi, 'plugin' 
   }
   function open(item: Node | Edge) {
     if (busy) return
+    if (item.id === 'butler' || item.id === 'butler-main') {
+      const f = form('管家 · Hermes'), b = model.overview.butler
+      f.append(el('p', b?.enabled ? b.connection : '未启用'))
+      if (b?.error) f.append(el('p', b.error))
+      f.append(button('打开总览', () => run(() => api.plugin.request('workspace.entry')))); return
+    }
     if (item.projectId) { void openProject(item.projectId); return }
     if (item.peerId) { openPeer(item.peerId); return }
     const f = form('工作间主 agent'), w = model.overview.workspace
