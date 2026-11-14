@@ -1,10 +1,12 @@
 ﻿import { atom, read, set, update, plugin, shell, files, Stack, Row, Box, Heading, Text, Button, IconButton, Badge, List, ListItem, Link,
   Select, Input, Textarea, Switch, RadioGroup, Field, Tabs, Tab, Collapsible, EmptyState, Callout, Skeleton, KeyValue, type PanelContext, type Tone } from 'orca'
-import { taskState, type Acceptance, type Decision, type Project, type ProjectRef, type Snapshot, type Task } from './model'
+import { taskState, type Acceptance, type Decision, type Project, type ProjectRef, type Snapshot, type Task, type Overview } from './model'
 
 type View = { kind: 'task'; id: string } | { kind: 'settings' } | null
 const OTHER = ' other' // options are stored trimmed, so a leading space cannot collide with one
 const projects = atom<ProjectRef[] | null>(null)
+const workspace = atom<Overview | null>(null)
+const overviewMode = atom(true)
 const selected = atom('project.selection', '', { persist: 'plugin' })
 const snapshot = atom<Snapshot | null>(null)
 const tab = atom('project.tab', 'inbox', { persist: 'plugin' })
@@ -33,16 +35,18 @@ async function load(id: string, reset = false) {
   } catch (e) { if (request === epoch) fail('', '读取未成功', e) }
 }
 async function choose(id: string) {
+  set(overviewMode, false)
   set(selected, id); set(snapshot, null); set(notes, {}); set(picks, {}); set(failure, null); set(view, null); set(editing, '')
   set(configOwner, ''); update(config, c => ({ ...c, appSecret: '' }))
   if (id) await load(id, true)
 }
 async function list() {
   try {
-    const answer = await plugin.request('projects.list')
-    set(projects, answer.projects); set(failure, answer.error ? { at: '', title: '读取未成功', text: answer.error } : null)
+    const [answer, all] = await Promise.all([plugin.request('projects.list'), plugin.request('workspace.overview')])
+    set(workspace, all)
+    set(projects, all.projects.map(p => p.ref)); set(failure, answer.error ? { at: '', title: '读取未成功', text: answer.error } : null)
     const id = read(selected)
-    if (id && answer.projects.some(p => p.id === id)) await load(id, !read(snapshot))
+    if (id && all.projects.some(p => p.ref.id === id)) { if (!read(overviewMode)) await load(id, !read(snapshot)) }
     else if (id && !answer.error) { set(selected, ''); set(snapshot, null); set(view, null) }
   } catch (e) { fail('', '读取未成功', e) }
 }
@@ -211,6 +215,7 @@ function messages(p: Project) {
   return <Stack gap="lg">
     {waiting.length ? <Stack gap="sm"><Heading level={2}>未送达主会话</Heading>{waiting.map(d => <Box key={d.id} border radius="lg" padding="md" gap="sm" background="card">
       <Row justify="between" gap="sm" align="start"><Text weight="medium">{d.subject}</Text><Badge tone={d.state === 'pending' || d.state === 'sending' ? 'neutral' : 'warning'}>{states[d.state]}</Badge></Row>
+      {d.targetRunId ? <Text muted>发往工作间主 agent</Text> : null}
       {summary(d.error ?? d.body)}
       {d.state === 'pending' && p.runId ? <Button disabled={read(busy)} onPress={() => act(d.id, '通知未成功', async () => {
         const answer = await plugin.request('project.deliver', { projectId: p.ref.id, deliveryId: d.id })
@@ -219,10 +224,11 @@ function messages(p: Project) {
       {problem(d.id)}
     </Box>)}</Stack> : null}
     {p.events.length ? <Stack gap="sm">
-      {waiting.length ? <Heading level={2}>飞书消息</Heading> : null}
+      {waiting.length ? <Heading level={2}>来源消息</Heading> : null}
       {[...p.events].reverse().map(e => {
         const linked = p.tasks.find(t => t.id === e.taskId)
         return <Collapsible key={e.id} title={clip(e.text.trim().split('\n')[0], 60)} description={linked ? `关联任务：${clip(linked.title, 40)}` : '未关联任务'}>
+          <Badge>{e.source === 'workspace-agent' ? '主 agent' : '飞书'}</Badge>
           {paragraphs(e.text)}
           <Text muted size="xs">{`${clip(e.senderId, 80)} · ${when(e.receivedAt)}`}</Text>
           {linked ? <Button variant="ghost" onPress={() => open(linked)}>查看任务</Button> : null}
@@ -234,7 +240,7 @@ function messages(p: Project) {
 function home(s: Snapshot, p: Project) {
   const f = feishu(s), { decisions, checks } = pending(p), count = decisions.length + checks.length
   // Binding is not liveness: the latest settled notification is the only evidence that the bound session still receives feedback.
-  const latest = [...p.deliveries].reverse().find(d => d.state !== 'pending' && d.state !== 'sending')
+  const latest = [...p.deliveries].reverse().find(d => !d.targetRunId && d.state !== 'pending' && d.state !== 'sending')
   return <Stack gap="md">
     <Stack gap="sm">
       {p.runId ? null : <Callout tone="warning" title="主会话未绑定">在本项目会话中说“开启项目协作”即可绑定。</Callout>}
@@ -319,8 +325,43 @@ function settingsPage(s: Snapshot, p: Project) {
   </Stack>
 }
 
+async function openOverviewTask(projectId: string, taskId: string) {
+  await choose(projectId)
+  if (read(selected) === projectId && read(snapshot)?.project?.tasks.some(t => t.id === taskId)) show({ kind: 'task', id: taskId })
+}
+function workspacePage(all: Overview) {
+  const kinds = { decision: '待决定', review: '待验收', blocked: '受阻', rework: '要求返修' }
+  return <Stack gap="lg">
+    <Row justify="between" gap="sm" wrap><Heading>工作间总览</Heading><Badge tone={all.workspace.runId ? 'success' : 'neutral'}>{all.workspace.runId ? '主 agent 已绑定' : '主 agent 未绑定'}</Badge></Row>
+    {all.error ? <Callout tone="danger" title="项目列表读取未成功">{paragraphs(all.error)}</Callout> : null}
+    <Stack gap="sm"><Heading level={2}>{`待用户处理 ${all.attention.length}`}</Heading>
+      {all.attention.length ? all.attention.map(item => <Box key={`${item.projectId}/${item.taskId}/${item.kind}/${item.itemId}`} border radius="lg" padding="md" gap="sm" background="card">
+        <Row gap="sm" wrap><Badge tone={tones[item.kind]}>{kinds[item.kind]}</Badge><Text muted>{fit(all.projects.find(p => p.ref.id === item.projectId)?.ref.name ?? item.projectId, 50)}</Text></Row>
+        <Text weight="semibold">{fit(item.title, 100)}</Text>{summary(item.summary)}
+        <Button onPress={() => openOverviewTask(item.projectId, item.taskId)}>查看任务</Button>
+      </Box>) : <EmptyState icon="check" title="没有待用户处理的事项" />}
+    </Stack>
+    <Stack gap="sm"><Heading level={2}>{`项目 ${all.projects.length}`}</Heading>
+      {all.projects.map(p => <Box key={p.ref.id} border radius="lg" padding="md" gap="sm" background="card">
+        <Row justify="between" gap="sm" wrap><Text weight="semibold">{fit(p.ref.name, 70)}</Text><Badge tone={p.bound ? 'success' : 'neutral'}>{p.bound ? '项目主 agent 已绑定' : '项目主 agent 未绑定'}</Badge></Row>
+        <Row gap="sm" wrap>{Object.entries(p.counts).map(([state, count]) => <Badge key={state} tone={tones[state as keyof typeof tones]}>{`${labels[state as keyof typeof labels]} ${count}`}</Badge>)}</Row>
+        <Text muted size="xs">{p.updatedAt ? `更新于 ${when(p.updatedAt)}` : '暂无更新'}</Text>
+        <Button onPress={() => choose(p.ref.id)}>打开项目</Button>
+        {p.agents.length ? <Row gap="sm" wrap>{[...new Set(p.agents.map(e => `${e.agent} · ${labels[e.state]}`))].map(label => <Badge key={label}>{label}</Badge>)}</Row> : null}
+        {p.agents.length ? <Collapsible title={`执行记录 ${p.agents.length}`}>
+          {p.agents.map(e => <Stack key={`${e.projectTaskId}/${e.dispatchId}`} gap="xs">
+            <Text>{`${e.agent} · ${labels[e.state]} · ${e.projectTaskId}`}</Text>
+            <KeyValue items={[{ label: 'Run', value: e.runId, code: true }, { label: 'Dispatch', value: e.dispatchId, code: true }]} />
+          </Stack>)}
+        </Collapsible> : <Text muted>暂无执行记录</Text>}
+        <Collapsible title="项目信息"><KeyValue items={[{ label: '路径', value: p.ref.path }, { label: '项目编号', value: p.ref.id, code: true }]} /></Collapsible>
+      </Box>)}
+    </Stack>
+  </Stack>
+}
 export function setup(ctx: PanelContext): void {
   ctx.subscriptions.push(plugin.on('project.changed', e => {
+    void plugin.request('workspace.overview').then(all => set(workspace, all)).catch(e => fail('', '读取总览未成功', e))
     const id = read(selected)
     if (id && (!e.projectId || e.projectId === id)) void load(id)
   }))
@@ -330,13 +371,16 @@ export default function Panel() {
   const all = read(projects), s = read(snapshot), p = s?.project, v = read(view), f = read(failure)
   const task = v?.kind === 'task' ? p?.tasks.find(t => t.id === v.id) : undefined
   return <Stack gap="md">
+    <Row gap="sm"><Button variant={read(overviewMode) ? 'solid' : 'ghost'} onPress={() => { set(overviewMode, true); void list() }}>总览</Button>
+      <Button variant={read(overviewMode) ? 'ghost' : 'solid'} onPress={() => { set(overviewMode, false); const id = read(selected); if (id) void load(id) }}>单项目</Button></Row>
     <Box direction="row" gap="xs" align="center">
       <Box grow><Select label="项目" labelHidden value={read(selected)} placeholder="选择项目" options={(all ?? []).map(x => ({ value: x.id, label: `${x.name} · ${x.path}` }))} onChange={choose} /></Box>
       <IconButton icon="refresh" label="刷新" onPress={list} />
-      {p && v?.kind !== 'settings' ? <IconButton icon="settings" label="项目设置" onPress={openSettings} /> : null}
+      {!read(overviewMode) && p && v?.kind !== 'settings' ? <IconButton icon="settings" label="项目设置" onPress={openSettings} /> : null}
     </Box>
     {f?.at === '' ? <Callout tone="danger" title={f.title}>{paragraphs(f.text)}<Button onPress={list}>重试</Button></Callout> : null}
-    {s && p ? v?.kind === 'settings' ? settingsPage(s, p) : task ? taskPage(p, task) : home(s, p)
+    {read(overviewMode) ? read(workspace) ? workspacePage(read(workspace)!) : f?.at === '' ? null : <Skeleton lines={3} label="正在读取总览" />
+      : s && p ? v?.kind === 'settings' ? settingsPage(s, p) : task ? taskPage(p, task) : home(s, p)
       : f?.at === '' ? null
       : !all || read(selected) ? <Skeleton lines={3} label="正在读取项目" />
       : <EmptyState icon="folder" title={all.length ? '选择一个项目' : 'Orca 中还没有项目'} />}

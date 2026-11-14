@@ -1,6 +1,6 @@
 ﻿import { defineCheck } from 'orca/testing'
 import { sample, longSample, refs, deliverable } from './fixtures'
-import { fresh, receiveEvent, submitTask } from './store'
+import { fresh, overview, receiveEvent, submitTask } from './store'
 import type { Snapshot } from './model'
 
 const pending = sample()
@@ -24,13 +24,14 @@ enabled.project!.feishu = { enabled: true, appId: 'cli_example', chatIds: ['oc_e
 const long = longSample()
 
 const state = (s: Snapshot, tab = 'inbox', view: unknown = null, list = refs) => ({
-  requests: { 'projects.list': () => ({ projects: list }), 'project.read': () => s },
+  requests: { 'projects.list': () => ({ projects: list }), 'project.read': () => s,
+    'workspace.overview': () => overview([s.project!], { version: 1, revision: 0, runId: '', requests: [] }) },
   persisted: { plugin: { 'project.selection': 'p1', 'project.tab': tab, 'project.view': view } }
 })
 export default defineCheck({
-  fresh: { requests: { 'projects.list': () => ({ projects: refs }) } },
-  noProjects: { requests: { 'projects.list': () => ({ projects: [] }) } },
-  listError: { requests: { 'projects.list': () => ({ projects: [], error: '无法读取 Orca 项目：请检查 Orca 与 CLI 路径' }) } },
+  fresh: { requests: { 'projects.list': () => ({ projects: refs }), 'workspace.overview': () => overview([pending.project!, fresh(refs[1])], { version: 1, revision: 0, runId: '', requests: [] }) } },
+  noProjects: { requests: { 'projects.list': () => ({ projects: [] }), 'workspace.overview': () => overview([], { version: 1, revision: 0, runId: '', requests: [] }) } },
+  listError: { requests: { 'projects.list': () => ({ projects: [], error: '无法读取 Orca 项目：请检查 Orca 与 CLI 路径' }), 'workspace.overview': () => overview([], { version: 1, revision: 0, runId: '', requests: [] }) } },
   unbound: state(unbound),
   inbox: state(pending),
   legacyTab: state(pending, 'decision', 'history'),

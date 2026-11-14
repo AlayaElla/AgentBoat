@@ -1,3 +1,4 @@
 # delivery records and evidence contain paths and the user name of the machine that produced them
 /docs/
 coordinator/MIGRATION.md
+coordinator/T4-delivery.md

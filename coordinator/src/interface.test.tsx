@@ -1,7 +1,7 @@
 ﻿import { assert, hostError, mockHost, mount, test } from 'orca/testing'
 import * as panel from './panel'
 import { refs, sample, longSample, deliverable } from './fixtures'
-import { fresh, feedback, submitTask } from './store'
+import { fresh, feedback, overview, submitTask } from './store'
 
 function fixture() {
   const s = sample(), two = { ...s, project: fresh(refs[1]) }
@@ -9,6 +9,7 @@ function fixture() {
   let refusal = ''
   const host = mockHost({ requests: {
     'projects.list': () => ({ projects: refs }),
+    'workspace.overview': () => overview([s.project!, two.project!], { version: 1, revision: 0, runId: '', requests: [] }),
     'project.read': ({ projectId }) => structuredClone(projectId === 'p1' ? s : two),
     'project.feedback': input => { feedback(s.project!, input); return structuredClone(s) },
     'project.settings': input => {
@@ -28,6 +29,22 @@ const tabLabels = (view: Awaited<ReturnType<typeof mount>>) => view.findAll({ ty
 // The first inbox card is the decision of 确定首页风格; its 详情 link opens that task's record.
 const openFirst = (view: Awaited<ReturnType<typeof mount>>) => view.press(view.findAll({ type: 'Link', text: '详情' })[0])
 const units = (value: string) => [...value].reduce((n, ch) => n + (ch.charCodeAt(0) > 0x2e7f ? 2 : 1), 0)
+
+test('overview opens first with a saved project; attention opens its exact project and task', async () => {
+  const { host } = fixture()
+  const view = await mount(panel, { host, persisted: { plugin: { 'project.selection': 'p2', 'project.view': { kind: 'settings' } } } })
+  assert.ok(view.find({ text: '工作间总览' }))
+  assert.ok(view.find({ text: '待用户处理 3' }))
+  assert.equal(view.find({ text: '保存设置' }), null)
+  await view.press(view.findAll({ type: 'Button', text: '查看任务' })[0])
+  assert.equal(view.valueOf({ label: '项目' }), 'p1')
+  assert.ok(view.find({ text: '返回待处理' }))
+  assert.ok(view.find({ text: '首页布局' }))
+  await view.press({ text: '总览' })
+  assert.ok(view.find({ text: '工作间总览' }))
+  clean(view)
+  await view.unmount()
+})
 
 test('inbox answers both queues in place; a change request leaves it; a new version returns for acceptance', async () => {
   const { s, host } = fixture()
@@ -143,6 +160,7 @@ test('a view stored by an earlier version opens the inbox instead of an empty pa
   for (const old of ['decision', 'review', 'rework', 'all', 'sources', 'settings']) {
     const view = await mount(panel, { host, persisted: { plugin: { 'project.selection': 'p1', 'project.tab': old, 'project.view': old } } })
     await view.settled()
+    await view.press({ text: '单项目' })
     assert.equal(view.valueOf({ label: '视图' }), 'inbox', old)
     assert.ok(view.find({ text: '待决定' }), old)
     await openFirst(view)
@@ -159,6 +177,7 @@ test('long content stays out of the inbox: a summary leads to the task record, w
   const s = longSample(), [review, style] = s.project!.tasks
   const host = mockHost({ requests: {
     'projects.list': () => ({ projects: s.projects }),
+    'workspace.overview': () => overview([s.project!], { version: 1, revision: 0, runId: '', requests: [] }),
     'project.read': () => structuredClone(s),
     'project.feedback': input => { feedback(s.project!, input); return structuredClone(s) }
   } })

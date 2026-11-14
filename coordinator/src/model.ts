@@ -29,11 +29,13 @@ export interface SourceEvent {
 }
 export interface Delivery {
   id: string; subject: string; body: string
+  targetRunId?: string
   state: 'pending' | 'sending' | 'sent' | 'failed' | 'uncertain'
   error?: string; requestId?: string
 }
 export interface Project {
   version: 1; ref: ProjectRef; revision: number; runId: string
+  updatedAt?: string
   roles: { design: 'codex' | 'claude'; code: 'codex' | 'claude'; review: 'codex' | 'claude' }
   feishu: { appId: string; chatIds: string[]; senderIds: string[]; enabled: boolean }
   tasks: Task[]; events: SourceEvent[]; deliveries: Delivery[]; requests: { id: string; fingerprint: string }[]
@@ -42,6 +44,22 @@ export interface ConnectionState { state: 'off' | 'connecting' | 'connected' | '
 export interface Snapshot {
   projects: ProjectRef[]; project: Project | null; connection: ConnectionState
   secretSaved: boolean; runtimeError?: string
+}
+export interface WorkspaceBinding { revision: number; runId: string }
+export interface Workspace extends WorkspaceBinding { version: 1; requests: { id: string; fingerprint: string }[] }
+export type TaskState = ReturnType<typeof taskState>
+export interface Attention {
+  projectId: string; taskId: string; kind: 'decision' | 'review' | 'blocked' | 'rework'
+  itemId: string; title: string; summary: string
+}
+export interface Overview {
+  workspace: WorkspaceBinding
+  attention: Attention[]
+  projects: {
+    ref: ProjectRef; counts: Record<TaskState, number>; updatedAt: string; bound: boolean
+    agents: (Task['executions'][number] & { projectTaskId: string; state: TaskState })[]
+  }[]
+  error?: string
 }
 
 export function taskState(task: Task): 'working' | 'decision' | 'review' | 'rework' | 'completed' | 'blocked' | 'paused' {

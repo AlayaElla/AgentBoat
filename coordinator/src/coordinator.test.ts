@@ -89,3 +89,127 @@ test('restart preserves an in-flight notification without resending', async () =
   coordinator.stop()
   await worker.deactivate()
 })
+
+test('overview reads legacy and closed projects without writing and includes every queue and execution', async () => {
+  const p = fresh(refs[0]); p.runId = 'run_project'
+  submitTask(p, { ...deliverable, executions: [{ runId: 'run_job', taskId: 'orca-task', dispatchId: 'dispatch', agent: 'codex' }] })
+  submitTask(p, { id: 'blocked', title: '依赖受阻', goal: '修复依赖', phase: 'blocked', decisions: [{ id: 'ask', question: '选择方案？' }] })
+  submitTask(p, { ...deliverable, id: 'rework' })
+  feedback(p, { taskId: 'rework', kind: 'acceptance', itemId: 'page-check', itemRevision: 1, result: 'changes_requested', note: '调整标题' })
+  const host = mockHost({ storage: { 'project:p1': p as any } })
+  const before = structuredClone(host.data().storage)
+  const runtime: CoordinatorRuntime = { projects: async () => [refs[1]], verifyRun: async () => {}, send: async () => { throw new Error('must not send') } }
+  const worker = await mountWorker({ default: (orca: OrcaWorkerApi) => { createCoordinator(orca, runtime) } }, { host })
+  const all = await worker.request('workspace.overview')
+  assert.deepEqual(all.workspace, { revision: 0, runId: '' })
+  assert.deepEqual(all.attention.map(a => a.kind).sort(), ['blocked', 'decision', 'review', 'rework'])
+  assert.equal(all.projects.length, 2)
+  assert.equal(all.projects[0].counts.review, 1)
+  assert.equal(all.projects[0].agents[0].dispatchId, 'dispatch')
+  assert.equal(all.projects[0].agents[0].projectTaskId, 'task-1')
+  assert.deepEqual((await worker.request('project.agent', { operation: 'read', projectId: 'p1' })).project, p)
+  assert.deepEqual(host.data().storage, before)
+  await worker.deactivate()
+})
+
+test('workspace binding validates Runs, revisions and request replay, and supports a project coordinator Run', async () => {
+  const p = fresh(refs[0]); p.runId = 'run_project'
+  const host = mockHost({ storage: { 'project:p1': p as any } })
+  const verified: string[] = []
+  const runtime: CoordinatorRuntime = { projects: async () => refs, verifyRun: async id => { verified.push(id); if (id === 'invalid') throw new Error('invalid Run') }, send: async () => ({}) }
+  const worker = await mountWorker({ default: (orca: OrcaWorkerApi) => { createCoordinator(orca, runtime) } }, { host })
+  const input = { operation: 'bind' as const, revision: 0, requestId: 'main-bind', runId: 'run_project' }
+  await assert.rejects(() => worker.request('workspace.agent', { ...input, runId: 'invalid' }))
+  assert.deepEqual(await worker.request('workspace.agent', input), { revision: 1, runId: 'run_project' })
+  assert.deepEqual(await worker.request('workspace.agent', input), { revision: 1, runId: 'run_project' })
+  await assert.rejects(() => worker.request('workspace.agent', { ...input, runId: 'run_other' }))
+  await assert.rejects(() => worker.request('workspace.agent', { ...input, requestId: 'stale' }))
+  await assert.rejects(() => worker.request('project.agent', { operation: 'bind', projectId: 'p2', revision: 0, requestId: 'reuse', runId: 'run_project' }))
+  assert.ok(verified.includes('run_project'))
+  assert.deepEqual((await worker.request('workspace.overview')).workspace, { revision: 1, runId: 'run_project' })
+  await worker.deactivate()
+})
+
+test('main messages use the existing source queue and retries never duplicate a delivery', async () => {
+  const p = fresh(refs[0]); p.runId = 'run_project'
+  const host = mockHost({ storage: { 'project:p1': p as any, workspace: { version: 1, revision: 1, runId: 'run_main', requests: [] } } })
+  let coordinator!: ReturnType<typeof createCoordinator>
+  const sends: { runId: string; body: string }[] = []
+  const runtime: CoordinatorRuntime = { projects: async () => refs, verifyRun: async () => {}, send: async (runId, d) => { sends.push({ runId, body: d.body }); return { requestId: 'sent-main-message' } } }
+  const worker = await mountWorker({ default: (orca: OrcaWorkerApi) => { coordinator = createCoordinator(orca, runtime) } }, { host })
+  const input = { projectId: 'p1', revision: 0, requestId: 'message-1', runId: 'run_main', text: '请核对本项目进展' }
+  await assert.rejects(() => worker.request('workspace.message', { ...input, runId: 'run_unknown' }))
+  await assert.rejects(() => worker.request('workspace.message', { ...input, projectId: 'p2' }))
+  await worker.request('workspace.message', input)
+  await worker.request('workspace.message', input)
+  await coordinator.flush('p1')
+  const saved = await coordinator.store.get('p1')
+  assert.equal(saved.events.length, 1)
+  assert.equal(saved.events[0].source, 'workspace-agent')
+  assert.equal(saved.events[0].senderId, 'run_main')
+  assert.equal(saved.deliveries[0].requestId, 'sent-main-message')
+  assert.equal(sends.length, 1)
+  assert.equal(sends[0].runId, 'run_project')
+  assert.ok(sends[0].body.includes('主 agent来源资料'))
+  assert.equal((await coordinator.store.get('p2')).events.length, 0)
+  await worker.deactivate()
+})
+
+test('project transitions notify main once, including new acceptance versions and completion after feedback', async () => {
+  const host = mockHost({ storage: { workspace: { version: 1, revision: 1, runId: 'run_main', requests: [] } } })
+  let coordinator!: ReturnType<typeof createCoordinator>
+  const sends: { runId: string; body: string }[] = []
+  const runtime: CoordinatorRuntime = { projects: async () => refs, verifyRun: async () => {}, send: async (runId, d) => { sends.push({ runId, body: d.body }); return { requestId: `sent-${sends.length}` } } }
+  const worker = await mountWorker({ default: (orca: OrcaWorkerApi) => { coordinator = createCoordinator(orca, runtime) } }, { host })
+  const submit = async (task: unknown, requestId: string) => {
+    const p = await worker.request('project.read', { projectId: 'p1' })
+    await worker.request('project.agent', { operation: 'submit', projectId: 'p1', revision: p.project!.revision, requestId, task })
+    await coordinator.flush('p1')
+  }
+  await submit({ ...deliverable, phase: 'working' }, 'working')
+  assert.equal(sends.length, 0)
+  await submit(deliverable, 'ready')
+  assert.equal(sends.length, 1)
+  await submit(deliverable, 'same')
+  assert.equal(sends.length, 1)
+  await submit({ id: 'block', title: '受阻任务', goal: '确认依赖', phase: 'blocked', decisions: [{ id: 'ask', question: '如何选择？' }] }, 'block')
+  assert.equal(sends.length, 3)
+  await submit({ ...deliverable, artifacts: [{ ...deliverable.artifacts[0], id: 'v2', version: 'v2' }], acceptance: [{ ...deliverable.acceptance[0], artifactIds: ['v2'] }] }, 'v2')
+  assert.equal(sends.length, 4)
+  const p = await coordinator.store.get('p1')
+  await worker.request('project.feedback', { projectId: 'p1', revision: p.revision, taskId: 'task-1', kind: 'acceptance', itemId: 'page-check', itemRevision: 2, result: 'passed' })
+  await coordinator.flush('p1')
+  assert.equal(sends.length, 5)
+  assert.ok(sends.every(s => s.runId === 'run_main' && s.body.includes('项目 p1 / 任务')))
+  assert.ok(sends.at(-1)!.body.includes('已完成'))
+  await worker.request('workspace.overview')
+  await coordinator.flush('p1')
+  assert.equal(sends.length, 5)
+  await worker.deactivate()
+})
+
+test('unbound main produces no notifications; restart keeps uncertain main delivery without resend', async () => {
+  const host = mockHost()
+  let coordinator!: ReturnType<typeof createCoordinator>, sends = 0
+  const runtime: CoordinatorRuntime = { projects: async () => refs, verifyRun: async () => {}, send: async () => { sends++; throw new Error('timeout') } }
+  const worker = await mountWorker({ default: (orca: OrcaWorkerApi) => { coordinator = createCoordinator(orca, runtime) } }, { host })
+  await worker.request('project.agent', { operation: 'submit', projectId: 'p1', revision: 0, requestId: 'unbound', task: deliverable })
+  assert.equal((await coordinator.store.get('p1')).deliveries.length, 0)
+  await worker.request('workspace.agent', { operation: 'bind', revision: 0, requestId: 'main', runId: 'run_main' })
+  // Binding and restarting never backfill old pending acceptance.
+  await coordinator.start(); await coordinator.flush('p1')
+  assert.equal(sends, 0)
+  const p = await coordinator.store.get('p1')
+  await worker.request('project.agent', { operation: 'submit', projectId: 'p1', revision: p.revision, requestId: 'block', task: { id: 'block', title: '阻塞', goal: '处理依赖', phase: 'blocked' } })
+  await coordinator.flush('p1')
+  assert.equal(sends, 1)
+  const saved = await coordinator.store.get('p1')
+  assert.equal(saved.deliveries[0].state, 'uncertain')
+  await coordinator.start(); await coordinator.flush('p1')
+  assert.equal(sends, 1)
+  await coordinator.store.mutate('p1', undefined, p => { p.deliveries[0].state = 'sending' })
+  await coordinator.start(); await coordinator.flush('p1')
+  assert.equal((await coordinator.store.get('p1')).deliveries[0].state, 'uncertain')
+  assert.equal(sends, 1)
+  coordinator.stop(); await worker.deactivate()
+})

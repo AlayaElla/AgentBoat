@@ -1,7 +1,10 @@
-import type { Snapshot, Project, ProjectRef } from './model'
+import type { Snapshot, Project, ProjectRef, Overview, WorkspaceBinding } from './model'
 export {}
 declare module 'orca' {
   interface PluginRequests {
+    'workspace.overview': { output: Overview }
+    'workspace.agent': { input: { operation: 'read' | 'bind'; revision?: number; requestId?: string; runId?: string }; output: WorkspaceBinding }
+    'workspace.message': { input: { projectId: string; revision: number; requestId: string; runId: string; text: string }; output: Snapshot }
     'projects.list': { output: { projects: ProjectRef[]; error?: string } }
     'project.read': { input: { projectId: string }; output: Snapshot }
     'project.settings': { input: { projectId: string; revision: number; roles: Project['roles']; feishu: Project['feishu']; appSecret?: string }; output: Snapshot }

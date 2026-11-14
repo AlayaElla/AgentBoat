@@ -1,20 +1,26 @@
 # 项目协作
 
-在 Orca 右侧打开“项目协作”并选择项目。项目下方显示主会话是否已绑定、飞书的实际连接状态；未绑定或连接异常时，处理方法显示在同一位置。主页面有三个标签：
+在 Orca 右侧打开“项目协作”，第一屏是工作间总览：跨项目待决定、待验收、受阻和要求返修事项，以及各项目状态计数、更新时间、项目主 agent 绑定和执行记录。点击事项直接打开对应项目的任务。执行记录不证明 agent 当前在线。用顶部项目选择或“单项目”切换到原有项目视图，“总览”返回。
+
+项目下方显示主会话是否已绑定、飞书的实际连接状态；未绑定或连接异常时，处理方法显示在同一位置。项目页面有三个标签：
 
 - 待处理：只有待决定与待验收。直接在卡片中选择选项或填写决定、打开成果、通过验收或退回修改；“详情”进入该任务的记录。内容较长时卡片只显示摘要，进入任务记录看完全文后再决定或验收；较长的选项以正文列出，按编号选择。
 - 任务记录：按最近更新排列。进入任务可查看目标、进展、成果、决定与验收历史、来源消息和执行记录，并可导出项目记录。
-- 消息：飞书消息，以及尚未送达主会话的通知。
+- 消息：飞书与工作间主 agent 来源，以及尚未送达的通知（发往工作间主 agent 时单独标明）。
 
 项目设置在右上角：保存成功后回到主页面，失败时留在设置并保留输入；未保存就返回会放弃修改。项目按本机 repoId 与 hostId 隔离，同名项目显示完整路径，设置页“项目信息”列出完整路径、项目编号和已绑定的主会话 Run。
 
 中文触发词是“开启项目协作”或“项目协作：”。规则位于 `skill/orca-project-coordinator/`，默认设计 Claude、代码与审查 Codex，项目设置可修改。面板反馈发送到项目绑定的 Orca Run，由主会话继续处理。
+
+`node scripts/client.mjs overview` 读取同一份总览；`main-read`、`main-bind <input.json>` 管理工作间主 agent Run，`message <input.json>` 向项目主会话发送并保留来源。任务新增待决定、待验收、受阻或完成时自动通知已绑定的工作间主 agent，读取与重启不会补发历史事项；未绑定不发送。输入与去重、待核对规则见 [桥接说明](skill/orca-project-coordinator/references/bridge.md)。
 
 ## 本地开发
 
 ```powershell
 npm ci
 npm run typecheck
+node scripts/test-local.mjs
+node scripts/check-local.mjs
 npm run build
 orca plugin validate plugin --json
 orca plugin dev load plugin --json
@@ -22,6 +28,8 @@ orca plugin open local.project-coordinator --panel project-coordinator --json
 ```
 
 `plugin/` 是自包含运行目录，包含打包后的官方飞书 SDK；不要直接加载有 node_modules 的源码根目录，以免超出 Orca 文件大小限制。修改后重新 build 与 dev reload。开发加载会保留，插件的 CLI 桥接使用 Orca 目前仅向开发插件开放的 dev request。
+
+用户正在使用的插件构建会自动重新加载。构建前先将 `%APPDATA%/orca/plugins-data/local.project-coordinator` 整个备份到仓库外，并用 client 读取全部项目快照；测试与类型检查全部通过后才能构建。重新加载后比对全部项目，除新增字段外必须一致；不一致立即恢复旧构建并核对数据，不自行修数据。使用 mockHost 隔离数据测试通知，不向真实项目写测试记录或发送消息。
 
 Orca 1.4.256 在本机 Windows 的 plugin test/check 会错误拒绝其测试运行时的相对导入。可以用以下脚本将同一官方测试运行时与测试临时打包，不修改 Orca 安装文件：
 

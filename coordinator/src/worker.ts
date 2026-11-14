@@ -2,7 +2,7 @@ import type { OrcaWorkerApi } from 'orca/worker'
 import type { Project, ProjectRef, Snapshot, SourceEvent } from './model'
 import { FeishuSources } from './feishu'
 import { OrcaRuntime, defaultExecutable, type CoordinatorRuntime } from './runtime'
-import { ProjectStore, artifactUrl, fail, feedback, object, receiveEvent, strings, submitTask, text } from './store'
+import { ProjectStore, artifactUrl, fail, feedback, fingerprint, fresh, notifyWorkspace, object, overview, receiveEvent, strings, submitTask, text } from './store'
 
 const revision = (value: unknown): number => {
   if (!Number.isSafeInteger(value) || (value as number) < 0) fail('请先读取项目当前版本')
@@ -30,7 +30,8 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
     return store.register(ref)
   }
   async function snapshot(id: string): Promise<Snapshot> {
-    const project = await ensure(id)
+    if (!catalog.length) await projects()
+    const project = catalog.some(p => p.id === id) ? await ensure(id) : (await store.all()).find(p => p.ref.id === id) ?? await ensure(id)
     return { projects: catalog, project, secretSaved: !!await secret(id),
       connection: project.feishu.enabled ? sources.state(project.feishu.appId) : { state: 'off', message: '' },
       ...(runtimeError ? { runtimeError } : {}) }
@@ -52,11 +53,11 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
       try {
         while (true) {
           const p = await store.get(id)
-          const delivery = p.deliveries.find(x => x.state === 'pending')
-          if (!p.runId || !delivery) break
+          const delivery = p.deliveries.find(x => x.state === 'pending' && (x.targetRunId || p.runId))
+          if (!delivery) break
           await store.mutate(id, undefined, p => { p.deliveries.find(x => x.id === delivery.id)!.state = 'sending' })
           try {
-            const receipt = await runtime.send(p.runId, delivery)
+            const receipt = await runtime.send(delivery.targetRunId || p.runId, delivery)
             await store.mutate(id, undefined, p => {
               const d = p.deliveries.find(x => x.id === delivery.id)!
               d.state = 'sent'; if (receipt.requestId) d.requestId = receipt.requestId
@@ -75,6 +76,37 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
     return work
   }
   const defer = (id: string) => setImmediate(() => { void flush(id).catch(() => {}) })
+  orca.panels.handle('workspace.overview', async () => {
+    await projects()
+    const saved = await store.all()
+    // Include stored projects even when their worktree is currently closed; overview never registers or rewrites them.
+    return overview([...saved, ...catalog.filter(ref => !saved.some(p => p.ref.id === ref.id)).map(fresh)], await store.workspace(), runtimeError)
+  })
+  orca.panels.handle('workspace.agent', async input => {
+    if (input.operation === 'bind') {
+      const runId = text(input.runId, 'Run 编号', 200)
+      await runtime.verifyRun(runId)
+      await store.bindWorkspace(revision(input.revision), runId, { id: text(input.requestId, '请求编号', 200), input })
+      changed()
+    } else if (input.operation !== 'read') fail('不支持的工作间操作')
+    const w = await store.workspace()
+    return { revision: w.revision, runId: w.runId }
+  })
+  orca.panels.handle('workspace.message', async input => {
+    const id = text(input.projectId, '项目编号', 200)
+    await ensure(id)
+    const requestId = text(input.requestId, '请求编号', 200), message = text(input.text, '消息', 16000)
+    await store.mutate(id, revision(input.revision), async p => {
+      const w = await store.workspace()
+      if (!w.runId || input.runId !== w.runId) fail('请使用已绑定的工作间主 agent Run')
+      if (!p.runId) fail('请先绑定项目主 agent')
+      const eventId = `workspace-agent:${fingerprint([id, requestId])}`
+      receiveEvent(p, { id: eventId, source: 'workspace-agent', sourceId: requestId, threadId: eventId,
+        chatId: '', senderId: w.runId, text: message, receivedAt: new Date().toISOString() })
+    }, { id: requestId, input })
+    changed(id); defer(id)
+    return snapshot(id)
+  })
   orca.panels.handle('projects.list', projects)
   orca.panels.handle('project.read', input => snapshot(text(input.projectId, '项目编号', 200)))
   orca.panels.handle('project.settings', async input => {
@@ -106,14 +138,18 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
   })
   orca.panels.handle('project.feedback', async input => {
     await ensure(input.projectId)
-    await store.mutate(input.projectId, revision(input.revision), p => feedback(p, input))
+    await store.mutate(input.projectId, revision(input.revision), async p => {
+      const before = structuredClone(p)
+      feedback(p, input)
+      notifyWorkspace(before, p, (await store.workspace()).runId)
+    })
     changed(input.projectId); defer(input.projectId)
     return snapshot(input.projectId)
   })
   orca.panels.handle('project.agent', async input => {
     const id = text(input.projectId, '项目编号', 200)
-    await ensure(id)
     if (input.operation === 'read') return snapshot(id)
+    await ensure(id)
     if (!['bind', 'submit'].includes(input.operation)) fail('不支持的协作操作')
     const request = { id: text(input.requestId, '请求编号', 200), input }
     if (input.operation === 'bind') await runtime.verifyRun(text(input.runId, 'Run 编号', 200))
@@ -121,10 +157,14 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
       if (input.operation === 'bind') {
         if ((await store.all()).some(x => x.ref.id !== id && x.runId === input.runId)) fail('该主会话 Run 已绑定其他项目')
         p.runId = input.runId!
-      } else submitTask(p, input.task)
+      } else {
+        const before = structuredClone(p)
+        submitTask(p, input.task)
+        notifyWorkspace(before, p, (await store.workspace()).runId)
+      }
     }, request)
     changed(id)
-    if (input.operation === 'bind') defer(id)
+    defer(id)
     return snapshot(id)
   })
   orca.panels.handle('project.deliver', async input => {
