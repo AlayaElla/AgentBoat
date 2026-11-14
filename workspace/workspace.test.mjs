@@ -1,10 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, readFileSync, writeFileSync, existsSync, rmSync, mkdirSync } from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 
-const sandbox = path.resolve('D:/Projects/agentboat-sandbox');
+const sandbox = path.resolve(process.env.AGENTBOAT_SANDBOX || path.join(os.tmpdir(), 'agentboat-sandbox'));
 mkdirSync(sandbox, { recursive: true });
 const testHome = mkdtempSync(path.join(sandbox, 'agentboat-demo-unit-'));
 process.env.AGENTBOAT_HOME = testHome;
@@ -37,7 +38,7 @@ test('初始化不覆盖模板；记忆按来源隔离、带日期、重复记�
     assert.throws(() => api.remember({ ...entry, kind: 'external', workspaceId: '../escape' }));
     assert.throws(() => api.remember({ ...entry, id: 'bad-date', date: 'bad' }));
     api.testPath(path.join(sandbox, 'agentboat-demo-project'));
-    assert.throws(() => api.testPath('D:/Projects/AgentBoat'));
+    assert.throws(() => api.testPath(path.join(path.dirname(sandbox), 'AgentBoat')));
     assert.throws(() => api.testPath(`${sandbox}-other/agentboat-demo-project`));
     assert.throws(() => api.testPath(path.join(sandbox, 'real-project')));
     assert.equal(existsSync(path.join(testHome, 'memory/.git')), true);

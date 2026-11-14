@@ -35,6 +35,8 @@ description: 用户说“开启工作间管理”或“工作间：”时，在 
 
 立项回执只说明主 agent 启动且提示词送达。项目主 agent 必须自己创建 Run、开启项目协作并绑定。随后用 `read` 与 Orca `run-show` 核对该项目的 Run 和协调者；确认前报告“等待绑定”，不声称立项闭环完成。
 
+立项脚本会准备 `.agents/skills` 编辑源和 `.agentboat/skill-proposals` 草稿目录，不覆盖已有 skill。项目主 agent 按 `$orca-project-coordinator` 审核、发布并合并到后续工作树的基线，Claude 的 `.claude/skills` 副本一并进 Git；工作间主 agent 不替项目主 agent 认可提议。附属机器上的项目更新后须重新生成 hands 启动配置，主机上旧配置不会自动获得远端新 skill，做法见工作间 README 的“项目 skill”。
+
 主人明确说“给项目里的某个 agent 做某事”时运行 `dispatch <input.json>`，按模板角色选择代理，用 Orca 创建独立工作树并启动 agent。输入 source 指向主人的会话/消息和日期，text 保留原话。脚本在插件任务中登记目标和来源，链接项目 `.agentboat/assignments/` 中的原话与启动回执，以实际调用会话通知项目主 Run；这类直接来源不是 workspace-agent 外部消息，不伪造 events 或 Dispatch 编号。项目主 agent 继续跟进任务，执行完成不等于用户验收。不要自己造工作树、终端或把已派活再派一遍。
 
 检查 `AGENTBOAT_HOME/projects/`、`assignments/` 的日志及 Orca 回执；needs-inspection 或未知结果先核对，保留原 requestId 和启动 operationId。不要为了绕过重复保护换编号重启任务。通知 uncertain 不自动重发；按版本匹配指南恢复。脚本不修改权限配置，Codex 在附属机器运行时仍遵守需求文档的主机只读沙箱、approval_policy=never 和本地工具中止约束。

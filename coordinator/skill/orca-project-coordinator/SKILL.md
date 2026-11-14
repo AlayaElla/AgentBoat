@@ -34,6 +34,18 @@ node "D:/Projects/AgentBoat/coordinator/scripts/client.mjs" read <projectId>
 - 收到主 agent 来源时，同样核对项目、来源编号并关联任务。项目需要用户决定、验收、协调阻塞或汇总完成时，通过原任务的 `submit` 如实登记；插件自动通知已绑定的工作间主 agent，不要另行重复发送。通知只传摘要，主 agent 应现读 `overview` 和项目记录，将事项转达用户，不替用户决定或验收。
 - 收到用户决定或修改反馈，继续原任务与原执行者；执行者已结束时在同一任务下建立新 Dispatch，保留尝试历史。仅在确实需要用户选择或缺少必要信息时提问。
 
+## 项目内沉淀 skill
+
+干活中发现已经验证、同项目其他任务会复用的做法时，执行者可提出 skill；一次性结论留在任务记录，不为了留痕强造 skill。先用 `node <AgentBoat仓库>/workspace/project-skills.mjs list --root <当前工作树>` 查重。用 `new --root <当前工作树> --name <项目前缀-能力名> --description <何时使用>` 生成 `.agentboat/skill-proposals/<name>/SKILL.md` 草稿；草稿不放到 agent 自动发现目录。写明适用范围、已验证步骤和核对方式，资源按相对路径放同目录，不含凭据、本机绝对路径、越权指令或其他项目资料。
+
+使用跨三家可移植格式：frontmatter 仅有单行字符串 `name` 和 `description`（标点复杂时用 JSON 双引号），后接 Markdown 正文；name 与目录同名。用 `validate --path <草稿目录>` 检查格式；涉及脚本时还要实际验证脚本。执行者回报草稿、证据和限制，不能自行把自己的提议当作项目主 agent 已认可。
+
+项目主 agent 核对是否可复用、已有 skill 是否可扩展、步骤与权限是否正确、验证是否充分；认可后由主 agent 执行 `publish --root <提议工作树> --name <name> --reviewer <实际主会话编号> --source <审核记录或消息编号>`。脚本把草稿发布到唯一编辑源 `.agents/skills/<name>`，生成 `.claude/skills/<name>` 的完整副本并记录全目录摘要；只在审核过的旧内容未被别人改动时覆盖。副本不手改，修改 skill 也重新走草稿和审核。这个命令记录审核依据，不能代替主 agent 的真实判断。目录规范与官方依据见 `<AgentBoat仓库>/workspace/README.md` 的“项目 skill”。
+
+发布仍只在提议者的工作树里。主 agent 按项目已有的提交约定，把源、Claude 副本、`.agentboat/skill-reviews.json` 和目录内 `.gitattributes` 一起纳入已审核提交，再合并到项目之后开工作树所用的分支。未经授权不提交；待合并时如实回报，不能说已经共享。之后的新工作树从合并后的提交创建；已有工作树须先按项目约定更新或合并，再重启 agent。Git 不会把文件自动传播到已存在的工作树。在撤销时同时移除对应源、副本和审核项，再合并撤销提交。
+
+agent 在主机、仓库在附属机器时，每个 agent 以自己的远程工作树为 `--root`，在主机运行 `agentboat-hands/agents/generate.mjs` 重新生成独立配置。生成器经 SSH 取该工作树 Git HEAD 已审核 skill 的快照；草稿、未提交变化、其他分支不会带上。快照只对本次配置有效，合并或更新后重新生成。其 SKILL 正文由启动器/配置加载，辅助文件与脚本始终通过 hands 读取和执行，不因 skill 允许使用主机工具；取快照失败就停止，不退回旧配置冒充最新版。
+
 ## 执行状态与交接
 
 已具备实现和验证条件时，让同一负责人交付可运行增量及直接证据；只有真实依赖或写入冲突需要隔离时才单列准备阶段。共享工程维护当前候选版本与小修增量，不为每次交接复制完整准备包、重验未变成果或提前反复生成最终文档。

@@ -4,6 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import os from 'node:os';
+import { initialize as initializeSkills } from './project-skills.mjs';
 
 export const root = fileURLToPath(new URL('../', import.meta.url));
 export const home = path.resolve(process.env.AGENTBOAT_HOME || path.join(os.homedir(), '.agentboat'));
@@ -72,7 +73,7 @@ export function init() {
 // Test mode is opt-in; normal use follows the owner's selected project paths.
 export function testPath(target) {
   if (process.env.AGENTBOAT_TEST_ONLY !== '1') return;
-  const sandbox = path.resolve('D:/Projects/agentboat-sandbox');
+  const sandbox = path.resolve(process.env.AGENTBOAT_SANDBOX || path.join(os.tmpdir(), 'agentboat-sandbox'));
   const relative = path.relative(sandbox, target);
   if (!relative || relative.startsWith('..') || path.isAbsolute(relative) || !path.basename(target).includes('agentboat-demo')) {
     throw new Error(`测试只允许 sandbox 下名称含 agentboat-demo 的目录：${target}`);
@@ -130,6 +131,7 @@ export function create(input) {
     if (source.kind === 'clone') run('git', ['clone', '--', text(source.url, '克隆地址'), destination]);
     if (!existsSync(destination)) throw new Error('已有项目目录不存在');
     testPath(realpathSync(destination));
+    initializeSkills(destination);
     const kind = existsSync(path.join(destination, '.git')) ? 'git' : 'folder';
     const registered = call(['repo', 'add', '--path', destination, '--kind', kind], destination);
     j.update('registered', { registered });

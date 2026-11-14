@@ -38,6 +38,36 @@ source 可省略以沿用模板；kind=empty 建不存在的空目录并登记 f
 
 新 Git 项目的独立工作树目录设在相邻的 `<项目目录名>-worktrees`，只设置新登记项目的 host setup。create 不覆盖已绑定项目。脚本回执为 awaiting-project-binding；项目主 agent 自己开启项目协作、创建 Run 和绑定；读取插件和 run-show 确认后才算立项完成。模板角色会同步到项目设置和首句话。
 
+## 项目 skill
+
+项目的唯一编辑源是 `.agents/skills/<name>/SKILL.md`；Claude 副本由审核发布脚本写到 `.claude/skills/<name>`，两者随 Git 合并。副本保存完整内容与辅助文件，无需符号链接或管理员权限。`create` 在登记前幂等准备源目录、字节保留的 `.gitattributes` 和草稿目录，不覆盖已有文件；已有项目也可手动 `init`。
+
+官方读取位置（2026-11-14 核对）：
+
+| Agent | 项目位置与依据 |
+| --- | --- |
+| Codex | [官方 Skills 文档](https://learn.chatgpt.com/docs/build-skills)：从 cwd 向仓库根查找 `.agents/skills`。 |
+| Claude Code | [官方 Skills 文档](https://code.claude.com/docs/en/skills)：项目 `.claude/skills/<name>/SKILL.md`，跟 Git 共享；新工作树从自己的目录加载。 |
+| OpenCode | [官方 Skills 文档](https://opencode.ai/docs/skills/)：`.opencode/skills`，兼容 `.agents/skills`、`.claude/skills`；本项目沿用共享目录，不另复制第三份。 |
+
+```sh
+node workspace/project-skills.mjs init --root <项目>
+node workspace/project-skills.mjs new --root <工作树> --name demo-check --description "检查 demo 时使用"
+node workspace/project-skills.mjs validate --path <工作树>/.agentboat/skill-proposals/demo-check
+node workspace/project-skills.mjs list --root <工作树>
+node workspace/project-skills.mjs publish --root <工作树> --name demo-check --reviewer <项目主会话编号> --source <审核消息编号>
+```
+
+`new` 只创建不被自动发现的草稿，已有同名文件拒绝覆盖。可移植格式限定为两个单行 YAML 字符串字段 `name`、`description` 加 Markdown 正文；复杂标点用 JSON 双引号值。名称用小写字母、数字、连字符，不超过 64 字符，与目录一致；description 不超过 1024 字符。校验会拒绝占位、缺字段、重复字段、链接、无正文；它不证明步骤正确，也不是通用 YAML 校验器。按需在草稿内添加 scripts、references 或 assets，不支持各家私有 frontmatter 扩展。
+
+执行者提出已验证的可复用做法，主 agent 审核内容、必要性、权限与证据后执行 publish，记录真实 reviewer/source 与全目录 SHA-256。源和副本都只覆盖摘要匹配的旧版本，保留外来文件和被人编辑的副本；先处理冲突再重新发布。命令的 reviewer 是审计依据，不是身份认证，不能自动代表主 agent 同意。list 区分 proposal、approved、unreviewed；后者需重新审核，不直接共享。
+
+**发布不等于合并。** 按项目提交约定把 `.agents/skills`、`.claude/skills`、`.agentboat/skill-reviews.json` 一起提交和合并，再从该基线启动新工作树。目录内 `.gitattributes` 避免 Windows 换行转换改变审核摘要。已有工作树更新后重启 agent；同名个人 skill 可能影响各家选择，名称宜加项目前缀。项目主 agent 的具体审核流程见 [项目协作 skill](../coordinator/skill/orca-project-coordinator/SKILL.md)。未经提交授权停在待合并状态。
+
+附属机器模式由 hands 生成器经 SSH 读取指定工作树 **HEAD** 的审核记录和源文件，在主机独立配置目录保存快照、提交号，并给三家加载 SKILL 正文。辅助文件和脚本用 hands 的远端路径，不执行主机副本。未审核的提交或取回失败直接报错，未提交改动不带上；每次合并、切分支或撤销后重新生成配置。详见 agentboat-hands README 的“项目 skill 快照”。不改订阅登录、全局 skill、插件或主机权限。
+
+验证辅助脚本：`node --test workspace/workspace.test.mjs workspace/project-skills.test.mjs`。它们只在沙盒的 agentboat-demo 临时目录读写并清理，不启动模型。
+
 ## 直接派活
 
 从 `node coordinator/scripts/client.mjs projects` 取得完整项目编号，核对路径、repoId、hostId。项目必须已绑定主 agent，必须为有提交的 Git 仓库。
@@ -110,7 +140,8 @@ kind=inference 存 inferences.md；kind=external 要加 workspaceId，存 extern
 ## 验证
 
 ```powershell
-$env:AGENTBOAT_HOME = 'D:\Projects\agentboat-sandbox\agentboat-demo-home'
+$env:AGENTBOAT_SANDBOX = 'D:\agentboat-sandbox'   # 不设时用系统临时目录下的 agentboat-sandbox
+$env:AGENTBOAT_HOME = 'D:\agentboat-sandbox\agentboat-demo-home'
 $env:AGENTBOAT_TEST_ONLY = '1'
 node --test workspace/workspace.test.mjs
 ```
