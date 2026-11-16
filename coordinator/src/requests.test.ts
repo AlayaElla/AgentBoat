@@ -64,6 +64,23 @@ async function rule(w: Awaited<ReturnType<typeof workspace>>, peerId: string, ac
 }
 const content = (peerId: string, requestId: string) => ({ peerId, requestId, title: `测试请求 ${requestId}`, context: '测试背景，仅回环', expected: '测试文字和链接', links: ['https://example.com/input'] })
 
+test('panel dispatch uses bound main, queues offline, notifies once and rejects unbound main', async () => {
+  const a = await workspace('panel-A'), b = await workspace('panel-B')
+  try {
+    const peerId = await connect(a, b)
+    const input = { operation: 'send' as const, ...content(peerId, 'panel-issued') }
+    await a.worker.request('workspace.requests', input)
+    await a.worker.request('workspace.requests', input)
+    assert.equal(a.agents.filter(d => d.subject.startsWith('已派活')).length, 1)
+    assert.equal((await a.coordinator.links.snapshot()).requests!.find(r => r.id === 'panel-issued')!.panelIssued, true)
+    assert.equal((await b.coordinator.links.snapshot()).requests!.some(r => r.id === 'panel-issued'), false)
+    await b.coordinator.links.refresh()
+    assert.equal((await b.coordinator.links.snapshot()).requests!.some(r => r.id === 'panel-issued'), true)
+    await a.coordinator.store.mutateWorkspace(w => { w.runId = '' })
+    await assert.rejects(() => a.worker.request('workspace.requests', { ...input, requestId: 'unbound' }), /主 agent/)
+  } finally { await a.close(); await b.close() }
+})
+
 test('loopback requests: deny, confirmation via Feishu, auto handoff, progress/results and exact replay across one-way reachability', async () => {
   const a = await workspace('A'), b = await workspace('B')
   try {

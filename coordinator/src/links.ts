@@ -15,7 +15,7 @@ export interface SharedReport {
   projects: { id: string; name: string; updatedAt: string; counts: Record<string, number>; pending: number
     tasks?: { title: string; phase: string; decisions: string[]; acceptance: string[] }[] }[]
 }
-interface Peer extends Sharing { id: string; workspaceId: string; name: string; endpoint: string; state: 'active' | 'pending' | 'revoked' }
+interface Peer extends Sharing { id: string; workspaceId: string; name: string; endpoint: string; state: 'active' | 'pending' | 'revoked'; relation?: 'above' | 'below' | 'peer'; sharingSet?: boolean; lastSyncAt?: string }
 interface LinkData {
   version: 1; revision: number; workspaceId: string; name: string
   enabled: boolean; host: string; port: number; publicUrl: string; tls: boolean; peers: Peer[]
@@ -123,15 +123,24 @@ export class WorkspaceLinks {
     if (!raw) return structuredClone(this.initial)
     const d = structuredClone(object(raw)) as LinkData
     if (d.version !== 1 || !Array.isArray(d.peers)) fail('工作间连接记录不兼容，请保留数据并检查版本')
+    for (const p of d.peers) if (p.sharingSet === undefined && (p.scope !== 'none' || p.projectIds.length || p.acceptTasks !== 'deny')) p.sharingSet = true
     return d
   }
   private async save(d: LinkData) { if (Buffer.byteLength(JSON.stringify(d)) > 100_000) fail('连接记录已达上限'); await this.orca.storage.set('workspace.links', d as any) }
   async snapshot(): Promise<LinksSnapshot> {
-    const d = await this.serial(() => this.data())
+    const d = await this.serial(async () => {
+      const d = await this.data(); let changed = false
+      for (const p of d.peers) {
+        const incoming = this.incoming.get(p.id)
+        if (incoming && Date.now() - Date.parse(incoming.receivedAt) >= 35_000 && p.lastSyncAt !== incoming.receivedAt) { p.lastSyncAt = incoming.receivedAt; changed = true }
+      }
+      if (changed) await this.save(d)
+      return d
+    })
     return { ...d, requests: (await this.requests.data()).requests, listening: this.listening, error: this.error, peers: d.peers.map(p => {
       const incoming = this.incoming.get(p.id), fresh = incoming && Date.now() - Date.parse(incoming.receivedAt) < 35_000 && !this.failures.has(p.id)
       return { ...p, status: p.state === 'revoked' ? 'revoked' : fresh ? 'connected' : p.state === 'pending' ? 'pending' : 'offline',
-        ...(incoming ? { receivedAt: incoming.receivedAt } : {}), ...(p.state === 'active' && fresh ? { report: incoming!.report } : {}) }
+        ...(incoming ? { receivedAt: incoming.receivedAt, lastSyncAt: incoming.receivedAt } : {}), ...(p.state === 'active' && fresh ? { report: incoming!.report } : {}) }
     }) }
   }
   async configure(input: Record<string, any>) {
@@ -200,8 +209,21 @@ export class WorkspaceLinks {
   async share(input: Record<string, any>) {
     const setting = sharing(input), own = await this.projects()
     if (setting.projectIds.some(id => !own.some(p => p.ref.id === id))) fail('只能开放本工作间自己的项目')
-    await this.serial(async () => { const d = await this.data(); if (input.revision !== d.revision) fail('连接已更新，请刷新后再保存'); const p = d.peers.find(p => p.id === input.id && p.state === 'active'); if (!p) fail('请选择有效连接'); Object.assign(p, setting); d.revision++; await this.save(d) })
+    await this.serial(async () => { const d = await this.data(); if (input.revision !== d.revision) fail('连接已更新，请刷新后再保存'); const p = d.peers.find(p => p.id === input.id && p.state === 'active'); if (!p) fail('请选择有效连接'); Object.assign(p, setting, { sharingSet: true }); d.revision++; await this.save(d) })
     await this.sync(input.id); this.changed(); return this.snapshot()
+  }
+  async relate(input: Record<string, any>) {
+    if (input.relation !== null && !['above', 'below', 'peer'].includes(input.relation)) fail('请选择有效关系')
+    await this.serial(async () => {
+      const d = await this.data(), p = d.peers.find(p => p.id === input.id && p.state === 'active')
+      if (input.revision !== d.revision) fail('连接已更新，请刷新后再保存')
+      if (!p) fail('请选择有效连接')
+      if (input.relation === null && !p.relation) return
+      if (input.relation === null) delete p.relation
+      else p.relation = input.relation
+      d.revision++; await this.save(d)
+    })
+    this.changed(); return this.snapshot()
   }
   async revoke(connectionId: string) {
     const p = await this.serial(async () => {
@@ -244,12 +266,17 @@ export class WorkspaceLinks {
       await this.serial(async () => { const now = await this.data(), current = now.peers.find(x => x.id === p.id); if (!current || current.state === 'revoked') return
         if (current.state === 'pending') { current.state = 'active'; now.revision++; await this.save(now) }
         await this.requests.receive(p.id, p.workspaceId, current.acceptTasks, result.exchange)
+        if (!current.lastSyncAt) { current.lastSyncAt = new Date().toISOString(); await this.save(now) }
         this.incoming.set(p.id, { report: incoming, receivedAt: new Date().toISOString() }); this.failures.delete(p.id)
       })
     } catch (e) {
       if ((e as { status?: number }).status === 401) await this.serial(async () => {
         const d = await this.data(), p = d.peers.find(p => p.id === connectionId)
         if (p && p.state !== 'revoked') { p.state = 'revoked'; d.revision++; await this.save(d); await this.requests.disconnect(p.id); await this.orca.secrets.delete(secretKey(p.id)) }
+      })
+      await this.serial(async () => {
+        const last = this.incoming.get(connectionId)?.receivedAt, d = await this.data(), p = d.peers.find(p => p.id === connectionId)
+        if (p && last && p.lastSyncAt !== last) { p.lastSyncAt = last; await this.save(d) }
       })
       this.failures.set(connectionId, '对端离线、连接已断开或凭据无效'); this.incoming.delete(connectionId)
     }
@@ -280,6 +307,7 @@ export class WorkspaceLinks {
         await this.requests.receive(p.id, p.workspaceId, p.acceptTasks, body.exchange)
         const response = { report: outgoing, exchange: await this.requests.envelope(p.id) }
         if (Buffer.byteLength(JSON.stringify(response)) > LIMIT) fail('工作间上报过大')
+        if (!p.lastSyncAt) { p.lastSyncAt = new Date().toISOString(); await this.save(d) }
         this.incoming.set(p.id, { report: incoming, receivedAt: new Date().toISOString() }); this.failures.delete(p.id)
         reply(200, response); this.changed()
       })

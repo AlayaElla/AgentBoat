@@ -270,7 +270,7 @@ export function submitTask(project: Project, raw: unknown): void {
   else project.tasks.push(task)
 }
 
-export interface FeedbackItem { taskId: string; kind: 'acceptance' | 'decision'; itemId: string; itemRevision?: number; result?: string; answer?: string; note?: string }
+export interface FeedbackItem { taskId: string; kind: 'acceptance' | 'decision'; itemId: string; itemRevision?: number; fingerprint?: string; result?: string; answer?: string; note?: string }
 export function feedback(project: Project, raw: unknown): void {
   const items = object(raw).items
   if (!Array.isArray(items) || items.length > 100) fail('反馈条目格式不正确')

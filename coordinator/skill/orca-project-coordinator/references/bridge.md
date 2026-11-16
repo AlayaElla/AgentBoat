@@ -54,6 +54,7 @@
 - `connection-reply`（stdin）：`{name,runId,id,requestId,text}`，id 是对方发来的 task.id。
 - `feishu-reply`：`{runId,eventId,requestId,text}`，回到原消息所在的会话。
 - 工作间互联 `links-*` 和跨工作间请求 `requests-*` 的输入见 `D:/Projects/AgentBoat/coordinator/LINKS.md`。
+- `links-relate`（stdin）：`{revision,id,relation}`，relation 为 `above`、`below`、`peer` 或 `null`。只在主人明确要求时修改本机关系；不发送给对方，也不改变开放范围或派活权限。
 
 ## 通用
 

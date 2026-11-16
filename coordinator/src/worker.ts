@@ -17,10 +17,16 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
   const changed = (projectId = '') => { orca.panels.post('project.changed', { projectId }); void updateStatus().catch(() => {}) }
   const main = mainAgent(orca, store, runtime, changed)
   let statusUpdates: Promise<unknown> = Promise.resolve()
+  let live: import('./agents').AgentsSnapshot = { ok: false, at: 0, agents: [] }
+  orca.panels.handle('workspace.agents', async () => {
+    live = await runtime.agents(await store.all())
+    await updateStatus()
+    return live
+  })
   function updateStatus() {
     const work = statusUpdates.then(async () => {
       const all = overview(await store.all(), await store.workspace()), s = await links.snapshot()
-      const count = groupedAttention(all.attention).length + (s.requests ?? []).filter(r => r.direction === 'incoming' && requestState(r) === 'confirm').length
+      const count = groupedAttention(all.attention).length + (s.requests ?? []).filter(r => r.direction === 'incoming' && requestState(r) === 'confirm').length + (live.ok ? live.agents.filter(a => a.state === 'need').length : 0)
       await orca.host.call('statusBar.update', { id: 'coordinator', text: `工作间 · 待处理 ${count}`, tooltip: '打开工作间总览 · Mod+Alt+Shift+J' })
     })
     statusUpdates = work.catch(() => {}); return work
@@ -44,7 +50,7 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
     if (!['send', 'decide', 'update', 'attach'].includes(input.operation)) fail('不支持的工作间请求操作')
     if (input.operation !== 'decide') {
       const w = await store.workspace()
-      if (!w.runId || input.runId !== w.runId) fail('请使用已绑定的工作间主 agent Run')
+      if (!w.runId || (input.runId !== w.runId && !(input.operation === 'send' && input.runId === undefined))) fail('请先设置主 agent，或使用已绑定的工作间主 agent Run')
     }
     if (input.operation === 'attach') {
       const s = await links.snapshot(), r = s.requests?.find(r => r.peerId === input.peerId && r.id === input.id && r.direction === 'incoming')
@@ -58,7 +64,7 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
       })
       defer(p.ref.id)
     }
-    const result = await links.request(input, input.operation as 'send' | 'decide' | 'update' | 'attach')
+    const result = await links.request({ ...input, panelIssued: input.operation === 'send' && input.runId === undefined }, input.operation as 'send' | 'decide' | 'update' | 'attach')
     await flushRequestNotifications(); return result
   })
   orca.panels.handle('workspace.links', async input => {
@@ -69,6 +75,7 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
       case 'cancel-invite': return links.cancelInvite()
       case 'join': return links.join(text(input.code, '连接码', 6000))
       case 'share': return links.share(input)
+      case 'relate': return links.relate(input)
       case 'revoke': return links.revoke(text(input.id, '连接编号', 64))
       case 'refresh': return links.refresh()
       default: return fail('不支持的工作间连接操作')
@@ -82,6 +89,8 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
     const work = requestNotifications.then(async () => {
       const s = await links.snapshot(), w = await store.workspace(), m = await store.messaging()
       const deliveries: Delivery[] = []
+      if (w.runId) for (const r of s.requests ?? []) if (r.direction === 'outgoing' && r.panelIssued) deliveries.push({ id: `workspace-request-sent:${r.peerId}:${r.id}`, targetRunId: w.runId,
+        subject: `已派活 · ${r.title}`, body: `已向「${s.peers.find(p => p.id === r.peerId)?.name || r.workspaceId}」的主 agent 派活。\n请求编号：${r.id}\n${r.title}\n请读取 requests-read 核对后续进展。`, state: 'pending' })
       for (const r of s.requests ?? []) for (const u of r.updates) {
         const incoming = r.direction === 'incoming'
         if (incoming && !['confirm', 'accepted'].includes(u.status)) continue
@@ -307,7 +316,7 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
     }
     return result
   })
-  orca.panels.handle('workspace.canvas', async () => { await runtime.openCanvas(); return { opened: true } })
+  orca.panels.handle('workspace.canvas', () => openOverview())
   orca.panels.handle('workspace.reply', async input => {
     const w = await store.workspace()
     if (!w.runId || w.runId !== input.runId) fail('请使用已绑定的工作间主 agent Run')
@@ -384,11 +393,11 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
   })
   orca.panels.handle('project.feedback', async input => {
     await ensure(input.projectId)
-    await store.mutate(input.projectId, revision(input.revision), async p => {
+    await store.mutate(input.projectId, input.revision === undefined ? undefined : revision(input.revision), async p => {
       const before = structuredClone(p)
       feedback(p, input)
       await notify(before, p)
-    })
+    }, input.requestId ? { id: text(input.requestId, '请求编号', 200), input } : undefined)
     changed(input.projectId); defer(input.projectId)
     return snapshot(input.projectId)
   })

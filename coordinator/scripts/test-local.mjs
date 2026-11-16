@@ -8,11 +8,10 @@ import { executable } from './orca-cli.mjs';
 const resources = path.resolve(path.dirname(executable), '../app.asar.unpacked/resources/plugins/declarative');
 await mkdir('.orca/local-test', { recursive: true });
 const runtime = path.join(resources, 'orca-runtime.mjs');
-const tests = ['butler', 'coordinator', 'feishu', 'interface', 'links', 'requests', 'org-canvas', 'main-agent'];
+const tests = ['butler', 'coordinator', 'feishu', 'links', 'requests', 'main-agent', 'agents'];
 await build({
-  entryPoints: tests.map(name => `src/${name}.test.${name === 'interface' ? 'tsx' : 'ts'}`), outdir: '.orca/local-test',
-  bundle: true, platform: 'node', format: 'esm', target: 'node22', jsx: 'transform', jsxFactory: '__orcaTestH', jsxFragment: '__orcaTestFragment',
-  inject: ['scripts/test-jsx.mjs'], tsconfigRaw: {compilerOptions:{jsx:'react',jsxFactory:'__orcaTestH',jsxFragmentFactory:'__orcaTestFragment'}},
+  entryPoints: tests.map(name => `src/${name}.test.ts`), outdir: '.orca/local-test',
+  bundle: true, platform: 'node', format: 'esm', target: 'node22',
   alias: { 'orca/testing': path.join(resources,'orca-testing.mjs'), 'orca': runtime },
   banner: {js:"import { createRequire as __testRequire } from 'node:module'; import { fileURLToPath as __testFile } from 'node:url'; import __testPath from 'node:path'; const require = __testRequire(import.meta.url); const __filename = __testFile(import.meta.url); const __dirname = __testPath.dirname(__filename);"},
   outExtension:{'.js':'.mjs'}

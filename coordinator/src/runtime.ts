@@ -4,6 +4,8 @@ import path from 'node:path'
 import os from 'node:os'
 import type { AgentSession, Delivery, ProjectRef } from './model'
 import { fail, projectKey } from './store'
+import { readAgents, type AgentsSnapshot } from './agents'
+import type { Project } from './model'
 
 const execute = promisify(execFile)
 export interface CoordinatorRuntime {
@@ -16,7 +18,7 @@ export interface CoordinatorRuntime {
   launchMain(workspace: string, agent: string, prompt: string): Promise<string>
   openOverview(): Promise<void>
   removeProject(ref: ProjectRef): Promise<void>
-  openCanvas(): Promise<void>
+  agents(projects: Project[]): Promise<AgentsSnapshot>
   hermesApprovalMode(): Promise<string>
   send(runId: string, delivery: Delivery): Promise<{ requestId?: string }>
 }
@@ -88,7 +90,7 @@ export class OrcaRuntime implements CoordinatorRuntime {
     return handle as string
   }
   async openOverview() { await this.call(['plugin', 'open', 'local.project-coordinator', '--panel', 'project-coordinator']) }
-  async openCanvas() { await this.call(['plugin', 'open', 'local.project-coordinator', '--panel', 'org-canvas']) }
+  async agents(projects: Project[]) { return readAgents(args => this.call(args), projects) }
   async hermesApprovalMode() {
     const home = process.env.HERMES_HOME || path.join(process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local'), 'hermes')
     const { stdout } = await execute(process.platform === 'win32' ? path.join(home, 'bin', 'hermes.exe') : 'hermes', ['config', 'get', 'approvals.mode', '--json'], { timeout: 15000, windowsHide: true, maxBuffer: 65536 })

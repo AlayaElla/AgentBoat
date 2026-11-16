@@ -5,7 +5,6 @@ import { testCoordinator as createCoordinator } from './test-runtime'
 import { fresh } from './store'
 import { refs } from './fixtures'
 import { mainTargets, OrcaRuntime } from './runtime'
-import { OrgCanvas } from './org-canvas'
 
 const session: AgentSession = { handle: 'orca_session_id:test-next', title: '测试接管会话', workspace: 'identity:test-workspace', workspaceName: '测试工作区', path: '/test/workspace', agent: 'claude', online: 'online' }
 const tokenFrom = (prompt: string) => /一次性接管凭据：([^\n]+)/.exec(prompt)![1]
@@ -93,10 +92,6 @@ for (const mode of ['existing', 'new'] as const) test(`main takeover ${mode}: ta
     await c.flushMailbox()
     assert.ok(sends.some(s => s.run === 'run_next' && s.subject === '飞书工作间消息'))
     assert.equal(sends.filter(s => s.run === 'run_old').length, 1)
-    const canvas = new OrgCanvas({ storage, plugin: { request: (n: string, i: any) => worker.request(n, i) } } as any)
-    await canvas.load()
-    const node = canvas.graph('projects').nodes.find(n => n.id === 'main')!
-    for (const value of [session.title, session.path, session.workspaceName, 'Claude', 'run_next', '在线']) assert.ok(node.detail.includes(value))
     const saved = JSON.stringify(host.data().storage)
     await worker.request('workspace.overview'); await worker.request('project.read', { projectId: 'p1' })
     assert.equal(JSON.stringify(host.data().storage), saved)

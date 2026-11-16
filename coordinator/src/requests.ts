@@ -50,7 +50,7 @@ export class WorkspaceRequests {
       if (prior.direction !== 'outgoing' || fingerprint([prior.peerId, content(prior)]) !== fingerprint([peerId, fields])) fail('请求编号已用于其他内容')
       return
     }
-    d.requests.push({ id, peerId, workspaceId, direction: 'outgoing', ...fields, createdAt: new Date().toISOString(), updates: [] })
+    d.requests.push({ id, peerId, workspaceId, direction: 'outgoing', ...fields, createdAt: new Date().toISOString(), updates: [], ...(input.panelIssued === true ? { panelIssued: true } : {}) })
     await this.save(d)
   }
   async update(input: Record<string, any>, decide: boolean) {

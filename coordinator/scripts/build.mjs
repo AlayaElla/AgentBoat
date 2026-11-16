@@ -1,5 +1,5 @@
 import { build } from 'esbuild';
-import { mkdir, cp, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, cp, rm, readFile, writeFile } from 'node:fs/promises';
 
 await build({
   entryPoints: ['src/worker.ts'],
@@ -13,6 +13,8 @@ await build({
 });
 await mkdir('plugin', { recursive: true });
 await cp('dist/worker.mjs', 'plugin/worker.mjs');
+// Generated source copy only; plugin data lives outside this directory.
+await rm(new URL('../plugin/src', import.meta.url), { recursive: true, force: true });
 await cp('src', 'plugin/src', { recursive: true });
 const manifest = JSON.parse(await readFile('orca-plugin.json', 'utf8'));
 manifest.main = 'worker.mjs';

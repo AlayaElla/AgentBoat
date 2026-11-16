@@ -21,6 +21,29 @@ async function post(url: string, route: string, body: any, token = '') {
   await r.text(); return r.status
 }
 
+test('relations remain local, saved sharing is sticky, offline time survives a new instance', async () => {
+  const a = await instance('relation A'), b = await instance('relation B')
+  try {
+    const s = await b.links.join((await a.links.invite()).invitation!.code), p = s.peers[0]
+    assert.equal((await b.links.relate({ revision: s.revision, id: p.id, relation: null })).revision, s.revision)
+    const related = await b.links.relate({ revision: s.revision, id: p.id, relation: 'above' })
+    assert.equal(related.peers[0].relation, 'above'); assert.equal(related.peers[0].scope, 'none')
+    assert.equal((await a.links.snapshot()).peers[0].relation, undefined)
+    const shared = await b.links.share({ revision: related.revision, id: p.id, scope: 'summary', projectIds: ['p1'], acceptTasks: 'confirm' })
+    assert.equal(shared.peers[0].sharingSet, true)
+    const changed = await b.links.relate({ revision: shared.revision, id: p.id, relation: 'below' })
+    assert.equal(changed.peers[0].scope, 'summary'); assert.equal(changed.peers[0].acceptTasks, 'confirm')
+    const wire = report(b.projects, changed.peers[0], 'test', 'test')
+    assert.equal('relation' in wire, false); assert.equal('sharingSet' in wire, false)
+    a.links.stop(); const offline = await b.links.refresh()
+    assert.equal(offline.peers[0].status, 'offline'); assert.ok(offline.peers[0].lastSyncAt)
+    const api = { storage: { get: async (k: string) => b.storage.get(k), set: async (k: string, v: any) => { b.storage.set(k, v) } }, secrets: { get: async () => null } }
+    const restarted = new WorkspaceLinks(api as any, async () => b.projects, () => {})
+    assert.equal((await restarted.snapshot()).peers[0].lastSyncAt, offline.peers[0].lastSyncAt)
+    await assert.rejects(() => b.links.relate({ revision: changed.revision, id: p.id, relation: 'invalid' }))
+  } finally { a.links.stop(); b.links.stop() }
+})
+
 test('two loopback workspaces pair once, share only selected local projects, change scopes, reject credentials, revoke immediately', async () => {
   const a = await instance('A'), b = await instance('B'), c = await instance('C')
   try {

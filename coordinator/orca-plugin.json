@@ -20,14 +20,7 @@
         "id": "project-coordinator",
         "title": "工作间",
         "icon": "blocks",
-        "entry": "src/panel.tsx",
-        "ui": "components"
-      },
-      {
-        "id": "org-canvas",
-        "title": "组织画布",
-        "icon": "blocks",
-        "entry": "src/org-canvas.html",
+        "entry": "src/panel.html",
         "ui": "html"
       }
     ]

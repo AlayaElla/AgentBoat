@@ -12,7 +12,7 @@ export interface RequestUpdate { id: string; status: RequestState; note: string;
 export interface WorkspaceRequest {
   id: string; peerId: string; workspaceId: string; direction: 'incoming' | 'outgoing'
   title: string; context: string; expected: string; links: string[]; createdAt: string
-  updates: RequestUpdate[]; projectId?: string
+  updates: RequestUpdate[]; projectId?: string; panelIssued?: boolean
 }
 export const requestState = (r: WorkspaceRequest): RequestState => r.updates.at(-1)?.status ?? 'sent'
 export interface Artifact { id: string; label: string; url: string; version: string }
