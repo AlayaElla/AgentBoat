@@ -43,7 +43,7 @@ async function setup(options = {}) {
     window.fixture = { project, links, live, workspace, calls, stored, emit: () => events['project.changed']?.({}), race: false, prune: () => { task.acceptance[0].revision++; task.acceptance[0].fingerprint = 'new-version'; project.revision++; } };
     window.orca = { storage: { get: async k => clone(stored[k] ?? null), set: async (k, v) => { stored[k] = clone(v); }, delete: async k => { delete stored[k]; } }, plugin: { on: (name, callback) => { events[name] = callback; return { dispose() {} }; }, request: async (name, input) => {
       calls.push({ name, input: clone(input) });
-      if (name === 'workspace.overview') return clone({ workspace, projects: [{ ref: project.ref, counts: { review: task.acceptance.filter(a => a.status === 'pending').length ? 1 : 0 }, agents: [], bound: true, updatedAt: '' }, ...(options.manyProjects ? Array.from({ length: 13 }, (_, i) => ({ ref: { ...project.ref, id: 'p' + (i + 2), name: '项目 ' + (i + 2) }, counts: { working: 1 }, agents: [], bound: true, updatedAt: '' })) : [])], hidden: [], attention: attention(), links, connections: [], machines: [{ id: 'local', name: '主机', role: 'host' }] });
+      if (name === 'workspace.overview') return clone({ workspace, projects: [{ ref: project.ref, counts: { review: task.acceptance.filter(a => a.status === 'pending').length ? 1 : 0 }, agents: [], bound: true, updatedAt: '' }, ...(options.manyProjects ? Array.from({ length: 13 }, (_, i) => ({ ref: { ...project.ref, id: 'p' + (i + 2), name: '项目 ' + (i + 2) }, counts: { working: options.idleProjects ? 0 : 1 }, agents: [], bound: true, updatedAt: '' })) : [])], hidden: [], attention: attention(), links, connections: [], machines: [{ id: 'local', name: '主机', role: 'host' }] });
       if (name === 'workspace.agents') return clone(live);
       if (name === 'project.read') return clone({ project, projects: [project.ref] });
       if (name === 'project.feedback') {
@@ -179,6 +179,31 @@ try {
     await page.getByText('agent 状态读不到', { exact: true }).waitFor();
     assert.equal(await page.getByText('agent 状态读不到', { exact: true }).count(), 1);
     assert.equal(await page.locator('[data-project] .pcard-b').count(), 0);
+  });
+  await setup({ manyProjects: true, idleProjects: true });
+  await test('projects without tasks stay visible while agents work or need input; done-only projects stay folded', async () => {
+    await page.evaluate(() => {
+      const a = fixture.live.agents[0];
+      fixture.live.agents = [{ ...a, id: 'work-p2', projectId: 'p2', state: 'work' }, { ...a, id: 'need-p3', projectId: 'p3', state: 'need' }, { ...a, id: 'done-p4', projectId: 'p4', state: 'done' }];
+      fixture.emit();
+    });
+    await page.locator('[data-project=p2] .arow').waitFor();
+    for (const id of ['p1', 'p2', 'p3']) {
+      assert.equal(await page.locator(`[data-project=${id}]`).isVisible(), true);
+      assert.equal(await page.locator(`details [data-project=${id}]`).count(), 0);
+    }
+    for (const id of ['p4', 'p5']) {
+      assert.equal(await page.locator(`details:not([open]) [data-project=${id}]`).count(), 1);
+      assert.equal(await page.locator(`[data-project=${id}]`).isVisible(), false);
+    }
+    await page.evaluate(() => { fixture.live.agents.find(a => a.projectId === 'p2').state = 'done'; fixture.emit(); });
+    await page.waitForFunction(() => document.querySelector('details:not([open]) [data-project=p2]'));
+    assert.equal(await page.locator('[data-project=p2]').isVisible(), false);
+    assert.equal(await page.locator('[data-project=p3]').isVisible(), true);
+    await page.evaluate(() => { fixture.live.ok = false; fixture.emit(); });
+    await page.getByText('agent 状态读不到', { exact: true }).waitFor();
+    assert.equal(await page.locator('details:not([open]) [data-project=p3]').count(), 1);
+    assert.equal(await page.locator('[data-project=p1]').isVisible(), true);
   });
   await setup();
   await test('keyboard tabs, escape navigation, focus, long input retention', async () => { await project(); const tasks = page.getByRole('tab', { name: '任务', exact: true }); await tasks.focus(); await page.keyboard.press('ArrowRight'); assert.equal(await page.getByRole('tab', { name: 'Agent', exact: true }).getAttribute('aria-selected'), 'true'); await page.keyboard.press('Escape'); await page.getByRole('heading', { name: '组织', exact: true }).waitFor(); await page.locator('[data-workspace=off] .wsr-h').focus(); await page.keyboard.press('Enter'); assert.equal(await page.locator('[data-workspace=off] .wsr-h').getAttribute('aria-expanded'), 'true'); });

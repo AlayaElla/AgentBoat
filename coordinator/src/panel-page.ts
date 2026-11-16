@@ -159,7 +159,7 @@ function ownProjects() {
       agents.length ? el('div', { class: 'pcard-b' }, unfinished.map(a => agentRow(a)), done ? small(`✓ 已完成 ${done} 个`) : null) : null)
   }
   return [!live.ok ? small('agent 状态读不到') : null, all.projects.length > 12 ? input('找项目', '', 'search', () => render(), '输入项目名') : null, ...(all.machines ?? [{ id: 'local', name: '', role: 'host' }]).map(m => {
-    const list = projects.filter(p => p.ref.hostId === m.id), active = list.filter(p => Object.values(p.counts).some(Boolean)), idle = list.filter(p => !Object.values(p.counts).some(Boolean))
+    const list = projects.filter(p => p.ref.hostId === m.id), active = list.filter(p => Object.values(p.counts).some(Boolean) || projectAgents(p.ref.id).some(a => a.state !== 'done')), idle = list.filter(p => !active.includes(p))
     return el('div', { class: 'stack g2' }, (all.machines?.length ?? 0) > 1 ? small(`${m.role === 'host' ? '主机' : '电脑'} · ${m.name}`) : null, el('div', { class: 'cards' }, active.sort((a, b) => projectCount(b.ref.id) - projectCount(a.ref.id)).map(projectCard)), idle.length ? el('details', { class: 'fold', open: !!form['找项目'] }, el('summary', {}, `还没有任务的项目 ${idle.length} 个`), el('div', { class: 'cards' }, idle.map(projectCard))) : null)
   }), !all.projects.length ? small('还没有项目，在 Orca 中添加项目后会显示在这里。') : null]
 }
