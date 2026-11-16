@@ -5,12 +5,13 @@
   "version": "0.1.0",
   "description": "分项目处理决定与成果验收，保存任务记录并接收飞书消息。",
   "engines": {
-    "orca": ">=1.4.248"
+    "orca": ">=1.4.261"
   },
   "execution": "trusted-worker",
   "pluginApi": 1,
   "main": "dist/worker.mjs",
   "contributes": {
+    "events": [{ "on": "agent.status.changed" }],
     "settings": [{ "key": "cliPath", "title": "Orca CLI 路径", "type": "string", "default": "" }],
     "commands": [{ "id": "workspace.overview", "title": "打开工作间总览", "when": "global" }],
     "keybindings": [{ "command": "workspace.overview", "key": "Mod+Alt+Shift+J", "when": "global" }],
@@ -29,6 +30,8 @@
     { "kind": "storage:own" },
     { "kind": "secrets:own" },
     { "kind": "settings:own" },
-    { "kind": "workspace:write" }
+    { "kind": "workspace:write" },
+    { "kind": "workspace:read" },
+    { "kind": "agent:read" }
   ]
 }

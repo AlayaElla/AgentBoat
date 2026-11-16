@@ -5,7 +5,7 @@ declare module 'orca' {
   interface PluginRequests {
     'workspace.connections': { input: import('./connections').ConnectionsInput; output: import('./connections').Connection[] | import('./connections').ConnectionDetail }
     'workspace.canvas': { output: { opened: boolean } }
-    'workspace.agents': { output: import('./agents').AgentsSnapshot }
+    'workspace.agents': { input: { refresh?: boolean }; output: import('./model').AgentsSnapshot }
     'project.visibility': { input: { projectId: string; revision: number; hidden: boolean }; output: Snapshot }
     'project.delete': { input: { projectId: string; revision: number; confirm: string }; output: { deleted: string; exportPath: string } }
     'workspace.requests': { input: { operation: 'read' | 'send' | 'decide' | 'update' | 'attach'; runId?: string; requestId?: string; peerId?: string; id?: string; title?: string; context?: string; expected?: string; links?: string[]; status?: import('./model').RequestState; note?: string; projectId?: string }; output: LinksSnapshot }

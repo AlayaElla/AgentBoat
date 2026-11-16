@@ -14,6 +14,10 @@ Orca 右侧的工作间是 HTML 面板，首页只有「等你处理」和「组
 
 ## 本地开发
 
+实时 agent 状态要求 Orca >=1.4.261，授权时新增「读取 agent 状态」和「读取工作区」；`workspace:write` 不包含读取权限。`workspace.agents` 按工作区调用宿主 `agents.list`，waiting/blocked 显示「需要你」、working 显示「工作中」、done 显示「已完成」。worker 监听 `agent.status.changed`，即使面板关闭也更新状态栏，60 秒兜底刷新；最多读取 256 个本机工作区、2000 条状态，截断会提示且状态栏数量带 `+`，已完成保留 24 小时。宿主每工作区最多返回 50 条且没有截断字段，达到 50 条时也显示数量不完整提示。
+
+宿主只给任务标题，插件仅对有执行记录的项目补读 `orchestration worker-list`，用精确 terminalId 找到唯一 dispatchId 再关联任务；不能匹配时只归属项目。宿主 sessionId 是提供方会话编号，当前 worker-list 不提供对应字段，不能把它拼成 Orca 会话句柄；结构化会话仅归属项目，不按标题关联任务。主 agent 接管仍保留 `worktree ps` 与 `terminal list`：`agents.list` 的状态不证明存活，也不给父会话信息或 Orca 会话句柄，不能替代既有 `subagentObservation`、可写终端及 Run/会话/一次性凭据核对。项目目录也改用宿主 project.list/workspace.list；删除前的全终端保护仍沿用 CLI。
+
 ```powershell
 npm ci
 npm run typecheck

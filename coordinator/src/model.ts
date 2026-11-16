@@ -144,3 +144,9 @@ export const mainAgentStates = {
   unknown: { label: '待命', tone: 'neutral' },
   offline: { label: '离线', tone: 'warning' }
 } as const
+export interface LiveAgent {
+  id: string; projectId: string; agent: string; role: 'worker' | 'session'
+  state: 'need' | 'work' | 'done'; rawState: string
+  title: string; taskId?: string; since: number
+}
+export interface AgentsSnapshot { ok: boolean; at: number; agents: LiveAgent[]; error?: string; truncated?: boolean }

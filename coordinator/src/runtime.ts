@@ -6,10 +6,11 @@ import type { AgentSession, Delivery, ProjectRef } from './model'
 import { fail, projectKey } from './store'
 import { readAgents, type AgentsSnapshot } from './agents'
 import type { Project } from './model'
+import type { HostApi } from 'orca/host'
 
 const execute = promisify(execFile)
 export interface CoordinatorRuntime {
-  projects(): Promise<ProjectRef[]>
+  projects(host: HostApi<'worker'>): Promise<ProjectRef[]>
   verifyRun(id: string, caller?: string): Promise<void>
   mainAgent(id: string): Promise<'claude' | 'codex' | undefined>
   targets(): Promise<{ sessions: AgentSession[]; workspaces: { workspace: string; name: string; path: string }[] }>
@@ -17,8 +18,8 @@ export interface CoordinatorRuntime {
   requestTakeover(handle: string, prompt: string): Promise<void>
   launchMain(workspace: string, agent: string, prompt: string): Promise<string>
   openOverview(): Promise<void>
-  removeProject(ref: ProjectRef): Promise<void>
-  agents(projects: Project[]): Promise<AgentsSnapshot>
+  removeProject(ref: ProjectRef, host: HostApi<'worker'>): Promise<void>
+  agents(projects: Project[], host: HostApi<'worker'>): Promise<AgentsSnapshot>
   hermesApprovalMode(): Promise<string>
   send(runId: string, delivery: Delivery): Promise<{ requestId?: string }>
 }
@@ -44,21 +45,15 @@ export class OrcaRuntime implements CoordinatorRuntime {
     if (!reply.ok) throw new Error(reply.error?.message ?? 'Orca 请求未成功')
     return reply.result
   }
-  async projects(): Promise<ProjectRef[]> {
-    const result = await this.call(['worktree', 'ps'])
-    if (result.truncated) fail('Orca 项目列表未完整返回，请先缩小工作区范围')
-    const projects = new Map<string, ProjectRef>()
-    for (const w of result.worktrees ?? []) {
-      if (!w.repoId || !w.path || !w.address?.worktree || w.address.environment !== 'local') continue
-      const hostId = w.hostId ?? 'local'
-      if (hostId !== 'local') continue
-      const id = projectKey(hostId, w.repoId)
-      if (!projects.has(id) || w.isMainWorktree) projects.set(id, {
-        id, repoId: w.repoId, hostId, name: w.repo || w.displayName || path.basename(w.path),
-        path: w.path, workspace: w.address.worktree
-      })
-    }
-    return [...projects.values()]
+  async projects(host: HostApi<'worker'>): Promise<ProjectRef[]> {
+    const [list, spaces] = await Promise.all([host.call('project.list', {}), host.call('workspace.list', {})])
+    if (list.truncated || spaces.truncated) fail('Orca 项目列表未完整返回，请先缩小工作区范围')
+    return list.projects.filter(p => (p.hostId ?? 'local') === 'local').flatMap(p => {
+      const candidates = spaces.workspaces.filter(w => w.projectId === p.id && (w.hostId ?? 'local') === 'local')
+      const w = candidates.find(w => path.resolve(w.path) === path.resolve(p.path)) ?? candidates[0]
+      return w ? [{ id: projectKey('local', p.id), repoId: p.id, hostId: 'local', name: p.name,
+        path: w.path, workspace: w.id.startsWith('identity:') ? w.id : `id:${w.id}` }] : []
+    })
   }
   async verifyRun(id: string, caller?: string): Promise<void> {
     if (!/^run_[\w-]+$/.test(id)) fail('Run 编号格式不正确')
@@ -67,6 +62,7 @@ export class OrcaRuntime implements CoordinatorRuntime {
     if (caller && result.run.coordinator_handle && result.run.coordinator_handle !== caller) fail('Orca 返回的 Run 协调者与当前会话不符；请在目标会话创建自己的新 Run')
   }
   async targets() {
+    // agents.list has no liveness/parent evidence; takeover still requires these exact CLI identities.
     const [ps, list] = await Promise.all([this.call(['worktree', 'ps', '--limit', '10000', '--agent-wait']), this.call(['terminal', 'list', '--limit', '10000'])])
     if (ps.truncated || list.truncated || ps.hostScope?.omittedHostIds?.includes('local')) fail('会话列表不完整，请恢复 Orca 后重试')
     return mainTargets(ps.worktrees ?? [], list.terminals ?? [])
@@ -90,28 +86,28 @@ export class OrcaRuntime implements CoordinatorRuntime {
     return handle as string
   }
   async openOverview() { await this.call(['plugin', 'open', 'local.project-coordinator', '--panel', 'project-coordinator']) }
-  async agents(projects: Project[]) { return readAgents(args => this.call(args), projects) }
+  async agents(projects: Project[], host: HostApi<'worker'>) { return readAgents(host, args => this.call(args), projects) }
   async hermesApprovalMode() {
     const home = process.env.HERMES_HOME || path.join(process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local'), 'hermes')
     const { stdout } = await execute(process.platform === 'win32' ? path.join(home, 'bin', 'hermes.exe') : 'hermes', ['config', 'get', 'approvals.mode', '--json'], { timeout: 15000, windowsHide: true, maxBuffer: 65536 })
     const mode = JSON.parse(stdout)
     return ['manual', 'smart', 'off'].includes(mode) ? mode : ''
   }
-  async removeProject(ref: ProjectRef) {
+  async removeProject(ref: ProjectRef, host: HostApi<'worker'>) {
     if (ref.hostId !== 'local') fail('只能移除本机项目')
     const setups = await this.call(['project', 'setups'])
     if (!Array.isArray(setups.setups) || setups.truncated) fail('无法确认项目登记，未移除')
     const found = setups.setups.filter((s: any) => s.repoId === ref.repoId && s.hostId === ref.hostId && path.resolve(s.path) === path.resolve(ref.path))
     if (found.length > 1) fail('项目登记不唯一，未移除')
     if (!found.length) {
-      if ((await this.projects()).some(p => p.id === ref.id)) fail('无法定位项目登记，未移除')
+      if ((await this.projects(host)).some(p => p.id === ref.id)) fail('无法定位项目登记，未移除')
       return
     }
     // --force also bypasses open-session guards; inspect every worktree and terminal immediately before removal.
     const [ps, terminals] = await Promise.all([this.call(['worktree', 'ps', '--limit', '10000', '--agent-wait']), this.call(['terminal', 'list', '--limit', '10000'])])
     assertProjectIdle(ref, ps, terminals)
     await this.call(['project', 'setup-delete', '--setup', found[0].id, '--force'])
-    if ((await this.projects()).some(p => p.id === ref.id)) fail('Orca 尚未确认移除，工作间记录保留')
+    if ((await this.projects(host)).some(p => p.id === ref.id)) fail('Orca 尚未确认移除，工作间记录保留')
   }
   async mainAgent(id: string): Promise<'claude' | 'codex' | undefined> {
     const result = await this.call(['orchestration', 'run-show', '--id', id])

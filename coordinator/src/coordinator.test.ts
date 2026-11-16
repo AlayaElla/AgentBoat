@@ -55,7 +55,9 @@ test('remove uses exact setup, checks every session and terminal, and fails clos
   assertProjectIdle(ref, { worktrees: [idle] }, { terminals: [] })
   const calls: string[][] = [], runtime = new OrcaRuntime(async () => 'unused')
   ;(runtime as any).call = async (args: string[]) => { calls.push(args); return args[0] === 'project' && args[1] === 'setups' ? { setups: [{ ...idle, id: 'exact' }] } : args[0] === 'terminal' ? { terminals: [] } : { worktrees: args.includes('ps') && !calls.some(a => a[1] === 'setup-delete') ? [idle] : [] } }
-  await runtime.removeProject(ref)
+  const host = mockHost({ results: { 'project.list': { projects: [], truncated: false }, 'workspace.list': { workspaces: [], truncated: false } } })
+  const worker = await mountWorker({ default: async api => { await runtime.removeProject(ref, api.host) } }, { host })
+  await worker.deactivate()
   assert.deepEqual(calls.find(a => a[1] === 'setup-delete'), ['project', 'setup-delete', '--setup', 'exact', '--force'])
 })
 

@@ -150,7 +150,22 @@ try {
   await setup({ unbound: true });
   await test('unbound main disables dispatch and explains why', async () => { await page.locator('[data-workspace=down] .wsr-h').click(); assert.equal(await page.locator('[data-workspace=down]').getByRole('button', { name: '派活', exact: true }).isDisabled(), true); assert.ok(await page.locator('[data-workspace=down] span[title]').getAttribute('title').then(x => x.includes('主 agent'))); });
   await setup();
-  await test('live agents distinguish need/work/unverified and unreadable state', async () => { await page.getByRole('button', { name: '全部 agent', exact: true }).click(); assert.equal(await page.locator('[data-st=need]').count(), 1); assert.equal(await page.locator('[data-st=work]').count(), 1); assert.ok((await page.locator('[data-st=work]').innerText()).includes('未核实')); await page.evaluate(() => { fixture.live.ok = false; fixture.live.agents = []; fixture.emit(); }); await page.getByText('agent 状态读不到，请刷新重试', { exact: true }).waitFor(); });
+  await test('host agents distinguish need/work and show one unreadable notice', async () => { await page.getByRole('button', { name: '全部 agent', exact: true }).click(); assert.equal(await page.locator('[data-st=need]').count(), 1); assert.equal(await page.locator('[data-st=work]').count(), 1); assert.ok(!(await page.locator('[data-st=work]').innerText()).includes('未核实')); await page.evaluate(() => { fixture.live.ok = false; fixture.live.agents = []; fixture.emit(); }); await page.getByText('agent 状态读不到', { exact: true }).waitFor(); assert.equal(await page.getByText('agent 状态读不到', { exact: true }).count(), 1); });
+  await setup({ manyProjects: true });
+  await test('agent failure and truncation each render once across home, project and task pages', async () => {
+    await page.evaluate(() => { fixture.live.ok = false; fixture.emit(); });
+    await page.getByText('agent 状态读不到', { exact: true }).waitFor();
+    await project();
+    assert.equal(await page.getByText('agent 状态读不到', { exact: true }).count(), 1);
+    await page.getByRole('tab', { name: 'Agent', exact: true }).click();
+    assert.equal(await page.getByText('agent 状态读不到', { exact: true }).count(), 1);
+    await page.getByRole('tab', { name: '任务', exact: true }).click();
+    await page.getByRole('button', { name: '页面交付', exact: true }).click();
+    assert.equal(await page.getByText('agent 状态读不到', { exact: true }).count(), 1);
+    await page.evaluate(() => { fixture.live.ok = true; fixture.live.truncated = true; fixture.emit(); });
+    await page.getByText('agent 状态未全部读取，数量仅含已读取的工作区', { exact: true }).waitFor();
+    assert.equal(await page.getByText('agent 状态读不到', { exact: true }).count(), 0);
+  });
   await setup({ manyProjects: true });
   await test('fourteen projects keep up to three agent rows and one completion count; empty cards have only a header', async () => {
     await page.evaluate(() => {

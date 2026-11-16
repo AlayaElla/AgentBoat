@@ -1,46 +1,53 @@
-import type { Project } from './model'
+import type { Project, LiveAgent, AgentsSnapshot } from './model'
+import type { HostApi, HostResult } from 'orca/host'
 import { projectKey } from './store'
 
-export interface LiveAgent {
-  id: string; projectId: string; agent: string; role: 'lead' | 'worker' | 'session'
-  state: 'need' | 'work' | 'done'; rawState: string; verified: boolean
-  title: string; taskId?: string; last: string; tool?: string; since: number; parentId?: string
-}
-export interface AgentsSnapshot { ok: boolean; at: number; agents: LiveAgent[]; error?: string }
+export type { LiveAgent, AgentsSnapshot } from './model'
 type Read = (args: string[]) => Promise<any>
+export const maxAgentWorkspaces = 256, maxAgents = 2000
 
-// Activity comes exclusively from ps; dispatch history only identifies the task.
-export async function readAgents(read: Read, projects: Project[]): Promise<AgentsSnapshot> {
+// Host status is authoritative; worker history only identifies a saved execution.
+export async function readAgents(host: HostApi<'worker'>, read: Read, projects: Project[]): Promise<AgentsSnapshot> {
   const at = Date.now()
   try {
-    const ps = await read(['worktree', 'ps', '--limit', '10000', '--agent-wait'])
-    if (!Array.isArray(ps.worktrees) || ps.truncated || ps.hostScope?.omittedHostIds?.includes('local')) throw Error('实时列表不完整')
-    const workers = new Map<string, any[]>(), leads = new Map<string, string>()
-    await Promise.all(projects.filter(p => p.runId).map(async p => {
-      const [list, run] = await Promise.all([read(['orchestration', 'worker-list', '--run', p.runId]), read(['orchestration', 'run-show', '--id', p.runId])])
-      if (list.nextCursor || list.truncated) throw Error('执行会话列表不完整')
-      workers.set(p.ref.id, list.workers ?? []); leads.set(p.ref.id, run.run?.coordinator_handle)
-    }))
-    const agents: LiveAgent[] = []
-    for (const w of ps.worktrees) {
-      if (w.address?.environment !== 'local' || (w.hostId ?? 'local') !== 'local' || w.isArchived || !w.repoId) continue
-      const projectId = projectKey('local', w.repoId), project = projects.find(p => p.ref.id === projectId)
-      if (project?.hidden) continue
-      for (const a of w.agents ?? []) {
-        if (!a.paneKey) continue
-        const since = typeof a.stateStartedAt === 'number' ? a.stateStartedAt : Date.parse(a.stateStartedAt)
-        if (!Number.isFinite(since)) throw Error('实时状态缺少时间')
+    const list = await host.call('workspace.list', {})
+    const local = list.workspaces.filter(w => (w.hostId ?? 'local') === 'local' && w.projectId && !projects.find(p => p.ref.id === projectKey('local', w.projectId!))?.hidden)
+    let truncated = list.truncated || local.length > maxAgentWorkspaces
+    const workers = new Map<string, any[]>(), agents: LiveAgent[] = []
+    workspaces: for (const w of local.slice(0, maxAgentWorkspaces)) {
+      const projectId = projectKey('local', w.projectId!), project = projects.find(p => p.ref.id === projectId)
+      const result = await host.call('agents.list', { workspaceId: w.id })
+      // Host caps each workspace at 50 without a truncation flag; do not present that boundary as a full count.
+      if (result.agents.length >= 50) truncated = true
+      if (!workers.has(projectId) && result.agents.some(a => a.terminalId)) {
+        let rows: any[] = []
+        if (project?.runId && project.tasks.some(t => t.executions.length)) {
+          try {
+            const list = await read(['orchestration', 'worker-list', '--run', project.runId])
+            if (!list.nextCursor && !list.truncated && Array.isArray(list.workers)) rows = list.workers
+          } catch { /* Status remains readable when execution history is unavailable. */ }
+        }
+        workers.set(projectId, rows)
+      }
+      for (const a of result.agents) {
+        const since = a.stateStartedAt
+        if (!Number.isFinite(since) || !['working', 'waiting', 'blocked', 'done'].includes(a.state)) throw Error('实时状态无效')
         if (a.state === 'done' && at - since > 86400000) continue
-        const session = /^structured-agent-session-(.+):[^:]+$/.exec(a.paneKey)
-        const handle = session ? `orca_session_id:${session[1]}` : a.terminalHandle
-        const dispatch = (workers.get(projectId) ?? []).find(d => d.agentTerminalHandle === handle || d.terminal === handle || d.projection?.session?.paneKey === a.paneKey || session && d.resource?.endpointIncarnation === `structured:${session[1]}`)
-        const task = dispatch && project?.tasks.find(t => t.executions.some(e => e.dispatchId === (dispatch.dispatchId ?? dispatch.dispatch?.id)))
-        agents.push({ id: a.paneKey, projectId, agent: a.agentType || '', role: handle && leads.get(projectId) === handle ? 'lead' : dispatch || a.parentPaneKey ? 'worker' : 'session',
-          state: ['blocked', 'waiting'].includes(a.state) ? 'need' : a.state === 'done' ? 'done' : 'work', rawState: a.state,
-          verified: a.subagentObservation === 'live', title: task?.title || a.conversationName || a.taskTitle || '会话', ...(task ? { taskId: task.id } : {}),
-          last: String(a.lastAssistantMessage || '').slice(0, 200), tool: a.toolName, since, parentId: a.parentPaneKey })
+        if (agents.length >= maxAgents) { truncated = true; break workspaces }
+        const identity = a.sessionId || a.terminalId
+        const matches = (workers.get(projectId) ?? []).filter(d =>
+          a.terminalId && [d.agentTerminalHandle, d.terminal, d.resource?.terminalHandle].includes(a.terminalId))
+        const dispatch = matches.length === 1 ? matches[0] : undefined
+        const tasks = dispatch ? project?.tasks.filter(t => t.executions.some(e => e.dispatchId === (dispatch.dispatchId ?? dispatch.dispatch?.id))) ?? [] : []
+        const task = tasks.length === 1 ? tasks[0] : undefined
+        agents.push({ id: `${w.id}:${identity ?? agents.length}`, projectId, agent: a.agent || '', role: dispatch ? 'worker' : 'session',
+          state: agentState(a.state), rawState: a.state,
+          title: task?.title || a.task?.title || a.title || '会话', ...(task ? { taskId: task.id } : {}), since })
       }
     }
-    return { ok: true, at, agents }
-  } catch (e) { return { ok: false, at, agents: [], error: e instanceof Error ? e.message : '实时状态读不到' } }
+    return { ok: true, at, agents, ...(truncated ? { truncated: true } : {}) }
+  } catch { return { ok: false, at, agents: [], error: 'agent 状态读不到' } }
+}
+export function agentState(state: HostResult<'agents.list'>['agents'][number]['state']): LiveAgent['state'] {
+  return state === 'waiting' || state === 'blocked' ? 'need' : state === 'working' ? 'work' : 'done'
 }

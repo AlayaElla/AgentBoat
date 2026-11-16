@@ -2,7 +2,7 @@ import type {} from 'orca/frame'
 import './protocol'
 import { agentName, groupedAttention, labels, taskState, requestState, requestStates, scopes, rules, statuses, connectionStates, roles, mainAgentStates } from './model'
 import type { Overview, Project, Task } from './model'
-import type { AgentsSnapshot, LiveAgent } from './agents'
+import type { AgentsSnapshot, LiveAgent } from './model'
 import type { LinksSnapshot } from './links'
 
 type Page = { kind: string; projectId?: string; id?: string; pid?: string }
@@ -112,10 +112,10 @@ async function back() {
   const prev = stack.pop() ?? { page: { kind: 'home' }, y: 0 }; page = prev.page; form = {}; current = null; epoch++; error = ''; notice = ''; confirming = false
   remember(); await loadPage().catch(e => { error = e.message }); render(prev.y); root.querySelector<HTMLElement>('[data-heading]')?.focus()
 }
-async function refresh() {
+async function refresh(forceAgents = false) {
   const n = epoch
   try {
-    const [overview, agents] = await Promise.all([req('workspace.overview'), req('workspace.agents')])
+    const [overview, agents] = await Promise.all([req('workspace.overview'), req('workspace.agents', { refresh: forceAgents })])
     if (n !== epoch) return
     all = overview; live = agents
     opened = Object.fromEntries(Object.entries(opened).filter(([id]) => id === 'self' || peers().some(p => p.id === id && p.status !== 'revoked')))
@@ -138,12 +138,12 @@ function choose(d: Draft) {
   confirming = false; persist('panel.drafts', drafts)
 }
 function agentRow(a: LiveAgent, full = false) {
-  const duration = a.state === 'done' ? `${relative(a.since)}完成` : `${a.state === 'need' ? '等你' : '工作中'} · ${relative(a.since)}开始${!a.verified ? '（未核实）' : ''}`
-  const line = el('div', { class: 'arow', title: a.last }, dot(a.state === 'need' ? 'need' : a.state === 'work' ? 'work' : 'ok'), el('span', { class: 'none' }, agentName(a.agent)), el('span', { class: 'grow trunc' }, a.title), small(duration))
-  return full ? el('article', { class: 'aitem', 'data-st': a.state }, line, small(`${{ lead: '项目主 agent', worker: 'worker', session: '其他会话' }[a.role]} · ${all.projects.find(p => p.ref.id === a.projectId)?.ref.name || '其他项目'}`), el('span', { class: 'clamp xs muted' }, `${a.tool ? `正在用 ${a.tool}。` : ''}${a.last}`), !['working', 'waiting', 'blocked', 'done'].includes(a.rawState) ? small(`Orca 状态：${a.rawState}`) : null) : line
+  const duration = a.state === 'done' ? `${relative(a.since)}完成` : `${a.state === 'need' ? '等你' : '工作中'} · ${relative(a.since)}开始`
+  const line = el('div', { class: 'arow' }, dot(a.state === 'need' ? 'need' : a.state === 'work' ? 'work' : 'ok'), el('span', { class: 'none' }, agentName(a.agent)), el('span', { class: 'grow trunc' }, a.title), small(duration))
+  return full ? el('article', { class: 'aitem', 'data-st': a.state }, line, small(`${a.role === 'worker' ? 'worker' : '会话'} · ${all.projects.find(p => p.ref.id === a.projectId)?.ref.name || '其他项目'}`)) : line
 }
 function agentsPage(id?: string) {
-  if (!live.ok) return callout('agent 状态读不到，请刷新重试', 'danger')
+  if (!live.ok) return null
   const list = projectAgents(id)
   return el('div', { class: 'cols3' }, ['need', 'work', 'done'].map(state => {
     const selected = list.filter(a => a.state === state).sort((a, b) => b.since - a.since), visible = state === 'done' ? selected.slice(0, 20) : selected
@@ -158,7 +158,7 @@ function ownProjects() {
       el('button', { type: 'button', class: 'pcard-h', title: p.ref.name, onclick: () => { void go({ kind: 'project', projectId: p.ref.id }) } }, el('span', { class: 'name grow trunc' }, p.ref.name), pill(projectCount(p.ref.id)), '›'),
       agents.length ? el('div', { class: 'pcard-b' }, unfinished.map(a => agentRow(a)), done ? small(`✓ 已完成 ${done} 个`) : null) : null)
   }
-  return [!live.ok ? small('agent 状态读不到') : null, all.projects.length > 12 ? input('找项目', '', 'search', () => render(), '输入项目名') : null, ...(all.machines ?? [{ id: 'local', name: '', role: 'host' }]).map(m => {
+  return [all.projects.length > 12 ? input('找项目', '', 'search', () => render(), '输入项目名') : null, ...(all.machines ?? [{ id: 'local', name: '', role: 'host' }]).map(m => {
     const list = projects.filter(p => p.ref.hostId === m.id), active = list.filter(p => Object.values(p.counts).some(Boolean) || projectAgents(p.ref.id).some(a => a.state !== 'done')), idle = list.filter(p => !active.includes(p))
     return el('div', { class: 'stack g2' }, (all.machines?.length ?? 0) > 1 ? small(`${m.role === 'host' ? '主机' : '电脑'} · ${m.name}`) : null, el('div', { class: 'cards' }, active.sort((a, b) => projectCount(b.ref.id) - projectCount(a.ref.id)).map(projectCard)), idle.length ? el('details', { class: 'fold', open: !!form['找项目'] }, el('summary', {}, `还没有任务的项目 ${idle.length} 个`), el('div', { class: 'cards' }, idle.map(projectCard))) : null)
   }), !all.projects.length ? small('还没有项目，在 Orca 中添加项目后会显示在这里。') : null]
@@ -187,7 +187,7 @@ function workspaceNode(p?: LinksSnapshot['peers'][number]) {
     p && !p.relation ? button('标关系', () => go({ kind: 'relation', id }), 'sm') : null), open ? el('div', { class: 'wsr-b', id: `workspace-${id}` }, body) : null)
 }
 function home() {
-  const entries = [...needs().map(a => item(a.title, `agent 等你 · ${agentName(a.agent)} · ${a.last}`, () => go({ kind: 'agents' }), dot('need'))), ...pending().map(a => item(a.title, `${a.kind === 'review' ? `${a.count} 项成果等你验收` : a.kind === 'decision' ? '待决定' : '受阻'} · ${all.projects.find(p => p.ref.id === a.projectId)?.ref.name || ''}`, () => go({ kind: 'task', projectId: a.projectId, id: a.taskId }), dot(a.kind === 'blocked' ? 'bad' : 'need'))), ...incoming().map(r => item(r.title, `来自 ${peers().find(p => p.id === r.peerId)?.name || ''} · 待你确认`, () => go({ kind: 'request', id: r.id }), dot('need')))]
+  const entries = [...needs().map(a => item(a.title, `agent 等你 · ${agentName(a.agent)}`, () => go({ kind: 'agents' }), dot('need'))), ...pending().map(a => item(a.title, `${a.kind === 'review' ? `${a.count} 项成果等你验收` : a.kind === 'decision' ? '待决定' : '受阻'} · ${all.projects.find(p => p.ref.id === a.projectId)?.ref.name || ''}`, () => go({ kind: 'task', projectId: a.projectId, id: a.taskId }), dot(a.kind === 'blocked' ? 'bad' : 'need'))), ...incoming().map(r => item(r.title, `来自 ${peers().find(p => p.id === r.peerId)?.name || ''} · 待你确认`, () => go({ kind: 'request', id: r.id }), dot('need')))]
   const direct = peers().filter(p => ['connected', 'offline'].includes(p.status)), up = direct.filter(p => p.relation === 'above'), down = direct.filter(p => p.relation === 'below').sort((a, b) => Number(incoming().some(r => r.peerId === b.id)) - Number(incoming().some(r => r.peerId === a.id)) || Number(a.status === 'offline') - Number(b.status === 'offline')), side = direct.filter(p => p.relation === 'peer'), free = direct.filter(p => !p.relation)
   return [!all.workspace.runId ? callout('还没有主 agent，请在设置中绑定。') : null, peers().some(p => p.status === 'pending') ? button('有工作间连接待核对', () => go({ kind: 'links' }), 'text') : null,
     all.error ? callout(all.error, 'danger') : null, all.links?.error ? callout(all.links.error, 'danger') : null,
@@ -249,7 +249,7 @@ function projectPage() {
   if (page.kind === 'task') {
     const t = p.tasks.find(t => t.id === page.id)
     if (!t) return callout('任务已不存在，请返回项目。')
-    return [el('h2', { class: 'h1 any' }, t.title), tag(labels[taskState(t)]), small(`记录里派给了 ${t.executions.map(e => agentName(e.agent)).join('、') || '尚未分派'}`), section('目标', el('p', { class: 'any' }, t.goal)), section('进展', el('p', { class: 'any' }, t.progress)), section('现在谁在做', !live.ok ? small('agent 状态读不到') : projectAgents(p.ref.id).filter(a => a.taskId === t.id && a.state !== 'done').length ? projectAgents(p.ref.id).filter(a => a.taskId === t.id && a.state !== 'done').map(a => agentRow(a, true)) : small('没有看到 agent 在做这个任务')), feedbackCards([t]), section('成果', t.artifacts.map(a => button(a.label + ' · ' + a.version, () => /^https?:/i.test(a.url) ? orca.shell?.openExternal(a.url) : req('project.openArtifact', { projectId: p.ref.id, taskId: t.id, artifactId: a.id }), 'sm'))), section('来源消息', p.events.filter(e => t.sourceIds.includes(e.id) || e.taskId === t.id).map(e => card(e.text))), section('记录', ...t.decisions.filter(d => d.answer !== undefined).map(d => small(`${d.question}：${d.answer}`)), ...t.acceptance.filter(a => a.status !== 'pending').map(a => small(`${a.title}：${a.status === 'passed' ? '已通过' : '需要修改'} · ${a.history.at(-1)?.note || ''}`)))]
+    return [el('h2', { class: 'h1 any' }, t.title), tag(labels[taskState(t)]), small(`记录里派给了 ${t.executions.map(e => agentName(e.agent)).join('、') || '尚未分派'}`), section('目标', el('p', { class: 'any' }, t.goal)), section('进展', el('p', { class: 'any' }, t.progress)), section('现在谁在做', !live.ok ? null : projectAgents(p.ref.id).filter(a => a.taskId === t.id && a.state !== 'done').length ? projectAgents(p.ref.id).filter(a => a.taskId === t.id && a.state !== 'done').map(a => agentRow(a, true)) : small('没有看到 agent 在做这个任务')), feedbackCards([t]), section('成果', t.artifacts.map(a => button(a.label + ' · ' + a.version, () => /^https?:/i.test(a.url) ? orca.shell?.openExternal(a.url) : req('project.openArtifact', { projectId: p.ref.id, taskId: t.id, artifactId: a.id }), 'sm'))), section('来源消息', p.events.filter(e => t.sourceIds.includes(e.id) || e.taskId === t.id).map(e => card(e.text))), section('记录', ...t.decisions.filter(d => d.answer !== undefined).map(d => small(`${d.question}：${d.answer}`)), ...t.acceptance.filter(a => a.status !== 'pending').map(a => small(`${a.title}：${a.status === 'passed' ? '已通过' : '需要修改'} · ${a.history.at(-1)?.note || ''}`)))]
   }
   return [row(el('h2', { class: 'h1 grow trunc' }, p.ref.name), button('项目设置', () => go({ kind: 'project-settings', projectId: p.ref.id }), 'text sm')), !p.runId ? callout('还没有项目主 agent，请在项目会话中按协作 skill 绑定。') : null, tabs(), el('div', { role: 'tabpanel', class: 'stack g3' }, tab === 'agents' ? agentsPage(p.ref.id) : tab === 'tasks' ? p.tasks.map(t => item(t.title, `${labels[taskState(t)]} · ${relative(t.updatedAt)}`, () => go({ kind: 'task', projectId: p.ref.id, id: t.id }))) : tab === 'messages' ? [section('通知', p.deliveries.map(d => card(d.subject, small(`${d.state === 'uncertain' ? '待核对，不会自动重发' : d.state === 'sent' ? '已通知' : '待通知'}`), small(d.error || ''), d.state === 'pending' ? button('发送通知', () => act(async () => { await req('project.deliver', { projectId: p.ref.id, deliveryId: d.id }); await refresh() })) : null))), section('来源消息', p.events.map(e => card(e.text)))] : feedbackCards(p.tasks.filter(t => t.phase === 'blocked' || t.decisions.some(d => d.answer === undefined) || t.phase === 'ready' && t.acceptance.some(a => a.status === 'pending'))))]
 }
@@ -327,9 +327,11 @@ function render(y = root.scrollTop) {
   const focused = document.activeElement as HTMLInputElement | null, focusKey = focused?.dataset.focus, selection = focused && ['text', 'search', 'password'].includes(focused.type) || focused?.tagName === 'TEXTAREA' ? [focused?.selectionStart, focused?.selectionEnd] : null
   root.setAttribute('aria-busy', String(busy))
   const title = ({ home: '工作间', settings: '设置', main: '主 agent', connections: '外部连接', connection: '连接', 'add-connection': '添加连接', links: '工作间连接', machines: '机器', hidden: '隐藏的项目', relation: '标关系', dispatch: '派活', agents: 'Agent', request: '请求', peer: '工作间', 'peer-project': '项目', project: '项目', task: '任务', 'project-settings': '项目设置' } as any)[page.kind] || '工作间'
-  root.replaceChildren(el('header', { class: 'top' }, page.kind !== 'home' ? button('‹ 返回', back, 'text back') : null, el('h1', { class: 'h1 grow trunc', tabindex: '-1', 'data-heading': '' }, title), page.kind !== 'home' && all ? button(`待处理 ${total()}`, () => go({ kind: 'home' }, true), 'text sm') : null, button('↻', refresh, 'text icon', false, '刷新'), button('⚙', () => go({ kind: 'settings' }), 'text icon', false, '设置')))
+  root.replaceChildren(el('header', { class: 'top' }, page.kind !== 'home' ? button('‹ 返回', back, 'text back') : null, el('h1', { class: 'h1 grow trunc', tabindex: '-1', 'data-heading': '' }, title), page.kind !== 'home' && all ? button(`待处理 ${total()}`, () => go({ kind: 'home' }, true), 'text sm') : null, button('↻', () => refresh(true), 'text icon', false, '刷新'), button('⚙', () => go({ kind: 'settings' }), 'text icon', false, '设置')))
   if (error) root.append(callout(error, 'danger'))
   if (notice) root.append(callout(notice))
+  if (all && !live.ok) root.append(callout('agent 状态读不到', 'danger'))
+  else if (live.truncated) root.append(callout('agent 状态未全部读取，数量仅含已读取的工作区'))
   if (all) root.append(...[content()].flat(12).filter(Boolean))
   else root.append(callout('正在读取工作间…'))
   renderSheet(); root.scrollTop = y
@@ -343,7 +345,7 @@ async function start() {
     if (saved?.page) { page = saved.page; stack = saved.stack ?? []; opened = saved.opened ?? opened }
     drafts = savedDrafts ?? {}
     orca.plugin.on('project.changed', () => { void refresh() })
-    orca.plugin.on('workspace.open', e => { void go({ kind: e.switching ? 'main' : 'home' }, true).then(refresh) })
+    orca.plugin.on('workspace.open', e => { void go({ kind: e.switching ? 'main' : 'home' }, true).then(() => refresh()) })
     const nav = await orca.storage.get('workspace.navigation') as any
     if (nav?.switching) { page = { kind: 'main' }; await orca.storage.set('workspace.navigation', { switching: false }) }
     await refresh(); root.scrollTop = saved?.y ?? 0
