@@ -43,7 +43,7 @@ async function setup(options = {}) {
     window.fixture = { project, links, live, workspace, calls, stored, emit: () => events['project.changed']?.({}), race: false, prune: () => { task.acceptance[0].revision++; task.acceptance[0].fingerprint = 'new-version'; project.revision++; } };
     window.orca = { storage: { get: async k => clone(stored[k] ?? null), set: async (k, v) => { stored[k] = clone(v); }, delete: async k => { delete stored[k]; } }, plugin: { on: (name, callback) => { events[name] = callback; return { dispose() {} }; }, request: async (name, input) => {
       calls.push({ name, input: clone(input) });
-      if (name === 'workspace.overview') return clone({ workspace, projects: [{ ref: project.ref, counts: { review: task.acceptance.filter(a => a.status === 'pending').length ? 1 : 0 }, agents: [], bound: true, updatedAt: '' }], hidden: [], attention: attention(), links, connections: [], machines: [{ id: 'local', name: '主机', role: 'host' }] });
+      if (name === 'workspace.overview') return clone({ workspace, projects: [{ ref: project.ref, counts: { review: task.acceptance.filter(a => a.status === 'pending').length ? 1 : 0 }, agents: [], bound: true, updatedAt: '' }, ...(options.manyProjects ? Array.from({ length: 13 }, (_, i) => ({ ref: { ...project.ref, id: 'p' + (i + 2), name: '项目 ' + (i + 2) }, counts: { working: 1 }, agents: [], bound: true, updatedAt: '' })) : [])], hidden: [], attention: attention(), links, connections: [], machines: [{ id: 'local', name: '主机', role: 'host' }] });
       if (name === 'workspace.agents') return clone(live);
       if (name === 'project.read') return clone({ project, projects: [project.ref] });
       if (name === 'project.feedback') {
@@ -151,6 +151,35 @@ try {
   await test('unbound main disables dispatch and explains why', async () => { await page.locator('[data-workspace=down] .wsr-h').click(); assert.equal(await page.locator('[data-workspace=down]').getByRole('button', { name: '派活', exact: true }).isDisabled(), true); assert.ok(await page.locator('[data-workspace=down] span[title]').getAttribute('title').then(x => x.includes('主 agent'))); });
   await setup();
   await test('live agents distinguish need/work/unverified and unreadable state', async () => { await page.getByRole('button', { name: '全部 agent', exact: true }).click(); assert.equal(await page.locator('[data-st=need]').count(), 1); assert.equal(await page.locator('[data-st=work]').count(), 1); assert.ok((await page.locator('[data-st=work]').innerText()).includes('未核实')); await page.evaluate(() => { fixture.live.ok = false; fixture.live.agents = []; fixture.emit(); }); await page.getByText('agent 状态读不到，请刷新重试', { exact: true }).waitFor(); });
+  await setup({ manyProjects: true });
+  await test('fourteen projects keep up to three agent rows and one completion count; empty cards have only a header', async () => {
+    await page.evaluate(() => {
+      const a = fixture.live.agents[0];
+      fixture.live.agents.push(...Array.from({ length: 3 }, (_, i) => ({ ...a, id: 'extra' + i, state: 'work' })),
+        ...['p1', 'p1', 'p2', 'p2'].map((projectId, i) => ({ ...a, id: 'done' + i, projectId, state: 'done' })),
+        { ...a, id: 'work-p3', projectId: 'p3', state: 'work', title: '项目三工作' });
+      fixture.emit();
+    });
+    await page.locator('[data-project=p2]').getByText('✓ 已完成 2 个', { exact: true }).waitFor();
+    assert.equal(await page.locator('[data-project]').count(), 14);
+    assert.equal(await page.locator('[data-project=p1] .arow').count(), 3);
+    assert.equal(await page.locator('[data-project=p1] .pcard-b').innerText().then(t => t.split('✓ 已完成 2 个').length - 1), 1);
+    assert.equal(await page.locator('[data-project=p2] .arow').count(), 0);
+    assert.equal(await page.locator('[data-project=p2] .pcard-b').innerText(), '✓ 已完成 2 个');
+    assert.equal(await page.locator('[data-project=p3] .arow').count(), 1);
+    assert.equal(await page.locator('[data-project=p1] .dot.need').count(), 1);
+    assert.equal(await page.locator('[data-project=p1] .dot.work').count(), 2);
+    assert.equal(await page.locator('[data-project]').evaluateAll(cards => cards.filter(c => !['p1', 'p2', 'p3'].includes(c.dataset.project)).every(c => c.children.length === 1 && c.firstElementChild.matches('.pcard-h'))), true);
+    const search = page.getByRole('searchbox', { name: '找项目' });
+    assert.equal(await search.getAttribute('placeholder'), '输入项目名');
+    await search.fill('项目 3'); await page.waitForFunction(() => document.querySelectorAll('[data-project]').length === 1);
+    assert.equal(await page.locator('[data-project=p3] .arow').count(), 1);
+    await search.fill(''); await page.waitForFunction(() => document.querySelectorAll('[data-project]').length === 14);
+    await page.evaluate(() => { fixture.live.ok = false; fixture.emit(); });
+    await page.getByText('agent 状态读不到', { exact: true }).waitFor();
+    assert.equal(await page.getByText('agent 状态读不到', { exact: true }).count(), 1);
+    assert.equal(await page.locator('[data-project] .pcard-b').count(), 0);
+  });
   await setup();
   await test('keyboard tabs, escape navigation, focus, long input retention', async () => { await project(); const tasks = page.getByRole('tab', { name: '任务', exact: true }); await tasks.focus(); await page.keyboard.press('ArrowRight'); assert.equal(await page.getByRole('tab', { name: 'Agent', exact: true }).getAttribute('aria-selected'), 'true'); await page.keyboard.press('Escape'); await page.getByRole('heading', { name: '组织', exact: true }).waitFor(); await page.locator('[data-workspace=off] .wsr-h').focus(); await page.keyboard.press('Enter'); assert.equal(await page.locator('[data-workspace=off] .wsr-h').getAttribute('aria-expanded'), 'true'); });
   await test('editing retains focus, caret and long text during refresh', async () => {

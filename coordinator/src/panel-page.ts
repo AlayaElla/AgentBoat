@@ -61,10 +61,10 @@ function button(text: string, action: () => any, cls = '', disabled = false, tit
   return el('button', { type: 'button', class: `btn ${cls}`, disabled: disabled || busy, title: title || text, 'aria-label': cls.includes('icon') ? title || text : undefined, onclick: () => { void action() } }, text)
 }
 const item = (title: string, summary: string, action: () => any, extra?: any) => el('button', { type: 'button', class: 'item', 'aria-label': title, 'aria-description': summary, onclick: () => { void action() }, title }, extra?.classList?.contains('dot') ? extra : null, el('span', { class: 'body' }, el('span', { class: 'trunc' }, title), small(summary)), !extra?.classList?.contains('dot') ? extra : null, '›')
-function input(label: string, initial: any = '', type = 'text', change?: (value: string) => void) {
+function input(label: string, initial: any = '', type = 'text', change?: (value: string) => void, placeholder?: string) {
   const name = label
   if (!(name in form)) form[name] = initial
-  const e = el(type === 'textarea' ? 'textarea' : 'input', { class: 'in', type: type === 'textarea' ? undefined : type, value: form[name], 'data-focus': name, maxlength: type === 'password' ? 4096 : 8000,
+  const e = el(type === 'textarea' ? 'textarea' : 'input', { class: 'in', type: type === 'textarea' ? undefined : type, value: form[name], placeholder, 'data-focus': name, maxlength: type === 'password' ? 4096 : 8000,
     oninput: (e: Event) => { const value = (e.target as HTMLInputElement).value; form[name] = value; change?.(value) } })
   return el('label', { class: 'field' }, el('span', { class: 'lb' }, label.startsWith('修改意见 ') ? '修改意见' : label.startsWith('决定 ') ? '你的决定' : label), e)
 }
@@ -152,10 +152,13 @@ function agentsPage(id?: string) {
 }
 function ownProjects() {
   const projects = all.projects.filter(p => !form['找项目'] || p.ref.name.toLowerCase().includes(form['找项目'].toLowerCase()))
-  const projectCard = (p: Overview['projects'][number]) => el('article', { class: 'pcard', 'data-project': p.ref.id },
-    el('button', { type: 'button', class: 'pcard-h', title: p.ref.name, onclick: () => { void go({ kind: 'project', projectId: p.ref.id }) } }, el('span', { class: 'name grow trunc' }, p.ref.name), pill(projectCount(p.ref.id)), '›'),
-    all.projects.length <= 12 ? el('div', { class: 'pcard-b' }, !live.ok ? small('agent 状态读不到') : projectAgents(p.ref.id).filter(a => a.state !== 'done').slice(0, 3).map(a => agentRow(a)), projectAgents(p.ref.id).filter(a => a.state === 'done').length ? small(`✓ 已完成 ${projectAgents(p.ref.id).filter(a => a.state === 'done').length} 个`) : null) : null)
-  return [all.projects.length > 12 ? input('找项目', '', 'search', () => render()) : null, ...(all.machines ?? [{ id: 'local', name: '', role: 'host' }]).map(m => {
+  const projectCard = (p: Overview['projects'][number]) => {
+    const agents = projectAgents(p.ref.id), unfinished = agents.filter(a => a.state !== 'done').slice(0, 3), done = agents.filter(a => a.state === 'done').length
+    return el('article', { class: 'pcard', 'data-project': p.ref.id },
+      el('button', { type: 'button', class: 'pcard-h', title: p.ref.name, onclick: () => { void go({ kind: 'project', projectId: p.ref.id }) } }, el('span', { class: 'name grow trunc' }, p.ref.name), pill(projectCount(p.ref.id)), '›'),
+      agents.length ? el('div', { class: 'pcard-b' }, unfinished.map(a => agentRow(a)), done ? small(`✓ 已完成 ${done} 个`) : null) : null)
+  }
+  return [!live.ok ? small('agent 状态读不到') : null, all.projects.length > 12 ? input('找项目', '', 'search', () => render(), '输入项目名') : null, ...(all.machines ?? [{ id: 'local', name: '', role: 'host' }]).map(m => {
     const list = projects.filter(p => p.ref.hostId === m.id), active = list.filter(p => Object.values(p.counts).some(Boolean)), idle = list.filter(p => !Object.values(p.counts).some(Boolean))
     return el('div', { class: 'stack g2' }, (all.machines?.length ?? 0) > 1 ? small(`${m.role === 'host' ? '主机' : '电脑'} · ${m.name}`) : null, el('div', { class: 'cards' }, active.sort((a, b) => projectCount(b.ref.id) - projectCount(a.ref.id)).map(projectCard)), idle.length ? el('details', { class: 'fold', open: !!form['找项目'] }, el('summary', {}, `还没有任务的项目 ${idle.length} 个`), el('div', { class: 'cards' }, idle.map(projectCard))) : null)
   }), !all.projects.length ? small('还没有项目，在 Orca 中添加项目后会显示在这里。') : null]
