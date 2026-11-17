@@ -14,6 +14,8 @@
 
 `bind`：`{projectId,revision,requestId,runId}`。
 
+项目写命令自动从当前 Orca 环境附带 caller；未给 runId 时尝试读取当前会话的 Run。Run 与项目绑定一致时，插件记住此调用会话，用于显示 Claude/Codex 类型和打开主会话所在工作区；已有项目在下一次写入时自动补齐。caller 是自报的显示和导航信息，不用于授权；没有记录或前缀无法识别时显示「未知」。
+
 `submit`：
 
 ```json

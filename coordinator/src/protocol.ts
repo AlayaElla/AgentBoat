@@ -6,7 +6,7 @@ declare module 'orca' {
     'workspace.connections': { input: import('./connections').ConnectionsInput; output: import('./connections').Connection[] | import('./connections').ConnectionDetail }
     'workspace.canvas': { output: { opened: boolean } }
     'workspace.agents': { input: { refresh?: boolean }; output: import('./model').AgentsSnapshot }
-    'project.visibility': { input: { projectId: string; revision: number; hidden: boolean }; output: Snapshot }
+    'project.visibility': { input: { projectId: string; revision: number; hidden: boolean; runId?: string; caller?: string }; output: Snapshot }
     'project.delete': { input: { projectId: string; revision: number; confirm: string }; output: { deleted: string; exportPath: string } }
     'workspace.requests': { input: { operation: 'read' | 'send' | 'decide' | 'update' | 'attach'; runId?: string; requestId?: string; peerId?: string; id?: string; title?: string; context?: string; expected?: string; links?: string[]; status?: import('./model').RequestState; note?: string; projectId?: string }; output: LinksSnapshot }
     'workspace.links': { input: { operation: 'read' | 'configure' | 'invite' | 'cancel-invite' | 'join' | 'share' | 'revoke' | 'refresh' | 'relate'; relation?: 'above' | 'below' | 'peer' | null; revision?: number; id?: string; code?: string; name?: string; enabled?: boolean; host?: string; port?: number; publicUrl?: string; tls?: boolean; certificate?: string; privateKey?: string; scope?: Sharing['scope']; projectIds?: string[]; acceptTasks?: Sharing['acceptTasks'] }; output: LinksSnapshot }
@@ -20,11 +20,12 @@ declare module 'orca' {
     'workspace.message': { input: { projectId: string; revision: number; requestId: string; runId: string; text: string }; output: Snapshot }
     'projects.list': { output: { projects: ProjectRef[]; error?: string } }
     'project.read': { input: { projectId: string }; output: Snapshot }
-    'project.settings': { input: { projectId: string; revision: number; roles: Project['roles'] }; output: Snapshot }
-    'project.feedback': { input: { projectId: string; revision?: number; requestId?: string; items: import('./store').FeedbackItem[] }; output: Snapshot }
+    'project.openMain': { input: { projectId: string }; output: { opened: boolean; multipleConversations?: boolean } }
+    'project.settings': { input: { projectId: string; revision: number; roles: Project['roles']; runId?: string; caller?: string }; output: Snapshot }
+    'project.feedback': { input: { projectId: string; revision?: number; requestId?: string; runId?: string; caller?: string; items: import('./store').FeedbackItem[] }; output: Snapshot }
     'project.deliver': { input: { projectId: string; deliveryId: string }; output: Snapshot }
     'project.openArtifact': { input: { projectId: string; taskId: string; artifactId: string }; output: { opened: boolean } }
-    'project.agent': { input: { operation: 'read' | 'bind' | 'submit'; projectId: string; revision?: number; requestId?: string; runId?: string; task?: unknown }; output: Snapshot }
+    'project.agent': { input: { operation: 'read' | 'bind' | 'submit'; projectId: string; revision?: number; requestId?: string; runId?: string; caller?: string; task?: unknown }; output: Snapshot }
   }
   interface PluginPanelEvents { 'project.changed': { projectId: string }; 'workspace.open': { switching: boolean } }
 }

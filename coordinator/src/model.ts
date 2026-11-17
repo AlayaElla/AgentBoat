@@ -58,6 +58,7 @@ export interface Messaging {
 export interface MessagingSnapshot extends Messaging { secretSaved: boolean; connection: ConnectionState }
 export interface Project {
   version: 1; ref: ProjectRef; revision: number; runId: string
+  mainAgentHandle?: string
   hidden?: boolean
   updatedAt?: string
   roles: { design: 'codex' | 'claude'; code: 'codex' | 'claude'; review: 'codex' | 'claude' }
@@ -66,8 +67,10 @@ export interface Project {
 export interface ConnectionState { state: 'off' | 'connecting' | 'connected' | 'error'; message: string }
 export interface Snapshot {
   mainAgent?: 'claude' | 'codex'
+  workspaceTarget?: ProjectWorkspace
   projects: ProjectRef[]; project: Project | null; runtimeError?: string
 }
+export type ProjectWorkspace = { workspaceId: string; multipleConversations?: boolean } | { error: string }
 export interface AgentSession {
   handle: string; title: string; workspace: string; workspaceName: string; path: string; agent: string
   online: 'online' | 'offline' | 'unknown'

@@ -12,7 +12,6 @@ const execute = promisify(execFile)
 export interface CoordinatorRuntime {
   projects(host: HostApi<'worker'>): Promise<ProjectRef[]>
   verifyRun(id: string, caller?: string): Promise<void>
-  mainAgent(id: string): Promise<'claude' | 'codex' | undefined>
   targets(): Promise<{ sessions: AgentSession[]; workspaces: { workspace: string; name: string; path: string }[] }>
   identify(handle: string, runId: string, currentRunId?: string): Promise<AgentSession>
   requestTakeover(handle: string, prompt: string): Promise<void>
@@ -108,16 +107,6 @@ export class OrcaRuntime implements CoordinatorRuntime {
     assertProjectIdle(ref, ps, terminals)
     await this.call(['project', 'setup-delete', '--setup', found[0].id, '--force'])
     if ((await this.projects(host)).some(p => p.id === ref.id)) fail('Orca 尚未确认移除，工作间记录保留')
-  }
-  async mainAgent(id: string): Promise<'claude' | 'codex' | undefined> {
-    const result = await this.call(['orchestration', 'run-show', '--id', id])
-    const handle = result.run?.coordinator_handle
-    if (typeof handle !== 'string' || !handle) return
-    const session = /^orca_session_id:(claude|codex)_/.exec(handle)
-    if (session) return session[1] as 'claude' | 'codex'
-    const terminal = await this.call(['terminal', 'show', '--terminal', handle])
-    const agent = terminal.terminal?.agent ?? terminal.terminal?.agentType
-    return agent === 'claude' || agent === 'codex' ? agent : undefined
   }
   async send(runId: string, delivery: Delivery): Promise<{ requestId?: string }> {
     const result = await this.call(['orchestration', 'send', '--from', 'plugin:local.project-coordinator', '--to', `run:${runId}`, '--type', 'status',

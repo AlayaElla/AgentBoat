@@ -65,6 +65,93 @@ test('workspace write does not grant workspace read', async () => {
   finally { await worker.deactivate() }
 })
 
+for (const selector of ['identity:wt2:local:project', refs[0].workspace]) for (const runId of ['', 'run_project']) test(`project opens its own workspace (${selector}, ${runId || 'unbound'})`, async () => {
+  const ref = { ...refs[0], workspace: selector }, p = fresh(ref); p.runId = runId
+  const workspaceId = selector.replace(/^id:/, ''), own = { ...workspace, id: workspaceId, projectId: ref.repoId, path: ref.path }
+  const host = mockHost({ storage: { 'project:p1': p as any }, results: {
+    'workspace.list': { workspaces: [own, { ...own, id: 'other-workspace' }], truncated: false },
+    'agents.list': { agents: [agent(), agent('done', 'second')] }, 'workspace.open': { opened: true }
+  } })
+  let c!: ReturnType<typeof testCoordinator>
+  const worker = await mountWorker({ default: api => { c = testCoordinator(api, {
+    projects: async () => [ref],
+    targets: async () => { throw Error('workspace navigation must not read takeover targets') }
+  }) } }, { host })
+  try {
+    assert.deepEqual((await worker.request('project.read', { projectId: ref.id })).workspaceTarget, { workspaceId, multipleConversations: true })
+    assert.deepEqual(await worker.request('project.openMain', { projectId: ref.id }), { opened: true, multipleConversations: true })
+    assert.deepEqual(host.callsOf('workspace.open'), [{ workspaceId }]); assert.deepEqual(host.callsOf('agents.list')[0], { workspaceId })
+    host.respond('agents.list', { agents: [] })
+    assert.equal((await worker.request('project.openMain', { projectId: ref.id })).multipleConversations, false)
+    host.respond('agents.list', () => { throw Error('agents unavailable') })
+    assert.deepEqual(await worker.request('project.openMain', { projectId: ref.id }), { opened: true })
+    host.respond('workspace.list', { workspaces: [{ ...own, id: 'other-workspace' }], truncated: false })
+    await assert.rejects(() => worker.request('project.openMain', { projectId: ref.id }), /项目工作区已被移除或不可用/)
+    assert.equal(host.callsOf('workspace.open').length, 3)
+    assert.deepEqual(host.data().storage['project:p1'], p); assert.deepEqual(host.refusals, [])
+  } finally { c.stop(); await worker.deactivate() }
+})
+
+for (const scenario of ['removed', 'wrong-project', 'remote', 'truncated', 'list-error', 'open-error']) test(`project workspace error: ${scenario}`, async () => {
+  const ref = refs[0], p = fresh(ref), own = { ...workspace, id: ref.workspace.replace(/^id:/, ''), projectId: ref.repoId }
+  const reason = scenario === 'truncated' ? '工作区列表未完整返回' : scenario === 'list-error' ? 'Orca: workspace inventory unavailable' : scenario === 'open-error' ? 'Orca: workspace open failed' : '项目工作区已被移除或不可用'
+  const host = mockHost({ storage: { 'project:p1': p as any }, results: {
+    'workspace.list': () => {
+      if (scenario === 'list-error') throw Error(reason)
+      return { truncated: scenario === 'truncated', workspaces: ['removed', 'truncated'].includes(scenario) ? [] : [{ ...own, ...(scenario === 'wrong-project' ? { projectId: 'other-project' } : {}), ...(scenario === 'remote' ? { hostId: 'ssh:remote' } : {}) }] }
+    },
+    'agents.list': { agents: [agent()] }, 'workspace.open': () => { throw Error(reason) }
+  } })
+  let c!: ReturnType<typeof testCoordinator>
+  const worker = await mountWorker({ default: api => { c = testCoordinator(api, { projects: async () => refs }) } }, { host })
+  try {
+    const snapshot = await worker.request('project.read', { projectId: ref.id })
+    if (scenario !== 'open-error') assert.ok(snapshot.workspaceTarget && 'error' in snapshot.workspaceTarget && snapshot.workspaceTarget.error.includes(reason))
+    await assert.rejects(() => worker.request('project.openMain', { projectId: ref.id }), new RegExp(reason))
+    assert.equal(host.callsOf('workspace.open').length, scenario === 'open-error' ? 1 : 0)
+    assert.deepEqual(host.data().storage['project:p1'], p)
+  } finally { c.stop(); await worker.deactivate() }
+})
+
+test('matching project writes record display identity, resolve its workspace, and preserve binding checks', async () => {
+  const ref = refs[0], p = fresh(ref); p.runId = 'run_project'
+  const own = { ...workspace, id: ref.workspace.replace(/^id:/, ''), projectId: ref.repoId }, lead = { ...own, id: 'lead-workspace' }
+  let caller = 'orca_session_id:claude_project', c!: ReturnType<typeof testCoordinator>
+  const host = mockHost({ storage: { 'project:p1': p as any }, results: { 'workspace.list': { workspaces: [own, lead], truncated: false }, 'agents.list': { agents: [agent()] }, 'workspace.open': { opened: true } } })
+  const worker = await mountWorker({ default: api => { c = testCoordinator(api, {
+    projects: async () => refs,
+    targets: async () => ({ workspaces: [], sessions: [{ handle: caller, workspace: 'id:lead-workspace', workspaceName: 'Lead', path: '/lead', title: 'Main', agent: 'claude', online: 'unknown' }] }),
+    verifyRun: async run => { if (run === 'run_forbidden') throw Error('existing Run check refused') }
+  }) } }, { host })
+  const submit = (handle: string, runId = 'run_project') => worker.request('project.agent', { operation: 'submit', projectId: ref.id, revision: (host.data().storage['project:p1'] as any).revision, requestId: crypto.randomUUID(), runId, caller: handle, task: { id: 't', title: 'Task', goal: 'Goal', phase: 'working' } })
+  try {
+    assert.equal((await worker.request('project.read', { projectId: ref.id })).mainAgent, undefined)
+    for (const kind of ['claude', 'codex']) {
+      caller = `orca_session_id:${kind}_project`
+      const result = await submit(caller)
+      assert.equal(result.project!.mainAgentHandle, caller); assert.equal(result.mainAgent, kind)
+      assert.deepEqual(result.workspaceTarget, { workspaceId: lead.id, multipleConversations: false })
+    }
+    await worker.request('project.openMain', { projectId: ref.id })
+    assert.deepEqual(host.callsOf('workspace.open').at(-1), { workspaceId: lead.id })
+    assert.equal((await submit('orca_session_id:claude_other', 'run_other')).project!.mainAgentHandle, caller)
+    caller = 'orca_session_id:uuid-without-agent-prefix'
+    assert.equal((await submit(caller)).mainAgent, undefined)
+    host.respond('workspace.list', { workspaces: [own], truncated: false })
+    assert.deepEqual((await worker.request('project.read', { projectId: ref.id })).workspaceTarget, { workspaceId: own.id, multipleConversations: false })
+    await assert.rejects(() => worker.request('project.agent', { operation: 'bind', projectId: ref.id, revision: (host.data().storage['project:p1'] as any).revision, requestId: 'refused', runId: 'run_forbidden', caller }), /existing Run check refused/)
+    const rebound = await worker.request('project.agent', { operation: 'bind', projectId: ref.id, revision: (host.data().storage['project:p1'] as any).revision, requestId: 'rebind', runId: 'run_next' })
+    assert.equal(rebound.project!.mainAgentHandle, undefined); assert.equal(rebound.mainAgent, undefined)
+    const bound = await worker.request('project.agent', { operation: 'bind', projectId: ref.id, revision: rebound.project!.revision, requestId: 'same-run', runId: 'run_next', caller: 'orca_session_id:claude_bound' })
+    assert.equal(bound.mainAgent, 'claude')
+    const settings = await worker.request('project.settings', { projectId: ref.id, revision: bound.project!.revision, roles: bound.project!.roles, runId: 'run_next', caller: 'orca_session_id:codex_settings' })
+    assert.equal(settings.mainAgent, 'codex')
+    const before = structuredClone(host.data().storage['project:p1'])
+    await assert.rejects(() => worker.request('project.agent', { operation: 'submit', projectId: ref.id, revision: (before as any).revision, requestId: 'invalid', runId: 'run_next', caller, task: {} }), /./)
+    assert.deepEqual(host.data().storage['project:p1'], before)
+  } finally { c.stop(); await worker.deactivate() }
+})
+
 test('host catalog matches exact local project IDs and canonical workspaces, refusing truncation', async () => {
   const host = mockHost({ results: {
     'project.list': { projects: [{ id: 'repo', name: '同名', kind: 'git', hostId: 'local', path: '/root' }, { id: 'remote', name: '同名', kind: 'git', hostId: 'ssh:remote', path: '/root' }], truncated: false },

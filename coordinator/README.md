@@ -2,9 +2,9 @@
 
 Orca 右侧的工作间是 HTML 面板，首页只有「等你处理」和「组织」。自己的工作间默认展开，主 agent、外部连接和项目都在树里；只显示直接连接的工作间。关系由实线与虚线表示，自己的名字条使用 Orca 主色。界面跟随 Orca 明暗主题，Geist 字体与 OFL 许可随插件打包。
 
-等你处理默认列三件，同一个任务的同一类事项合并计数，在等你的 agent 也算一件。实时状态仅取 Orca worktree ps，执行记录只用来对上任务；读不到时明确显示，已完成只留 24 小时，Agent 页最多列 20 条完成记录。
+等你处理在宽屏两栏时全部列出，左栏独立滚动；单栏时先列三件，再按需展开。同一个任务的同一类事项合并计数，在等你的 agent 也算一件。实时状态仅取 Orca worktree ps，执行记录只用来对上任务；读不到时明确显示，已完成只留 24 小时，Agent 页最多列 20 条完成记录。
 
-项目页提供待处理、任务、Agent、消息；项目设置里分工、导出、隐藏和删除。反馈先逐条选择，按项目一次提交；全部通过只是选择，点「提交 N 条」即提交。草稿按项目保存到本机插件存储，成果或决定过期时整批暂停，清掉过期项并提示重新提交。
+项目页提供待处理、任务、Agent、消息；右上角「打开主会话」优先打开已记录会话所在的工作区，找不到时打开项目自身的工作区，多个对话时提示手动点主会话标签。项目工作区被移除或不可用时按钮禁用并显示原因；点击时重新核对，宿主报错原样显示。项目设置里分工、导出、隐藏和删除，主 agent 类型从记录的会话前缀显示，未记录或类型无法识别时显示「未知」。反馈先逐条选择，按项目一次提交；全部通过只是选择，点「提交 N 条」即提交。请求发出后，按钮立即显示「提交中…」或「处理中…」与转圈效果，完成后恢复并显示结果；系统减少动态效果时只显示文字。草稿按项目保存到本机插件存储，成果或决定过期时整批暂停，清掉过期项并提示重新提交。
 
 设置提供主 agent、外部连接、工作间连接、机器、隐藏的项目。外部连接沿用飞书和多个 A2A 的独立凭据与往来记录。隐藏保留项目记录；删除先导出，再核对没有打开的会话，移除 Orca 登记后才删工作间记录，磁盘文件保留。
 
@@ -63,7 +63,7 @@ macOS 默认插件数据目录为 `~/Library/Application Support/orca/plugins-da
 
 实时 agent 状态要求 Orca >=1.4.261，授权时新增「读取 agent 状态」和「读取工作区」；`workspace:write` 不包含读取权限。`workspace.agents` 按工作区调用宿主 `agents.list`，waiting/blocked 显示「需要你」、working 显示「工作中」、done 显示「已完成」。worker 监听 `agent.status.changed`，即使面板关闭也更新状态栏，60 秒兜底刷新；最多读取 256 个本机工作区、2000 条状态，截断会提示且状态栏数量带 `+`，已完成保留 24 小时。宿主每工作区最多返回 50 条且没有截断字段，达到 50 条时也显示数量不完整提示。
 
-宿主只给任务标题，插件仅对有执行记录的项目补读 `orchestration worker-list`，用精确 terminalId 找到唯一 dispatchId 再关联任务；不能匹配时只归属项目。宿主 sessionId 是提供方会话编号，当前 worker-list 不提供对应字段，不能把它拼成 Orca 会话句柄；结构化会话仅归属项目，不按标题关联任务。主 agent 接管仍保留 `worktree ps` 与 `terminal list`：`agents.list` 的状态不证明存活，也不给父会话信息或 Orca 会话句柄，不能替代既有 `subagentObservation`、可写终端及 Run/会话/一次性凭据核对。项目目录也改用宿主 project.list/workspace.list；删除前的全终端保护仍沿用 CLI。
+宿主只给任务标题，插件仅对有执行记录的项目补读 `orchestration worker-list`，用精确 terminalId 找到唯一 dispatchId 再关联任务；不能匹配时只归属项目。宿主 sessionId 是提供方会话编号，当前 worker-list 不提供对应字段，不能把它拼成 Orca 会话句柄；结构化会话仅归属项目，不按标题关联任务。项目 CLI 写入自动附带当前 caller 与可读取的 Run，仅在 Run 与项目绑定一致时记录 `mainAgentHandle`；这是会话自报的显示和导航信息，不作为权限判断。`project.openMain` 优先使用该句柄在 `runtime.targets` 中对应的精确工作区，再用项目 `ref.workspace` 兜底，并通过宿主 `workspace.list` 核对本机工作区后调用已有 `workspace:write` 下的 `workspace.open`。`agents.list` 只用于判断是否显示多个对话的标签提示，读取失败不影响打开工作区。主 agent 接管仍保留 `worktree ps` 与 `terminal list`：`agents.list` 的状态不证明存活，也不给父会话信息或 Orca 会话句柄，不能替代既有 `subagentObservation`、可写终端及 Run/会话/一次性凭据核对。项目目录也改用宿主 project.list/workspace.list；删除前的全终端保护仍沿用 CLI。
 
 ```powershell
 npm ci

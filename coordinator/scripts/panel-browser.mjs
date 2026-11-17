@@ -48,13 +48,18 @@ async function setup(options = {}) {
     const sessions = ['甲', '乙'].map((name, i) => ({ handle: 'session-' + i, title: name + '会话', workspace: 'identity:test', workspaceName: '示例工作区', path: '/test/工作区 with spaces', agent: i ? 'codex' : 'claude', online: 'online' }));
     const attention = () => task.acceptance.filter(a => a.status === 'pending').map(a => ({ projectId: 'p1', taskId: 't1', kind: 'review', itemId: a.id, title: task.title, summary: a.title }));
     const calls = [];
-    window.fixture = { project, links, live, workspace, calls, stored, emit: () => events['project.changed']?.({}), race: false, prune: () => { task.acceptance[0].revision++; task.acceptance[0].fingerprint = 'new-version'; project.revision++; } };
+    window.fixture = { project, links, live, workspace, calls, stored, workspaceTarget: { workspaceId: 'identity:project-workspace', multipleConversations: true }, emit: () => events['project.changed']?.({}), race: false, prune: () => { task.acceptance[0].revision++; task.acceptance[0].fingerprint = 'new-version'; project.revision++; } };
     window.orca = { storage: { get: async k => clone(stored[k] ?? null), set: async (k, v) => { stored[k] = clone(v); }, delete: async k => { delete stored[k]; } }, plugin: { on: (name, callback) => { events[name] = callback; return { dispose() {} }; }, request: async (name, input) => {
       if (input !== undefined && !isJson(input)) throw Error('input: Invalid input');
       calls.push({ name, input: clone(input) });
       if (name === 'workspace.overview') return clone({ workspace, projects: [{ ref: project.ref, counts: { review: task.acceptance.filter(a => a.status === 'pending').length ? 1 : 0 }, agents: [], bound: true, updatedAt: '' }, ...(options.manyProjects ? Array.from({ length: 13 }, (_, i) => ({ ref: { ...project.ref, id: 'p' + (i + 2), name: '项目 ' + (i + 2) }, counts: { working: options.idleProjects ? 0 : 1 }, agents: [], bound: true, updatedAt: '' })) : [])], hidden: [], attention: attention(), links, connections: [], machines: [{ id: 'local', name: '主机', role: 'host' }] });
       if (name === 'workspace.agents') return clone(live);
-      if (name === 'project.read') return clone({ project, projects: [project.ref] });
+      if (name === 'project.read') return clone({ project, projects: [project.ref], workspaceTarget: window.fixture.workspaceTarget, mainAgent: window.fixture.mainAgent });
+      if (name === 'project.openMain') {
+        if (window.fixture.delayOpen) await new Promise(r => { window.fixture.finishOpen = r; });
+        if (window.fixture.openError) throw Error(window.fixture.openError);
+        return { opened: true, multipleConversations: window.fixture.workspaceTarget.multipleConversations };
+      }
       if (name === 'project.feedback') {
         if (window.fixture.delayFeedback) { window.fixture.delayFeedback = false; await new Promise(r => { window.fixture.finishFeedback = r; }); }
         if (window.fixture.race) { window.fixture.race = false; window.fixture.prune(); throw Error('成果已更新'); }
@@ -89,6 +94,115 @@ async function setup(options = {}) {
 const home = async () => { await page.getByRole('button', { name: /^待处理 / }).click(); await page.getByRole('heading', { name: '组织', exact: true }).waitFor(); };
 const project = async () => { await page.locator('[data-project=p1] .pcard-h').click(); await page.getByRole('button', { name: '这 2 项全部通过', exact: true }).waitFor(); };
 try {
+  for (const wide of [false, true]) {
+    await setup({ width: wide ? 1040 : 400 });
+    await test(`${wide ? 'wide inbox lists every item and scrolls independently' : 'narrow inbox keeps three items and expands on demand'}`, async () => {
+      await page.evaluate(() => { fixture.live.agents.push(...Array.from({ length: 40 }, (_, i) => ({ ...fixture.live.agents[0], id: 'need-' + i, state: 'need' }))); fixture.emit(); });
+      await page.waitForFunction(() => document.querySelector('.inbox .pill')?.textContent === '43');
+      const inbox = page.locator('.inbox'), more = inbox.getByRole('button', { name: /^再看 / });
+      assert.equal(await inbox.locator('.item:visible').count(), wide ? 43 : 3);
+      if (wide) {
+        assert.equal(await more.isVisible(), false);
+        assert.equal(await inbox.evaluate(e => e.scrollHeight > e.clientHeight && getComputedStyle(e).overflowY === 'auto'), true);
+        await inbox.hover();
+        const organizationTop = (await page.locator('.home>section').nth(1).boundingBox()).y;
+        const rootTop = await page.locator('#panel').evaluate(e => e.scrollTop);
+        await page.mouse.wheel(0, 600);
+        await page.waitForFunction(() => document.querySelector('.inbox').scrollTop > 0);
+        assert.equal(await page.locator('#panel').evaluate(e => e.scrollTop), rootTop);
+        assert.equal((await page.locator('.home>section').nth(1).boundingBox()).y, organizationTop);
+      } else {
+        assert.equal(await more.textContent(), '再看 40 条'); await more.click();
+        assert.equal(await inbox.locator('.item:visible').count(), 43);
+      }
+    });
+  }
+  for (const multipleConversations of [true, false]) {
+    await setup({ width: 300 });
+    await test(`project opens main workspace once and ${multipleConversations ? 'shows' : 'omits'} tab hint`, async () => {
+      await page.evaluate(multiple => { fixture.workspaceTarget.multipleConversations = multiple; fixture.delayOpen = true; }, multipleConversations);
+      await project();
+      const open = page.getByRole('button', { name: '打开主会话', exact: true });
+      assert.equal(await open.isEnabled(), true);
+      assert.equal(await page.locator('#panel').evaluate(e => e.scrollWidth <= e.clientWidth), true);
+      await open.evaluate(button => { button.click(); button.click(); });
+      await page.waitForFunction(() => !!fixture.finishOpen);
+      assert.equal(await open.isDisabled(), true);
+      await page.evaluate(() => fixture.finishOpen());
+      await page.getByRole('status').filter({ hasText: '已打开项目所在的工作区' }).waitFor();
+      assert.equal((await page.getByRole('status').allTextContents()).some(t => t.includes('如果有多个对话，点一下主会话的标签')), multipleConversations);
+      assert.deepEqual(await page.evaluate(() => fixture.calls.filter(c => c.name === 'project.openMain')), [{ name: 'project.openMain', input: { projectId: 'p1' } }]);
+    });
+  }
+  await setup();
+  await test('project workspace opens with no bound Run and unreadable conversation count', async () => {
+    await page.evaluate(() => { fixture.project.runId = ''; delete fixture.workspaceTarget.multipleConversations; });
+    await project();
+    assert.equal(await page.getByRole('button', { name: '打开主会话', exact: true }).isEnabled(), true);
+    await page.getByRole('button', { name: '打开主会话', exact: true }).click();
+    await page.getByRole('status').filter({ hasText: '已打开项目所在的工作区' }).waitFor();
+    assert.equal((await page.getByRole('status').allTextContents()).some(t => t.includes('点一下主会话的标签')), false);
+  });
+  for (const reason of ['项目工作区已被移除或不可用', '工作区列表未完整返回，请刷新后重试', 'Orca: workspace inventory unavailable']) {
+    await setup();
+    await test(`project disables main workspace button with visible reason: ${reason}`, async () => {
+      await page.evaluate(reason => { fixture.workspaceTarget = { error: reason }; }, reason);
+      await project();
+      const open = page.getByRole('button', { name: '打开主会话', exact: true });
+      assert.equal(await open.isDisabled(), true); assert.equal(await open.getAttribute('title'), reason);
+      assert.equal(await page.getByText(reason, { exact: true }).isVisible(), true);
+      assert.equal(await page.evaluate(() => fixture.calls.filter(c => c.name === 'project.openMain').length), 0);
+      await page.evaluate(() => { fixture.workspaceTarget = { workspaceId: 'identity:project-workspace', multipleConversations: false }; fixture.emit(); });
+      await page.waitForFunction(() => [...document.querySelectorAll('button')].some(b => b.textContent === '打开主会话' && !b.disabled));
+    });
+  }
+  await setup();
+  await test('project settings show recorded agent type and unknown without a record', async () => {
+    await project(); await page.getByRole('button', { name: '项目设置', exact: true }).click();
+    await page.getByText('项目主 agent：未知', { exact: true }).waitFor();
+    for (const [value, label] of [['claude', 'Claude'], ['codex', 'Codex']]) {
+      await page.evaluate(value => { fixture.mainAgent = value; fixture.emit(); }, value);
+      await page.getByText('项目主 agent：' + label, { exact: true }).waitFor();
+    }
+  });
+  await setup();
+  await test('shared actions immediately show submission feedback and respect reduced motion', async () => {
+    await project(); await page.getByRole('button', { name: '这 2 项全部通过' }).click();
+    await page.getByRole('button', { name: '提交 2 条', exact: true }).evaluate(button => {
+      fixture.delayFeedback = true; button.click();
+      const waiting = document.querySelector('button[aria-busy=true]');
+      if (waiting?.textContent !== '提交中…' || !waiting.disabled || !waiting.querySelector('.spinner')) throw Error('No immediate wait effect');
+    });
+    await page.waitForFunction(() => !!fixture.finishFeedback);
+    const waiting = page.locator('button[aria-busy=true]');
+    assert.equal(await waiting.textContent(), '提交中…');
+    assert.equal(await page.getByRole('button', { name: '清空', exact: true }).isDisabled(), true);
+    assert.equal(await waiting.locator('.spinner').evaluate(e => getComputedStyle(e).animationName), 'ab-spin');
+    await page.emulateMedia({ reducedMotion: 'reduce' });
+    assert.equal(await waiting.locator('.spinner').evaluate(e => getComputedStyle(e).display), 'none');
+    assert.equal(await waiting.textContent(), '提交中…');
+    await page.evaluate(() => fixture.finishFeedback());
+    await page.getByRole('status').filter({ hasText: '已提交 2 条' }).waitFor();
+    assert.equal(await page.locator('button[aria-busy=true]').count(), 0);
+    assert.equal(await page.getByRole('button', { name: '打开主会话', exact: true }).isEnabled(), true);
+  });
+  await setup();
+  await test('workspace open error stays visible while an available workspace remains clickable', async () => {
+    await project(); await page.evaluate(() => { fixture.openError = 'Orca: workspace no longer exists'; });
+    await page.getByRole('button', { name: '打开主会话', exact: true }).click();
+    await page.getByRole('alert').filter({ hasText: 'Orca: workspace no longer exists' }).waitFor();
+    assert.equal(await page.getByRole('button', { name: '打开主会话', exact: true }).isEnabled(), true);
+    assert.equal(await page.getByText('Orca: workspace no longer exists', { exact: true }).count(), 1);
+    assert.equal(await page.getByRole('status').filter({ hasText: '已打开项目所在的工作区' }).count(), 0);
+  });
+  await setup();
+  await test('workspace removed during open disables button after rechecking', async () => {
+    await project(); await page.evaluate(() => { fixture.openError = 'Orca: workspace removed'; fixture.workspaceTarget = { error: '项目工作区已被移除或不可用' }; });
+    await page.getByRole('button', { name: '打开主会话', exact: true }).click();
+    await page.getByRole('alert').filter({ hasText: 'Orca: workspace removed' }).waitFor();
+    assert.equal(await page.getByRole('button', { name: '打开主会话', exact: true }).isDisabled(), true);
+    assert.equal(await page.getByText('项目工作区已被移除或不可用', { exact: true }).isVisible(), true);
+  });
   await test('v8 mockup pages open in a headless browser', async () => {
     page = await browser.newPage(); page.on('pageerror', e => errors.push(e.message));
     for (const kind of ['home', 'project', 'task', 'project-settings', 'settings', 'main', 'connections', 'connection', 'add-connection', 'links', 'machines', 'agents', 'request', 'peer', 'peer-project', 'dispatch', 'relation']) {

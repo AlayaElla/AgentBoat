@@ -154,10 +154,27 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
   async function snapshot(id: string): Promise<Snapshot> {
     if (!catalog.length) await projects()
     const project = catalog.some(p => p.id === id) ? await ensure(id) : (await store.all()).find(p => p.ref.id === id) ?? await ensure(id)
-    const mainAgent = project.runId ? await runtime.mainAgent(project.runId).catch(() => undefined) : undefined
+    const mainAgent = /^orca_session_id:(claude|codex)_/.exec(project.mainAgentHandle ?? '')?.[1] as Snapshot['mainAgent']
     return { projects: catalog, project,
-      ...(mainAgent ? { mainAgent } : {}),
+      ...(mainAgent ? { mainAgent } : {}), workspaceTarget: await projectWorkspace(project.ref, project.mainAgentHandle),
       ...(runtimeError ? { runtimeError } : {}) }
+  }
+  async function projectWorkspace(ref: ProjectRef, handle?: string): Promise<import('./model').ProjectWorkspace> {
+    try {
+      const list = await orca.host.call('workspace.list', {})
+      const session = handle ? await runtime.targets().then(t => t.sessions.find(s => s.handle === handle)).catch(() => undefined) : undefined
+      const workspace = (session && list.workspaces.find(w => w.id === session.workspace.replace(/^id:/, '') && (w.hostId ?? 'local') === 'local'))
+        || list.workspaces.find(w => w.id === ref.workspace.replace(/^id:/, '') && w.projectId === ref.repoId && (w.hostId ?? 'local') === ref.hostId)
+      if (!workspace) fail(list.truncated ? '工作区列表未完整返回，请刷新后重试' : '项目工作区已被移除或不可用')
+      const conversations = await orca.host.call('agents.list', { workspaceId: workspace.id }).catch(() => undefined)
+      return { workspaceId: workspace.id, ...(conversations ? { multipleConversations: conversations.agents.length > 1 } : {}) }
+    } catch (e) {
+      return { error: e instanceof Error ? e.message : String(e) }
+    }
+  }
+  function rememberProjectCaller(project: Project, input: { runId?: string; caller?: string }) {
+    // Self-reported identity is display/navigation metadata, never authorization evidence.
+    if (project.runId && input.runId === project.runId && input.caller) project.mainAgentHandle = text(input.caller, '调用会话', 500)
   }
   async function ingest(appId: string, event: SourceEvent): Promise<void> {
     const work = inbound.then(() => ingestOne(appId, event))
@@ -372,7 +389,7 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
     const id = text(input.projectId, '项目编号', 200)
     if (typeof input.hidden !== 'boolean') fail('隐藏状态不正确')
     await snapshot(id)
-    await store.mutate(id, revision(input.revision), p => { p.hidden = input.hidden })
+    await store.mutate(id, revision(input.revision), p => { p.hidden = input.hidden; rememberProjectCaller(p, input) })
     changed(id); if (!input.hidden) defer(id)
     return snapshot(id)
   })
@@ -396,12 +413,19 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
     return { deleted: id, exportPath }
   })
   orca.panels.handle('project.read', input => snapshot(text(input.projectId, '项目编号', 200)))
+  orca.panels.handle('project.openMain', async input => {
+    await projects()
+    const { workspaceTarget } = await snapshot(text(input.projectId, '项目编号', 200))
+    if (!workspaceTarget || 'error' in workspaceTarget) fail(workspaceTarget?.error || '项目工作区不可用')
+    await orca.host.call('workspace.open', { workspaceId: workspaceTarget.workspaceId })
+    return { opened: true, ...(workspaceTarget.multipleConversations === undefined ? {} : { multipleConversations: workspaceTarget.multipleConversations }) }
+  })
   orca.panels.handle('project.settings', async input => {
     const id = text(input.projectId, '项目编号', 200)
     await ensure(id)
     const roles = object(input.roles)
     if (['design', 'code', 'review'].some(k => !['codex', 'claude'].includes(roles[k]))) fail('请选择 Codex 或 Claude')
-    await store.mutate(id, revision(input.revision), p => { p.roles = roles as Project['roles'] })
+    await store.mutate(id, revision(input.revision), p => { p.roles = roles as Project['roles']; rememberProjectCaller(p, input) })
     changed(id)
     return snapshot(id)
   })
@@ -410,6 +434,7 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
     await store.mutate(input.projectId, input.revision === undefined ? undefined : revision(input.revision), async p => {
       const before = structuredClone(p)
       feedback(p, input)
+      rememberProjectCaller(p, input)
       await notify(before, p)
     }, input.requestId ? { id: text(input.requestId, '请求编号', 200), input } : undefined)
     changed(input.projectId); defer(input.projectId)
@@ -425,12 +450,14 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
     await store.mutate(id, revision(input.revision), async p => {
       if (input.operation === 'bind') {
         if ((await store.all()).some(x => x.ref.id !== id && x.runId === input.runId)) fail('该主会话 Run 已绑定其他项目')
+        if (p.runId !== input.runId) delete p.mainAgentHandle
         p.runId = input.runId!
       } else {
         const before = structuredClone(p)
         submitTask(p, input.task)
         await notify(before, p)
       }
+      rememberProjectCaller(p, input)
     }, request)
     changed(id)
     defer(id)
