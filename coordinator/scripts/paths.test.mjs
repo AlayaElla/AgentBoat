@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import path from 'node:path';
 import { existsSync } from 'node:fs';
-import { clientPath, userDataPath } from './paths.mjs';
+import { executable, clientPath, userDataPath } from './orca-cli.mjs';
 
 test('Orca paths honor profiles and platform defaults; takeover script exists', () => {
   assert.equal(userDataPath('darwin', {}, '/Users/test'), path.join('/Users/test', 'Library', 'Application Support', 'orca'));
@@ -10,4 +10,6 @@ test('Orca paths honor profiles and platform defaults; takeover script exists', 
   assert.equal(userDataPath('linux', { XDG_CONFIG_HOME: 'config' }, 'home'), path.join('config', 'orca'));
   for (const platform of ['darwin', 'win32', 'linux']) assert.equal(userDataPath(platform, { ORCA_USER_DATA_PATH: 'custom-profile' }), 'custom-profile');
   assert.ok(path.isAbsolute(clientPath)); assert.ok(existsSync(clientPath));
+  assert.ok(executable);
+  if (process.env.ORCA_CLI_COMMAND) assert.equal(executable, process.env.ORCA_CLI_COMMAND);
 });

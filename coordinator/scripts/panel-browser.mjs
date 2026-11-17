@@ -56,6 +56,7 @@ async function setup(options = {}) {
       if (name === 'workspace.agents') return clone(live);
       if (name === 'project.read') return clone({ project, projects: [project.ref] });
       if (name === 'project.feedback') {
+        if (window.fixture.delayFeedback) { window.fixture.delayFeedback = false; await new Promise(r => { window.fixture.finishFeedback = r; }); }
         if (window.fixture.race) { window.fixture.race = false; window.fixture.prune(); throw Error('成果已更新'); }
         for (const i of input.items) { const a = i.kind === 'acceptance' ? task.acceptance.find(a => a.id === i.itemId) : task.decisions.find(d => d.id === i.itemId); if (!a || i.kind === 'acceptance' && a.revision !== i.itemRevision) throw Error('stale'); }
         for (const i of input.items) { if (i.kind === 'acceptance') task.acceptance.find(a => a.id === i.itemId).status = i.result; else task.decisions.find(d => d.id === i.itemId).answer = i.answer; }
@@ -154,13 +155,46 @@ try {
     assert.equal(await page.locator('input,textarea').count(), 0); assert.equal(await page.getByText('受阻任务', { exact: true }).count(), 0);
     await home();
   });
-  await test('bulk all-pass only selects; explicit confirmation sends one project batch', async () => {
+  await test('bulk all-pass only selects; one submit click sends one project batch', async () => {
     await project(); await page.getByRole('button', { name: '这 2 项全部通过' }).click();
     assert.equal(await page.evaluate(() => fixture.calls.filter(c => c.name === 'project.feedback').length), 0);
-    await page.getByRole('button', { name: '提交 2 条', exact: true }).click(); await page.getByRole('button', { name: '确认提交', exact: true }).click();
+    await page.getByRole('button', { name: '提交 2 条', exact: true }).click();
     await page.getByRole('status').filter({ hasText: '已提交 2 条' }).waitFor();
     assert.equal(await page.evaluate(() => fixture.calls.filter(c => c.name === 'project.feedback').length), 1);
     assert.equal(await page.evaluate(() => fixture.project.deliveries.length), 1);
+  });
+  await setup();
+  await test('rapid double submit sends one batch and blocks selection changes while pending', async () => {
+    await project(); await page.getByRole('button', { name: '这 2 项全部通过' }).click();
+    await page.getByRole('button', { name: '提交 2 条', exact: true }).evaluate(button => {
+      fixture.delayFeedback = true; button.click(); button.click();
+    });
+    await page.waitForFunction(() => !!fixture.finishFeedback);
+    assert.equal(await page.locator('[data-sheet] .primary').isDisabled(), true);
+    assert.equal(await page.locator('#panel').evaluate(e => e.inert), true);
+    const request = await page.evaluate(() => fixture.calls.filter(c => c.name === 'project.feedback'));
+    assert.equal(request.length, 1); assert.ok(request[0].input.requestId); assert.equal(request[0].input.items.length, 2);
+    await page.keyboard.press('Escape');
+    assert.equal(await page.locator('[data-heading]').textContent(), '项目');
+    assert.equal(await page.evaluate(() => Object.keys(fixture.stored['panel.drafts'].p1).length), 2);
+    await page.evaluate(() => fixture.finishFeedback());
+    await page.getByRole('status').filter({ hasText: '已提交 2 条' }).waitFor();
+    assert.equal(await page.locator('#panel').evaluate(e => e.inert), false);
+    assert.deepEqual(await page.evaluate(() => fixture.calls.filter(c => c.name === 'project.feedback')), request);
+    assert.equal(await page.evaluate(() => fixture.project.deliveries.length), 1);
+  });
+  await setup();
+  await test('unfinished modification notes and decisions disable submit', async () => {
+    await page.evaluate(() => { fixture.project.tasks[0].decisions.push({ id: 'd1', question: '选择交付方式', options: ['按方案一'], history: [] }); fixture.emit(); });
+    await project(); await page.getByRole('button', { name: '需要修改', exact: true }).first().click();
+    assert.equal(await page.getByRole('button', { name: '提交 1 条', exact: true }).isDisabled(), true);
+    await page.getByLabel('修改意见', { exact: true }).fill('调整间距');
+    assert.equal(await page.getByRole('button', { name: '提交 1 条', exact: true }).isDisabled(), false);
+    await page.getByRole('radio', { name: '其他', exact: true }).click();
+    assert.equal(await page.getByRole('button', { name: '提交 2 条', exact: true }).isDisabled(), true);
+    await page.getByLabel('你的决定', { exact: true }).fill('按方案二');
+    assert.equal(await page.getByRole('button', { name: '提交 2 条', exact: true }).isDisabled(), false);
+    assert.equal(await page.evaluate(() => fixture.calls.filter(c => c.name === 'project.feedback').length), 0);
   });
   await setup();
   await test('strict JSON bridge rejects undefined and mixed decision/acceptance batch submits once', async () => {
@@ -177,7 +211,6 @@ try {
     await page.getByRole('radio', { name: '按方案一', exact: true }).check();
     await page.getByRole('button', { name: '通过', exact: true }).first().click();
     await page.getByRole('button', { name: '提交 2 条', exact: true }).click();
-    await page.getByRole('button', { name: '确认提交', exact: true }).click();
     await page.getByRole('status').filter({ hasText: '已提交 2 条' }).waitFor();
     const result = await page.evaluate(() => ({ items: fixture.calls.find(c => c.name === 'project.feedback').input.items, task: fixture.project.tasks[0], deliveries: fixture.project.deliveries }));
     assert.equal(result.task.decisions[0].answer, '按方案一'); assert.equal(result.task.acceptance[0].status, 'passed');
@@ -185,16 +218,19 @@ try {
     const decision = result.items.find(i => i.kind === 'decision'), acceptance = result.items.find(i => i.kind === 'acceptance');
     assert.equal(Object.hasOwn(decision, 'itemRevision'), false); assert.equal(Object.hasOwn(decision, 'result'), false); assert.equal(Object.hasOwn(acceptance, 'answer'), false);
   });
-  for (const race of [false, true]) {
+  for (const stale of ['refresh', 'preflight', 'feedback']) {
     await setup(); await project(); await page.getByRole('button', { name: '这 2 项全部通过' }).click();
-    await test(race ? 'race rejects entire batch, drops stale item, keeps other draft for a second submission' : 'refresh prunes stale draft before submit and preserves other draft', async () => {
-      if (race) await page.evaluate(() => { fixture.race = true; });
-      else { await page.evaluate(() => { fixture.prune(); fixture.emit(); }); await page.getByRole('status').filter({ hasText: '原选择已作废' }).waitFor(); }
-      await page.getByRole('button', { name: race ? '提交 2 条' : '提交 1 条', exact: true }).click();
-      if (race) { await page.getByRole('button', { name: '确认提交', exact: true }).click(); await page.getByRole('alert').waitFor(); assert.equal(await page.evaluate(() => fixture.project.deliveries.length), 0); }
+    await test(`${stale} prunes stale draft, rejects stale batch and preserves other draft for resubmission`, async () => {
+      if (stale === 'feedback') await page.evaluate(() => { fixture.race = true; });
+      else { await page.evaluate(stale => { fixture.prune(); if (stale === 'refresh') fixture.emit(); }, stale); if (stale === 'refresh') await page.getByRole('status').filter({ hasText: '原选择已作废' }).waitFor(); }
+      if (stale !== 'refresh') {
+        await page.getByRole('button', { name: '提交 2 条', exact: true }).click();
+        await (stale === 'feedback' ? page.getByRole('alert') : page.getByRole('status').filter({ hasText: '这次一条都没有提交' })).waitFor();
+        assert.equal(await page.evaluate(() => fixture.project.deliveries.length), 0);
+        assert.equal(await page.evaluate(() => fixture.calls.filter(c => c.name === 'project.feedback').length), stale === 'feedback' ? 1 : 0);
+      }
       assert.equal(await page.evaluate(() => Object.keys(fixture.stored['panel.drafts'].p1).length), 1);
-      if (race) await page.getByRole('button', { name: '提交 1 条', exact: true }).click();
-      await page.getByRole('button', { name: '确认提交', exact: true }).click(); await page.getByRole('status').filter({ hasText: '已提交 1 条' }).waitFor();
+      await page.getByRole('button', { name: '提交 1 条', exact: true }).click(); await page.getByRole('status').filter({ hasText: '已提交 1 条' }).waitFor();
     });
   }
   await setup();

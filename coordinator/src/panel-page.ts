@@ -14,7 +14,7 @@ const req = (name: string, input?: any): Promise<any> => input === undefined
 let all: Overview, live: AgentsSnapshot = { ok: false, at: 0, agents: [] }, current: Project | null = null, projectLead = ''
 let page: Page = { kind: 'home' }, stack: { page: Page; y: number }[] = [], opened: Record<string, boolean> = { self: true }
 let drafts: Record<string, Record<string, Draft>> = {}, form: Record<string, any> = {}, detail: any, targets: any
-let error = '', notice = '', busy = false, more = false, confirming = false, tab = 'inbox', epoch = 0
+let error = '', notice = '', busy = false, more = false, tab = 'inbox', epoch = 0
 let persistChain: Promise<unknown> = Promise.resolve()
 const persist = (key: string, value: any) => {
   const copy = structuredClone(value)
@@ -105,13 +105,13 @@ async function loadPage() {
   if (current) reconcile(current)
 }
 async function go(next: Page, reset = false) {
-  stack = reset ? [] : [...stack, { page, y: root.scrollTop }]; page = next; form = {}; detail = null; current = null; epoch++; error = ''; notice = ''; confirming = false; tab = 'inbox'
+  stack = reset ? [] : [...stack, { page, y: root.scrollTop }]; page = next; form = {}; detail = null; current = null; epoch++; error = ''; notice = ''; tab = 'inbox'
   remember(); render(0)
   try { await loadPage() } catch (e) { error = (e as Error).message }
   render(0); root.querySelector<HTMLElement>('[data-heading]')?.focus()
 }
 async function back() {
-  const prev = stack.pop() ?? { page: { kind: 'home' }, y: 0 }; page = prev.page; form = {}; current = null; epoch++; error = ''; notice = ''; confirming = false
+  const prev = stack.pop() ?? { page: { kind: 'home' }, y: 0 }; page = prev.page; form = {}; current = null; epoch++; error = ''; notice = ''
   remember(); await loadPage().catch(e => { error = e.message }); render(prev.y); root.querySelector<HTMLElement>('[data-heading]')?.focus()
 }
 async function refresh(forceAgents = false) {
@@ -132,12 +132,12 @@ function reconcile(p: Project) {
     const valid = t && t.phase !== 'paused' && a && (d.kind === 'acceptance' ? t.phase === 'ready' && 'status' in a && a.status === 'pending' && a.revision === d.itemRevision && a.fingerprint === d.fingerprint : 'answer' in a ? a.answer === undefined && JSON.stringify([a.question, a.options]) === d.signature : 'question' in a && JSON.stringify([a.question, a.options]) === d.signature)
     if (!valid) { delete drafts[p.ref.id][k]; stale++ }
   }
-  if (stale) { confirming = false; notice = `${stale} 条已更新或已处理，原选择已作废；其余选择保留，请重新查看后提交。`; persist('panel.drafts', drafts) }
+  if (stale) { notice = `${stale} 条已更新或已处理，原选择已作废；其余选择保留，请重新查看后提交。`; persist('panel.drafts', drafts) }
 }
 function choose(d: Draft) {
   delete form.feedbackRequestId
   drafts[page.projectId!] ??= {}; drafts[page.projectId!][key(d.taskId, d.kind, d.itemId)] = d
-  confirming = false; persist('panel.drafts', drafts)
+  persist('panel.drafts', drafts)
 }
 function agentRow(a: LiveAgent, full = false) {
   const duration = a.state === 'done' ? `${relative(a.since)}完成` : `${a.state === 'need' ? '等你' : '工作中'} · ${relative(a.since)}开始`
@@ -219,7 +219,7 @@ function renderSheet() {
   const selected = Object.values(choices())
   if (!selected.length) return
   const invalid = selected.some(d => d.kind === 'decision' ? !d.answer?.trim() : d.result === 'changes_requested' && !d.note?.trim())
-  root.append(el('section', { class: 'sheet', 'data-sheet': '', 'aria-label': '批量提交' }, confirming ? [el('h2', { class: 'h2' }, `确认提交 ${selected.length} 条`), ...selected.map(d => el('div', { class: 'any' }, `${d.title}：${d.answer ?? (d.result === 'passed' ? '通过' : `退回修改 · ${d.note}`)}`)), small('合成一条消息发给本项目主 agent，提交后不能撤回。'), row(button('确认提交', submitFeedback, 'primary', invalid), button('再看看', () => { confirming = false; renderSheet() }))] : [small(invalid ? '有条目还没写内容' : `已选 ${selected.length} 条`), row(button(`提交 ${selected.length} 条`, () => { confirming = true; renderSheet(); root.querySelector<HTMLElement>('[data-sheet] button')?.focus() }, 'primary', invalid), button('清空', () => { drafts[page.projectId!] = {}; persist('panel.drafts', drafts); render() }))]))
+  root.append(el('section', { class: 'sheet', 'data-sheet': '', 'aria-label': '批量提交' }, small(invalid ? '有条目还没写内容' : `已选 ${selected.length} 条`), row(button(`提交 ${selected.length} 条`, submitFeedback, 'primary', invalid), button('清空', () => { drafts[page.projectId!] = {}; persist('panel.drafts', drafts); render() }))))
 }
 async function submitFeedback() {
   await act(async () => {
@@ -233,10 +233,10 @@ async function submitFeedback() {
     form.feedbackRequestId ??= crypto.randomUUID()
     try {
       const result = await req('project.feedback', { projectId: id, requestId: form.feedbackRequestId, items })
-      current = result.project; drafts[id] = {}; persist('panel.drafts', drafts); confirming = false; notice = `已提交 ${items.length} 条，已记录一条汇总通知。`; delete form.feedbackRequestId
+      current = result.project; drafts[id] = {}; persist('panel.drafts', drafts); notice = `已提交 ${items.length} 条，已记录一条汇总通知。`; delete form.feedbackRequestId
       await refresh()
     } catch (e) {
-      const latest = await req('project.read', { projectId: id }); current = latest.project; reconcile(current!); confirming = false
+      const latest = await req('project.read', { projectId: id }); current = latest.project; reconcile(current!)
       error = `这次未确认提交，请核对记录。${notice || (e as Error).message}`
     }
   })
@@ -336,6 +336,7 @@ function content(): any {
 function render(y = root.scrollTop) {
   const focused = document.activeElement as HTMLInputElement | null, focusKey = focused?.dataset.focus, selection = focused && ['text', 'search', 'password'].includes(focused.type) || focused?.tagName === 'TEXTAREA' ? [focused?.selectionStart, focused?.selectionEnd] : null
   root.setAttribute('aria-busy', String(busy))
+  root.inert = busy
   const title = ({ home: '工作间', settings: '设置', main: '主 agent', connections: '外部连接', connection: '连接', 'add-connection': '添加连接', links: '工作间连接', machines: '机器', hidden: '隐藏的项目', relation: '标关系', dispatch: '派活', agents: 'Agent', request: '请求', peer: '工作间', 'peer-project': '项目', project: '项目', task: '任务', 'project-settings': '项目设置' } as any)[page.kind] || '工作间'
   root.replaceChildren(el('header', { class: 'top' }, page.kind !== 'home' ? button('‹ 返回', back, 'text back') : null, el('h1', { class: 'h1 grow trunc', tabindex: '-1', 'data-heading': '' }, title), page.kind !== 'home' && all ? button(`待处理 ${total()}`, () => go({ kind: 'home' }, true), 'text sm') : null, button('↻', () => refresh(true), 'text icon', false, '刷新'), button('⚙', () => go({ kind: 'settings' }), 'text icon', false, '设置')))
   if (error) root.append(callout(error, 'danger'))

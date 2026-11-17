@@ -1,1 +1,3 @@
-export const executable: string
+export const executable: string;
+export function userDataPath(platform?: NodeJS.Platform, env?: NodeJS.ProcessEnv, home?: string): string;
+export const clientPath: string;

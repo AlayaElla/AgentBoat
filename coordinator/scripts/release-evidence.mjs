@@ -3,7 +3,7 @@ import { execFileSync } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { isDeepStrictEqual } from 'node:util';
-import { userDataPath } from './paths.mjs';
+import { userDataPath } from './orca-cli.mjs';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 const [operation, destination, name = 'before'] = process.argv.slice(2);

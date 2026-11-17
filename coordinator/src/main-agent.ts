@@ -1,6 +1,6 @@
 import { randomBytes, randomUUID } from 'node:crypto'
 import { existsSync } from 'node:fs'
-import { clientPath } from '../scripts/paths.mjs'
+import { clientPath } from '../scripts/orca-cli.mjs'
 import type { OrcaWorkerApi } from 'orca/worker'
 import type { WorkspaceBinding } from './model'
 import type { CoordinatorRuntime } from './runtime'
