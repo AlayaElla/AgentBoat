@@ -73,7 +73,8 @@ export interface AgentSession {
   online: 'online' | 'offline' | 'unknown'
 }
 export interface MainTakeover {
-  id: string; target: AgentSession; expiresAt: string; state: 'sending' | 'waiting' | 'uncertain'
+  id: string; target: AgentSession; expiresAt: string; state: 'sending' | 'waiting' | 'uncertain' | 'expired'
+  error?: string
 }
 export interface WorkspaceBinding {
   revision: number; runId: string; session?: AgentSession; boundAt?: string

@@ -8,7 +8,9 @@ import type { LinksSnapshot } from './links'
 type Page = { kind: string; projectId?: string; id?: string; pid?: string }
 type Draft = { taskId: string; kind: 'acceptance' | 'decision'; itemId: string; itemRevision?: number; fingerprint?: string; signature: string; title: string; result?: string; answer?: string; note?: string }
 const root = document.getElementById('panel')!
-const req = (name: string, input?: any): Promise<any> => orca.plugin.request(name as any, input)
+const req = (name: string, input?: any): Promise<any> => input === undefined
+  ? orca.plugin.request(name as any)
+  : orca.plugin.request(name as any, JSON.parse(JSON.stringify(input)))
 let all: Overview, live: AgentsSnapshot = { ok: false, at: 0, agents: [] }, current: Project | null = null, projectLead = ''
 let page: Page = { kind: 'home' }, stack: { page: Page; y: number }[] = [], opened: Record<string, boolean> = { self: true }
 let drafts: Record<string, Record<string, Draft>> = {}, form: Record<string, any> = {}, detail: any, targets: any
@@ -70,7 +72,7 @@ function input(label: string, initial: any = '', type = 'text', change?: (value:
 }
 function select(label: string, options: Record<string, string>, initial: string, change?: (v: string) => void) {
   if (!(label in form)) form[label] = initial
-  const s = el('select', { class: 'in', 'data-focus': label, onchange: (e: Event) => { form[label] = (e.target as HTMLSelectElement).value; change?.(form[label]) } }, Object.entries(options).map(([v, t]) => el('option', { value: v }, t))) as HTMLSelectElement
+  const s = el('select', { class: 'in', 'aria-label': label, 'data-focus': label, onchange: (e: Event) => { form[label] = (e.target as HTMLSelectElement).value; change?.(form[label]) } }, Object.entries(options).map(([v, t]) => el('option', { value: v }, t))) as HTMLSelectElement
   s.value = form[label]
   return el('label', { class: 'field' }, el('span', { class: 'lb' }, label), el('span', { class: 'sel' }, s))
 }
@@ -300,10 +302,18 @@ function connectionPage() {
     c ? [check('确认删除这个连接的设置、凭据和往来记录', !!form.delete, v => { form.delete = v; render() }), button('删除连接', () => act(async () => { await req('workspace.connections', { operation: 'delete', connectionId: c.id, confirm: true }); await go({ kind: 'connections' }); await refresh() }), 'danger', !form.delete)] : null]
 }
 function mainPage() {
-  const w = all.workspace
-  return [callout('主 agent 是你的唯一对话入口，负责统筹所有项目。'), small(w.session ? `${agentName(w.session.agent)} · ${w.session.title} · ${mainAgentStates[w.session.online].label}` : '还没有主 agent'), w.takeover ? callout(`接管状态：${w.takeover.state} · 有效至 ${w.takeover.expiresAt}`) : null,
-    select('切换方式', { existing: '选择已有会话', new: '开启新会话' }, 'existing', () => render()),
-    form['切换方式'] === 'existing' ? select('会话', Object.fromEntries((targets?.sessions ?? []).map((s: any) => [s.handle, `${s.title} · ${s.workspaceName} · ${s.path}`])), '') : [select('工作区', Object.fromEntries((targets?.workspaces ?? []).map((s: any) => [s.workspace, `${s.name} · ${s.path}`])), ''), select('Agent', { claude: 'Claude', codex: 'Codex', opencode: 'OpenCode' }, 'claude')], check('确认由这个会话接管主 agent', !!form.confirm, v => { form.confirm = v; render() }), button('请求接管', () => act(async () => { await req('workspace.agent.switch', { revision: w.revision, mode: form['切换方式'], handle: form['会话'], workspace: form['工作区'], agent: form.Agent }); form.confirm = false; await refresh() }), 'primary', !form.confirm),
+  const w = all.workspace, t = w.takeover, workspaces = targets?.workspaces ?? []
+  const minutes = t ? Math.max(0, Math.ceil((Date.parse(t.expiresAt) - Date.now()) / 60000)) : 0
+  const switchMain = async (input: any) => {
+    error = ''
+    try { await req('workspace.agent.switch', { revision: all.workspace.revision, ...input }) }
+    catch (e) { error = (e as Error).message }
+    await refresh()
+  }
+  return [el('p', {}, w.session ? `${agentName(w.session.agent)} · ${w.session.title} · ${mainAgentStates[w.session.online].label}` : w.runId ? '已绑定主 agent' : '还没有主 agent'),
+    t ? card(callout(minutes ? t.error || `正在等 ${t.target.title} 接管，还剩 ${minutes} 分钟` : '对方没在有效期内完成绑定', !minutes || t.error ? 'danger' : ''), button('取消', () => switchMain({ mode: 'cancel' }))) : null,
+    section('在线会话', (targets?.sessions ?? []).map((s: any) => card(row(el('span', { class: 'grow any' }, s.title), w.session?.handle === s.handle ? tag('当前主 agent') : button(w.runId ? '换成它' : '设为主 agent', () => switchMain({ mode: 'existing', handle: s.handle }), 'primary')), small(`${agentName(s.agent)} · ${s.workspaceName} · ${s.path}`))), !targets?.sessions?.length ? small('没有可接管的在线会话') : null),
+    section('新会话', select('工作区', Object.fromEntries(workspaces.map((s: any) => [s.workspace, `${s.name} · ${s.path}`])), workspaces[0]?.workspace ?? ''), select('Agent', { claude: 'Claude', codex: 'Codex' }, 'claude'), button('新开一个主 agent', () => switchMain({ mode: 'new', workspace: form['工作区'], agent: form.Agent }), 'primary', !workspaces.length)),
     el('details', { class: 'fold' }, el('summary', {}, '绑定详情'), el('dl', { class: 'kv' }, Object.entries({ Run: w.runId || '未绑定', 会话: w.session?.handle || '未知', 目录: w.session?.path || '未知', 绑定时间: w.boundAt || '未知', 授权边界: w.securityBoundary || '未知' }).map(([k, v]) => [el('dt', {}, k), el('dd', {}, v)])))]
 }
 function content(): any {
@@ -352,3 +362,4 @@ async function start() {
   } catch (e) { error = (e as Error).message; render() }
 }
 void start()
+setInterval(() => { if (page.kind === 'main' && all?.workspace.takeover) render() }, 30000)

@@ -7,10 +7,10 @@ description: 用户说“开启工作间管理”或“工作间：”时，在 
 
 你是这个工作间唯一的主 agent，只听主人的。带 Task / Dispatch 编号的执行者不承担这个角色。
 
-命令都在 `D:/Projects/AgentBoat` 下：
-- `client.mjs` 的命令和输入见 `coordinator/skill/orca-project-coordinator/references/bridge.md`。
-- `workspace.mjs`（立项、派活、记忆）见 `workspace/README.md`。
-- 工作间互联见 `coordinator/LINKS.md`。
+仓库路径：`{{AGENTBOAT_REPO}}`（安装器按本机位置填写；仓库移动后重新安装）。
+- 脚本：`node "{{AGENTBOAT_REPO}}/coordinator/scripts/client.mjs" <命令>`，输入见 `{{AGENTBOAT_REPO}}/coordinator/skill/orca-project-coordinator/references/bridge.md`。
+- `workspace.mjs`（立项、派活、记忆）见 `{{AGENTBOAT_REPO}}/workspace/README.md`。
+- 工作间互联见 `{{AGENTBOAT_REPO}}/coordinator/LINKS.md`。
 
 ## 必须遵守
 

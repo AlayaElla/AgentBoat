@@ -4,12 +4,11 @@ Node.js + Git + 运行中的 Orca 桌面端，以及已加载的项目协作插�
 
 ```powershell
 node workspace/install.mjs
-$env:AGENTBOAT_HOME = 'D:\my-agentboat'
 node workspace/workspace.mjs init
 node workspace/workspace.mjs templates
 ```
 
-安装只复制到 `~/.agents/skills/agentboat-workspace`，让 `~/.claude/skills/agentboat-workspace` 指向它；Windows 用 junction，不弹管理员授权。已有其他链接/目录会拒绝覆盖。skill 全文在 [skill/agentboat-workspace/SKILL.md](skill/agentboat-workspace/SKILL.md)，加载后说“开启工作间管理”。安装不启动 agent，不改变主 Run。
+安装一次同步工作间与项目协作两份 skill 到 `~/.agents/skills/`，并让 `~/.claude/skills/` 的对应名称链接到它们；Windows 用 junction，不弹管理员授权。安装时把仓库占位符替换成本机真实路径，换机器或移动仓库后重新运行安装。已有其他链接/目录会拒绝覆盖。skill 全文在 [skill/agentboat-workspace/SKILL.md](skill/agentboat-workspace/SKILL.md)，加载后说“开启工作间管理”。安装不启动 agent，不改变主 Run。上述 Node 命令在 Windows PowerShell 和 macOS 终端均可用。
 
 `AGENTBOAT_HOME` 默认 `~/.agentboat`；init 保留已有模板和记忆，不覆盖定制。目录有 templates、memory、projects（立项日志）、assignments（派活日志）、requests（插件请求原文）。记忆有独立 Git 仓库，脚本只暂存不提交；主人的明确内容和推断分开，外部工作间单独目录。所有来源与日志可能含用户原话，按本机私有资料保管，不放凭据。
 
@@ -26,7 +25,7 @@ node workspace/workspace.mjs templates
   "requestId": "create-my-app-001",
   "template": "code",
   "name": "my-app",
-  "path": "D:/projects/my-app",
+  "path": "<新项目的绝对路径>",
   "source": { "kind": "empty" },
   "goal": "先开启项目协作，等待具体需求"
 }

@@ -1,6 +1,6 @@
 # Hermes 连接
 
-在“工作间 → 设置 → 外部连接”按唯一名字管理 A2A 连接。Hermes 安装与自动配置用 `workspace/install-hermes.ps1`，配置脚本经 workspace.connections 按名字 Hermes 新建或更新 a2a 记录，不依赖固定连接编号。任意 A2A 连接详情会在本机配置可读时显示审批方式。
+在“工作间 → 设置 → 外部连接”按唯一名字管理 A2A 连接。Windows 的 Hermes 安装与自动配置用 `workspace/install-hermes.ps1`；macOS 不运行此 Windows 安装脚本，可在安装 Hermes 后直接配置 A2A 连接。配置脚本经 workspace.connections 按名字 Hermes 新建或更新 a2a 记录，不依赖固定连接编号。任意 A2A 连接详情会在本机配置可读时显示审批方式。
 
 自动配置使用 Hermes 9900、插件 9901。两个方向都要求至少 32 字符的独立令牌；插件令牌只存 Orca secrets，Hermes 令牌只存本机 .env 与 config.yaml。空令牌表示不更换。插件监听始终为 127.0.0.1，出站只允许无路径、无凭据的回环 HTTP 地址；远端经已有隧道接入。
 

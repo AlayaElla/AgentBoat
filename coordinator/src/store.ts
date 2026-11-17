@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto'
 import path from 'node:path'
-import os from 'node:os'
+import { userDataPath } from '../scripts/paths.mjs'
 import { mkdir, writeFile } from 'node:fs/promises'
 import type { StorageApi } from 'orca'
 import { taskState, type Acceptance, type Artifact, type Project, type ProjectRef, type SourceEvent, type Task, type Workspace, type Overview, type Attention, type Messaging, type AgentSession, sourceName } from './model'
@@ -78,11 +78,7 @@ export function notifyWorkspace(before: Project, after: Project, runId: string):
 export class ProjectStore {
   private chain: Promise<unknown> = Promise.resolve()
   constructor(private storage: Pick<StorageApi, 'get' | 'set' | 'keys' | 'delete'>,
-    private exportDirectory = path.join(process.env.ORCA_USER_DATA_PATH || (
-      process.platform === 'win32' ? path.join(process.env.APPDATA || path.join(os.homedir(), 'AppData', 'Roaming'), 'orca') :
-      process.platform === 'darwin' ? path.join(os.homedir(), 'Library', 'Application Support', 'orca') :
-      path.join(process.env.XDG_CONFIG_HOME || path.join(os.homedir(), '.config'), 'orca')
-    ), 'plugins-data', 'local.project-coordinator', 'exports')) {}
+    private exportDirectory = path.join(userDataPath(), 'plugins-data', 'local.project-coordinator', 'exports')) {}
   async remove(id: string, expected: number, absent: () => Promise<void>): Promise<string> {
     return this.serial(async () => {
       const project = await this.get(id)
@@ -145,7 +141,7 @@ export class ProjectStore {
       if (prior) fail('检查请求编号已用于绑定；请换一个新的请求编号')
       if (w.revision !== expected) fail('工作间已更新，请刷新后再提交')
       if ((await this.all()).some(p => p.runId === runId)) fail('该 Run 已绑定项目；请在当前会话创建独立的工作间主 agent Run')
-      if (w.runId) {
+      if (w.runId || w.takeover || token) {
         const t = w.takeover
         if (!t || typeof token !== 'string' || !token || t.tokenHash !== fingerprint(token) || !Number.isFinite(Date.parse(t.expiresAt)) || Date.parse(t.expiresAt) <= Date.now()) fail('替换主 agent 需要面板发起的有效一次性接管凭据；请让主人在面板重新发起切换')
         if (!t.target.handle) fail('启动回执尚未确认目标会话；请稍后重读 main-read 再试')
@@ -154,7 +150,7 @@ export class ProjectStore {
         if (w.runId === runId) fail('接管会话必须创建自己的新 Run')
         if (checkOnly) return w
         w.retired ??= []
-        w.retired.push({ id: `retired:${t.id}`, targetRunId: w.runId, subject: '工作间主 agent 已切换',
+        if (w.runId) w.retired.push({ id: `retired:${t.id}`, targetRunId: w.runId, subject: '工作间主 agent 已切换',
           body: `你已不再是工作间主 agent。新的主 agent：${session.title || session.handle}\n工作区：${session.workspaceName || session.workspace}\n目录：${session.path}\nAgent：${session.agent}\nRun：${runId}\n请停止承担工作间主 agent。已发送的通知不会补发；新的主 agent 会读取总览补齐事项。`, state: 'pending' })
       }
       if (checkOnly) return w

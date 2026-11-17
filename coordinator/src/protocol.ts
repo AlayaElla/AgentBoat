@@ -15,7 +15,7 @@ declare module 'orca' {
     'workspace.overview': { output: Overview }
     'workspace.agent': { input: { operation: 'read' | 'bind'; revision?: number; requestId?: string; runId?: string; caller?: string; currentRunId?: string; token?: string; checkOnly?: boolean }; output: WorkspaceBinding }
     'workspace.agent.targets': { output: { sessions: import('./model').AgentSession[]; workspaces: { workspace: string; name: string; path: string }[] } }
-    'workspace.agent.switch': { input: { revision: number; mode: 'existing' | 'new'; handle?: string; workspace?: string; agent?: string }; output: WorkspaceBinding }
+    'workspace.agent.switch': { input: { revision: number; mode: 'existing' | 'new' | 'cancel'; handle?: string; workspace?: string; agent?: string }; output: WorkspaceBinding }
     'workspace.entry': { output: { opened: boolean } }
     'workspace.message': { input: { projectId: string; revision: number; requestId: string; runId: string; text: string }; output: Snapshot }
     'projects.list': { output: { projects: ProjectRef[]; error?: string } }

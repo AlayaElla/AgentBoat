@@ -3,11 +3,12 @@ import { execFileSync } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { isDeepStrictEqual } from 'node:util';
+import { userDataPath } from './paths.mjs';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 const [operation, destination, name = 'before'] = process.argv.slice(2);
 if (!destination || !['backup', 'snapshot', 'compare'].includes(operation)) throw new Error('Usage: release-evidence.mjs backup|snapshot|compare <backup-dir> [snapshot-name]');
-const data = path.join(process.env.APPDATA, 'orca/plugins-data/local.project-coordinator');
+const data = path.join(userDataPath(), 'plugins-data', 'local.project-coordinator');
 const json = async file => JSON.parse(await readFile(file, 'utf8'));
 const save = (file, value) => writeFile(file, JSON.stringify(value, null, 2) + '\n');
 function request(...args) {

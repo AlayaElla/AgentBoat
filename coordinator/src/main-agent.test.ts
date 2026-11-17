@@ -5,9 +5,42 @@ import { testCoordinator as createCoordinator } from './test-runtime'
 import { fresh } from './store'
 import { refs } from './fixtures'
 import { mainTargets, OrcaRuntime } from './runtime'
+import path from 'node:path'
+import { existsSync } from 'node:fs'
 
 const session: AgentSession = { handle: 'orca_session_id:test-next', title: '测试接管会话', workspace: 'identity:test-workspace', workspaceName: '测试工作区', path: '/test/workspace', agent: 'claude', online: 'online' }
 const tokenFrom = (prompt: string) => /一次性接管凭据：([^\n]+)/.exec(prompt)![1]
+
+for (const runId of ['', 'run_old']) test(`takeover can be replaced and cancelled while sending, old credentials stay invalid (${runId || 'unbound'})`, async () => {
+  const other = { ...session, handle: 'orca_session_id:other', title: '另一个会话' }
+  const host = mockHost({ storage: { workspace: { version: 1, revision: 0, runId, requests: [] } } })
+  let c!: ReturnType<typeof createCoordinator>, started!: () => void, finish!: () => void
+  const sending = new Promise<void>(r => { started = r }), delay = new Promise<void>(r => { finish = r })
+  const prompts: string[] = []
+  const worker = await mountWorker({ default: (api: OrcaWorkerApi) => { c = createCoordinator(api, {
+    targets: async () => ({ sessions: [session, other], workspaces: [] }), identify: async handle => handle === session.handle ? session : other,
+    requestTakeover: async (handle, prompt) => { prompts.push(prompt); if (handle === session.handle) { started(); await delay; throw Error('late timeout') } }
+  }) } }, { host })
+  try {
+    const first = worker.request('workspace.agent.switch', { mode: 'existing', revision: 0, handle: session.handle })
+    await sending
+    const read = () => worker.request('workspace.agent', { operation: 'read' })
+    const replacement = await worker.request('workspace.agent.switch', { mode: 'existing', revision: (await read()).revision, handle: other.handle })
+    finish(); await first
+    assert.equal((await read()).takeover?.id, replacement.takeover?.id)
+    assert.equal((await read()).takeover?.state, 'waiting')
+    const bind = (token: string, caller = other.handle) => worker.request('workspace.agent', { operation: 'bind', revision: (host.data().storage.workspace as any).revision, requestId: 'bind-test', runId: 'run_new', caller, token, checkOnly: true })
+    await assert.rejects(() => bind(tokenFrom(prompts[0]), session.handle))
+    assert.ok((await bind(tokenFrom(prompts[1]))).check?.canTakeOver)
+    const cancelled = await worker.request('workspace.agent.switch', { mode: 'cancel', revision: (await read()).revision })
+    assert.equal(cancelled.takeover, undefined); assert.equal(cancelled.runId, runId)
+    await assert.rejects(() => bind(tokenFrom(prompts[1])))
+    const retry = await worker.request('workspace.agent.switch', { mode: 'existing', revision: cancelled.revision, handle: other.handle })
+    const accepted = await worker.request('workspace.agent', { operation: 'bind', revision: retry.revision, requestId: 'fresh-bind', runId: 'run_new', caller: other.handle, token: tokenFrom(prompts[2]) })
+    assert.equal(accepted.runId, 'run_new'); assert.equal(accepted.takeover, undefined)
+    await assert.rejects(() => bind(tokenFrom(prompts[2])))
+  } finally { finish(); c.stop(); await worker.deactivate() }
+})
 
 test('unknown takeover send and old-agent notification are durable and never automatically retried', async () => {
   const host = mockHost({ storage: { workspace: { version: 1, revision: 0, runId: 'run_old', requests: [] } } })
@@ -21,6 +54,7 @@ test('unknown takeover send and old-agent notification are durable and never aut
   try {
     const t = await worker.request('workspace.agent.switch', { mode: 'existing', revision: 0, handle: session.handle })
     assert.equal(t.takeover?.state, 'uncertain'); assert.equal(t.runId, 'run_old')
+    assert.ok(t.takeover?.error?.includes('未能确认送达'))
     await c.start(); await c.start(); assert.equal(requests, 1)
     const bound = await worker.request('workspace.agent', { operation: 'bind', revision: t.revision, requestId: 'test', caller: session.handle, runId: 'run_new', token: tokenFrom(prompt) })
     assert.equal(bound.previousNotice, 'uncertain'); assert.equal(bound.runId, 'run_new')
@@ -55,14 +89,17 @@ for (const mode of ['existing', 'new'] as const) test(`main takeover ${mode}: ta
     assert.equal(switching.runId, 'run_old'); assert.equal(switching.takeover?.state, 'waiting')
     assert.equal(launched, mode === 'new' ? 1 : 0)
     const token = tokenFrom(prompts[0]); assert.equal(JSON.stringify(host.data().storage).includes(token), false)
+    const script = JSON.parse(/接管脚本绝对路径：([^\n]+)/.exec(prompts[0])![1])
+    assert.ok(path.isAbsolute(script)); assert.ok(existsSync(script)); assert.ok(prompts[0].includes('main-bind --check'))
     assert.equal(JSON.stringify(switching).includes('tokenHash'), false)
     const current = () => worker.request('workspace.agent', { operation: 'read' })
-    await assert.rejects(() => worker.request('workspace.agent.switch', { revision: switching.revision, mode, handle: session.handle }))
     await assert.rejects(() => worker.request('workspace.agent', { ...bind, revision: switching.revision, token: 'wrong' }))
     await assert.rejects(() => worker.request('workspace.agent', { ...bind, revision: switching.revision }))
     await assert.rejects(() => worker.request('workspace.agent', { ...bind, revision: switching.revision, token, caller: 'another' }))
     await c.store.mutateWorkspace(w => { w.takeover!.expiresAt = new Date(Date.now() - 1).toISOString() })
     const expiredRevision = (await current()).revision
+    assert.equal((await current()).takeover?.state, 'expired')
+    assert.equal((await current()).takeover?.error, '对方没在有效期内完成绑定')
     await assert.rejects(() => worker.request('workspace.agent', { ...bind, revision: expiredRevision, token }))
     await c.store.mutateWorkspace(w => { w.takeover!.expiresAt = new Date(Date.now() + 60000).toISOString() })
     const good = { ...bind, revision: (await current()).revision, token }
