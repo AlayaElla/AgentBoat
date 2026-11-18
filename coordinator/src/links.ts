@@ -31,6 +31,7 @@ export interface LinksSnapshot extends Omit<LinkData, 'peers'> {
   peers: (Peer & { status: 'connected' | 'offline' | 'pending'; receivedAt?: string; report?: SharedReport } & Partial<Awaited<ReturnType<LinkMessages['summarize']>>>)[]
   invitation?: { code: string; expiresAt: string }
 }
+const peerFields = new Set<keyof Peer>(['id', 'workspaceId', 'name', 'endpoint', 'state', 'scope', 'allProjects', 'projectIds', 'relation', 'sharingSet', 'lastSyncAt'])
 const defaults = (): Sharing => ({ scope: 'none', allProjects: false, projectIds: [] })
 const secretKey = (id: string) => `workspace-link:${id}`
 const id = (v: unknown) => {
@@ -229,19 +230,13 @@ export class WorkspaceLinks {
   private syncing = new Map<string, Promise<string | undefined>>()
   private listening = ''
   private error = ''
-  constructor(private orca: Pick<OrcaWorkerApi, 'storage' | 'secrets'>, private projects: () => Promise<Project[]>, private changed: () => void, private chooseHost = invitationHost, private enqueue?: (peer: Peer, messages: IncomingMessage[]) => Promise<void>, private activity?: () => Promise<LocalActivity>, files?: LinkFiles, private checkCatalog?: () => Promise<unknown>) { this.messages = new LinkMessages(orca.storage, files) }
+  constructor(private orca: Pick<OrcaWorkerApi, 'storage' | 'secrets'>, private projects: () => Promise<Project[]>, private changed: () => void, private chooseHost = invitationHost, private enqueue?: (peer: Peer, messages: IncomingMessage[]) => Promise<void>, private activity?: () => Promise<LocalActivity>, files = new LinkFiles(), private checkCatalog?: () => Promise<unknown>) { this.messages = new LinkMessages(files) }
   private serial<T>(fn: () => Promise<T>): Promise<T> { const p = this.chain.then(fn); this.chain = p.catch(() => {}); return p }
   private async data(): Promise<LinkData> {
     const raw = await this.orca.storage.get('workspace.links')
-    if (!raw) return structuredClone(this.initial)
+    if (raw == null) return structuredClone(this.initial)
     const d = structuredClone(object(raw)) as LinkData
-    if (d.version !== 1 || !Array.isArray(d.peers)) fail('工作间连接记录不兼容，请保留数据并检查版本')
-    d.peers = d.peers.filter(({ state }: { state: string }) => state !== 'revoked').map(({ id, workspaceId, name, endpoint, state, relation, sharingSet, lastSyncAt, scope, allProjects, projectIds }) => {
-      const configured = sharingSet ?? (scope !== 'none' || allProjects === true || projectIds.length > 0 ? true : undefined)
-      return { id, workspaceId, name, endpoint, state, scope, allProjects: allProjects === true, projectIds,
-        ...(relation === undefined ? {} : { relation }), ...(lastSyncAt === undefined ? {} : { lastSyncAt }),
-        ...(configured === undefined ? {} : { sharingSet: configured }) }
-    })
+    if (d.version !== 1 || !Array.isArray(d.peers) || d.peers.some(p => !p || Object.keys(p).some(key => !peerFields.has(key as keyof Peer)) || !['active', 'pending'].includes(p.state) || typeof p.allProjects !== 'boolean' || !Array.isArray(p.projectIds))) fail('工作间连接记录不兼容，请保留数据并检查版本')
     return d
   }
   private async save(d: LinkData) { if (Buffer.byteLength(JSON.stringify(d)) > 100_000) fail('连接记录已达上限'); await this.orca.storage.set('workspace.links', d as any) }

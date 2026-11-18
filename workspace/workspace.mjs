@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import os from 'node:os';
 import { initialize as initializeSkills } from './project-skills.mjs';
-import { agentFlags, launchReceipt, projectLeadDefaults } from './agent-launch.mjs';
+import { agentFlags, launchReceipt } from './agent-launch.mjs';
 export { launchReceipt } from './agent-launch.mjs';
 
 export const root = fileURLToPath(new URL('../', import.meta.url));
@@ -50,11 +50,6 @@ export function key(value) {
 }
 export function template(id) {
   const value = json(path.join(home, 'templates', `${key(id)}.json`));
-  if (id === 'code' && value.mainAgent?.agent === 'claude') {
-    const defaults = projectLeadDefaults;
-    const model = value.mainAgent.model ?? defaults.model;
-    value.mainAgent = { surface: defaults.surface, ...(model === defaults.model ? { effort: defaults.effort } : {}), ...value.mainAgent, model };
-  }
   for (const role of [value.mainAgent, ...Object.values(value.roles || {})]) {
     if (!['claude', 'codex'].includes(role?.agent)) throw new Error('代理应为 claude 或 codex');
     if (role.effort && !role.model) throw new Error('effort 需要 model');
@@ -127,7 +122,7 @@ function launchProjectLead(j, t, project, goal) {
   const prompt = `${t.firstMessage}\n项目身份与分工：${JSON.stringify(context)}\n只在这个项目开启协作；读取 $orca-project-coordinator 和桥接说明。由你自己的会话创建 Run，再用 client.mjs read 现读版本并用 bind 绑定此 projectId，不能绑定工作间主 agent 或复用别的项目 Run。脚本路径：${client}。首轮完成绑定后简短回复项目编号与 Run；不要自行另起 agent。\n主人本次目标：${goal || '先开启项目协作，等待具体任务。'}`;
   const launched = call(['agent', 'launch', '--worktree', ref.workspace, ...agentFlags(t.mainAgent), '--prompt', prompt], ref.path);
   j.update('launch-returned', { launched });
-  if (t.mainAgent.surface === 'chat' && (launched.launch ?? launched).outcome?.kind !== 'structured') {
+  if (t.mainAgent.surface === 'chat' && launched.outcome?.kind !== 'structured') {
     throw new Error('Orca 未确认打开聊天会话，请核对启动回执，不要重复启动');
   }
   const handle = launchReceipt(launched);
@@ -278,7 +273,7 @@ export function dispatch(input) {
     const launched = call(['worktree', 'create', '--repo', `id:${p.ref.repoId}`, '--name', name, '--no-parent',
       '--setup', 'skip', ...agentFlags(t.roles[role]), '--prompt', prompt], p.ref.path);
     j.update('launch-returned', { launched });
-    const handle = launchReceipt(launched);
+    const handle = launchReceipt(launched.launch);
     const launchFile = path.join(evidenceDir, `${input.requestId}-launch.json`);
     writeFileSync(launchFile, JSON.stringify(launched, null, 2) + '\n', { flag: 'wx' });
     const fresh = project(p.ref.id);

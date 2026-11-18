@@ -13,26 +13,26 @@ import { groupedAttention } from './model'
 const mainSession = { handle: 'orca_session_id:test-main', title: '测试主会话', workspace: 'id:test', workspaceName: '测试工作区', path: '/test', agent: 'claude', online: 'online' as const }
 
 test('connections isolate multiple A2A configs, tokens and histories', async () => {
-  const legacy = { version: 1, revision: 2, enabled: false, port: 9901, url: 'http://127.0.0.1:9900', entries: [] }
-  const token = 'test-only-token-12345678901234567890', host = mockHost({ storage: { 'workspace.connections': { version: 1, entries: [{ id: 'butler', name: 'Hermes', type: 'a2a' }] }, 'workspace.a2a:butler': legacy, workspace: { version: 1, revision: 0, runId: 'run_main', requests: [] } }, secrets: { 'butler:inbound': token, 'butler:outbound': token } })
+  const first = { version: 1, revision: 2, enabled: false, port: 9901, url: 'http://127.0.0.1:9900', entries: [] }
+  const token = 'test-only-token-12345678901234567890', host = mockHost({ storage: { 'workspace.connections': { version: 1, entries: [{ id: 'butler', name: 'Hermes', type: 'a2a' }] }, 'workspace.a2a:butler': first, workspace: { version: 1, revision: 0, runId: 'run_main', requests: [] } }, secrets: { 'butler:inbound': token, 'butler:outbound': token } })
   let c!: ReturnType<typeof createCoordinator>
   const worker = await mountWorker({ default: (api: OrcaWorkerApi) => { c = createCoordinator(api, { projects: async () => [], verifyRun: async () => {}, hermesApprovalMode: async () => 'smart', send: async () => ({}) }) } }, { host })
   try {
     const list = await worker.request('workspace.connections', { operation: 'read' }) as import('./connections').Connection[]
     assert.equal(list[0].name, 'Hermes'); assert.equal(list[0].id, 'butler')
     assert.equal((await worker.request('workspace.connections', { operation: 'read', name: 'Hermes' }) as import('./connections').ConnectionDetail).approvalMode, 'smart')
-    await assert.rejects(() => worker.request('workspace.connections', { operation: 'save', type: 'a2a', name: 'Hermes', enabled: false, port: 0, url: legacy.url }), /名字不能重复/)
-    assert.deepEqual(host.data().storage['workspace.a2a:butler'], legacy)
+    await assert.rejects(() => worker.request('workspace.connections', { operation: 'save', type: 'a2a', name: 'Hermes', enabled: false, port: 0, url: first.url }), /名字不能重复/)
+    assert.deepEqual(host.data().storage['workspace.a2a:butler'], first)
     const added = await worker.request('workspace.connections', { operation: 'save', type: 'a2a', name: 'Second', enabled: true, port: 0, url: 'http://127.0.0.1:9999', inboundToken: token + 'second', outboundToken: token + 'peer' }) as import('./connections').ConnectionDetail
     assert.notEqual(added.connection.id, 'butler'); assert.ok(added.a2a!.listening)
-    assert.deepEqual(host.data().storage['workspace.a2a:butler'], legacy); assert.equal(host.data().secrets['butler:inbound'], token)
+    assert.deepEqual(host.data().storage['workspace.a2a:butler'], first); assert.equal(host.data().secrets['butler:inbound'], token)
     const rpc = async (bearer: string) => fetch(added.a2a!.listening, { method: 'POST', headers: { Authorization: `Bearer ${bearer}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'GetTask', params: { id: 'missing' } }) })
     assert.equal((await rpc(token)).status, 401)
     assert.equal(((await (await rpc(token + 'second')).json()) as any).error.code, -32001)
     const inbound = await fetch(added.a2a!.listening, { method: 'POST', headers: { Authorization: `Bearer ${token}second`, 'Content-Type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'SendMessage', params: { message: { messageId: 'second-only', role: 'ROLE_USER', parts: [{ text: 'mock isolated message' }] }, configuration: { returnImmediately: true } } }) })
     assert.equal(inbound.status, 200)
     const isolated = await worker.request('workspace.connections', { operation: 'read', connectionId: added.connection.id }) as import('./connections').ConnectionDetail
-    assert.equal(isolated.a2a!.entries.length, 1); assert.deepEqual(host.data().storage['workspace.a2a:butler'], legacy)
+    assert.equal(isolated.a2a!.entries.length, 1); assert.deepEqual(host.data().storage['workspace.a2a:butler'], first)
     await assert.rejects(() => worker.request('workspace.connections', { operation: 'save', connectionId: added.connection.id, name: 'Second', enabled: true, port: 0, url: added.a2a!.url, revision: isolated.a2a!.revision, inboundToken: token + 'changed', outboundToken: 'short' }))
     assert.equal(host.data().secrets[`${added.connection.id}:inbound`], token + 'second')
     const renamed = await worker.request('workspace.connections', { operation: 'save', connectionId: added.connection.id, name: 'Renamed', enabled: true, port: 0, url: added.a2a!.url, revision: isolated.a2a!.revision }) as import('./connections').ConnectionDetail
@@ -42,7 +42,7 @@ test('connections isolate multiple A2A configs, tokens and histories', async () 
     await worker.request('workspace.connections', { operation: 'delete', connectionId: added.connection.id, confirm: true })
     assert.equal(host.data().secrets[`${added.connection.id}:inbound`], undefined)
     assert.equal((await worker.request('workspace.connections', { operation: 'read' }) as any[]).length, 1)
-    assert.deepEqual(host.data().storage['workspace.a2a:butler'], legacy)
+    assert.deepEqual(host.data().storage['workspace.a2a:butler'], first)
     assert.equal(JSON.stringify(host.data().storage).includes(token), false)
   } finally { c.stop(); await worker.deactivate() }
 })
@@ -71,7 +71,7 @@ test('attention counts reviews per task and excludes rework consistently', () =>
 })
 function requireOverview(p: import('./model').Project) { return overview(p ? [p] : [], { version: 1, revision: 0, runId: '', requests: [] }) }
 
-test('hide preserves legacy records and agent writes, excludes all workspace surfaces and pauses queued reminders until restore', async () => {
+test('hide preserves project records and agent writes, excludes all workspace surfaces and pauses queued reminders until restore', async () => {
   const p = fresh(refs[0]); p.runId = 'run_project'
   submitTask(p, deliverable)
   p.deliveries.push({ id: 'queued-feishu', subject: 'queued', body: 'queued', state: 'pending', external: { channel: 'feishu', appId: 'test', chatId: 'chat' } },
@@ -231,6 +231,14 @@ test('overview reads registered projects with closed workspaces without writing 
   assert.equal(all.projects[0].agents[0].projectTaskId, 'task-1')
   assert.deepEqual((await worker.request('project.agent', { operation: 'read', projectId: 'p1' })).project, p)
   assert.deepEqual({ ...host.data().storage, 'workspace.connections': undefined }, { ...before, 'workspace.connections': undefined })
+  await worker.deactivate()
+})
+
+test('incomplete workspace records fail without overwriting the binding', async () => {
+  const saved = { version: 1, runId: 'run_bound' }, host = mockHost({ storage: { workspace: saved } })
+  const worker = await mountWorker({ default: (orca: OrcaWorkerApi) => { createCoordinator(orca, {}) } }, { host })
+  await assert.rejects(() => worker.request('workspace.agent', { operation: 'read' }), /工作间记录格式/)
+  assert.deepEqual(host.data().storage.workspace, saved)
   await worker.deactivate()
 })
 
@@ -420,8 +428,8 @@ test('one submission produces one workspace summary and retains per-item dedupli
   assert.equal(after.deliveries.length, 2); assert.equal(after.deliveries[1].noticeKeys!.length, 1)
 })
 
-test('empty connections reads never write defaults or migrate old keys', async () => {
-  const host = mockHost({ storage: { 'workspace.butler': { version: 1, enabled: false }, 'workspace.messaging': { version: 1, revision: 0, feishu: { enabled: false, appId: 'residual', chatIds: [], senderIds: [] }, inbox: [], deliveries: [] } } })
+test('empty connection reads do not create a directory', async () => {
+  const host = mockHost()
   const before = structuredClone(host.data().storage)
   const worker = await mountWorker({ default: (api: OrcaWorkerApi) => { createCoordinator(api, {}) } }, { host })
   try { assert.deepEqual(await worker.request('workspace.connections', { operation: 'read' }), []); assert.deepEqual(host.data().storage, before) }

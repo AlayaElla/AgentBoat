@@ -1,5 +1,6 @@
 import { assert, test } from 'orca/testing'
 import http from 'node:http'
+import { Readable } from 'node:stream'
 import { Butler, butlerUrl } from './butler'
 import { sample } from './fixtures'
 
@@ -19,6 +20,17 @@ async function rpc(b: Butler, method: string, params: any, bearer = token) {
 }
 const params = (id: string, text = '模拟Hermes提醒', immediate = true) => ({ message: { messageId: id, role: 'ROLE_USER', contextId: 'ctx-daily', parts: [{ text }] }, configuration: { returnImmediately: immediate } })
 async function until(fn: () => Promise<boolean>) { for (let i = 0; i < 100; i++) { if (await fn()) return; await new Promise(r => setTimeout(r, 10)) }; throw Error('Condition timed out') }
+
+test('incoming message preserves a Unicode character split between HTTP chunks', async () => {
+  const { b } = await instance()
+  try {
+    const text = '你好', body = Buffer.from(JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'SendMessage', params: params('split-message', text) })), split = body.indexOf(Buffer.from(text)) + 1
+    const request = Object.assign(Readable.from([body.subarray(0, split), body.subarray(split)]), { method: 'POST', url: '/', socket: { remoteAddress: '127.0.0.1' }, headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' } })
+    let result: any
+    await (b as any).serve(request, { writeHead: (code: number) => assert.equal(code, 200), end: (data: string) => { result = JSON.parse(data) } })
+    assert.equal(result.result.task.history[0].parts[0].text, text)
+  } finally { b.stop() }
+})
 
 test('Hermes → main → reply → Hermes: v1 async, blocking, deduplication, auth, loopback and project isolation', async () => {
   const { b, storage, secrets, notices, before } = await instance()

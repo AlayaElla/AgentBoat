@@ -9,7 +9,7 @@
 - `read <projectId>`：`{project}`，含 revision、runId、roles、tasks、events、deliveries。
 - `project-lead <projectId>` 读取项目的主会话、待接管状态和在线目标会话。
 - `main-read`：主 agent 绑定；`main-targets`：可接管的在线会话。
-- `connections`、`connection-read <名字>`、`connection-check <名字>`（只做无害查询）、`feishu-read`。
+- `connections`、`connection-read <名字>`、`connection-check <名字>`（只做无害查询）。
 
 ## 项目主 agent
 

@@ -415,7 +415,6 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
     await syncSources(); changed()
     return messagingSnapshot()
   }
-  orca.panels.handle('workspace.feishu', input => { if (input.operation !== 'read') fail('飞书配置请在外部连接中保存'); return messagingSnapshot() })
   const connections = new Connections(orca, async () => (await store.workspace()).runId,
     (run, id, body, name) => runtime.send(run, { id, subject: `来自外部连接「${name}」`, body, state: 'pending' }), () => changed(), messagingSnapshot, feishuSettings, async () => {
       await store.mutateMessaging(m => { m.feishu = { enabled: false, appId: '', chatIds: [], senderIds: [] }; m.inbox = []; m.deliveries = m.deliveries.filter(d => !d.external) })
@@ -428,7 +427,6 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
     }
     return result
   })
-  orca.panels.handle('workspace.canvas', () => openOverview())
   orca.panels.handle('workspace.reply', async input => {
     const w = await store.workspace()
     if (!w.runId || w.runId !== input.runId) fail('请使用已绑定的工作间主 agent Run')
@@ -537,10 +535,10 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
     }
     await store.mutate(id, revision(input.revision), async p => {
       if (input.operation === 'bind') {
+        if ((await store.workspace()).runId === input.runId) fail('请在目标会话创建独立的项目 Run')
         if ((await store.all()).some(x => x.ref.id !== id && x.runId === input.runId)) fail('该主会话 Run 已绑定其他项目')
         if (takeoverSession) {
           const t = verifyTakeover(p.takeover, input.token, takeoverSession, p.runId, input.runId!)
-          if ((await store.workspace()).runId === input.runId) fail('请在目标会话创建独立的项目 Run')
           const ref = await requireProject(id)
           const workspace = await projectWorkspace(ref, takeoverSession)
           if (!('workspaceId' in workspace) || workspace.workspaceId !== workspaceId(takeoverSession.workspace)) fail('目标会话已经离开项目工作区')
@@ -614,7 +612,7 @@ export default async function activate(orca: OrcaWorkerApi): Promise<void> {
     const configured = await orca.settings.get('cliPath')
     return typeof configured === 'string' && configured.trim() ? configured.trim() : defaultExecutable
   })
-  coordinator = createCoordinator(orca, runtime, undefined, undefined, new LinkFiles())
+  coordinator = createCoordinator(orca, runtime)
   await coordinator.start()
 }
 export function deactivate(): void { coordinator?.stop() }

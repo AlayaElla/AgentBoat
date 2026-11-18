@@ -36,7 +36,7 @@ async function fixture(main = true) {
   return { worker, host, coordinator, transport, sends, mainSends, submit, ingest, timeout: () => { failSend = true } }
 }
 
-test('workspace Feishu settings preserve legacy projects and store credentials only in secrets', async () => {
+test('workspace Feishu settings do not modify project records and store credentials only in secrets', async () => {
   const f = await fixture()
   const before = await f.coordinator.store.all()
   const saved = await f.worker.request('workspace.connections', { operation: 'save', type: 'feishu', name: '飞书', revision: 0, feishu: config, appSecret: 'mock-only-secret' })

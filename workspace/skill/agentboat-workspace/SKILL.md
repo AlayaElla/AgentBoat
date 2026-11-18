@@ -42,7 +42,7 @@ description: 用户说“开启工作间管理”或“工作间：”时，在 
   - 只发日常文字，不发项目名、路径、记录或凭据。
   - Hermes 发来的确认请求转给主人；主人答复后用 `connection-reply`，不替主人批准。
 - 飞书：
-  - 普通消息先 `feishu-read` 核对，再 `feishu-reply` 回原会话。
+  - 普通消息先 `connection-read <飞书连接名>` 核对，再 `feishu-reply` 回原会话。
   - 飞书来的日常请求交给 Hermes 办；结果仍用原 eventId 回复。
   - 待决定和待验收的提醒由插件直接发，主人回复提醒即可。
 - 立项：按主人选的模板和目录 `create`。

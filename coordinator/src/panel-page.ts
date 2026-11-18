@@ -663,7 +663,6 @@ new ResizeObserver(([entry]) => {
 }).observe(root)
 async function start() {
   try {
-    await orca.storage.delete('org.canvas.layout')
     const [saved, savedDrafts] = await Promise.all([orca.storage.get('panel.home'), orca.storage.get('panel.drafts')]) as any[]
     if (saved?.page) { page = saved.page; stack = saved.stack ?? []; opened = saved.opened ?? opened }
     drafts = savedDrafts ?? {}

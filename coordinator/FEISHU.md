@@ -17,7 +17,7 @@
 
 ## 在飞书中使用
 
-- 普通消息发送到工作间主 Run。主 agent 在仓库根目录用 `node coordinator/scripts/client.mjs feishu-read` 核对来源，用 `feishu-reply <input.json>` 发回同一会话，输入 `{runId,eventId,requestId,text}`。input.json 只有回复与来源信息，不包含凭据；相同 requestId 只能重放完全相同回复。该接口要求绑定的主 Run，不会自动抓取或转发 agent 的整段会话。
+- 普通消息发送到工作间主 Run。主 agent 在仓库根目录用 `node coordinator/scripts/client.mjs connection-read <飞书连接名>` 核对来源，用 `feishu-reply <input.json>` 发回同一会话，输入 `{runId,eventId,requestId,text}`。input.json 只有回复与来源信息，不包含凭据；相同 requestId 只能重放完全相同回复。该接口要求绑定的主 Run，不会自动抓取或转发 agent 的整段会话。
 - 新待决定提醒列出问题及选项；直接“回复”那条提醒，输入 `1`、完整选项或 `决定：你的决定`。自由决定也用 `决定：`。
 - 新待验收提醒包含验收版本、核对内容和成果；直接回复 `通过`、`验收通过` 或 `修改：具体意见`。群里同时 @ 机器人；@ 占位符仅在解析反馈时去掉，原话照存。
 - 必须回复准确提醒。普通会话里的“通过”、不明消息、已处理或已更新的提醒会追问，不推断为全部通过。项目、任务、事项、版本由发出的提醒记录确定，不能通过回复内容改成其他项目。只允许用户名单内的人记录反馈，且会话也必须被允许；未授权消息忽略，不发送项目内容给它。
@@ -31,7 +31,7 @@
 
 ## 新请求与数据
 
-`workspace.feishu` 只接受 `{operation:'read'}`，读取配置、状态、来源与发送记录。配置保存走 `workspace.connections`：`{operation:'save',connectionId,name,revision,feishu:{enabled,appId,senderIds,chatIds},appSecret?}`；新建时用 type=feishu。Secret 进入 Orca 加密存储，读取仅返回 secretSaved；存储写入成功后才更新密钥。
+`workspace.connections` 用 `{operation:'read',name}` 读取连接的配置、状态、来源与发送记录（见 `feishu` 字段）。保存配置：`{operation:'save',connectionId,name,revision,feishu:{enabled,appId,senderIds,chatIds},appSecret?}`；新建时用 type=feishu。Secret 进入 Orca 加密存储，读取仅返回 secretSaved；存储写入成功后才更新密钥。
 
 `workspace.reply` 输入 `{runId,eventId,requestId,text}`，对应 CLI `feishu-reply`。来源决定回复目标，绑定 Run 和允许范围均会检查。相同 requestId 必须有相同正文与来源；裁剪后仍可校验去重摘要。
 

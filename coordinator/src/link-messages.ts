@@ -1,4 +1,3 @@
-import type { StorageApi } from 'orca'
 import { fail, fingerprint, maxMessageLength, object, text } from './store'
 import { LinkFiles, maxLinkFiles, safeFiles, wireChunk, wireFiles, type FileChunk, type LinkFile, type ReceivedFile } from './link-files'
 
@@ -6,7 +5,6 @@ const maxPending = 10
 const maxRecent = 10
 export const linkMessageHistory = 50
 const maxPendingBytes = 150_000
-const storageKey = 'workspace.link-messages'
 
 export interface WireMessage { requestId: string; text: string; files?: LinkFile[]; chunk?: FileChunk }
 type FileError = 'capacity' | 'checksum'
@@ -38,11 +36,11 @@ export const fileErrorText = { capacity: '已达此工作间的 1 GB 接收上�
 // All reads and writes are serialized by WorkspaceLinks.
 export class LinkMessages {
   private progress = new Map<string, Map<string, number[]>>()
-  constructor(private storage: Pick<StorageApi, 'get' | 'set'>, private files?: LinkFiles) {}
+  constructor(private files: LinkFiles) {}
 
   async data(): Promise<Message[]> {
-    const raw = await this.files?.messageJournal() ?? await this.storage.get(storageKey)
-    if (raw === null || raw === undefined) return []
+    const raw = await this.files.messageJournal()
+    if (raw === undefined) return []
     if (!Array.isArray(raw)) fail('工作间消息记录格式不正确')
     return structuredClone(raw) as unknown as Message[]
   }
@@ -63,10 +61,7 @@ export class LinkMessages {
   }
 
   private async save(records: Message[]) {
-    const compacted = this.compact(records)
-    // Orca caps one storage value at 256 KiB, below a full history with attachments.
-    if (this.files) await this.files.saveMessageJournal(compacted)
-    else await this.storage.set(storageKey, compacted)
+    await this.files.saveMessageJournal(this.compact(records))
   }
 
   async summarize(records: Message[], peerId: string) {
@@ -76,7 +71,7 @@ export class LinkMessages {
       ...(m.files ? { files: m.files.map((f, i) => ({ name: f.name, size: f.size, type: f.type, transferred: m.state === 'pending' ? this.progress.get(peerId)?.get(m.requestId)?.[i] ?? 0 : m.fileError ? 0 : f.size })) } : {}),
       ...(m.fileError ? { fileError: fileErrorText[m.fileError] } : {})
     }))
-    for (const m of await this.files?.incomplete(peerId) ?? []) recent.push({ requestId: m.requestId, preview: '', at: m.at, state: 'receiving',
+    for (const m of await this.files.incomplete(peerId)) recent.push({ requestId: m.requestId, preview: '', at: m.at, state: 'receiving',
       files: m.files.map((f, i) => ({ name: f.name, size: f.size, type: f.type, transferred: m.offsets[i] })) })
     return { pendingMessages: own.filter(m => m.state === 'pending').length,
       recentMessages: recent.sort((a, b) => b.at.localeCompare(a.at)).slice(0, maxRecent) }
@@ -90,8 +85,7 @@ export class LinkMessages {
     if (!prior && own.length >= maxPending) fail('此连接待送达的消息已达上限，原记录已保留')
     const body = raw.files !== undefined && (raw.text === undefined || raw.text === '') ? '' : text(raw.text, '消息正文', maxMessageLength)
     if (!prior && pending.reduce((bytes, r) => bytes + bodyBytes(r.text!), bodyBytes(body)) > maxPendingBytes) fail('工作间待送达的消息已达容量上限，原记录已保留')
-    if (raw.files !== undefined && !this.files) fail('附件存储不可用')
-    const staged = raw.files === undefined ? undefined : await this.files!.stage(peerId, raw.files,
+    const staged = raw.files === undefined ? undefined : await this.files.stage(peerId, raw.files,
       prior ? 0 : own.reduce((n, r) => n + (r.files?.reduce((size, f) => size + f.size, 0) ?? 0), 0))
     let saved = false
     try {
@@ -103,7 +97,7 @@ export class LinkMessages {
       records.push({ requestId: key, text: body, peerId, hash, at: new Date().toISOString(), state: 'pending', ...staged })
       await this.save(records)
       saved = true
-    } finally { if (staged && !saved) await this.files!.discard(peerId, staged.spool) }
+    } finally { if (staged && !saved) await this.files.discard(peerId, staged.spool) }
   }
 
   async pending(peerId: string): Promise<WireMessage[]> {
@@ -112,7 +106,7 @@ export class LinkMessages {
 
   async chunk(peerId: string, message: WireMessage) {
     const row = (await this.data()).find(m => m.peerId === peerId && m.requestId === message.requestId && m.state === 'pending')
-    if (row?.files && row.spool) return this.files?.chunk(peerId, row.spool, row.files, this.progress.get(peerId)?.get(row.requestId) ?? row.files.map(() => 0))
+    if (row?.files && row.spool) return this.files.chunk(peerId, row.spool, row.files, this.progress.get(peerId)?.get(row.requestId) ?? row.files.map(() => 0))
   }
 
   async receive(peerId: string, raw: unknown, enqueue: (messages: IncomingMessage[]) => Promise<void>, workspaceId = peerId) {
@@ -146,7 +140,6 @@ export class LinkMessages {
       if (prior && prior.hash !== hash) fail('对端消息编号重复且正文不同')
       let fileError = prior?.fileError, attachments: ReceivedFile[] | undefined
       if (!prior && m.files) {
-        if (!this.files) fail('附件存储不可用')
         const transfer = await this.files.receive(peerId, workspaceId, m.requestId, hash, m.files, m.chunk)
         if ('offsets' in transfer) {
           (result.progress ??= []).push({ requestId: m.requestId, offsets: transfer.offsets })
@@ -190,7 +183,7 @@ export class LinkMessages {
     }
     if (progress.size) this.progress.set(peerId, progress)
     else this.progress.delete(peerId)
-    for (const spool of cleanup) await this.files?.discard(peerId, spool)
+    for (const spool of cleanup) await this.files.discard(peerId, spool)
     return { ...result, more: more || changed && records.some(r => r.peerId === peerId && r.state === 'pending') }
   }
 
@@ -198,6 +191,6 @@ export class LinkMessages {
     const records = await this.data(), kept = records.filter(m => m.peerId !== peerId)
     if (kept.length !== records.length) await this.save(kept)
     this.progress.delete(peerId)
-    await this.files?.revoke(peerId)
+    await this.files.revoke(peerId)
   }
 }

@@ -30,7 +30,7 @@ test('project lead switches only within its workspace and preserves tasks and qu
   const replacement: AgentSession = { ...projectSession, handle: 'terminal-opencode', title: '替补会话', agent: 'opencode' }
   const outsider = { ...projectSession, handle: 'other-workspace', workspace: 'identity:elsewhere' }
   let sessions = [old, projectSession, replacement, outsider]
-  const host = mockHost({ storage: { 'project:p1': p as any, 'project:p2': other as any, workspace: { runId: 'run_owner' } }, results: {
+  const host = mockHost({ storage: { 'project:p1': p as any, 'project:p2': other as any, workspace: { version: 1, revision: 0, runId: 'run_owner', requests: [] } }, results: {
     'workspace.list': { workspaces: [testWorkspace, { ...testWorkspace, id: outsider.workspace, projectId: refs[1].repoId }], truncated: false },
     'agents.list': { agents: [] }
   } })
@@ -53,6 +53,7 @@ test('project lead switches only within its workspace and preserves tasks and qu
     projectId: 'p1', operation: 'bind', revision: r, requestId: 'handoff-' + runId, runId, currentRunId: runId, caller, token: tokenFrom(requests[i].prompt)
   })
   try {
+    await assert.rejects(() => worker.request('project.agent', { operation: 'bind', projectId: 'p1', revision: p.revision, requestId: 'conflicting-bind', runId: 'run_owner' }), /独立的项目 Run/)
     const start = await read()
     assert.deepEqual(start.sessions.map(s => s.handle), [old.handle, projectSession.handle, replacement.handle])
     assert.deepEqual(start.binding.session, old)
@@ -199,10 +200,10 @@ test('unknown takeover send and old-agent notification are durable and never aut
   } finally { c.stop(); await worker.deactivate() }
 })
 
-for (const mode of ['existing', 'new'] as const) test(`main takeover ${mode}: target owns new Run, only valid token replaces legacy binding, notices follow new binding`, async () => {
+for (const mode of ['existing', 'new'] as const) test(`main takeover ${mode}: target owns new Run, only valid token replaces the previous binding, notices follow new binding`, async () => {
   const project = fresh(refs[0]); project.runId = 'run_project'
-  const legacy = { version: 1, revision: 2, runId: 'run_old', requests: [] }
-  const host = mockHost({ storage: { workspace: legacy, 'project:p1': project as any } })
+  const binding = { version: 1, revision: 2, session: { ...session, handle: 'previous-handle' }, runId: 'run_old', requests: [] }
+  const host = mockHost({ storage: { workspace: binding, 'project:p1': project as any } })
   const prompts: string[] = [], sends: { run: string; subject: string }[] = []
   let c!: ReturnType<typeof createCoordinator>, storage!: OrcaWorkerApi['storage'], launched = 0
   const worker = await mountWorker({ default: (api: OrcaWorkerApi) => {
@@ -218,8 +219,8 @@ for (const mode of ['existing', 'new'] as const) test(`main takeover ${mode}: ta
   } }, { host })
   try {
     const before = await worker.request('workspace.agent', { operation: 'read' })
-    assert.equal(before.runId, 'run_old'); assert.equal(before.session, undefined)
-    assert.deepEqual(host.data().storage.workspace, legacy)
+    assert.equal(before.runId, 'run_old'); assert.equal(before.session?.handle, 'previous-handle')
+    assert.deepEqual(host.data().storage.workspace, binding)
     const bind = { operation: 'bind' as const, runId: 'run_next', caller: session.handle, revision: 2, requestId: 'test-bind' }
     await assert.rejects(() => worker.request('workspace.agent', bind))
     const switching = await worker.request('workspace.agent.switch', { revision: 2, mode, ...(mode === 'existing' ? { handle: session.handle } : { workspace: session.workspace, agent: 'claude' }) })

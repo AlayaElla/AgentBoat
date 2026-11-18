@@ -1,8 +1,7 @@
 import { assert, mockHost, mountWorker, test } from 'orca/testing'
-import type { JsonValue } from 'orca'
 import type { OrcaWorkerApi } from 'orca/worker'
 import type { Delivery } from './model'
-import { testCoordinator as createCoordinator } from './test-runtime'
+import { testCoordinator as createCoordinator, testFiles } from './test-runtime'
 import { LinkMessages } from './link-messages'
 import { maxMessageLength } from './store'
 import { fileChunkBytes, LinkFiles, maxLinkFileBytes, safeNames } from './link-files'
@@ -15,12 +14,10 @@ import { setTimeout as delay } from 'node:timers/promises'
 import { refs } from './fixtures'
 import type { CoordinatorRuntime } from './runtime'
 
-const legacy = { version: 1, requests: [{ id: 'legacy-record' }] }
-async function workspace(name: string, bound: boolean, savedDeliveries: Delivery[] = [], files?: LinkFiles, extra?: Partial<CoordinatorRuntime>) {
+async function workspace(name: string, bound: boolean, savedDeliveries: Delivery[] = [], files = testFiles(), extra?: Partial<CoordinatorRuntime>) {
   const sends: { runId: string; delivery: Delivery }[] = []
   const host = mockHost({ storage: {
     workspace: { version: 1, revision: 0, runId: bound ? name + '_run' : '', requests: [] },
-    'workspace.requests': legacy,
     ...(savedDeliveries.length ? { 'workspace.messaging': { version: 1, revision: 0,
       feishu: { enabled: false, appId: '', chatIds: [], senderIds: [] }, inbox: [], deliveries: savedDeliveries as any } } : {})
   } })
@@ -35,7 +32,7 @@ async function workspace(name: string, bound: boolean, savedDeliveries: Delivery
   const read = () => worker.request('workspace.links', { operation: 'read' })
   const send = (id: string, requestId: string, text: string, runId = name + '_run', files?: string[]) => worker.request('workspace.links', { operation: 'send', id, runId, requestId, text, ...(files ? { files } : {}) })
   const bind = () => worker.request('workspace.agent', { operation: 'bind', revision: 0, runId: name + '_run', caller: 'test-' + name, requestId: 'test-bind' })
-  return { worker, host, coordinator, read, send, bind, sends,
+  return { worker, host, coordinator, read, send, bind, sends, files,
     async close() { coordinator.stop(); await worker.deactivate() } }
 }
 
@@ -233,14 +230,9 @@ test('attachment disk offsets survive restarts, unsafe names are cleaned and rev
 
 test('the disk journal preserves existing text deduplication and grows past the host per-key limit', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'agentboat-t38-'))
-  let saved: JsonValue = null
-  const storage = { get: async () => saved, set: async (_key: string, value: JsonValue) => { saved = structuredClone(value) } }
-  const original = new LinkMessages(storage)
   const body = '中文'.repeat(100)
-  const enqueue = async () => {}
   try {
-    await original.receive('original-peer', { messages: [{ requestId: 'legacy', text: body }], received: [] }, enqueue)
-    const files = new LinkFiles(root), messages = new LinkMessages(storage, files)
+    const messages = new LinkMessages(new LinkFiles(root))
     let delivered = 0
     const queue = async (batch: unknown[]) => { delivered += batch.length }
     for (let p = 0; p < 10; p++) for (let i = 0; i < 50; i += 10) {
@@ -248,10 +240,10 @@ test('the disk journal preserves existing text deduplication and grows past the 
       await messages.receive('peer-' + p, { messages: batch, received: [] }, queue)
     }
     assert.ok((await stat(path.join(root, 'link-messages.json'))).size > 256 * 1024)
-    const restarted = new LinkMessages(storage, new LinkFiles(root))
-    assert.deepEqual((await restarted.receive('original-peer', { messages: [{ requestId: 'legacy', text: body }], received: [] }, queue)).received, ['legacy'])
+    const restarted = new LinkMessages(new LinkFiles(root))
+    assert.deepEqual((await restarted.receive('peer-0', { messages: [{ requestId: 'message-0', text: body }], received: [] }, queue)).received, ['message-0'])
     assert.equal(delivered, 500)
-    assert.equal((await restarted.data()).length, 501)
+    assert.equal((await restarted.data()).length, 500)
   } finally { await rm(root, { recursive: true, force: true }) }
 })
 
@@ -317,8 +309,6 @@ test('both main agents exchange messages on one listener, with durable offline d
     await b.coordinator.flushMailbox()
     assert.equal(b.sends.length, 1)
     assert.equal(a.sends.length, 1)
-    assert.deepEqual(a.host.data().storage['workspace.requests'], legacy)
-    assert.deepEqual(b.host.data().storage['workspace.requests'], legacy)
   } finally { await a.close(); await b.close() }
 })
 
@@ -343,7 +333,7 @@ test('per-link pending cap preserves the queue, and revocation discards it in bo
     await b.coordinator.links.refresh()
     for (const w of [a, b]) {
       assert.deepEqual((await w.read()).peers, [])
-      assert.deepEqual(w.host.data().storage['workspace.link-messages'], [])
+      assert.deepEqual(await w.files.messageJournal(), [])
       assert.equal(w.host.data().secrets[`workspace-link:${id}`], undefined)
       await assert.rejects(() => w.send(id, 'removed', '文字'), /请选择有效连接/)
       assert.equal(w.sends.length, w === a ? 1 : 0)
@@ -374,16 +364,13 @@ test('pending, delivered and received previews stay short while the agent receiv
   } finally { await a.close(); await b.close() }
 })
 
-test('receive compacts old history above 200 KB and keeps a bounded dedup window of short previews in one key', async () => {
-  const key = 'workspace.link-messages'
-  const storage = new Map<string, any>([[key, Array.from({ length: 1250 }, (_, i) => ({
+test('receive compacts old history above 200 KB and keeps a bounded dedup window of short previews', async () => {
+  const files = testFiles()
+  await files.saveMessageJournal(Array.from({ length: 1250 }, (_, i) => ({
     peerId: 'peer', requestId: 'old-' + i, hash: 'x'.repeat(64), at: '2026-11-18T00:00:00.000Z', state: 'delivered'
-  }))]])
-  assert.ok(Buffer.byteLength(JSON.stringify(storage.get(key))) > 200_000)
-  const messages = new LinkMessages({
-    get: async key => storage.get(key) ?? null,
-    set: async (key, value) => { storage.set(key, structuredClone(value)) }
-  })
+  })))
+  const messages = new LinkMessages(files)
+  assert.ok(Buffer.byteLength(JSON.stringify(await messages.data())) > 200_000)
   const queued: string[] = [], untouched = { requestId: 'untouched', text: '留在待送达队列' }
   const first = { requestId: 'first', text: '旧历史满时仍能接收' }
   assert.deepEqual((await messages.receive('peer', { messages: [first], received: [] },
@@ -406,9 +393,8 @@ test('receive compacts old history above 200 KB and keeps a bounded dedup window
   assert.equal(history.length, 50)
   assert.ok(history.every(m => !('text' in m) && m.preview === (m.state === 'received' ? '收' : '发').repeat(200)))
   assert.equal(history[0].requestId, 'sent-30')
-  assert.deepEqual([...storage.keys()], [key])
   assert.ok(Buffer.byteLength(JSON.stringify(records)) < 50_000)
-  const before = structuredClone([...storage])
+  const before = await messages.data()
   await messages.send('peer', last.sent)
   await assert.rejects(() => messages.send('peer', { ...last.sent, text: '改写' }), /消息编号已用于其他内容/)
   const enqueue = async () => { throw new Error('重放不应再次入队') }
@@ -416,27 +402,22 @@ test('receive compacts old history above 200 KB and keeps a bounded dedup window
   const older = history[1]
   assert.deepEqual((await messages.receive('peer', { messages: [{ requestId: older.requestId, text: last.incoming.text }], received: [] }, enqueue)).received, [older.requestId])
   await assert.rejects(() => messages.receive('peer', { messages: [{ ...last.incoming, text: '改写' }], received: [] }, enqueue), /正文不同/)
-  assert.deepEqual([...storage], before)
+  assert.deepEqual(await messages.data(), before)
   assert.deepEqual(await messages.pending('peer'), [untouched])
   await messages.revoke('peer')
   assert.deepEqual((await messages.data()).map(m => m.peerId), ['other-peer'])
-  assert.deepEqual([...storage.keys()], [key])
 })
 
 test('all connections share a 150 KB pending body budget and can receive when it is full', async () => {
-  let stored: JsonValue = null
-  const messages = new LinkMessages({
-    get: async () => stored,
-    set: async (_key, value) => { stored = structuredClone(value) }
-  })
+  const messages = new LinkMessages(testFiles())
   const body = '中'.repeat(16_000)
   for (const peer of ['a', 'b', 'c']) await messages.send(peer, { requestId: peer, text: body })
   const last = { requestId: 'd', text: '"'.repeat(3000) }
   await messages.send('d', last)
-  const full = JSON.stringify(stored)
+  const full = JSON.stringify(await messages.data())
   await messages.send('d', last)
   await assert.rejects(() => messages.send('e', { requestId: 'e', text: 'x' }), /待送达的消息已达容量上限/)
-  assert.equal(JSON.stringify(stored), full)
+  assert.equal(JSON.stringify(await messages.data()), full)
   const inbound = { requestId: 'remote', text: body }
   assert.deepEqual((await messages.receive('e', { messages: [inbound], received: [] }, async batch => {
     assert.deepEqual(batch, [inbound])

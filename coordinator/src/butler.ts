@@ -254,10 +254,10 @@ export class Butler {
     })
     if (req.method !== 'POST' || req.url !== '/') return send(404, { error: 'Not found' })
     if (!req.headers['content-type']?.startsWith('application/json') && !req.headers['content-type']?.startsWith('application/a2a+json')) return send(415, { error: 'JSON required' })
-    let raw = '', id: any = null
+    const chunks: Buffer[] = []; let size = 0, id: any = null
     try {
-      for await (const chunk of req) { raw += chunk; if (Buffer.byteLength(raw) > 24000) return send(413, { error: 'Too large' }) }
-      let r: any; try { r = JSON.parse(raw) } catch { throw rpcError(-32700, 'Parse error') }
+      for await (const chunk of req) { size += chunk.length; if (size > 24000) return send(413, { error: 'Too large' }); chunks.push(chunk) }
+      let r: any; try { r = JSON.parse(Buffer.concat(chunks).toString('utf8')) } catch { throw rpcError(-32700, 'Parse error') }
       if (!r || r.jsonrpc !== '2.0' || !['string', 'number'].includes(typeof r.id)) throw rpcError(-32600, 'Invalid request')
       id = r.id
       const p = object(r.params)

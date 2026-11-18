@@ -24,8 +24,7 @@ test('初始化不覆盖模板；记忆按来源隔离、带日期、重复记�
     writeFileSync(custom, JSON.stringify(value));
     api.init();
     assert.equal(api.template('code').name, '自定义');
-    assert.deepEqual(api.template('code').mainAgent, { agent: 'claude', model: 'claude-opus-5-5', effort: 'xhigh', surface: 'chat' });
-    assert.deepEqual(JSON.parse(readFileSync(custom)).mainAgent, { agent: 'claude' });
+    assert.deepEqual(api.template('code').mainAgent, value.mainAgent);
     assert.throws(() => api.template('../escape'));
     const entry = { id: 'fact-1', kind: 'user', date: '2026-11-14T00:00:00Z', source: '测试主人 / msg-1', text: '偏好短回答' };
     api.remember(entry);
@@ -48,9 +47,9 @@ test('初始化不覆盖模板；记忆按来源隔离、带日期、重复记�
     assert.equal(existsSync(path.join(testHome, 'memory/.git')), true);
     const launch = { outcome: { handle: 'agent-1' }, prompt: { outcome: 'journaled' } };
     assert.equal(api.launchReceipt(launch), 'agent-1');
-    assert.equal(api.launchReceipt({ launch }), 'agent-1');
+    assert.throws(() => api.launchReceipt({ launch }));
     assert.equal(api.launchReceipt({ outcome: { kind: 'structured', handle: 'tab', sessionId: 'test-chat' }, prompt: { outcome: 'journaled' } }), 'orca_session_id:test-chat');
-    assert.throws(() => api.launchReceipt({ launch: { outcome: { handle: 'agent-1' }, prompt: { outcome: 'unknown' } } }));
+    assert.throws(() => api.launchReceipt({ outcome: { handle: 'agent-1' }, prompt: { outcome: 'unknown' } }));
   } finally {
     const resolved = path.resolve(testHome);
     assert.equal(path.dirname(resolved), sandbox);

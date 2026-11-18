@@ -131,7 +131,8 @@ export class ProjectStore {
   }
   async workspace(): Promise<Workspace> {
     const value = await this.storage.get('workspace')
-    const w: Workspace = { version: 1, revision: 0, runId: '', requests: [], ...(value ? structuredClone(object(value)) : {}) }
+    if (value == null) return { version: 1, revision: 0, runId: '', requests: [] }
+    const w = structuredClone(object(value)) as Workspace
     if (w.version !== 1 || !Number.isSafeInteger(w.revision) || w.revision < 0 || typeof w.runId !== 'string' || !Array.isArray(w.requests)) fail('工作间记录格式不兼容，请保留数据并检查插件版本')
     return w
   }

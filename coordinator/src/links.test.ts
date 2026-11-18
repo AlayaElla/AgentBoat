@@ -5,7 +5,7 @@ import { WorkspaceLinks, defaultWorkspaceName, endpoint, invitationHost, report 
 import { refs, sample } from './fixtures'
 import { fresh } from './store'
 import type { LiveAgent } from './model'
-import { testCoordinator as createCoordinator } from './test-runtime'
+import { testCoordinator as createCoordinator, testFiles } from './test-runtime'
 
 async function instance(name: string, configured = true, chooseHost = () => '127.0.0.1') {
   const storage = new Map<string, any>(), secrets = new Map<string, string>()
@@ -13,7 +13,7 @@ async function instance(name: string, configured = true, chooseHost = () => '127
     secrets: { get: async (k: string) => secrets.get(k) ?? null, set: async (k: string, v: string) => { secrets.set(k, v) }, delete: async (k: string) => { secrets.delete(k) } } }
   const projects = structuredClone([sample().project!, fresh(refs[1])])
   projects[0].ref.name = name + ' private project'
-  const create = () => new WorkspaceLinks(api as OrcaWorkerApi, async () => projects, () => {}, chooseHost)
+  const create = () => new WorkspaceLinks(api as OrcaWorkerApi, async () => projects, () => {}, chooseHost, undefined, undefined, testFiles())
   const links = create()
   if (configured) {
     const initial = await links.snapshot()
@@ -25,6 +25,14 @@ async function post(url: string, route: string, body: any, token = '') {
   const r = await fetch(url + route, { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', Connection: 'close' }, body: JSON.stringify(body) })
   await r.text(); return r.status
 }
+
+test('unexpected peer fields cannot enter panel snapshots or be rewritten', async () => {
+  const { links, storage } = await instance('shape', false)
+  const initial = await links.snapshot(), saved = { ...initial, peers: [{ id: 'peer', workspaceId: 'remote', name: 'remote', endpoint: '', state: 'active', scope: 'none', allProjects: false, projectIds: [], unrecognized: 'not a panel field' }] }
+  storage.set('workspace.links', saved)
+  await assert.rejects(() => links.snapshot(), /工作间连接记录/)
+  assert.deepEqual(storage.get('workspace.links'), saved)
+})
 
 test('HTTP addresses and automatic interface choice use the same Tailscale boundaries', () => {
   for (const host of ['127.0.0.1', '[::1]', 'localhost', '100.64.0.0', '100.127.255.255', '[fd7a:115c:a1e0::1]', '[FD7A:115C:A1E0:FFFF:FFFF:FFFF:FFFF:FFFF]', 'host.example.ts.net']) {
@@ -81,9 +89,6 @@ test('relations remain local, saved sharing is sticky, offline time survives a n
     const related = await b.links.relate({ revision: s.revision, id: p.id, relation: 'above' })
     assert.equal(related.peers[0].relation, 'above'); assert.equal(related.peers[0].scope, 'none')
     assert.equal((await a.links.snapshot()).peers[0].relation, undefined)
-    const legacy = b.storage.get('workspace.links').peers[0]
-    legacy.acceptTasks = 'auto'
-    assert.equal('acceptTasks' in (await b.links.snapshot()).peers[0], false)
     const shared = await b.links.share({ revision: related.revision, id: p.id, scope: 'summary', projectIds: ['p1'] })
     assert.equal(shared.peers[0].sharingSet, true)
     const changed = await b.links.relate({ revision: shared.revision, id: p.id, relation: 'below' })
@@ -93,13 +98,13 @@ test('relations remain local, saved sharing is sticky, offline time survives a n
     a.links.stop(); const offline = await b.links.refresh()
     assert.equal(offline.peers[0].status, 'offline'); assert.ok(offline.peers[0].lastSyncAt)
     const api = { storage: { get: async (k: string) => b.storage.get(k), set: async (k: string, v: any) => { b.storage.set(k, v) } }, secrets: { get: async () => null } }
-    const restarted = new WorkspaceLinks(api as any, async () => b.projects, () => {})
+    const restarted = new WorkspaceLinks(api as any, async () => b.projects, () => {}, undefined, undefined, undefined, testFiles())
     assert.equal((await restarted.snapshot()).peers[0].lastSyncAt, offline.peers[0].lastSyncAt)
     await assert.rejects(() => b.links.relate({ revision: changed.revision, id: p.id, relation: 'invalid' }))
   } finally { a.links.stop(); b.links.stop() }
 })
 
-test('all projects uses the current visible projects and preserves the legacy selection when switched off', async () => {
+test('all projects uses the current visible projects and preserves the explicit selection when switched off', async () => {
   const a = await instance('A'), b = await instance('B')
   try {
     const joined = await b.links.join((await a.links.invite()).invitation!.code), id = joined.peers[0].id
@@ -109,7 +114,6 @@ test('all projects uses the current visible projects and preserves the legacy se
     }
     const reported = async () => (await b.links.refresh()).peers[0].report!.projects.map(p => p.id)
     await share({ projectIds: ['p1'] })
-    delete a.storage.get('workspace.links').peers[0].allProjects
     assert.equal((await a.links.snapshot()).peers[0].allProjects, false)
     assert.deepEqual(await reported(), ['p1'])
     await assert.rejects(() => share({ allProjects: 'true' }), /全部项目设置不正确/)
@@ -167,7 +171,6 @@ test('two loopback workspaces pair once, share only selected local projects, cha
       return (await b.links.refresh()).peers[0].report!
     }
     let r = await setA('summary')
-    assert.equal('acceptTasks' in r, false)
     assert.deepEqual(r.projects.map(p => p.id), ['p1'])
     assert.equal(r.projects[0].tasks, undefined)
     assert.equal(r.projects[0].pending, 2)
@@ -215,21 +218,6 @@ test('two loopback workspaces pair once, share only selected local projects, cha
     assert.equal((await a.links.snapshot()).peers[0].id, rejoined[0].id)
     assert.equal(await post(address, '/sync', { id: rejoined[0].id }, token), 401)
   } finally { a.links.stop(); b.links.stop(); c.links.stop() }
-})
-
-test('legacy revoked links disappear on read and the next save keeps only existing connections', async () => {
-  const a = await instance('A'), b = await instance('B')
-  try {
-    await b.links.join((await a.links.invite()).invitation!.code)
-    const raw = a.storage.get('workspace.links'), active = structuredClone(raw.peers[0])
-    raw.peers.unshift({ ...active, id: 'legacy-link', workspaceId: 'legacy-peer', state: 'revoked' })
-    const before = structuredClone(raw)
-    const snapshot = await a.links.snapshot()
-    assert.deepEqual(snapshot.peers.map(p => p.id), [active.id])
-    assert.deepEqual(a.storage.get('workspace.links'), before)
-    await a.links.rename({ revision: snapshot.revision, name: 'A renamed' })
-    assert.deepEqual(a.storage.get('workspace.links').peers, [active])
-  } finally { a.links.stop(); b.links.stop() }
 })
 
 test('details sync shares current main and scoped live agents without local identifiers', async () => {
@@ -309,6 +297,7 @@ test('invites expire/cancel, malformed and oversized requests fail closed, expli
     const token = a.secrets.get(`workspace-link:${p.id}`)!
     const malformed = report([], p, p.workspaceId, 'B')
     const exchange = { messages: [], received: [] }
+    assert.equal(await post(s.listening, '/sync', { id: p.id, report: malformed }, token), 400)
     assert.equal(await post(s.listening, '/sync', { id: p.id, report: malformed, exchange }, token), 200)
     assert.equal(await post(s.listening, '/sync', { id: p.id, report: malformed, exchange: { messages: 'invalid', received: [] } }, token), 400)
     assert.equal(await post(s.listening, '/sync', { id: p.id, report: { ...malformed, workspaceId: 'wrong' }, exchange }, token), 400)
@@ -331,25 +320,6 @@ test('invites expire/cancel, malformed and oversized requests fail closed, expli
     ]) assert.equal(await post(s.listening, '/sync', { id: p.id, report: changed, exchange }, token), 400)
     assert.deepEqual((await a.links.snapshot()).peers[0].report, accepted)
   } finally { a.links.stop(); b.links.stop() }
-})
-
-test('plugin request/overview integration preserves all legacy project and workspace records', async () => {
-  const project = sample().project!, storage = { 'project:p1': project as any, workspace: { version: 1, revision: 2, runId: 'run_main', requests: [] } }
-  const host = mockHost({ storage })
-  let coordinator!: ReturnType<typeof createCoordinator>
-  const worker = await mountWorker({ default: (orca: OrcaWorkerApi) => { coordinator = createCoordinator(orca, { projects: async () => refs, verifyRun: async () => {}, send: async () => ({}) }) } }, { host })
-  try {
-    const s = await worker.request('workspace.links', { operation: 'read' })
-    assert.equal(s.enabled, false)
-    assert.equal(s.host, '127.0.0.1')
-    const named = await worker.request('workspace.links', { operation: 'rename', revision: s.revision, name: '本机名称' })
-    assert.equal(named.name, '本机名称')
-    const all = await worker.request('workspace.overview')
-    assert.equal(all.links!.workspaceId, s.workspaceId)
-    assert.deepEqual(host.data().storage['project:p1'], storage['project:p1'])
-    assert.deepEqual(host.data().storage.workspace, storage.workspace)
-    assert.deepEqual(worker.refusals, [])
-  } finally { coordinator.stop(); await worker.deactivate() }
 })
 
 test('Orca catalog controls project visibility, pending counts, writes, notices and the next peer report', async () => {
@@ -425,6 +395,6 @@ test('Orca catalog controls project visibility, pending counts, writes, notices 
 test('refresh does not broadcast changes when there is no outbound peer to sync', async () => {
   let changed = 0
   const api = { storage: { get: async (key: string) => key !== 'workspace.links' ? null : ({ version: 1, revision: 0, workspaceId: 'own', name: 'own', enabled: false, host: '127.0.0.1', port: 0, publicUrl: '', tls: false, peers: [] }) } }
-  const links = new WorkspaceLinks(api as unknown as OrcaWorkerApi, async () => [], () => { changed++ })
+  const links = new WorkspaceLinks(api as unknown as OrcaWorkerApi, async () => [], () => { changed++ }, undefined, undefined, undefined, testFiles())
   await links.refresh(); assert.equal(changed, 0); links.stop()
 })

@@ -29,7 +29,7 @@ function location(root, relative) {
 }
 export function filesAt(directory, prefix = '') {
   ordinary(directory);
-  const files = {};
+  const files = Object.create(null);
   for (const item of fs.readdirSync(directory, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name, 'en'))) {
     const file = path.join(directory, item.name), key = prefix + item.name;
     ordinary(file);
@@ -44,8 +44,7 @@ export function digest(files) {
   for (const key of Object.keys(files).sort()) hash.update(key).update('\0').update(files[key]).update('\0');
   return hash.digest('hex');
 }
-export function validate(directory) {
-  const files = filesAt(directory);
+export function validate(directory, files = filesAt(directory)) {
   const text = files['SKILL.md']?.toString('utf8').replace(/^\uFEFF/, '').replace(/\r\n/g, '\n');
   const match = text?.match(/^---\n([\s\S]*?)\n---\n([\s\S]+)$/);
   if (!match || !match[2].trim() || /\bTODO\b|\[填写/.test(text)) throw new Error(`SKILL.md 缺少 frontmatter、正文或仍有占位：${directory}`);
@@ -109,10 +108,9 @@ export function publish(root, id, reviewer, evidence) {
   root = path.resolve(root); name(id);
   if (!reviewer?.trim() || !evidence?.trim()) throw new Error('发布需要项目主 agent 的 reviewer 与审核依据 source');
   const draft = location(root, `${proposals}/${id}`), canonical = location(root, `${source}/${id}`), mirror = location(root, `.claude/skills/${id}`);
-  const skill = validate(draft), records = record(root), previous = records[id];
+  const files = filesAt(draft), skill = validate(draft, files), records = record(root), previous = records[id];
   // Check both destinations before replacing either; never overwrite foreign or edited files.
   for (const destination of [canonical, mirror]) if (fs.existsSync(destination) && (!previous || digest(filesAt(destination)) !== previous.sha256)) throw new Error(`目标有未审核或自行修改的内容，未覆盖：${destination}`);
-  const files = filesAt(draft);
   // Keep reviewed bytes unchanged when Windows Git checks out a new worktree.
   initialize(root);
   const attributes = location(root, '.claude/skills/.gitattributes');

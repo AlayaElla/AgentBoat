@@ -77,8 +77,7 @@ export class OrcaRuntime implements CoordinatorRuntime {
     await this.call(['orchestration', 'send', '--from', 'plugin:local.project-coordinator', '--to', handle, '--type', 'status', '--subject', subject, '--body', prompt])
   }
   async launchMain(workspace: string, agent: string, prompt: string, options?: Omit<AgentLaunch, 'agent'>) {
-    const result = await this.call(['agent', 'launch', ...agentFlags({ agent, ...options }), '--worktree', workspace, '--prompt', prompt])
-    const launch = result.launch ?? result
+    const launch = await this.call(['agent', 'launch', ...agentFlags({ agent, ...options }), '--worktree', workspace, '--prompt', prompt])
     if (options?.surface === 'chat' && launch.outcome?.kind !== 'structured') fail('聊天会话启动回执待核对，不会自动重启')
     return launchReceipt(launch)
   }
