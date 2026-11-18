@@ -10,7 +10,7 @@ const cliPath = realpathSync(path.isAbsolute(executable) ? executable : execFile
 const resources = path.resolve(path.dirname(cliPath), '../app.asar.unpacked/resources/plugins/declarative');
 await mkdir('.orca/local-test', { recursive: true });
 const runtime = path.join(resources, 'orca-runtime.mjs');
-const tests = ['butler', 'coordinator', 'feishu', 'links', 'requests', 'main-agent', 'agents'];
+const tests = ['butler', 'coordinator', 'feishu', 'links', 'link-messages', 'main-agent', 'agents'];
 await build({
   entryPoints: tests.map(name => `src/${name}.test.ts`), outdir: '.orca',
   bundle: true, platform: 'node', format: 'esm', target: 'node22',

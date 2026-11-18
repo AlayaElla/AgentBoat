@@ -70,7 +70,7 @@ html.dark .btn.danger{background:color-mix(in oklab,var(--orca-destructive) 60%,
 .st{display:inline-flex;flex:none;width:12px;height:12px;align-items:center;justify-content:center;color:var(--ab-done)}
 .st>.i{width:12px;height:12px}.st>.i svg{stroke-width:3}
 
-/* 列表行：照 Orca 组件式面板的列表行（上下 6 左右 8，圆角 8，悬停变深一点）。等你处理、设置、任务、往来请求都用它 */
+/* 列表行：照 Orca 组件式面板的列表行（上下 6 左右 8，圆角 8，悬停变深一点）。等你处理、设置、任务都用它 */
 .list{display:flex;flex-direction:column;list-style:none;margin:0;padding:0}
 .list.flush{margin:0 -8px}
 .item{display:flex;width:100%;align-items:flex-start;gap:8px;min-width:0;padding:6px 8px;border:0;border-radius:var(--r-md);background:none;text-align:left;cursor:pointer}

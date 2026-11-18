@@ -6,15 +6,6 @@ export interface ProjectRef {
   hostId: string
   workspace: string
 }
-export const requestStates = { sent: '已发出', confirm: '待对方确认', rejected: '已拒绝', accepted: '已接受', working: '进行中', completed: '已完成', failed: '失败', disconnected: '已断开' }
-export type RequestState = keyof typeof requestStates
-export interface RequestUpdate { id: string; status: RequestState; note: string; links: string[]; at: string }
-export interface WorkspaceRequest {
-  id: string; peerId: string; workspaceId: string; direction: 'incoming' | 'outgoing'
-  title: string; context: string; expected: string; links: string[]; createdAt: string
-  updates: RequestUpdate[]; projectId?: string; panelIssued?: boolean
-}
-export const requestState = (r: WorkspaceRequest): RequestState => r.updates.at(-1)?.status ?? 'sent'
 export interface Artifact { id: string; label: string; url: string; version: string }
 export interface UserFeedback { at: string; revision: number; result: string; note: string }
 export interface Acceptance {
@@ -44,10 +35,11 @@ export interface Delivery {
   id: string; subject: string; body: string
   noticeKeys?: string[]
   receiptHash?: string
+  linkMessageHash?: string
   targetRunId?: string
   state: 'pending' | 'sending' | 'sent' | 'uncertain'
   error?: string; requestId?: string
-  external?: { channel: 'feishu'; appId: string; chatId: string; replyTo?: string; messageId?: string; target?: FeedbackTarget; workspaceRequest?: { peerId: string; id: string }; artifacts?: Artifact[]; root?: string }
+  external?: { channel: 'feishu'; appId: string; chatId: string; replyTo?: string; messageId?: string; target?: FeedbackTarget; artifacts?: Artifact[]; root?: string }
 }
 export interface FeishuConfig { appId: string; chatIds: string[]; senderIds: string[]; enabled: boolean }
 export interface Messaging {
@@ -144,7 +136,7 @@ export const statuses = { connected: '已连接', offline: '离线', pending: '�
 export const connectionStates = { off: '未启用', connecting: '连接中', connected: '已连接', error: '连接异常', unchecked: '未检查' }
 export const results: Record<string, string> = { passed: '已通过', changes_requested: '已退回修改', pending: '待验收' }
 export const deliveryStates = { pending: '待通知', sending: '正在通知', sent: '已通知', uncertain: '待核对' }
-export const sourceName = (s: string) => ({ 'workspace-agent': '主 agent', 'workspace-external': '外部工作间', feishu: '飞书' }[s] || s)
+export const sourceName = (s: string) => ({ 'workspace-agent': '主 agent', feishu: '飞书' }[s] || s)
 
 export const mainAgentStates = {
   online: { label: '在线', tone: 'success' },

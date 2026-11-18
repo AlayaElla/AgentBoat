@@ -8,7 +8,7 @@ import { ProjectStore, fail, fingerprint, text, revision } from './store'
 
 const mainSecurityBoundary = 'Run 归属由会话自报；替换授权来自面板一次性凭据。同一系统用户的本机程序可读写插件数据。'
 
-export function mainAgent(orca: OrcaWorkerApi, store: ProjectStore, runtime: CoordinatorRuntime, changed: () => void) {
+export function mainAgent(orca: OrcaWorkerApi, store: ProjectStore, runtime: CoordinatorRuntime, changed: () => void, bound: () => void) {
   async function read(): Promise<WorkspaceBinding> {
     const w = await store.workspace()
     const t = w.takeover
@@ -46,6 +46,7 @@ export function mainAgent(orca: OrcaWorkerApi, store: ProjectStore, runtime: Coo
       const session = await runtime.identify(caller, runId, input.currentRunId)
       await store.bindWorkspace(revision(input.revision), runId, { id: text(input.requestId, '请求编号', 200), input }, session, input.token, input.checkOnly)
       if (input.checkOnly) return { ...await read(), check: { canTakeOver: true, message: '可以接管；本次只核实，凭据和绑定均未改变', runId, session } }
+      bound()
       await flushRetired(); changed()
     } else if (input.operation !== 'read') fail('不支持的工作间操作')
     return read()

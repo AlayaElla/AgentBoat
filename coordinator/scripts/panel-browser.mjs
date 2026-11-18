@@ -41,8 +41,8 @@ async function setup(options = {}) {
     const acceptance = id => ({ id, title: '成果 ' + id, details: '核对布局和内容', artifactIds: [], revision: 1, status: 'pending', history: [], fingerprint: 'version-1-' + id });
     const task = { id: 't1', title: '页面交付', goal: '完成页面', progress: '已交付', phase: 'ready', executions: [], artifacts: [], acceptance: [acceptance('a1'), acceptance('a2')], decisions: [], updatedAt: new Date().toISOString(), sourceIds: [] };
     const project = { version: 1, ref: { id: 'p1', name: '示例项目', hostId: 'local', repoId: 'repo', workspace: 'id:repo', path: '/example' }, revision: 2, runId: 'run_project', roles: { design: 'claude', code: 'codex', review: 'codex' }, tasks: [task], events: [], deliveries: [], requests: [] };
-    const p = (id, relation, status = 'connected', scope = 'details') => ({ id, name: '工作间 ' + id, workspaceId: 'ws-' + id, state: status === 'pending' ? 'pending' : status === 'revoked' ? 'revoked' : 'active', relation, sharingSet: false, status, scope: 'none', projectIds: [], acceptTasks: 'deny', lastSyncAt: new Date(now - 100000).toISOString(), receivedAt: new Date(now).toISOString(), ...(status === 'connected' ? { report: { scope, acceptTasks: 'confirm', projects: scope === 'none' ? [] : [{ id: 'remote-p', name: '开放的项目', updatedAt: new Date().toISOString(), pending: 0, counts: { blocked: 1 }, ...(scope === 'details' ? { tasks: [{ title: '受阻任务', phase: 'blocked', decisions: [], acceptance: [] }] } : {}) }] } } : {}) });
-    const links = { version: 1, revision: 1, workspaceId: 'self', name: '我的工作间', enabled: false, host: '127.0.0.1', port: 0, publicUrl: '', tls: false, listening: '', error: '', peers: [p('up', 'above'), p('down', 'below'), p('off', 'below', 'offline'), p('side', 'peer'), p('free', undefined), p('pending', undefined, 'pending'), p('revoked', 'below', 'revoked')], requests: [{ id: 'r1', peerId: 'up', workspaceId: 'ws-up', direction: 'incoming', title: '请帮忙整理', context: '背景', expected: '一份说明', links: [], createdAt: new Date().toISOString(), updates: [{ id: 'u1', status: 'confirm', note: '', links: [], at: new Date().toISOString() }] }] };
+    const p = (id, relation, status = 'connected', scope = 'details') => ({ id, name: '工作间 ' + id, workspaceId: 'ws-' + id, state: status === 'pending' ? 'pending' : status === 'revoked' ? 'revoked' : 'active', relation, sharingSet: false, status, scope: 'none', projectIds: [], lastSyncAt: new Date(now - 100000).toISOString(), receivedAt: new Date(now).toISOString(), ...(status === 'connected' ? { report: { scope, projects: scope === 'none' ? [] : [{ id: 'remote-p', name: '开放的项目', updatedAt: new Date().toISOString(), pending: 0, counts: { blocked: 1 }, ...(scope === 'details' ? { tasks: [{ title: '受阻任务', phase: 'blocked', decisions: [], acceptance: [] }] } : {}) }] } } : {}) });
+    const links = { version: 1, revision: 1, workspaceId: 'self', name: '我的工作间', enabled: false, host: '127.0.0.1', port: 0, publicUrl: '', tls: false, listening: '', error: '', peers: [p('up', 'above'), p('down', 'below'), p('off', 'below', 'offline'), p('side', 'peer'), p('free', undefined), p('pending', undefined, 'pending'), p('revoked', 'below', 'revoked')] };
     const live = { ok: true, at: now, agents: [{ id: 'agent-need', projectId: 'p1', agent: 'codex', role: 'worker', state: 'need', rawState: 'waiting', verified: true, title: '等批准', last: '等待用户批准', since: now - 60000 }, { id: 'agent-work', projectId: 'p1', agent: 'claude', role: 'session', state: 'work', rawState: 'working', verified: false, title: '正在工作', last: '正在处理', since: now - 20000 }] };
     const workspace = { revision: 1, runId: options.unbound ? '' : 'run_main', ...(!options.unbound ? { session: { handle: 'main', agent: 'claude', title: '统筹会话', online: 'online' } } : {}) };
     const sessions = ['甲', '乙'].map((name, i) => ({ handle: 'session-' + i, title: name + '会话', workspace: 'identity:test', workspaceName: '示例工作区', path: '/test/工作区 with spaces', agent: i ? 'codex' : 'claude', online: 'online' }));
@@ -81,7 +81,6 @@ async function setup(options = {}) {
         if (input.operation === 'share') Object.assign(peer, input, { sharingSet: true });
         links.revision++; return clone(links);
       }
-      if (name === 'workspace.requests') { if (!workspace.runId) throw Error('no main agent'); return clone(links); }
       if (name === 'workspace.agent.targets') return { sessions: clone(sessions), workspaces: [{ workspace: 'identity:test', name: '示例工作区', path: '/test/工作区 with spaces' }] };
       if (name === 'workspace.agent.switch') {
         if (input.revision !== workspace.revision) throw Error('工作间已更新');
@@ -105,9 +104,9 @@ try {
     await setup({ width: wide ? 1040 : 400 });
     await test(`${wide ? 'wide inbox lists every item and scrolls independently' : 'narrow inbox keeps three items and expands on demand'}`, async () => {
       await page.evaluate(() => { fixture.live.agents.push(...Array.from({ length: 40 }, (_, i) => ({ ...fixture.live.agents[0], id: 'need-' + i, state: 'need' }))); fixture.emit(); });
-      await page.waitForFunction(() => document.querySelector('.inbox .pill')?.textContent === '43');
+      await page.waitForFunction(() => document.querySelector('.inbox .pill')?.textContent === '42');
       const inbox = page.locator('.inbox'), more = inbox.getByRole('button', { name: /^再看 / });
-      assert.equal(await inbox.locator('.item:visible').count(), wide ? 43 : 3);
+      assert.equal(await inbox.locator('.item:visible').count(), wide ? 42 : 3);
       if (wide) {
         assert.equal(await more.isVisible(), false);
         assert.equal(await inbox.evaluate(e => e.scrollHeight > e.clientHeight && getComputedStyle(e).overflowY === 'auto'), true);
@@ -119,8 +118,8 @@ try {
         assert.equal(await page.locator('#panel').evaluate(e => e.scrollTop), rootTop);
         assert.equal((await page.locator('.home>section').nth(1).boundingBox()).y, organizationTop);
       } else {
-        assert.equal(await more.textContent(), '再看 40 条'); await more.click();
-        assert.equal(await inbox.locator('.item:visible').count(), 43);
+        assert.equal(await more.textContent(), '再看 39 条'); await more.click();
+        assert.equal(await inbox.locator('.item:visible').count(), 42);
       }
     });
   }
@@ -212,8 +211,8 @@ try {
   });
   await test('v8 mockup pages open in a headless browser', async () => {
     page = await browser.newPage(); page.on('pageerror', e => errors.push(e.message));
-    for (const kind of ['home', 'project', 'task', 'project-settings', 'settings', 'main', 'connections', 'connection', 'add-connection', 'links', 'machines', 'agents', 'request', 'peer', 'peer-project', 'dispatch', 'relation']) {
-      const params = new URLSearchParams({ page: kind, id: ['request'].includes(kind) ? 'r1' : ['connection'].includes(kind) ? 'hermes' : ['task'].includes(kind) ? 't1' : ['relation'].includes(kind) ? 'out' : 'ops', project: 'web', pid: 'ox0' });
+    for (const kind of ['home', 'project', 'task', 'project-settings', 'settings', 'main', 'connections', 'connection', 'add-connection', 'links', 'machines', 'agents', 'peer', 'peer-project', 'relation']) {
+      const params = new URLSearchParams({ page: kind, id: ['connection'].includes(kind) ? 'hermes' : ['task'].includes(kind) ? 't1' : ['relation'].includes(kind) ? 'out' : 'ops', project: 'web', pid: 'ox0' });
       await page.goto(pathToFileURL(path.resolve('../docs/design/workspace-mockup-v8.html')).href + '#' + params); await page.locator('#panel').waitFor();
     }
   });
@@ -255,7 +254,7 @@ try {
   await test('home sections, shared counts, self once, direct peers only, relation wires, details-only red dot', async () => {
     assert.equal(await page.locator('.home>section').count(), 2);
     assert.equal(await page.locator('[data-workspace=self]').count(), 1);
-    assert.equal(await page.locator('.inbox .pill').innerText(), '3');
+    assert.equal(await page.locator('.inbox .pill').innerText(), '2');
     assert.equal(await page.locator('[data-workspace=self] .wsr-top .pill').innerText(), '2');
     assert.equal(await page.locator('[data-workspace=pending],[data-workspace=revoked]').count(), 0);
     assert.equal(await page.locator('.org-up [data-workspace=up],.org-kids [data-workspace=down],.org-side [data-workspace=side]').count(), 3);
@@ -267,10 +266,12 @@ try {
     await page.evaluate(() => { fixture.links.peers.find(p => p.id === 'down').report.scope = 'summary'; fixture.emit(); });
     await page.waitForFunction(() => !document.querySelector('[data-workspace=down] .flag'));
   });
-  await test('remote workspace has connection/projects/requests, readonly summary hides task details', async () => {
+  await test('remote workspace shows connection and projects, readonly summary hides task details', async () => {
     await page.locator('[data-workspace=down] .wsr-h').click();
     const body = page.locator('[data-workspace=down] .wsr-b');
-    assert.equal(await body.getByRole('heading').allTextContents().then(x => x.join(',')), '项目,请求');
+    assert.equal(await body.getByRole('heading').allTextContents().then(x => x.join(',')), '项目');
+    assert.equal(await body.getByText(/已连接/).count(), 1);
+    assert.equal(await body.getByRole('button', { name: '派活', exact: true }).count(), 0);
     assert.equal(await body.getByText('主 agent', { exact: true }).count(), 0);
     await body.getByRole('button', { name: '开放的项目' }).click();
     assert.equal(await page.locator('input,textarea').count(), 0); assert.equal(await page.getByText('受阻任务', { exact: true }).count(), 0);
@@ -415,6 +416,7 @@ try {
     await page.locator('[data-workspace=free]').getByRole('button', { name: '标关系' }).click();
     await page.getByRole('radio', { name: '上级 · 画在你上面' }).check();
     assert.equal(await page.getByLabel('开放范围').inputValue(), 'summary');
+    assert.equal(await page.getByText(/派活|往来请求/).count(), 0);
     assert.equal(await page.getByRole('checkbox', { name: '全部项目', exact: true }).isChecked(), true);
     assert.equal(await page.getByRole('checkbox', { name: '示例项目', exact: true }).isDisabled(), true);
     assert.equal(await page.evaluate(() => fixture.links.peers.find(p => p.id === 'free').relation), undefined);
@@ -440,6 +442,7 @@ try {
     };
     await openPeer();
     await page.getByLabel('开放范围').selectOption('summary');
+    assert.equal(await page.getByText(/派活|往来请求/).count(), 0);
     const selectAll = page.getByRole('checkbox', { name: '全部项目', exact: true });
     const first = page.getByRole('checkbox', { name: '示例项目', exact: true });
     const second = page.getByRole('checkbox', { name: '项目 2', exact: true });
@@ -451,7 +454,7 @@ try {
     await page.getByRole('region', { name: '你向对方开放' }).getByText('全部项目', { exact: true }).waitFor();
     assert.equal(await first.count(), 0);
     await home();
-    await node.getByText(/你开放：全部项目/).waitFor();
+    assert.equal(await node.getByText(/你开放：全部项目/).count(), 0);
     await project();
     await page.getByRole('button', { name: '项目设置', exact: true }).click();
     await page.getByRole('region', { name: '开放给了谁' }).getByText('工作间 free', { exact: true }).waitFor();
@@ -464,17 +467,6 @@ try {
     await page.getByRole('status').filter({ hasText: '已保存' }).waitFor();
     assert.deepEqual(await page.evaluate(() => fixture.calls.filter(c => c.input?.operation === 'share').map(c => [c.input.allProjects, c.input.projectIds])), [[true, ['p1']], [false, ['p1']]]);
   });
-  for (const id of ['down', 'off']) {
-    await setup();
-    await test('dispatch ' + (id === 'off' ? 'offline queues without Run' : 'online addresses peer main'), async () => {
-      await page.locator(`[data-workspace=${id}] .wsr-h`).click(); await page.locator(`[data-workspace=${id}]`).getByRole('button', { name: '派活', exact: true }).click();
-      await page.getByLabel('要做什么').fill('整理资料'); await page.getByLabel('期望结果').fill('一份说明');
-      await page.getByRole('button', { name: '发出', exact: true }).click(); await page.waitForFunction(() => fixture.calls.some(c => c.name === 'workspace.requests'));
-      const c = await page.evaluate(() => fixture.calls.find(c => c.name === 'workspace.requests').input); assert.equal(c.peerId, id); assert.equal(c.runId, undefined); assert.ok(c.requestId);
-    });
-  }
-  await setup({ unbound: true });
-  await test('unbound main disables dispatch and explains why', async () => { await page.locator('[data-workspace=down] .wsr-h').click(); assert.equal(await page.locator('[data-workspace=down]').getByRole('button', { name: '派活', exact: true }).isDisabled(), true); assert.ok(await page.locator('[data-workspace=down] span[title]').getAttribute('title').then(x => x.includes('主 agent'))); });
   await setup();
   await test('host agents distinguish need/work and show one unreadable notice', async () => { await page.getByRole('button', { name: '全部 agent', exact: true }).click(); assert.equal(await page.locator('[data-st=need]').count(), 1); assert.equal(await page.locator('[data-st=work]').count(), 1); assert.ok(!(await page.locator('[data-st=work]').innerText()).includes('未核实')); await page.evaluate(() => { fixture.live.ok = false; fixture.live.agents = []; fixture.emit(); }); await page.getByText('agent 状态读不到', { exact: true }).waitFor(); assert.equal(await page.getByText('agent 状态读不到', { exact: true }).count(), 1); });
   await setup({ manyProjects: true });
@@ -548,11 +540,12 @@ try {
   });
   await setup();
   await test('keyboard tabs, escape navigation, focus, long input retention', async () => { await project(); const tasks = page.getByRole('tab', { name: '任务', exact: true }); await tasks.focus(); await page.keyboard.press('ArrowRight'); assert.equal(await page.getByRole('tab', { name: 'Agent', exact: true }).getAttribute('aria-selected'), 'true'); await page.keyboard.press('Escape'); await page.getByRole('heading', { name: '组织', exact: true }).waitFor(); await page.locator('[data-workspace=off] .wsr-h').focus(); await page.keyboard.press('Enter'); assert.equal(await page.locator('[data-workspace=off] .wsr-h').getAttribute('aria-expanded'), 'true'); });
-  await test('editing retains focus, caret and long text during refresh', async () => {
-    await page.locator('[data-workspace=off]').getByRole('button', { name: '派活', exact: true }).click();
-    const input = page.getByLabel('背景', { exact: true }), text = '一段需要保留的输入。'.repeat(50);
+  await test('editing retains focus and long input during refresh', async () => {
+    await page.getByRole('button', { name: '＋ 连接', exact: true }).click();
+    await page.locator('details', { hasText: '高级' }).locator('summary').click();
+    const input = page.getByLabel('访问地址', { exact: true }), text = 'https://' + 'work-room.'.repeat(45) + 'example.com';
     await input.fill(text); await page.evaluate(() => fixture.emit());
-    await page.waitForFunction(text => document.querySelector('textarea[data-focus="背景"]')?.value === text && document.activeElement?.getAttribute('data-focus') === '背景', text);
+    await page.waitForFunction(text => document.activeElement?.getAttribute('data-focus') === '访问地址' && document.activeElement.value === text, text);
     assert.equal(await input.inputValue(), text); assert.equal(await page.locator('#panel').evaluate(e => e.scrollWidth <= e.clientWidth), true);
   });
   await setup();

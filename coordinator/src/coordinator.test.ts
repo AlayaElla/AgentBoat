@@ -90,7 +90,7 @@ test('hide preserves legacy records and agent writes, excludes all workspace sur
     const all = await worker.request('workspace.overview')
     assert.deepEqual(all.projects.map(p => p.ref.id), ['p2']); assert.deepEqual(all.hidden, [refs[0]])
     assert.deepEqual(all.attention, [])
-    assert.deepEqual(report([hidden], { scope: 'details', allProjects: true, projectIds: ['p1'], acceptTasks: 'deny' }, 'own', 'own').projects, [])
+    assert.deepEqual(report([hidden], { scope: 'details', allProjects: true, projectIds: ['p1'] }, 'own', 'own').projects, [])
     await worker.request('project.agent', { operation: 'submit', projectId: 'p1', revision: hidden.revision, requestId: 'hidden-submit', task: {
       id: 'hidden-task', title: '隐藏中继续工作', goal: '目标', phase: 'blocked', decisions: [{ id: 'ask', question: '隐藏中的问题' }]
     } })
@@ -106,7 +106,7 @@ test('hide preserves legacy records and agent writes, excludes all workspace sur
     const visible = await worker.request('workspace.overview')
     assert.ok(visible.projects.some(p => p.ref.id === 'p1')); assert.equal(visible.hidden!.length, 0)
     assert.equal(visible.attention.length, 3)
-    assert.equal(report([restored], { scope: 'details', allProjects: false, projectIds: ['p1'], acceptTasks: 'deny' }, 'own', 'own').projects.length, 1)
+    assert.equal(report([restored], { scope: 'details', allProjects: false, projectIds: ['p1'] }, 'own', 'own').projects.length, 1)
     const current = await c.store.get('p1')
     await worker.request('project.agent', { operation: 'submit', projectId: 'p1', revision: current.revision, requestId: 'visible-submit', task: {
       id: 'visible-task', title: '恢复后提醒', goal: '目标', phase: 'blocked'

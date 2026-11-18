@@ -1,6 +1,6 @@
 import type {} from 'orca/frame'
 import './protocol'
-import { agentName, groupedAttention, isProjectShared, labels, taskState, requestState, requestStates, scopes, rules, statuses, connectionStates, roles, mainAgentStates } from './model'
+import { agentName, groupedAttention, isProjectShared, labels, taskState, scopes, statuses, connectionStates, roles, mainAgentStates } from './model'
 import type { Overview, Project, Task, ProjectWorkspace } from './model'
 import type { AgentsSnapshot, LiveAgent } from './model'
 import type { LinksSnapshot, Sharing } from './links'
@@ -30,9 +30,7 @@ const peer = () => peers().find(p => p.id === page.id)
 const sharesAllProjects = (p: LinksSnapshot['peers'][number]) => p.state === 'active' && p.scope !== 'none' && p.allProjects
 const pending = (p?: string) => groupedAttention(all.attention).filter(a => !p || a.projectId === p)
 const needs = () => live.ok ? live.agents.filter(a => a.state === 'need') : []
-const requests = () => all.links?.requests ?? []
-const incoming = () => requests().filter(r => r.direction === 'incoming' && requestState(r) === 'confirm')
-const total = () => pending().length + needs().length + incoming().length
+const total = () => pending().length + needs().length
 const projectCount = (id: string) => pending(id).length + needs().filter(a => a.projectId === id).length
 const projectAgents = (id?: string) => live.ok ? live.agents.filter(a => !id || a.projectId === id) : []
 const relative = (at?: number | string) => {
@@ -171,32 +169,23 @@ function ownProjects() {
     return el('div', { class: 'stack g2' }, (all.machines?.length ?? 0) > 1 ? small(`${m.role === 'host' ? '主机' : '电脑'} · ${m.name}`) : null, el('div', { class: 'cards' }, active.sort((a, b) => projectCount(b.ref.id) - projectCount(a.ref.id)).map(projectCard)), idle.length ? el('details', { class: 'fold', open: !!form['找项目'] }, el('summary', {}, `还没有任务的项目 ${idle.length} 个`), el('div', { class: 'cards' }, idle.map(projectCard))) : null)
   }), !all.projects.length ? small('还没有项目，在 Orca 中添加项目后会显示在这里。') : null]
 }
-function dispatchReason(p: LinksSnapshot['peers'][number]) {
-  return !all.workspace.runId ? '先设置主 agent，再派活' : p.status === 'pending' || p.status === 'revoked' ? '先核对有效连接' : p.report?.acceptTasks === 'deny' ? '对方不接受派活；关系不改变权限' : ''
-}
-function dispatchButton(p: LinksSnapshot['peers'][number]) {
-  const reason = dispatchReason(p)
-  return el('span', { title: reason }, button('派活', () => go({ kind: 'dispatch', id: p.id }), 'sm', !!reason, reason))
-}
 function workspaceNode(p?: LinksSnapshot['peers'][number]) {
   const id = p?.id ?? 'self', open = opened[id] ?? false, active = !p || p.status === 'connected', report = active ? p?.report : null
-  const unfinished = requests().filter(r => r.peerId === id && !['rejected', 'completed', 'failed', 'disconnected'].includes(requestState(r)))
   const flagged = p?.relation === 'below' && report?.scope === 'details' && report.projects.some(pr => pr.tasks?.some(t => t.phase === 'blocked'))
   const body = !p ? [row(small(`你的工作间${all.machines?.[0] ? ` · ${all.machines[0].name}` : ''}`), button('全部 agent', () => go({ kind: 'agents' }), 'text sm')),
     el('button', { type: 'button', class: 'lead', onclick: () => { void go({ kind: 'main' }) } }, dot(all.workspace.session?.online === 'online' ? 'ok' : ''), el('span', { class: 't' }, '主 agent'), el('span', { class: 'grow trunc xs muted' }, all.workspace.runId ? `${agentName(all.workspace.session?.agent)} · ${all.workspace.session?.title || ''} · ${all.workspace.session ? mainAgentStates[all.workspace.session.online].label : '未知'}` : '还没有主 agent'), '›'),
     el('div', { class: 'under' }, row(small('外部连接'), all.connections?.map(c => button(c.name, () => go({ kind: 'connection', id: c.id }), 'text sm')), button('＋', () => go({ kind: 'add-connection' }), 'text sm')), ownProjects())]
     : [row(small(active ? `已连接 · ${relative(p.receivedAt)}同步` : `离线 · 最后同步 ${relative(p.lastSyncAt)}`), button('连接设置', () => go({ kind: 'peer', id }), 'text sm')),
-      section('项目', !active ? small('未知') : !report?.projects.length ? small('对方没有向你开放项目') : el('div', { class: 'cards' }, report.projects.map(pr => el('div', { class: 'pcard' }, item(pr.name, pr.counts.working ? `在做 ${pr.counts.working}` : pr.counts.review ? '等对方验收' : '项目进展', () => go({ kind: 'peer-project', id, pid: pr.id })))))),
-      section('请求', dispatchButton(p), unfinished.map(r => el('div', { class: 'pcard' }, item(r.title, requestStates[requestState(r)], () => go({ kind: 'request', id: r.id })))), !unfinished.length ? small('暂无请求') : null)]
+      section('项目', !active ? small('未知') : !report?.projects.length ? small('对方没有向你开放项目') : el('div', { class: 'cards' }, report.projects.map(pr => el('div', { class: 'pcard' }, item(pr.name, pr.counts.working ? `在做 ${pr.counts.working}` : pr.counts.review ? '等对方验收' : '项目进展', () => go({ kind: 'peer-project', id, pid: pr.id }))))))]
   return el('article', { class: `wsr ${p ? '' : 'me'}`, 'data-workspace': id }, el('div', { class: 'wsr-top' },
     el('button', { type: 'button', class: 'wsr-h', 'aria-expanded': String(open), 'aria-controls': `workspace-${id}`, title: p ? `${p.name} · ${p.relation ? { above: '你标的上级', below: '你标的下级', peer: '你标的平级' }[p.relation] : '还没标关系'}` : '我的工作间', onclick: () => { opened[id] = !open; remember(); render() } },
       dot(active ? 'ok' : '', active ? '已连接' : '离线'), flagged ? dot('bad flag', '有受阻的任务') : null, el('span', { class: 'name trunc' }, p?.name ?? all.links?.name ?? '我的工作间'), !p ? tag('我', 'solid') : null,
-      el('span', { class: 'sum trunc xs muted' }, p ? [sharesAllProjects(p) ? '你开放：全部项目' : '', !active ? `离线 · 最后同步 ${relative(p.lastSyncAt)}` : report?.projects.length ? `${report.projects.length} 个项目` : '', active && unfinished.length ? `${unfinished.length} 个请求` : ''].filter(Boolean).join(' · ') : `${all.projects.length} 个项目`), pill(p ? incoming().filter(r => r.peerId === id).length : pending().length + needs().length), '›'),
+      el('span', { class: 'sum trunc xs muted' }, p ? !active ? `离线 · 最后同步 ${relative(p.lastSyncAt)}` : report?.projects.length ? `${report.projects.length} 个项目` : '' : `${all.projects.length} 个项目`), p ? null : pill(total()), '›'),
     p && !p.relation ? button('标关系', () => go({ kind: 'relation', id }), 'sm') : null), open ? el('div', { class: 'wsr-b', id: `workspace-${id}` }, body) : null)
 }
 function home() {
-  const entries = [...needs().map(a => item(a.title, `agent 等你 · ${agentName(a.agent)}`, () => go({ kind: 'agents' }), dot('need'))), ...pending().map(a => item(a.title, `${a.kind === 'review' ? `${a.count} 项成果等你验收` : a.kind === 'decision' ? '待决定' : '受阻'} · ${all.projects.find(p => p.ref.id === a.projectId)?.ref.name || ''}`, () => go({ kind: 'task', projectId: a.projectId, id: a.taskId }), dot(a.kind === 'blocked' ? 'bad' : 'need'))), ...incoming().map(r => item(r.title, `来自 ${peers().find(p => p.id === r.peerId)?.name || ''} · 待你确认`, () => go({ kind: 'request', id: r.id }), dot('need')))]
-  const direct = peers().filter(p => ['connected', 'offline'].includes(p.status)), up = direct.filter(p => p.relation === 'above'), down = direct.filter(p => p.relation === 'below').sort((a, b) => Number(incoming().some(r => r.peerId === b.id)) - Number(incoming().some(r => r.peerId === a.id)) || Number(a.status === 'offline') - Number(b.status === 'offline')), side = direct.filter(p => p.relation === 'peer'), free = direct.filter(p => !p.relation)
+  const entries = [...needs().map(a => item(a.title, `agent 等你 · ${agentName(a.agent)}`, () => go({ kind: 'agents' }), dot('need'))), ...pending().map(a => item(a.title, `${a.kind === 'review' ? `${a.count} 项成果等你验收` : a.kind === 'decision' ? '待决定' : '受阻'} · ${all.projects.find(p => p.ref.id === a.projectId)?.ref.name || ''}`, () => go({ kind: 'task', projectId: a.projectId, id: a.taskId }), dot(a.kind === 'blocked' ? 'bad' : 'need')))]
+  const direct = peers().filter(p => ['connected', 'offline'].includes(p.status)), up = direct.filter(p => p.relation === 'above'), down = direct.filter(p => p.relation === 'below').sort((a, b) => Number(a.status === 'offline') - Number(b.status === 'offline')), side = direct.filter(p => p.relation === 'peer'), free = direct.filter(p => !p.relation)
   return [!all.workspace.runId ? callout('还没有主 agent，请在设置中绑定。') : null, peers().some(p => p.status === 'pending') ? button('有工作间连接待核对', () => go({ kind: 'links' }), 'text') : null,
     all.error ? callout(all.error, 'danger') : null, all.links?.error ? callout(all.links.error, 'danger') : null,
     all.connections?.filter(c => c.enabled && c.state === 'error').map(c => button(`外部连接「${c.name}」异常`, () => go({ kind: 'connection', id: c.id }), 'text')),
@@ -270,14 +259,13 @@ function projectPage() {
   return [row(el('h2', { class: 'h1 grow trunc' }, p.ref.name), openMain, button('项目设置', () => go({ kind: 'project-settings', projectId: p.ref.id }), 'text sm')), reason && reason !== error ? callout(reason) : null, tabs(), el('div', { role: 'tabpanel', class: 'stack g3' }, tab === 'agents' ? agentsPage(p.ref.id) : tab === 'tasks' ? p.tasks.map(t => item(t.title, `${labels[taskState(t)]} · ${relative(t.updatedAt)}`, () => go({ kind: 'task', projectId: p.ref.id, id: t.id }))) : tab === 'messages' ? [section('通知', p.deliveries.map(d => card(d.subject, small(`${d.state === 'uncertain' ? '待核对，不会自动重发' : d.state === 'sent' ? '已通知' : '待通知'}`), small(d.error || ''), d.state === 'pending' ? button('发送通知', () => act(async () => { await req('project.deliver', { projectId: p.ref.id, deliveryId: d.id }); await refresh() })) : null))), section('来源消息', p.events.map(e => card(e.text)))] : feedbackCards(p.tasks.filter(t => t.phase === 'blocked' || t.decisions.some(d => d.answer === undefined) || t.phase === 'ready' && t.acceptance.some(a => a.status === 'pending'))))]
 }
 function sharingFields(p: LinksSnapshot['peers'][number], suggestion?: Sharing) {
-  const draft: Sharing = form.sharing ??= suggestion ?? { scope: p.scope, acceptTasks: p.acceptTasks, allProjects: p.allProjects === true, projectIds: [...p.projectIds] }
+  const draft: Sharing = form.sharing ??= suggestion ?? { scope: p.scope, allProjects: p.allProjects === true, projectIds: [...p.projectIds] }
   const scope = select('开放范围', scopes, draft.scope, v => { draft.scope = v as Sharing['scope']; form.touched = true; render() })
-  const accept = select('对方给你派活', rules, draft.acceptTasks, v => { draft.acceptTasks = v as Sharing['acceptTasks']; form.touched = true })
   return [scope, draft.scope !== 'none' ? section('开放哪些项目',
     row(check('全部项目', draft.allProjects, v => { form.touched = true; draft.allProjects = v; render() }, { 'data-focus': 'all-projects' }), small('以后新加的项目也会自动开放给对方')),
     all.projects.map(pr => check(pr.ref.name, isProjectShared(pr, draft), v => {
       form.touched = true; draft.projectIds = v ? [...draft.projectIds, pr.ref.id] : draft.projectIds.filter(id => id !== pr.ref.id)
-    }, { disabled: draft.allProjects }))) : null, accept]
+    }, { disabled: draft.allProjects }))) : null]
 }
 async function saveSharing(id: string) {
   all.links = await req('workspace.links', { operation: 'share', revision: all.links!.revision, id, ...form.sharing })
@@ -287,32 +275,26 @@ function peerPage() {
   if (!p) return callout('连接不存在，请返回。')
   if (page.kind === 'peer-project') {
     const pr = p.status === 'connected' ? p.report?.projects.find(pr => pr.id === page.pid) : undefined
-    return !pr ? callout('现在看不到这个项目') : [el('h2', { class: 'h1 any' }, pr.name), callout(`「${p.name}」开放给你的项目，只读。对方开放的是${scopes[p.report!.scope]}。`), small(`${relative(pr.updatedAt)}更新 · 对方待处理 ${pr.pending}`), row(Object.entries(pr.counts).map(([k, n]) => tag(`${(labels as any)[k] || k} ${n}`))), p.report?.scope === 'details' ? pr.tasks?.map(t => card(t.title, small((labels as any)[t.phase] || t.phase), ...t.decisions.map(q => small(`待决定：${q}`)), ...t.acceptance.map(a => small(`待验收：${a}`)))) : null, dispatchButton(p)]
+    return !pr ? callout('现在看不到这个项目') : [el('h2', { class: 'h1 any' }, pr.name), callout(`「${p.name}」开放给你的项目，只读。对方开放的是${scopes[p.report!.scope]}。`), small(`${relative(pr.updatedAt)}更新 · 对方待处理 ${pr.pending}`), row(Object.entries(pr.counts).map(([k, n]) => tag(`${(labels as any)[k] || k} ${n}`))), p.report?.scope === 'details' ? pr.tasks?.map(t => card(t.title, small((labels as any)[t.phase] || t.phase), ...t.decisions.map(q => small(`待决定：${q}`)), ...t.acceptance.map(a => small(`待验收：${a}`)))) : null]
   }
-  if (page.kind === 'dispatch') return [callout(`发给「${p.name}」的主 agent。${p.report ? `对方${rules[p.report.acceptTasks]}派活。` : '离线，连上后才送达；对方接不接受也要到时才知道。'}`), input('要做什么'), input('背景', '', 'textarea'), input('期望结果', '', 'textarea'), input('参考链接（一行一个）', '', 'textarea'), small('只传文字和链接。'), dispatchReason(p) ? callout(dispatchReason(p)) : null, row(button('发出', () => act(async () => {
-    const links = String(form['参考链接（一行一个）'] || '').split('\n').map(s => s.trim()).filter(Boolean)
-    for (const link of links) { let u: URL; try { u = new URL(link) } catch { throw Error(`链接格式不正确：${link}`) }; if (!['http:', 'https:'].includes(u.protocol) || u.username || u.password) throw Error(`只支持无凭据的 HTTP(S) 链接：${link}`) }
-    form.requestId ??= crypto.randomUUID()
-    await req('workspace.requests', { operation: 'send', peerId: p.id, requestId: form.requestId, title: form['要做什么'], context: form['背景'], expected: form['期望结果'], links }); await back(); await refresh(); notice = '已记录派活请求'
-  }), 'primary', !!dispatchReason(p)), button('取消', back))]
   if (page.kind === 'relation') {
     form.relation ??= p.relation ?? 'none'
-    const suggest = (relation: string): Sharing => ({ scope: relation === 'above' ? 'summary' : 'none', acceptTasks: relation === 'none' ? p.acceptTasks : 'confirm', allProjects: relation === 'above', projectIds: [...p.projectIds] })
+    const suggest = (relation: string): Sharing => ({ scope: relation === 'above' ? 'summary' : 'none', allProjects: relation === 'above', projectIds: [...p.projectIds] })
     const first = !p.relation && !p.sharingSet, proposed = first && form.relation !== 'none'
     return [callout('关系只保存在你这边，不发给对方，不改变权限。'), ...Object.entries({ above: '上级 · 画在你上面', below: '下级 · 画在你下面', peer: '平级 · 虚线相连', none: '不标 · 不连线' }).map(([value, title]) => check(title, form.relation === value, () => {
       form.relation = value
       if (first && !form.touched) {
         const draft = form.sharing = suggest(value)
-        form['开放范围'] = draft.scope; form['对方给你派活'] = draft.acceptTasks
+        form['开放范围'] = draft.scope
       }
       render()
-    }, { type: 'radio', name: 'relation', value })), proposed ? section('你这边对它的设置', sharingFields(p, suggest(form.relation))) : !first ? callout(`当前开放设置：${scopes[p.scope]}${sharesAllProjects(p) ? ' · 全部项目' : ''} · ${rules[p.acceptTasks]}`) : null,
+    }, { type: 'radio', name: 'relation', value })), proposed ? section('你这边对它的设置', sharingFields(p, suggest(form.relation))) : !first ? callout(`当前开放设置：${scopes[p.scope]}${sharesAllProjects(p) ? ' · 全部项目' : ''}`) : null,
       row(button('保存', () => act(async () => { all.links = await req('workspace.links', { operation: 'relate', revision: all.links!.revision, id: p.id, relation: form.relation === 'none' ? null : form.relation }); if (proposed) await saveSharing(p.id); await back(); await refresh() }), 'primary', p.state !== 'active'), button('取消', back))]
   }
   const sharing = sharesAllProjects(p) && !form.editingSharing
-    ? row(el('span', {}, '全部项目'), small(`${scopes[p.scope]} · ${rules[p.acceptTasks]}`), button('编辑开放设置', () => { form.editingSharing = true; render(); root.querySelector<HTMLElement>('[data-focus="开放范围"]')?.focus() }, 'text sm'))
+    ? row(el('span', {}, '全部项目'), small(scopes[p.scope]), button('编辑开放设置', () => { form.editingSharing = true; render(); root.querySelector<HTMLElement>('[data-focus="开放范围"]')?.focus() }, 'text sm'))
     : [sharingFields(p), button('保存', () => act(async () => { await saveSharing(p.id); form.editingSharing = false; notice = '已保存' }), 'primary', p.state !== 'active')]
-  return [el('h2', { class: 'h1 any' }, p.name), small(`${statuses[p.status]} · 最后同步 ${relative(p.lastSyncAt)}`), section('关系', small(p.relation ? { above: '上级', below: '下级', peer: '平级' }[p.relation] : '未标'), button('改关系', () => go({ kind: 'relation', id: p.id }), '', p.state !== 'active')), section('对方向你开放', small(p.report ? scopes[p.report.scope] : '未知'), small(p.report ? `你给对方派活：${rules[p.report.acceptTasks]}` : '派活规则未知'), dispatchButton(p)), section('往来请求', requests().filter(r => r.peerId === p.id).map(r => item(r.title, requestStates[requestState(r)], () => go({ kind: 'request', id: r.id })))), section('你向对方开放', sharing),
+  return [el('h2', { class: 'h1 any' }, p.name), small(`${statuses[p.status]} · 最后同步 ${relative(p.lastSyncAt)}`), section('关系', small(p.relation ? { above: '上级', below: '下级', peer: '平级' }[p.relation] : '未标'), button('改关系', () => go({ kind: 'relation', id: p.id }), '', p.state !== 'active')), section('对方向你开放'), section('你向对方开放', sharing),
     check('确认断开这个工作间', !!form.revoke, v => { form.revoke = v; render() }), button('断开连接', () => act(async () => { all.links = await req('workspace.links', { operation: 'revoke', id: p.id }); await go({ kind: 'links' }); await refresh() }), 'danger', !form.revoke)]
 }
 function linksPage() {
@@ -414,7 +396,7 @@ function mainPage() {
 }
 function content(): any {
   if (page.projectId) return projectPage()
-  if (['peer', 'relation', 'dispatch', 'peer-project'].includes(page.kind)) return peerPage()
+  if (['peer', 'relation', 'peer-project'].includes(page.kind)) return peerPage()
   if (page.kind === 'links') return linksPage()
   if (page.kind === 'connection' || page.kind === 'add-connection') return connectionPage()
   if (page.kind === 'agents') return [agentsPage(), small('只列本机实时状态；已完成保留 24 小时。其他工作间没有上报 agent 状态。')]
@@ -423,10 +405,6 @@ function content(): any {
   if (page.kind === 'connections') return [all.connections?.map(c => item(c.name, `${c.type === 'a2a' ? 'A2A agent' : '飞书'} · ${connectionStates[c.state]}`, () => go({ kind: 'connection', id: c.id }))), button('添加连接', () => go({ kind: 'add-connection' }), 'primary')]
   if (page.kind === 'machines') return [all.machines?.map(m => card(m.name, small(m.role === 'host' ? '主机' : '附属机器'))), select('我在哪台电脑上', Object.fromEntries((all.machines ?? []).map(m => [m.id, m.name])), 'local', v => persist('panel.machine', v))]
   if (page.kind === 'hidden') return all.hidden?.length ? all.hidden.map(p => item(p.name, p.path, () => go({ kind: 'project-settings', projectId: p.id }))) : small('没有隐藏的项目')
-  if (page.kind === 'request') {
-    const r = requests().find(r => r.id === page.id)
-    return !r ? callout('请求不存在') : [el('h2', { class: 'h1 any' }, r.title), tag(requestStates[requestState(r)]), small(`来自 ${peers().find(p => p.id === r.peerId)?.name || r.workspaceId}`), section('背景', el('p', { class: 'any' }, r.context)), section('期望结果', el('p', { class: 'any' }, r.expected)), ...r.links.map(url => button(url, () => orca.shell?.openExternal(url), 'text')), ...r.updates.map(u => card(requestStates[u.status], small(u.note))), r.direction === 'outgoing' && requestState(r) === 'sent' && peers().find(p => p.id === r.peerId)?.status !== 'connected' ? callout('对方离线，连上后才会送达。') : null, r.direction === 'incoming' && requestState(r) === 'confirm' ? [input('说明', '', 'textarea'), row(...['accepted', 'rejected'].map(status => button(status === 'accepted' ? '接受' : '拒绝', () => act(async () => { await req('workspace.requests', { operation: 'decide', peerId: r.peerId, id: r.id, requestId: crypto.randomUUID(), status, note: form['说明'] }); await refresh() }), status === 'accepted' ? 'primary' : '')))] : null]
-  }
   return home()
 }
 function render(y = root.scrollTop) {
@@ -434,7 +412,7 @@ function render(y = root.scrollTop) {
   const focused = document.activeElement as HTMLInputElement | null, focusKey = focused?.dataset.focus, selection = focused && ['text', 'search', 'password'].includes(focused.type) || focused?.tagName === 'TEXTAREA' ? [focused?.selectionStart, focused?.selectionEnd] : null
   root.setAttribute('aria-busy', String(busy))
   root.inert = busy
-  const title = ({ home: '工作间', settings: '设置', main: '主 agent', connections: '外部连接', connection: '连接', 'add-connection': '添加连接', links: '工作间连接', machines: '机器', hidden: '隐藏的项目', relation: '标关系', dispatch: '派活', agents: 'Agent', request: '请求', peer: '工作间', 'peer-project': '项目', project: '项目', task: '任务', 'project-settings': '项目设置' } as any)[page.kind] || '工作间'
+  const title = ({ home: '工作间', settings: '设置', main: '主 agent', connections: '外部连接', connection: '连接', 'add-connection': '添加连接', links: '工作间连接', machines: '机器', hidden: '隐藏的项目', relation: '标关系', agents: 'Agent', peer: '工作间', 'peer-project': '项目', project: '项目', task: '任务', 'project-settings': '项目设置' } as any)[page.kind] || '工作间'
   root.replaceChildren(el('header', { class: 'top' }, page.kind !== 'home' ? button('‹ 返回', back, 'text back') : null, el('h1', { class: 'h1 grow trunc', tabindex: '-1', 'data-heading': '' }, title), page.kind !== 'home' && all ? button(`待处理 ${total()}`, () => go({ kind: 'home' }, true), 'text sm') : null, button('↻', () => refresh(true), 'text icon', false, '刷新'), button('⚙', () => go({ kind: 'settings' }), 'text icon', false, '设置')))
   if (error) root.append(callout(error, 'danger'))
   if (notice) root.append(callout(notice))

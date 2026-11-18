@@ -5,6 +5,7 @@ import { mkdir, writeFile } from 'node:fs/promises'
 import type { StorageApi } from 'orca'
 import { taskState, type Acceptance, type Artifact, type Project, type ProjectRef, type SourceEvent, type Task, type Workspace, type Overview, type Attention, type Messaging, type AgentSession, sourceName } from './model'
 
+export const maxMessageLength = 16000
 export function fail(message: string): never { throw Object.assign(new Error(message), { code: 'invalid_request' }) }
 export function object(value: unknown): Record<string, any> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) fail('请求必须是对象')

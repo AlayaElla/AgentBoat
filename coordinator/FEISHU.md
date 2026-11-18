@@ -35,6 +35,6 @@
 
 `workspace.reply` 输入 `{runId,eventId,requestId,text}`，对应 CLI `feishu-reply`。来源决定回复目标，绑定 Run 和允许范围均会检查。相同 requestId 必须有相同正文与来源；裁剪后仍可校验去重摘要。
 
-回复决定和验收提醒会调用批量 project.feedback（items 只有当前一项），校验事项尚待用户处理，写入反馈原话与来源。删除飞书连接只清除其配置、密钥、收发记录，其他工作间请求通知的去重回执保留。
+回复决定和验收提醒会调用批量 project.feedback（items 只有当前一项），校验事项尚待用户处理，写入反馈原话与来源。删除飞书连接会清除该连接的配置、密钥和收发记录。
 
 开发和发布流程见 [README](README.md)。

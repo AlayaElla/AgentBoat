@@ -35,7 +35,7 @@ syncBuiltinESMExports();`);
   } finally { rmSync(dir, {recursive:true,force:true}); }
 });
 
-test('named connection CLI maps read/check/send/reply and takes message JSON only from stdin', () => {
+test('connection and link CLI take message JSON from stdin', () => {
   const dir = mkdtempSync(path.join(os.tmpdir(), 'connection-client-'));
   const fixture = path.join(dir, 'orca-fixture.mjs');
   writeFileSync(fixture, `import cp from 'node:child_process';
@@ -49,6 +49,9 @@ syncBuiltinESMExports();`);
       assert.equal(value.handler, 'workspace.connections');
       assert.deepEqual(value.input, ['read','check'].includes(operation) ? {operation,name:'Hermes'} : {...input,operation});
     }
+    const input = { id: 'local-connection', runId: 'mock-main', requestId: 'mock-message', text: '模拟主 agent 消息' };
+    const value = JSON.parse(execFileSync(process.execPath, ['--import', pathToFileURL(fixture).href, 'scripts/client.mjs', 'links-send'], { encoding: 'utf8', windowsHide: true, input: JSON.stringify(input) }));
+    assert.deepEqual(value, { handler: 'workspace.links', input: { ...input, operation: 'send' } });
   } finally { rmSync(dir, {recursive:true,force:true}); }
 });
 

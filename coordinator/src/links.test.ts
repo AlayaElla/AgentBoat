@@ -66,7 +66,6 @@ test('one-click invite binds the selected address and keeps the assigned port af
     assert.equal(joined.enabled, false)
     assert.equal(joined.peers[0].endpoint, s.publicUrl)
     assert.equal(joined.peers[0].scope, 'none')
-    assert.equal(joined.peers[0].acceptTasks, 'deny')
     assert.equal(Buffer.from(b.secrets.get(`workspace-link:${joined.peers[0].id}`)!, 'base64url').length, 32)
   } finally { a.links.stop(); b.links.stop(); restarted.stop() }
 })
@@ -79,10 +78,13 @@ test('relations remain local, saved sharing is sticky, offline time survives a n
     const related = await b.links.relate({ revision: s.revision, id: p.id, relation: 'above' })
     assert.equal(related.peers[0].relation, 'above'); assert.equal(related.peers[0].scope, 'none')
     assert.equal((await a.links.snapshot()).peers[0].relation, undefined)
-    const shared = await b.links.share({ revision: related.revision, id: p.id, scope: 'summary', projectIds: ['p1'], acceptTasks: 'confirm' })
+    const legacy = b.storage.get('workspace.links').peers[0]
+    legacy.acceptTasks = 'auto'
+    assert.equal('acceptTasks' in (await b.links.snapshot()).peers[0], false)
+    const shared = await b.links.share({ revision: related.revision, id: p.id, scope: 'summary', projectIds: ['p1'] })
     assert.equal(shared.peers[0].sharingSet, true)
     const changed = await b.links.relate({ revision: shared.revision, id: p.id, relation: 'below' })
-    assert.equal(changed.peers[0].scope, 'summary'); assert.equal(changed.peers[0].acceptTasks, 'confirm')
+    assert.equal(changed.peers[0].scope, 'summary')
     const wire = report(b.projects, changed.peers[0], 'test', 'test')
     assert.equal('relation' in wire, false); assert.equal('sharingSet' in wire, false)
     a.links.stop(); const offline = await b.links.refresh()
@@ -100,7 +102,7 @@ test('all projects uses the current visible projects and preserves the legacy se
     const joined = await b.links.join((await a.links.invite()).invitation!.code), id = joined.peers[0].id
     const share = async (settings: { allProjects?: unknown; projectIds?: string[]; scope?: string }) => {
       const previous = await a.links.snapshot()
-      return a.links.share({ id, revision: previous.revision, scope: 'summary', acceptTasks: 'confirm', ...settings })
+      return a.links.share({ id, revision: previous.revision, scope: 'summary', ...settings })
     }
     const reported = async () => (await b.links.refresh()).peers[0].report!.projects.map(p => p.id)
     await share({ projectIds: ['p1'] })
@@ -158,11 +160,11 @@ test('two loopback workspaces pair once, share only selected local projects, cha
     assert.equal(await post(invitation.listening, '/pair', { invite: decoded.token }), 401)
     const setA = async (scope: string, projectIds = ['p1']) => {
       const s = await a.links.snapshot()
-      await a.links.share({ id: peer.id, revision: s.revision, scope, projectIds, acceptTasks: 'confirm' })
+      await a.links.share({ id: peer.id, revision: s.revision, scope, projectIds })
       return (await b.links.refresh()).peers[0].report!
     }
     let r = await setA('summary')
-    assert.equal(r.acceptTasks, 'confirm')
+    assert.equal('acceptTasks' in r, false)
     assert.deepEqual(r.projects.map(p => p.id), ['p1'])
     assert.equal(r.projects[0].tasks, undefined)
     assert.equal(r.projects[0].pending, 2)
@@ -177,7 +179,7 @@ test('two loopback workspaces pair once, share only selected local projects, cha
     await b.links.join((await c.links.invite()).invitation!.code)
     let bs = await b.links.snapshot()
     const bc = bs.peers.find(p => p.workspaceId !== invitation.workspaceId)!
-    await b.links.share({ id: bc.id, revision: bs.revision, scope: 'details', projectIds: ['p1'], acceptTasks: 'auto' })
+    await b.links.share({ id: bc.id, revision: bs.revision, scope: 'details', projectIds: ['p1'] })
     const thirdParty = (await c.links.snapshot()).peers[0].report!
     assert.equal(thirdParty.projects[0].name, 'B private project')
     assert.equal(JSON.stringify(thirdParty).includes('A private project'), false)
@@ -218,14 +220,14 @@ test('invites expire/cancel, malformed and oversized requests fail closed, expli
     assert.equal(await post(s.listening, '/pair', { junk: 'x'.repeat(181000) }), 400)
     await b.links.join((await a.links.invite()).invitation!.code)
     const as = await a.links.snapshot(), p = as.peers[0]
-    await assert.rejects(() => a.links.share({ id: p.id, revision: as.revision, scope: 'details', projectIds: ['external-project'], acceptTasks: 'auto' }))
+    await assert.rejects(() => a.links.share({ id: p.id, revision: as.revision, scope: 'details', projectIds: ['external-project'] }))
     const token = a.secrets.get(`workspace-link:${p.id}`)!
     const malformed = report([], p, p.workspaceId, 'B')
-    const missing = { ...malformed } as any; delete missing.acceptTasks
-    assert.equal(await post(s.listening, '/sync', { id: p.id, report: missing }, token), 400)
-    assert.equal(await post(s.listening, '/sync', { id: p.id, report: { ...malformed, acceptTasks: 'invalid' } }, token), 400)
-    assert.equal(await post(s.listening, '/sync', { id: p.id, report: { ...malformed, workspaceId: 'wrong' } }, token), 400)
-    assert.equal(await post(s.listening, '/sync', { id: p.id, report: { ...malformed, scope: 'none', projects: [{ secret: 'ignored' }] } }, token), 400)
+    const exchange = { messages: [], received: [] }
+    assert.equal(await post(s.listening, '/sync', { id: p.id, report: malformed, exchange }, token), 200)
+    assert.equal(await post(s.listening, '/sync', { id: p.id, report: malformed, exchange: { messages: 'invalid', received: [] } }, token), 400)
+    assert.equal(await post(s.listening, '/sync', { id: p.id, report: { ...malformed, workspaceId: 'wrong' }, exchange }, token), 400)
+    assert.equal(await post(s.listening, '/sync', { id: p.id, report: { ...malformed, scope: 'none', projects: [{ secret: 'ignored' }] }, exchange }, token), 400)
   } finally { a.links.stop(); b.links.stop() }
 })
 
