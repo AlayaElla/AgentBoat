@@ -365,7 +365,12 @@ function linksPage() {
     el('details', { class: 'fold', open: !!form.advanced, ontoggle: (e: Event) => {
       const details = e.currentTarget as HTMLDetailsElement
       if (details.isConnected) form.advanced = details.open
-    } }, el('summary', {}, el('span', { class: 'i', 'aria-hidden': 'true' }, '›'), '高级'), el('div', { class: 'in-fold' },
+    } }, el('summary', { onclick: (e: Event) => {
+      e.preventDefault()
+      const details = (e.currentTarget as HTMLElement).parentElement as HTMLDetailsElement
+      form.advanced = !details.open
+      details.open = form.advanced
+    } }, el('span', { class: 'i', 'aria-hidden': 'true' }, '›'), '高级'), el('div', { class: 'in-fold' },
       check('启用工作间连接', form.enabled ?? s.enabled, v => { form.enabled = v }),
       input('监听 IP', s.host), input('端口', String(s.port), 'number'), input('访问地址', s.publicUrl),
       check('TLS', form.tls ?? s.tls, v => { form.tls = v }),

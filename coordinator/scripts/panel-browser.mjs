@@ -377,8 +377,12 @@ try {
     await advanced.locator('summary').click();
     assert.equal(await advanced.getByLabel('监听 IP', { exact: true }).inputValue(), '100.64.0.42');
     assert.equal(await advanced.getByLabel('端口', { exact: true }).inputValue(), '43123');
-    await advanced.locator('summary').click();
-    await page.getByLabel('对方的连接码').fill('  AB1.fixture  ');
+    await advanced.locator('summary').evaluate(summary => {
+      summary.click();
+      const input = document.querySelector('[data-focus="对方的连接码"]');
+      input.value = '  AB1.fixture  ';
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    });
     await join.click();
     await page.getByRole('status').filter({ hasText: '已加入工作间' }).waitFor();
     assert.deepEqual(await page.evaluate(() => fixture.calls.filter(c => c.name === 'workspace.links').map(c => c.input)), [

@@ -42,7 +42,7 @@ test('HTTP addresses and automatic interface choice use the same Tailscale bound
 })
 
 test('one-click invite binds the selected address and keeps the assigned port after restart; joining needs only the code', async () => {
-  const a = await instance('A', false, () => '127.0.0.2'), b = await instance('B', false)
+  const a = await instance('A', false, () => '::1'), b = await instance('B', false)
   const restarted = a.create()
   try {
     const initial = await a.links.snapshot()
@@ -52,9 +52,9 @@ test('one-click invite binds the selected address and keeps the assigned port af
     assert.equal(initial.enabled, false)
     assert.equal(a.storage.has('workspace.links'), false)
     const s = await a.links.invite()
-    assert.equal(s.host, '127.0.0.2')
+    assert.equal(s.host, '::1')
     assert.ok(s.port > 0)
-    assert.equal(s.publicUrl, `http://127.0.0.2:${s.port}`)
+    assert.equal(s.publicUrl, `http://[::1]:${s.port}`)
     assert.equal(s.listening, s.publicUrl)
     a.links.stop()
     await restarted.start()
