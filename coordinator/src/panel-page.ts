@@ -299,8 +299,63 @@ function peerPage() {
 }
 function linksPage() {
   const s = all.links!
-  return [input('工作间名称', s.name), check('启用工作间连接', form.enabled ?? s.enabled, v => { form.enabled = v }), input('监听 IP', s.host), input('端口', String(s.port), 'number'), input('访问地址', s.publicUrl), check('TLS', form.tls ?? s.tls, v => { form.tls = v }), input('TLS 证书', '', 'textarea'), input('TLS 私钥', '', 'password'), button('保存连接设置', () => act(async () => { all.links = await req('workspace.links', { operation: 'configure', revision: s.revision, name: form['工作间名称'], enabled: form.enabled ?? s.enabled, host: form['监听 IP'], port: Number(form['端口']), publicUrl: form['访问地址'], tls: form.tls ?? s.tls, certificate: form['TLS 证书'], privateKey: form['TLS 私钥'] }); form['TLS 私钥'] = ''; form['TLS 证书'] = ''; notice = '已保存' }), 'primary'), small(s.listening || '未监听'),
-    section('连接工作间', button('生成连接码', () => act(async () => { const result = await req('workspace.links', { operation: 'invite' }); form.invitation = result.invitation; render() })), form.invitation ? card(small(`有效至 ${form.invitation.expiresAt}`), el('code', { class: 'any' }, form.invitation.code), button('取消连接码', () => act(async () => { await req('workspace.links', { operation: 'cancel-invite' }); delete form.invitation }))) : null, input('对方的连接码', '', 'textarea'), button('连接', () => act(async () => { all.links = await req('workspace.links', { operation: 'join', code: form['对方的连接码'] }); form['对方的连接码'] = ''; await refresh() }))),
+  const invitation: LinksSnapshot['invitation'] = form.invitation
+  const code = invitation ? el('textarea', { class: 'in', rows: 2, readonly: true, 'aria-label': '邀请连接码', 'data-focus': '邀请连接码', value: invitation.code }) as HTMLTextAreaElement : null
+  return [
+    button('邀请', () => act(async () => {
+      const { invitation, ...links } = await req('workspace.links', { operation: 'invite' })
+      all.links = links
+      for (const key of ['监听 IP', '端口', '访问地址', 'enabled']) delete form[key]
+      form.invitation = invitation
+      notice = '已生成连接码'
+    }), 'primary'),
+    invitation && code && Date.parse(invitation.expiresAt) > Date.now() ? card(
+      small(`有效至 ${new Date(invitation.expiresAt).toLocaleTimeString()}`), code,
+      row(button('复制连接码', async () => {
+        error = ''; notice = ''
+        if (Date.parse(invitation.expiresAt) <= Date.now()) {
+          delete form.invitation; error = '连接码已过期，请重新邀请'
+        } else {
+          try {
+            await navigator.clipboard.writeText(invitation.code)
+            notice = '已复制连接码'
+          } catch {
+            code.select()
+            if (document.execCommand('copy')) notice = '已复制连接码'
+            else error = '无法自动复制，请复制选中的连接码'
+          }
+        }
+        render()
+      }), button('取消连接码', () => act(async () => {
+        all.links = await req('workspace.links', { operation: 'cancel-invite' })
+        delete form.invitation
+        notice = '已取消连接码'
+      })))) : null,
+    input('对方的连接码', '', 'textarea', () => render()),
+    button('加入', () => act(async () => {
+      const previous = new Set(peers().map(p => p.id))
+      all.links = await req('workspace.links', { operation: 'join', code: form['对方的连接码'].trim() })
+      notice = peers().some(p => !previous.has(p.id) && p.status === 'pending') ? '连接结果待核对，请刷新原连接' : '已加入工作间'
+      form['对方的连接码'] = ''
+    }), 'primary', !form['对方的连接码'].trim()),
+    el('details', { class: 'fold', open: !!form.advanced, ontoggle: (e: Event) => {
+      const details = e.currentTarget as HTMLDetailsElement
+      if (details.isConnected) form.advanced = details.open
+    } }, el('summary', {}, el('span', { class: 'i', 'aria-hidden': 'true' }, '›'), '高级'), el('div', { class: 'in-fold' },
+      input('工作间名称', s.name),
+      check('启用工作间连接', form.enabled ?? s.enabled, v => { form.enabled = v }),
+      input('监听 IP', s.host), input('端口', String(s.port), 'number'), input('访问地址', s.publicUrl),
+      check('TLS', form.tls ?? s.tls, v => { form.tls = v }),
+      input('TLS 证书', '', 'textarea'), input('TLS 私钥', '', 'password'),
+      button('保存连接设置', () => act(async () => {
+        all.links = await req('workspace.links', { operation: 'configure', revision: s.revision, name: form['工作间名称'], enabled: form.enabled ?? s.enabled, host: form['监听 IP'], port: Number(form['端口']), publicUrl: form['访问地址'], tls: form.tls ?? s.tls, certificate: form['TLS 证书'], privateKey: form['TLS 私钥'] })
+        form['TLS 私钥'] = ''; form['TLS 证书'] = ''; delete form.invitation
+        if (all.links?.error) throw new Error(all.links.error)
+        notice = '已保存'
+      })),
+      small(s.listening || '未监听'),
+      el('p', {}, 'Tailscale 流量已有端到端加密，只允许同一网络中有访问权限的设备连入，因此无需证书。'),
+      el('p', {}, '没有 Tailscale 时，可让邀请方监听回环地址，加入方用 SSH 本地端口转发，并让邀请方把访问地址填为加入方的转发入口。'))),
     section('工作间', peers().map(p => item(p.name, statuses[p.status], () => go({ kind: 'peer', id: p.id }))), peers().some(p => p.status === 'pending') ? button('核对连接', () => act(async () => { all.links = await req('workspace.links', { operation: 'refresh' }); await refresh() })) : null)]
 }
 function connectionPage() {

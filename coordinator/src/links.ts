@@ -1,6 +1,8 @@
 import http from 'node:http'
 import https from 'node:https'
-import { isIP } from 'node:net'
+import { BlockList, isIP, type AddressInfo, type LookupFunction } from 'node:net'
+import { lookup } from 'node:dns'
+import { hostname, networkInterfaces } from 'node:os'
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto'
 import type { OrcaWorkerApi } from 'orca/worker'
 import { taskState, type Project, type WorkspaceRequest } from './model'
@@ -37,12 +39,34 @@ const equal = (a: string, b: string) => {
   const x = Buffer.from(a), y = Buffer.from(b)
   return x.length === y.length && timingSafeEqual(x, y)
 }
+const tailscale = new BlockList()
+tailscale.addSubnet('100.64.0.0', 10, 'ipv4')
+tailscale.addSubnet('fd7a:115c:a1e0::', 48, 'ipv6')
+const loopback = new BlockList()
+loopback.addSubnet('127.0.0.0', 8, 'ipv4')
+loopback.addAddress('::1', 'ipv6')
+
+function httpNetwork(host: string): 'loopback' | 'tailscale' | undefined {
+  const address = host.replace(/^\[(.*)\]$/, '$1').toLowerCase().replace(/\.$/, '')
+  const version = isIP(address), family = version === 6 ? 'ipv6' : 'ipv4'
+  if (address === 'localhost' || version && loopback.check(address, family)) return 'loopback'
+  if (address.endsWith('.ts.net') || version && tailscale.check(address, family)) return 'tailscale'
+}
+export function invitationHost(interfaces = networkInterfaces()): string {
+  const addresses = Object.values(interfaces).flat().filter(info => info && !info.internal && httpNetwork(info.address) === 'tailscale')
+  return (addresses.find(info => info?.family === 'IPv4') ?? addresses[0])?.address ?? '127.0.0.1'
+}
 export function endpoint(value: unknown): string {
   let u: URL
   try { u = new URL(text(value, '访问地址', 2048)) } catch { return fail('请填写完整的 HTTP(S) 地址') }
   if (u.username || u.password || u.search || u.hash || u.pathname !== '/' ||
-    !(u.protocol === 'https:' || u.protocol === 'http:' && ['127.0.0.1', '[::1]', 'localhost'].includes(u.hostname))) fail('非回环地址必须使用 HTTPS；地址不能含路径、凭据或参数')
+    !(u.protocol === 'https:' || u.protocol === 'http:' && httpNetwork(u.hostname))) fail('仅回环或 Tailscale 地址可使用 HTTP，其余地址须使用 HTTPS；地址不能含路径、凭据或参数')
   return u.origin
+}
+function validateListener(d: Pick<LinkData, 'host' | 'port' | 'publicUrl' | 'tls' | 'enabled'>) {
+  if (!isIP(d.host) || d.host === '0.0.0.0' || /^[:0]+$/.test(d.host) || !Number.isInteger(d.port) || d.port < 0 || d.port > 65535) fail('请填写明确的监听 IP 与 0–65535 端口，不能绑定所有地址')
+  if (d.publicUrl) endpoint(d.publicUrl)
+  if (d.enabled && !httpNetwork(d.host) && (!d.tls || !d.publicUrl.startsWith('https://'))) fail('此监听地址需要 TLS 和 HTTPS 访问地址')
 }
 function sharing(raw: unknown): Sharing {
   const r = object(raw)
@@ -90,11 +114,23 @@ async function jsonBody(stream: AsyncIterable<Buffer>): Promise<any> {
   for await (const c of stream) { size += c.length; if (size > LIMIT) fail('工作间消息过大'); chunks.push(c) }
   return object(JSON.parse(Buffer.concat(chunks).toString('utf8')))
 }
+// Check the actual destination of a plain HTTP hostname before sending credentials.
+const lookupHttpHost: LookupFunction = (host, options, callback) => {
+  lookup(host, { ...options, all: true }, (error, addresses) => {
+    if (error) return callback(error, '', 0)
+    const network = httpNetwork(host)
+    const safe = addresses.filter(a => network && httpNetwork(a.address) === network)
+    if (!safe.length) return callback(new Error('Invalid HTTP address'), '', 0)
+    if (options.all) callback(null, safe)
+    else callback(null, safe[0].address, safe[0].family)
+  })
+}
 async function call(url: string, route: string, body: unknown, token = ''): Promise<any> {
   const u = new URL(endpoint(url) + route), data = JSON.stringify(body)
   if (Buffer.byteLength(data) > LIMIT) fail('工作间上报过大，请减少开放的项目')
   return new Promise((resolve, reject) => {
-    const req = (u.protocol === 'https:' ? https : http).request(u, { method: 'POST', headers: {
+    const req = (u.protocol === 'https:' ? https : http).request(u, { method: 'POST', rejectUnauthorized: true,
+      ...(u.protocol === 'http:' ? { agent: false, lookup: lookupHttpHost } : {}), headers: {
       'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(data), ...(token ? { Authorization: `Bearer ${token}` } : {})
     } }, res => {
       if (res.statusCode !== 200) { res.resume(); reject(Object.assign(new Error(res.statusCode === 401 ? '连接已断开或凭据无效' : '对端未接受请求，请核对连接状态'), { status: res.statusCode })); return }
@@ -106,7 +142,7 @@ async function call(url: string, route: string, body: unknown, token = ''): Prom
 
 export class WorkspaceLinks {
   readonly requests: WorkspaceRequests
-  private initial: LinkData = { version: 1, revision: 0, workspaceId: randomUUID(), name: '我的工作间', enabled: false, host: '127.0.0.1', port: 0, publicUrl: '', tls: false, peers: [] }
+  private initial: LinkData = { version: 1, revision: 0, workspaceId: randomUUID(), name: hostname() || '我的工作间', enabled: false, host: '127.0.0.1', port: 0, publicUrl: '', tls: false, peers: [] }
   private server?: http.Server | https.Server
   private timer?: ReturnType<typeof setInterval>
   private invitation?: { token: string; expires: number }
@@ -116,7 +152,7 @@ export class WorkspaceLinks {
   private syncing = new Map<string, Promise<void>>()
   private listening = ''
   private error = ''
-  constructor(private orca: Pick<OrcaWorkerApi, 'storage' | 'secrets'>, private projects: () => Promise<Project[]>, private changed: () => void) { this.requests = new WorkspaceRequests(orca.storage) }
+  constructor(private orca: Pick<OrcaWorkerApi, 'storage' | 'secrets'>, private projects: () => Promise<Project[]>, private changed: () => void, private chooseHost = invitationHost) { this.requests = new WorkspaceRequests(orca.storage) }
   private serial<T>(fn: () => Promise<T>): Promise<T> { const p = this.chain.then(fn); this.chain = p.catch(() => {}); return p }
   private async data(): Promise<LinkData> {
     const raw = await this.orca.storage.get('workspace.links')
@@ -147,9 +183,10 @@ export class WorkspaceLinks {
     await this.serial(async () => {
       const d = await this.data()
       if (d.revision !== input.revision) fail('连接设置已更新，请刷新后再保存')
-      if (typeof input.enabled !== 'boolean' || typeof input.tls !== 'boolean' || !isIP(input.host) || ['0.0.0.0', '::'].includes(input.host) || !Number.isInteger(input.port) || input.port < 0 || input.port > 65535) fail('请填写明确的监听 IP 与 0–65535 端口，不能绑定所有地址')
+      if (typeof input.enabled !== 'boolean' || typeof input.tls !== 'boolean') fail('监听与 TLS 设置不正确')
       const publicUrl = input.publicUrl ? endpoint(input.publicUrl) : ''
-      if (input.enabled && !['127.0.0.1', '::1'].includes(input.host) && (!input.tls || !publicUrl.startsWith('https:'))) fail('非回环监听必须配置 TLS 和 HTTPS 访问地址')
+      const next = { ...d, name: text(input.name, '工作间名称', 200), enabled: input.enabled, host: input.host, port: input.port, publicUrl, tls: input.tls, revision: d.revision + 1 }
+      validateListener(next)
       if (input.certificate || input.privateKey) {
         if (!input.certificate || !input.privateKey) fail('请同时填写证书与私钥')
         // Validate before changing either live listener or secret storage.
@@ -157,35 +194,61 @@ export class WorkspaceLinks {
         await this.orca.secrets.set('workspace-links-tls', JSON.stringify({ cert: input.certificate, key: input.privateKey }))
       }
       if (input.enabled && input.tls && !await this.orca.secrets.get('workspace-links-tls')) fail('请填写 TLS 证书与私钥')
-      Object.assign(d, { name: text(input.name, '工作间名称', 200), enabled: input.enabled, host: input.host, port: input.port, publicUrl, tls: input.tls, revision: d.revision + 1 })
-      await this.save(d)
+      await this.save(next)
+      await this.listen(next)
     })
-    await this.start(); this.changed(); return this.snapshot()
+    this.changed(); return this.snapshot()
   }
   async start() {
-    this.stop()
-    this.error = ''
-    const d = await this.serial(() => this.data())
-    if (d.enabled) {
-      try {
-        this.server = d.tls ? https.createServer(JSON.parse(await this.orca.secrets.get('workspace-links-tls') || '{}'), (q, s) => { void this.serve(q, s) }) : http.createServer((q, s) => { void this.serve(q, s) })
-        this.server.requestTimeout = 5000; this.server.headersTimeout = 5000; this.server.maxConnections = 32
-        await new Promise<void>((resolve, reject) => { this.server!.once('error', reject); this.server!.listen(d.port, d.host, resolve) })
-        this.listening = `${d.tls ? 'https' : 'http'}://${isIP(d.host) === 6 ? `[${d.host}]` : d.host}:${(this.server.address() as import('node:net').AddressInfo).port}`
-        this.server.on('error', () => { this.error = '监听已停止，请检查地址与端口'; this.changed() })
-        this.error = ''
-      } catch { this.stop(); this.error = '无法监听，请检查地址、端口和 TLS 证书' }
-    }
+    await this.serial(async () => this.listen(await this.data()))
+    clearInterval(this.timer)
     this.timer = setInterval(() => { void this.refresh().catch(() => {}) }, 10_000); this.timer.unref()
   }
-  stop() { if (this.timer) clearInterval(this.timer); this.server?.closeAllConnections(); this.server?.close(); this.server = undefined; this.listening = ''; this.invitation = undefined }
-  async invite() {
-    const s = await this.snapshot()
-    if (!this.listening) fail('请先启用工作间连接监听')
-    this.invitation = { token: randomBytes(32).toString('base64url'), expires: Date.now() + 120_000 }
-    return { ...s, invitation: { code: `AB1.${Buffer.from(JSON.stringify({ workspaceId: s.workspaceId, name: s.name, url: s.publicUrl || this.listening, token: this.invitation.token })).toString('base64url')}`, expiresAt: new Date(this.invitation.expires).toISOString() } }
+  private async listen(d: LinkData) {
+    this.closeListener()
+    this.error = ''
+    if (d.enabled) {
+      try {
+        validateListener(d)
+        const network = d.tls ? undefined : httpNetwork(d.host)
+        const serve = (q: http.IncomingMessage, s: http.ServerResponse) => {
+          if (network === 'tailscale' && httpNetwork(q.socket.remoteAddress || '') !== network) { s.writeHead(403).end(); return }
+          void this.serve(q, s)
+        }
+        this.server = d.tls ? https.createServer(JSON.parse(await this.orca.secrets.get('workspace-links-tls') || '{}'), serve) : http.createServer(serve)
+        this.server.requestTimeout = 5000; this.server.headersTimeout = 5000; this.server.maxConnections = 32
+        await new Promise<void>((resolve, reject) => { this.server!.once('error', reject); this.server!.listen(d.port, d.host, resolve) })
+        this.listening = `${d.tls ? 'https' : 'http'}://${isIP(d.host) === 6 ? `[${d.host}]` : d.host}:${(this.server.address() as AddressInfo).port}`
+        this.server.on('error', () => { this.closeListener(); this.error = '监听已停止，请检查地址与端口'; this.changed() })
+        this.error = ''
+      } catch { this.closeListener(); this.error = '无法监听，请检查地址、端口和 TLS 证书' }
+    }
   }
-  cancelInvite() { this.invitation = undefined; return this.snapshot() }
+  private closeListener() { this.server?.closeAllConnections(); this.server?.close(); this.server = undefined; this.listening = ''; this.invitation = undefined }
+  stop() { clearInterval(this.timer); this.closeListener() }
+  async invite() {
+    const invitation = await this.serial(async () => {
+      const d = await this.data(), enabled = d.enabled
+      if (!enabled && d.host === this.initial.host && !d.tls && !d.publicUrl) d.host = this.chooseHost()
+      d.enabled = true
+      if (!this.listening) await this.listen(d)
+      if (!this.listening) fail(this.error || '无法启动工作间连接监听')
+      try {
+        const url = endpoint(d.publicUrl || this.listening)
+        if (!enabled || !d.port || !d.publicUrl) {
+          d.port = (this.server!.address() as AddressInfo).port
+          d.publicUrl = url
+          d.revision++
+          await this.save(d)
+        }
+        this.invitation = { token: randomBytes(32).toString('base64url'), expires: Date.now() + 120_000 }
+        return { code: `AB1.${Buffer.from(JSON.stringify({ workspaceId: d.workspaceId, name: d.name, url, token: this.invitation.token })).toString('base64url')}`, expiresAt: new Date(this.invitation.expires).toISOString() }
+      } catch (e) { if (!enabled) this.closeListener(); throw e }
+    })
+    this.changed()
+    return { ...await this.snapshot(), invitation }
+  }
+  async cancelInvite() { await this.serial(async () => { this.invitation = undefined }); return this.snapshot() }
   async join(code: string) {
     let c: Record<string, any>
     try { if (!code.startsWith('AB1.') || code.length > 6000) throw Error(); c = object(JSON.parse(Buffer.from(code.slice(4), 'base64url').toString('utf8'))) } catch { return fail('连接码格式不正确') }

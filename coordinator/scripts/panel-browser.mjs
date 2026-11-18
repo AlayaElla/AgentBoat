@@ -69,6 +69,12 @@ async function setup(options = {}) {
         return clone({ project });
       }
       if (name === 'workspace.links') {
+        if (input.operation === 'invite') {
+          if (window.fixture.inviteError) throw Error(window.fixture.inviteError);
+          Object.assign(links, { enabled: true, host: '100.64.0.42', port: 43123, publicUrl: 'http://100.64.0.42:43123', listening: 'http://100.64.0.42:43123' });
+          return { ...clone(links), invitation: { code: 'AB1.fixture', expiresAt: new Date(Date.now() + 120000).toISOString() } };
+        }
+        if (input.operation === 'join') links.peers.push(p('joined', undefined));
         const peer = links.peers.find(p => p.id === input.id);
         if (input.operation === 'relate') peer.relation = input.relation ?? undefined;
         if (input.operation === 'share') Object.assign(peer, input, { sharingSet: true });
@@ -347,6 +353,39 @@ try {
       await page.getByRole('button', { name: '提交 1 条', exact: true }).click(); await page.getByRole('status').filter({ hasText: '已提交 1 条' }).waitFor();
     });
   }
+  await setup();
+  await test('connection opens with two actions and collapsed advanced settings; invite copies and join needs only a code', async () => {
+    await page.context().grantPermissions(['clipboard-read', 'clipboard-write']);
+    await page.getByRole('button', { name: '设置', exact: true }).click();
+    await page.getByRole('button', { name: '工作间连接', exact: true }).click();
+    const invite = page.getByRole('button', { name: '邀请', exact: true }), join = page.getByRole('button', { name: '加入', exact: true });
+    const advanced = page.locator('details', { hasText: '高级' });
+    assert.equal(await advanced.evaluate(e => e.open), false);
+    for (const label of ['工作间名称', '监听 IP', '端口', '访问地址', 'TLS', 'TLS 证书', 'TLS 私钥']) assert.equal(await advanced.getByLabel(label, { exact: true }).isVisible(), false);
+    assert.equal(await join.isDisabled(), true);
+    await page.evaluate(() => { fixture.inviteError = '无法监听，请检查地址、端口和 TLS 证书'; });
+    await invite.click();
+    await page.getByRole('alert').filter({ hasText: '无法监听' }).waitFor();
+    assert.equal(await page.getByRole('button', { name: '复制连接码' }).count(), 0);
+    await page.evaluate(() => { fixture.inviteError = ''; fixture.calls.length = 0; });
+    await invite.click();
+    await page.getByRole('button', { name: '复制连接码', exact: true }).click();
+    await page.getByRole('status').filter({ hasText: '已复制连接码' }).waitFor();
+    assert.equal(await page.evaluate(() => navigator.clipboard.readText()), 'AB1.fixture');
+    assert.equal(await advanced.evaluate(e => e.open), false);
+    await advanced.locator('summary').click();
+    assert.equal(await advanced.getByLabel('监听 IP', { exact: true }).inputValue(), '100.64.0.42');
+    assert.equal(await advanced.getByLabel('端口', { exact: true }).inputValue(), '43123');
+    await advanced.locator('summary').click();
+    await page.getByLabel('对方的连接码').fill('  AB1.fixture  ');
+    await join.click();
+    await page.getByRole('status').filter({ hasText: '已加入工作间' }).waitFor();
+    assert.deepEqual(await page.evaluate(() => fixture.calls.filter(c => c.name === 'workspace.links').map(c => c.input)), [
+      { operation: 'invite' }, { operation: 'join', code: 'AB1.fixture' }
+    ]);
+    assert.equal(await advanced.evaluate(e => e.open), false);
+    assert.equal(await page.locator('#panel').evaluate(e => e.scrollWidth <= e.clientWidth), true);
+  });
   await setup();
   await test('relation suggestions are drafts, user edits survive relation switches, later relation preserves sharing', async () => {
     await page.locator('[data-workspace=free]').getByRole('button', { name: '标关系' }).click();

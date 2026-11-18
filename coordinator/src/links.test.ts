@@ -1,25 +1,73 @@
 import { assert, test, mockHost, mountWorker } from 'orca/testing'
+import { hostname } from 'node:os'
 import type { OrcaWorkerApi } from 'orca/worker'
-import { WorkspaceLinks, endpoint, report } from './links'
+import { WorkspaceLinks, endpoint, invitationHost, report } from './links'
 import { refs, sample } from './fixtures'
 import { fresh } from './store'
 import { testCoordinator as createCoordinator } from './test-runtime'
 
-async function instance(name: string) {
+async function instance(name: string, configured = true, chooseHost = () => '127.0.0.1') {
   const storage = new Map<string, any>(), secrets = new Map<string, string>()
   const api = { storage: { get: async (k: string) => structuredClone(storage.get(k) ?? null), set: async (k: string, v: any) => { storage.set(k, structuredClone(v)) } },
     secrets: { get: async (k: string) => secrets.get(k) ?? null, set: async (k: string, v: string) => { secrets.set(k, v) }, delete: async (k: string) => { secrets.delete(k) } } }
   const projects = structuredClone([sample().project!, fresh(refs[1])])
   projects[0].ref.name = name + ' private project'
-  const links = new WorkspaceLinks(api as OrcaWorkerApi, async () => projects, () => {})
-  const initial = await links.snapshot()
-  await links.configure({ revision: initial.revision, name, enabled: true, host: '127.0.0.1', port: 0, publicUrl: '', tls: false })
-  return { links, storage, secrets, projects }
+  const create = () => new WorkspaceLinks(api as OrcaWorkerApi, async () => projects, () => {}, chooseHost)
+  const links = create()
+  if (configured) {
+    const initial = await links.snapshot()
+    await links.configure({ revision: initial.revision, name, enabled: true, host: '127.0.0.1', port: 0, publicUrl: '', tls: false })
+  }
+  return { links, storage, secrets, projects, create }
 }
 async function post(url: string, route: string, body: any, token = '') {
-  const r = await fetch(url + route, { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+  const r = await fetch(url + route, { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', Connection: 'close' }, body: JSON.stringify(body) })
   await r.text(); return r.status
 }
+
+test('HTTP addresses and automatic interface choice use the same Tailscale boundaries', () => {
+  for (const host of ['127.0.0.1', '[::1]', 'localhost', '100.64.0.0', '100.127.255.255', '[fd7a:115c:a1e0::1]', '[FD7A:115C:A1E0:FFFF:FFFF:FFFF:FFFF:FFFF]', 'host.example.ts.net']) {
+    assert.equal(endpoint(`http://${host}:8765`), new URL(`http://${host}:8765`).origin)
+  }
+  for (const host of ['100.63.255.255', '100.128.0.0', '[fd7a:115c:a1df::1]', '[fd7a:115c:a1e1::1]', '192.168.0.2', '203.0.113.1', 'ts.net', 'host.ts.net.example', 'notts.net']) {
+    assert.throws(() => endpoint(`http://${host}:8765`))
+    assert.equal(endpoint(`https://${host}:8765`), `https://${host}:8765`)
+  }
+  const v4 = (address: string) => ({ address, family: 'IPv4' as const, internal: false, netmask: '', mac: '', cidr: null })
+  const v6 = { ...v4('fd7a:115c:a1e0::a'), family: 'IPv6' as const, scopeid: 0 }
+  const regular = { ethernet: ['100.63.255.255', '100.128.0.0', '192.168.0.2'].map(v4) }
+  assert.equal(invitationHost(regular), '127.0.0.1')
+  assert.equal(invitationHost({ ...regular, vpn: [v6] }), v6.address)
+  assert.equal(invitationHost({ ...regular, vpn: [v6, v4('100.64.0.1')] }), '100.64.0.1')
+})
+
+test('one-click invite binds the selected address and keeps the assigned port after restart; joining needs only the code', async () => {
+  const a = await instance('A', false, () => '127.0.0.2'), b = await instance('B', false)
+  const restarted = a.create()
+  try {
+    const initial = await a.links.snapshot()
+    assert.equal(initial.name, hostname())
+    assert.equal(initial.enabled, false)
+    assert.equal(a.storage.has('workspace.links'), false)
+    const s = await a.links.invite()
+    assert.equal(s.host, '127.0.0.2')
+    assert.ok(s.port > 0)
+    assert.equal(s.publicUrl, `http://127.0.0.2:${s.port}`)
+    assert.equal(s.listening, s.publicUrl)
+    a.links.stop()
+    await restarted.start()
+    const next = await restarted.invite()
+    assert.equal(next.port, s.port)
+    assert.equal(next.listening, s.listening)
+    const joined = await b.links.join(next.invitation!.code)
+    assert.equal(joined.peers[0].status, 'connected')
+    assert.equal(joined.enabled, false)
+    assert.equal(joined.peers[0].endpoint, s.publicUrl)
+    assert.equal(joined.peers[0].scope, 'none')
+    assert.equal(joined.peers[0].acceptTasks, 'deny')
+    assert.equal(Buffer.from(b.secrets.get(`workspace-link:${joined.peers[0].id}`)!, 'base64url').length, 32)
+  } finally { a.links.stop(); b.links.stop(); restarted.stop() }
+})
 
 test('relations remain local, saved sharing is sticky, offline time survives a new instance', async () => {
   const a = await instance('relation A'), b = await instance('relation B')
@@ -88,8 +136,8 @@ test('two loopback workspaces pair once, share only selected local projects, cha
     const beforeRestart = [...a.storage]
     a.links.stop(); await a.links.start()
     assert.deepEqual([...a.storage], beforeRestart)
-    // Listener port 0 may change after restart: use the new listening address for authorization checks.
     const address = (await a.links.snapshot()).listening
+    assert.equal(address, invitation.listening)
     await a.links.revoke(peer.id)
     assert.equal(await post(address, '/sync', { id: peer.id }, token), 401)
     assert.equal(a.secrets.has(`workspace-link:${peer.id}`), false)
@@ -107,6 +155,7 @@ test('invites expire/cancel, malformed and oversized requests fail closed, expli
     assert.throws(() => endpoint('https://example.com/path'))
     const s = await a.links.snapshot()
     await assert.rejects(() => a.links.configure({ ...s, host: '0.0.0.0' }))
+    await assert.rejects(() => a.links.configure({ ...s, host: '0:0:0:0:0:0:0:0' }))
     await assert.rejects(() => a.links.configure({ ...s, host: '192.0.2.1', tls: false }))
     await assert.rejects(() => a.links.configure({ ...s, revision: s.revision + 1 }))
     const invitation = await a.links.invite(), decoded = JSON.parse(Buffer.from(invitation.invitation!.code.slice(4), 'base64url').toString())
