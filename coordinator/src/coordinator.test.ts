@@ -259,11 +259,16 @@ test('main messages use the existing source queue and retries never duplicate a 
   const host = mockHost({ storage: { 'project:p1': p as any, workspace: { version: 1, revision: 1, runId: 'run_main', requests: [] } } })
   let coordinator!: ReturnType<typeof createCoordinator>
   const sends: { runId: string; body: string }[] = []
-  const runtime: Partial<CoordinatorRuntime> = { projects: async () => refs, verifyRun: async () => {}, send: async (runId, d) => { sends.push({ runId, body: d.body }); return { requestId: 'sent-main-message' } } }
+  let deliveredAfterBinding!: () => void
+  const afterBinding = new Promise<void>(resolve => { deliveredAfterBinding = resolve })
+  const runtime: Partial<CoordinatorRuntime> = { projects: async () => refs, verifyRun: async () => {}, send: async (runId, d) => {
+    sends.push({ runId, body: d.body }); if (runId === 'run_new') deliveredAfterBinding()
+    return { requestId: 'sent-main-message' }
+  } }
   const worker = await mountWorker({ default: (orca: OrcaWorkerApi) => { coordinator = createCoordinator(orca, runtime) } }, { host })
   const input = { projectId: 'p1', revision: 0, requestId: 'message-1', runId: 'run_main', text: '请核对本项目进展' }
   await assert.rejects(() => worker.request('workspace.message', { ...input, runId: 'run_unknown' }))
-  await assert.rejects(() => worker.request('workspace.message', { ...input, projectId: 'p2' }))
+  await assert.rejects(() => worker.request('workspace.message', { ...input, projectId: 'p2', runId: 'run_unknown' }))
   await worker.request('workspace.message', input)
   await worker.request('workspace.message', input)
   await coordinator.flush('p1')
@@ -276,7 +281,22 @@ test('main messages use the existing source queue and retries never duplicate a 
   assert.equal(sends[0].runId, 'run_project')
   assert.ok(sends[0].body.includes('主 agent来源资料'))
   assert.equal((await coordinator.store.get('p2')).events.length, 0)
-  await worker.deactivate()
+  const unbound = { projectId: 'p2', requestId: input.requestId, runId: input.runId, text: input.text }
+  const queued = await worker.request('workspace.message', unbound)
+  assert.equal(queued.queued, '项目还没有主会话，已排队')
+  await worker.request('workspace.message', unbound)
+  await coordinator.flush('p2')
+  assert.equal(sends.length, 1)
+  assert.equal((await coordinator.store.get('p2')).events.length, 1)
+  assert.equal((await coordinator.store.get('p2')).deliveries[0].state, 'pending')
+  await worker.request('project.agent', { operation: 'bind', projectId: 'p2', revision: queued.project!.revision, requestId: 'bind-p2', runId: 'run_new' })
+  await Promise.race([afterBinding, new Promise((_, reject) => { setTimeout(() => reject(Error('绑定后没有启动投递')), 2000).unref() })])
+  await coordinator.flush('p2')
+  await worker.request('workspace.message', unbound)
+  await coordinator.flush('p2')
+  assert.deepEqual(sends.map(s => s.runId), ['run_project', 'run_new'])
+  assert.equal((await coordinator.store.get('p2')).deliveries[0].state, 'sent')
+  coordinator.stop(); await worker.deactivate()
 })
 
 test('project transitions notify main once, including new acceptance versions and completion after feedback', async () => {

@@ -49,7 +49,7 @@
 ## 工作间主 agent
 
 - `main-bind [--check]`（stdin）：`{revision,requestId,runId,token}`，首次绑定可省 token。`--check` 只核实、不生效。
-- `message`：`{projectId,revision,requestId,runId,text}`，成为项目的 workspace-agent 来源。
+- `message`：`{projectId,revision?,requestId,runId,text}`，成为项目的 workspace-agent 来源，runId 必须是已绑定的工作间主 agent Run。尚未绑定项目主会话时，回执显示「项目还没有主会话，已排队」，绑定后由插件投递。脚本在已绑定的工作间主 agent 会话内尝试自动开会话，`autoLaunch` 显示状态、会话 handle 和启动参数或具体原因。回执已排队时保留原 requestId。
 - `hide`、`restore`：`{projectId,revision}`。
 - `delete`：`{projectId,revision,confirm:projectId}`。插件先导出记录（回执里有 exportPath）；有打开的终端或会话就拒绝。只从 Orca 移除登记，磁盘文件和 Git 保留。
 - `connection-send`（stdin）：`{name,runId,requestId,contextId?,text}`。同一事项沿用 contextId。

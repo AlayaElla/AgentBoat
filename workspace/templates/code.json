@@ -1,7 +1,7 @@
 {
   "id": "code",
   "name": "代码项目：Claude 设计，Codex 编码和审查",
-  "mainAgent": { "agent": "claude" },
+  "mainAgent": { "agent": "claude", "model": "claude-opus-5-5", "effort": "xhigh", "surface": "chat" },
   "roles": {
     "design": { "agent": "claude" },
     "code": { "agent": "codex" },

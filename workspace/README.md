@@ -16,7 +16,7 @@ node workspace/workspace.mjs templates
 
 工作间互联在插件“设置 → 其他工作间”中管理；现读命令是 `node coordinator/scripts/client.mjs links-refresh` 与 `links-read`。工作间主 agent 互发消息用 `links-send`，从标准输入接收 `{id,runId,requestId,text}`，其中 runId 为本工作间已绑定的主 agent Run。外部记忆按 workspaceId 独立保存。输入格式和验证边界见 [工作间连接](../coordinator/LINKS.md)。
 
-默认 [templates/code.json](templates/code.json)：项目主 agent Claude，设计 Claude，代码和审查 Codex，来源 empty。模板可直接编辑 JSON；agent 支持 claude/codex，可附 model 和 effort，effort 需要 model。没有指定模型时跟随 Orca 设置。每项工作只起需要的 agent。
+默认 [templates/code.json](templates/code.json) 使用 Claude Opus 5.5、`xhigh` 和 `chat` 启动项目主 agent。设计由 Claude 负责，代码和审查由 Codex 负责，来源为 `empty`。模板可设置 `agent`、`model`、`effort` 和 `surface`，其中 `effort` 需要 `model`。手动立项和自动开项目主会话共用模板的启动参数。
 
 保存 UTF-8 JSON 后调用（支持 BOM）：
 
@@ -71,7 +71,7 @@ node workspace/project-skills.mjs publish --root <工作树> --name demo-check -
 
 ## 直接派活
 
-从 `node coordinator/scripts/client.mjs projects` 取得完整项目编号，核对路径、repoId、hostId。项目必须已绑定主 agent，必须为有提交的 Git 仓库。
+从 `node coordinator/scripts/client.mjs projects` 取得完整项目编号，核对路径、repoId、hostId。项目必须是本机登记且已有提交的 Git 仓库。未绑定项目主 agent 时，工作间主 agent 先自动开主会话。
 
 ```json
 {
@@ -90,7 +90,13 @@ node workspace/project-skills.mjs publish --root <工作树> --name demo-check -
 node workspace/workspace.mjs dispatch dispatch.json
 ```
 
-脚本必须在 Orca 会话内运行，从 Orca 环境取实际调用会话，不接受伪造 sender 或主 Run。先登记插件任务和项目内 `.agentboat/assignments/` 来源原文，再用 `orca worktree create --no-parent --agent ... --setup skip`，登记启动回执并通知项目主 Run。直接派活的来源在任务 goal、progress 与来源成果中，可在项目任务中打开；插件 events 的 workspace-agent 来源专用于真正主 Run 的 `message`。独立 agent 完成后向项目主 Run 回报，不由启动脚本代验收。没有 Orca Task/Dispatch 的直接启动不伪造执行编号。
+脚本在已绑定的工作间主 agent 会话内运行，从 Orca 环境取实际调用会话。先登记插件任务和项目内 `.agentboat/assignments/` 来源原文，再用 `orca worktree create --no-parent --agent ... --setup skip` 启动执行者并登记回执。启动通知由插件队列投递给项目主 Run，未绑定时等绑定后再投递。独立 agent 完成后读项目当前绑定的 Run 并回报成果。插件任务中保留来源和回执，启动不等于做完或验收。
+
+## 项目主会话自动启动
+
+工作间主 agent 用 `client.mjs message` 转话时，插件先保存原话和待投递记录。项目尚未绑定时，回执显示「项目还没有主会话，已排队」，脚本用默认 `code` 模板开主会话。派活时使用 `dispatch` 输入中指定的模板。自动启动保留项目名、文件、Git 和项目已有分工。缺少工作间脚本目录时会先 `init`，保留已有模板和记忆。
+
+回执 `autoLaunch` 包含项目名、状态和已确认的会话 handle、模型、强度及启动方式。最近 10 分钟内已经有一次启动时复用同一份记录。启动回执不明时先核对日志，不换编号重复转话。工作间主 agent 自己的目录、重复登记、远端项目和已绑定项目都不会自动开。缺少工作区时，先在 Orca 准备工作区，排队的消息仍保留。
 
 同 requestId 拒绝二次启动。失败查看 projects/assignments 日志和其中完整回执；结果不明不换编号重试。脚本不会自动清理未知 agent，按 Orca 版本指南恢复，避免重复执行和丢失数据。当前脚本是一次性 CLI，不做常驻轮询，状态与回报由主 agent 会话接收并读取。
 

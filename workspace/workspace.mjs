@@ -1,6 +1,6 @@
 import { executable as orca } from '../coordinator/scripts/orca-cli.mjs';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync, realpathSync, appendFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync, realpathSync, appendFileSync, statSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
@@ -13,8 +13,12 @@ const client = path.join(root, 'coordinator/scripts/client.mjs');
 
 const json = file => JSON.parse(readFileSync(file, 'utf8').replace(/^\uFEFF/, ''));
 const save = (file, value) => writeFileSync(file, JSON.stringify(value, null, 2) + '\n');
-const run = (executable, args, cwd = root) => execFileSync(executable, args, {
-  cwd, encoding: 'utf8', windowsHide: true, timeout: 120000, maxBuffer: 8 * 1024 * 1024,
+const canonical = directory => {
+  const resolved = realpathSync(directory);
+  return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
+};
+const run = (executable, args, cwd = root, env = process.env) => execFileSync(executable, args, {
+  cwd, env, encoding: 'utf8', windowsHide: true, timeout: 120000, maxBuffer: 8 * 1024 * 1024,
 });
 function call(args, cwd) {
   const reply = JSON.parse(run(orca, [...args, '--environment', 'local', '--json'], cwd));
@@ -27,9 +31,12 @@ function bridge(operation, input) {
     argument = path.join(home, 'requests', `${randomUUID()}.json`);
     save(argument, input);
   }
-  const reply = JSON.parse(run(process.execPath, [client, operation, ...(argument ? [argument] : [])]));
+  const reply = JSON.parse(run(process.execPath, [client, operation, ...(argument ? [argument] : [])], root, { ...process.env, ORCA_ENVIRONMENT: 'local', ORCA_PAIRING_CODE: '' }));
   if (!reply.ok) throw new Error(JSON.stringify(reply.error));
   return reply.result.result;
+}
+function plugin(name, input) {
+  return call(['plugin', 'dev', 'request', path.join(root, 'coordinator/plugin'), name, '--data', JSON.stringify(input)]).result;
 }
 function text(value, label) {
   if (typeof value !== 'string' || !value.trim()) throw new Error(`缺少 ${label}`);
@@ -41,9 +48,15 @@ export function key(value) {
 }
 export function template(id) {
   const value = json(path.join(home, 'templates', `${key(id)}.json`));
+  if (id === 'code' && value.mainAgent?.agent === 'claude') {
+    const defaults = json(fileURLToPath(new URL('./templates/code.json', import.meta.url))).mainAgent;
+    const model = value.mainAgent.model ?? defaults.model;
+    value.mainAgent = { surface: defaults.surface, ...(model === defaults.model ? { effort: defaults.effort } : {}), ...value.mainAgent, model };
+  }
   for (const role of [value.mainAgent, ...Object.values(value.roles || {})]) {
     if (!['claude', 'codex'].includes(role?.agent)) throw new Error('代理应为 claude 或 codex');
     if (role.effort && !role.model) throw new Error('effort 需要 model');
+    if (role.surface && !['chat', 'terminal'].includes(role.surface)) throw new Error('surface 应为 chat 或 terminal');
   }
   if (['design', 'code', 'review'].some(k => !value.roles?.[k])) throw new Error('缺少角色 design/code/review');
   if (!value.mainAgent || !['empty', 'existing', 'clone'].includes(value.source?.kind)) throw new Error('模板缺少 mainAgent 或 source.kind');
@@ -51,7 +64,7 @@ export function template(id) {
   return value;
 }
 function agentFlags(role) {
-  return ['--agent', role.agent, ...(role.model ? ['--model', role.model] : []), ...(role.effort ? ['--effort', role.effort] : [])];
+  return ['--agent', role.agent, ...(role.model ? ['--model', role.model] : []), ...(role.effort ? ['--effort', role.effort] : []), ...(role.surface ? ['--surface', role.surface] : [])];
 }
 export function init() {
   mkdirSync(home, { recursive: true });
@@ -84,29 +97,109 @@ export function testPath(target) {
   if (resolvedRelative.startsWith('..') || path.isAbsolute(resolvedRelative)) throw new Error('测试目录不能通过链接离开 sandbox');
 }
 function project(id) {
-  const refs = bridge('projects').projects.filter(p => p.id === id);
-  if (refs.length !== 1 || refs[0].hostId !== 'local') throw new Error('项目不存在或不是本机项目，请用完整项目编号');
+  const catalog = bridge('projects');
+  if (catalog.error) throw new Error(catalog.error);
+  const refs = catalog.projects.filter(p => p.id === id);
+  if (refs.length !== 1 || refs[0].hostId !== 'local') throw new Error('只支持 Orca 本机登记的项目，请核对完整编号和主机');
   testPath(refs[0].path);
-  const snapshot = bridge('read', id);
-  if (!snapshot.project?.runId) throw new Error('项目尚未绑定主 agent');
-  return snapshot.project;
+  const { project, runtimeError } = bridge('read', id);
+  if (runtimeError || !project) throw new Error(runtimeError || '项目已从 Orca 移除');
+  return { ...project, ref: refs[0] };
 }
-function journal(dir, requestId, input) {
+function journal(dir, requestId, input, reuse = false) {
   const file = path.join(home, dir, `${key(requestId)}.json`);
-  if (existsSync(file)) throw new Error(`请求已执行或结果待核对，先读 ${file}，不要另起 agent`);
   const record = { requestId, at: new Date().toISOString(), input, stage: 'prepared' };
-  writeFileSync(file, JSON.stringify(record, null, 2) + '\n', { flag: 'wx' });
+  try { writeFileSync(file, JSON.stringify(record, null, 2) + '\n', { flag: 'wx' }); }
+  catch (error) {
+    if (error.code !== 'EEXIST') throw error;
+    if (reuse) return;
+    throw new Error(`请求已执行或结果待核对，先读 ${file}，不要另起 agent`);
+  }
   return { record, update: (stage, data = {}) => { Object.assign(record, data, { stage }); save(file, record); } };
 }
 export function launchReceipt(result) {
-  const launch = result.launch;
-  if (!launch?.outcome?.handle || !['journaled', 'handed-to-terminal'].includes(launch.prompt?.outcome)) {
+  const launch = result.launch ?? result;
+  const handle = launch.outcome?.kind === 'structured' ? (launch.outcome.sessionId && `orca_session_id:${launch.outcome.sessionId}`) : launch.outcome?.handle;
+  if (!handle || !['journaled', 'handed-to-terminal'].includes(launch.prompt?.outcome)) {
     throw new Error('未确认 agent 收到提示词，请检查日志中的启动回执，不要重复启动');
   }
-  return launch.outcome.handle;
+  return handle;
+}
+function initIfNeeded() {
+  if (!existsSync(path.join(home, 'requests')) || !existsSync(path.join(home, 'templates/code.json')) || !existsSync(path.join(home, 'memory/.git/index'))) init();
+}
+function launchProjectLead(j, t, project, goal) {
+  const ref = project.ref;
+  if (!ref.workspace) throw new Error('项目当前没有工作区，请先在 Orca 准备项目工作区');
+  const context = { projectId: ref.id, repoId: ref.repoId, hostId: ref.hostId, path: ref.path, name: ref.name, roles: project.roles, template: t.id };
+  j.update('launching', { context, mainAgent: t.mainAgent });
+  const prompt = `${t.firstMessage}\n项目身份与分工：${JSON.stringify(context)}\n只在这个项目开启协作；读取 $orca-project-coordinator 和桥接说明。由你自己的会话创建 Run，再用 client.mjs read 现读版本并用 bind 绑定此 projectId，不能绑定工作间主 agent 或复用别的项目 Run。脚本路径：${client}。首轮完成绑定后简短回复项目编号与 Run；不要自行另起 agent。\n主人本次目标：${goal || '先开启项目协作，等待具体任务。'}`;
+  const launched = call(['agent', 'launch', '--worktree', ref.workspace, ...agentFlags(t.mainAgent), '--prompt', prompt], ref.path);
+  j.update('launch-returned', { launched });
+  if (t.mainAgent.surface === 'chat' && (launched.launch ?? launched).outcome?.kind !== 'structured') {
+    throw new Error('Orca 未确认打开聊天会话，请核对启动回执，不要重复启动');
+  }
+  const handle = launchReceipt(launched);
+  j.update('awaiting-project-binding', { handle });
+  return handle;
+}
+function currentWorkspaceMain(runId) {
+  const caller = process.env.ORCA_AGENT_SESSION_ID ? `orca_session_id:${process.env.ORCA_AGENT_SESSION_ID}` : process.env.ORCA_TERMINAL_HANDLE;
+  const main = bridge('main-read');
+  if (!caller || !main.runId || main.session?.handle !== caller || (runId !== undefined && runId !== main.runId)) throw new Error('请在已绑定的工作间主 agent 会话中执行');
+  return main;
+}
+const alreadyBound = p => ({ status: 'already-bound', projectName: p.ref.name, reason: '项目已绑定主 agent' });
+const launchSettings = ({ agent, model, effort, surface } = {}) => ({ agent, model, effort, surface });
+const bindingWindow = 10 * 60_000;
+function startProjectLead(p, templateId, goal, createJournal) {
+  const id = p.ref.id, workspaceDirectory = canonical(p.ref.path);
+  const dir = path.join('projects', 'auto', key(id)), logDir = path.join(home, dir);
+  mkdirSync(logDir, { recursive: true });
+  const attempts = readdirSync(logDir).flatMap(f => /^\d+\.json$/.test(f) ? [Number(f.slice(0, -5))] : []);
+  const last = Math.max(0, ...attempts);
+  if (last) {
+    const file = path.join(logDir, `${last}.json`);
+    let prior;
+    try { prior = json(file); }
+    catch { prior = { stage: 'needs-inspection', error: '启动日志未完整写入，请用原请求核对' }; }
+    const at = Date.parse(prior.at) || statSync(file).mtimeMs;
+    if (Date.now() - at < bindingWindow) {
+      createJournal?.update(prior.stage, { context: prior.context, launched: prior.launched });
+      return { status: prior.stage === 'needs-inspection' ? 'needs-inspection' : 'awaiting-project-binding',
+        projectName: p.ref.name, handle: prior.handle, ...launchSettings(prior.mainAgent), reused: true, ...(prior.error ? { reason: prior.error } : {}) };
+    }
+  }
+  const j = journal(dir, String(last + 1), { projectId: id, template: templateId }, true);
+  if (!j) return { status: 'awaiting-project-binding', projectName: p.ref.name, reused: true, reason: '启动请求已在进行' };
+  try {
+    initIfNeeded();
+    const latest = project(id);
+    if (latest.runId) { j.update('already-bound'); return alreadyBound(latest); }
+    if (latest.ref.repoId !== p.ref.repoId || latest.ref.workspace !== p.ref.workspace || canonical(latest.ref.path) !== workspaceDirectory) throw new Error('项目身份或工作区已变化，请核对后再操作');
+    const t = template(templateId), handle = launchProjectLead(j, t, latest, goal);
+    createJournal?.update(j.record.stage, { context: j.record.context, launched: j.record.launched });
+    return { status: j.record.stage, projectName: latest.ref.name, handle, ...launchSettings(t.mainAgent), reused: false };
+  } catch (error) { j.update('needs-inspection', { error: error.message }); throw error; }
+}
+export function autoProjectLead(id, runId, templateId = 'code') {
+  const p = project(id);
+  if (p.runId) return alreadyBound(p);
+  const main = currentWorkspaceMain(runId);
+  if (!main.session.path || !existsSync(main.session.path)) throw new Error('无法核对工作间主 agent 的目录，请核对当前绑定');
+  const repos = call(['repo', 'list']).repos.filter(r => (r.executionHostId ?? (r.connectionId ? 'ssh' : 'local')) === 'local');
+  const repo = repos.find(r => r.id === p.ref.repoId);
+  if (!repo) throw new Error('只支持 Orca 本机登记的项目，请核对完整编号和主机');
+  const rootDirectory = canonical(repo.path), workspaceDirectory = canonical(p.ref.path), mainDirectory = canonical(main.session.path);
+  if ([rootDirectory, workspaceDirectory].includes(mainDirectory)) throw new Error('这是工作间主 agent 自己的目录，不能自动开项目主会话');
+  if (repos.some(r => r.id !== repo.id && existsSync(r.path) && [rootDirectory, workspaceDirectory].includes(canonical(r.path)))) throw new Error('同一路径在 Orca 重复登记，请先在 Orca 删除多余登记');
+  if (!p.ref.workspace) throw new Error('项目当前没有工作区，请先在 Orca 准备项目工作区');
+  testPath(rootDirectory); testPath(workspaceDirectory);
+  return startProjectLead(p, templateId);
 }
 export function create(input) {
-  const t = template(input.template || 'code');
+  initIfNeeded();
+  const templateId = input.template || 'code', t = template(templateId);
   const destination = path.resolve(text(input.path, '项目完整路径'));
   if (!path.isAbsolute(input.path)) throw new Error('项目路径必须为绝对路径');
   testPath(destination);
@@ -135,24 +228,31 @@ export function create(input) {
       ...(kind === 'git' ? ['--worktree-base-path', path.join(path.dirname(destination), `${path.basename(destination)}-worktrees`)] : [])], destination);
     const roles = Object.fromEntries(Object.entries(t.roles).map(([k, v]) => [k, v.agent]));
     const current = bridge('read', ref.id).project;
-    call(['plugin', 'dev', 'request', path.join(root, 'coordinator/plugin'), 'project.settings', '--data',
-      JSON.stringify({ projectId: ref.id, revision: current.revision, roles, feishu: current.feishu })]);
-    const context = { projectId: ref.id, repoId: repo.id, hostId: 'local', path: destination, name, roles, template: t.id };
-    j.update('launching', { context });
-    const prompt = `${t.firstMessage}\n项目身份与分工：${JSON.stringify(context)}\n只在这个项目开启协作；读取 $orca-project-coordinator 和桥接说明。由你自己的会话创建 Run，再用 client.mjs bind 绑定此 projectId，不能绑定工作间主 agent 或复用别的项目 Run。脚本路径：${client}。首轮完成绑定后简短回复项目编号与 Run；不要自行另起 agent。\n主人本次目标：${input.goal || '先开启项目协作，等待具体任务。'}`;
-    const launched = call(['agent', 'launch', '--worktree', ref.workspace, ...agentFlags(t.mainAgent), '--prompt', prompt], destination);
-    j.update('launch-returned', { launched });
-    const handle = launchReceipt(launched);
-    j.update('awaiting-project-binding', { handle });
+    plugin('project.settings', { projectId: ref.id, revision: current.revision, roles, feishu: current.feishu });
+    const lead = startProjectLead(project(ref.id), templateId, input.goal, j);
+    j.update(lead.status, lead);
     return j.record;
   } catch (error) { j.update('needs-inspection', { error: error.message }); throw error; }
 }
+function submitDispatch(p, requestId, task) {
+  const submit = current => bridge('submit', { projectId: p.ref.id, revision: current.revision, requestId, task });
+  try { return submit(p); }
+  catch (error) {
+    let receipt;
+    try { receipt = JSON.parse(error.stderr?.toString()).error; } catch { throw error; }
+    if (receipt?.code !== 'plugin_request_failed' || receipt.data?.requestCode !== 'invalid_request' || !receipt.message?.endsWith('项目已更新，请刷新后再提交')) throw error;
+    const latest = project(p.ref.id), target = value => value.tasks.find(t => t.id === task.id);
+    if (JSON.stringify(target(latest)) !== JSON.stringify(target(p))) throw error;
+    return submit(latest);
+  }
+}
 export function dispatch(input) {
-  const p = project(text(input.projectId, 'projectId'));
+  let p = project(text(input.projectId, 'projectId'));
   const goal = text(input.text, '用户原话 text');
   const source = text(input.source, '来源（会话和消息编号）');
-  const sender = text(process.env.ORCA_AGENT_SESSION_ID ? `orca_session_id:${process.env.ORCA_AGENT_SESSION_ID}` : process.env.ORCA_TERMINAL_HANDLE, '实际 Orca 调用会话');
-  const t = template(input.template || 'code');
+  const main = currentWorkspaceMain(), sender = main.session.handle;
+  initIfNeeded();
+  const templateId = input.template || 'code', t = template(templateId);
   const role = input.role || 'code';
   if (!t.roles[role]) throw new Error('模板中没有该角色');
   const repo = call(['repo', 'show', '--repo', `id:${p.ref.repoId}`]).repo;
@@ -161,18 +261,22 @@ export function dispatch(input) {
   const name = key(input.name);
   testPath(path.join(repo.worktreeBasePath || path.dirname(p.ref.path), name));
   const j = journal('assignments', input.requestId, input);
-  const evidenceDir = path.join(p.ref.path, '.agentboat/assignments');
-  mkdirSync(evidenceDir, { recursive: true });
-  const provenance = path.join(evidenceDir, `${input.requestId}-source.md`);
-  writeFileSync(provenance, `# 用户直接派活\n\n日期：${j.record.at}\n来源：${source}\n调用会话：${sender}\n项目：${p.ref.id}\n\n用户原话：\n\n${goal}\n`, { flag: 'wx' });
-  const taskId = `direct-${input.requestId}`;
-  const artifact = { id: `${taskId}-source`, label: '直接派活来源与用户原话', url: provenance, version: 'v1' };
   try {
-    bridge('submit', { projectId: p.ref.id, revision: p.revision, requestId: `${input.requestId}-record`, task: {
+    const autoLaunch = p.runId ? alreadyBound(p) : autoProjectLead(p.ref.id, main.runId, templateId);
+    if (autoLaunch.status === 'needs-inspection') throw new Error(autoLaunch.reason || '项目主会话启动结果待核对');
+    j.update('project-lead', { autoLaunch });
+    p = project(p.ref.id);
+    const evidenceDir = path.join(p.ref.path, '.agentboat/assignments');
+    mkdirSync(evidenceDir, { recursive: true });
+    const provenance = path.join(evidenceDir, `${input.requestId}-source.md`);
+    writeFileSync(provenance, `# 用户直接派活\n\n日期：${j.record.at}\n来源：${source}\n调用会话：${sender}\n项目：${p.ref.id}\n\n用户原话：\n\n${goal}\n`, { flag: 'wx' });
+    const taskId = `direct-${input.requestId}`;
+    const artifact = { id: `${taskId}-source`, label: '直接派活来源与用户原话', url: provenance, version: 'v1' };
+    submitDispatch(p, `${input.requestId}-record`, {
       id: taskId, title: input.title || name, goal, phase: 'working', progress: '已登记直接派活，尚未确认启动', artifacts: [artifact],
-    } });
+    });
     j.update('launching', { taskId, sourcePath: provenance, sender });
-    const prompt = `项目直接任务：${goal}\n来源：${source}；项目编号：${p.ref.id}；项目主 Run：${p.runId}。只做此任务，保留他人改动，不再派子任务。完成后以你自己的会话通过 orca orchestration send --to run:${p.runId} 向项目主 agent 回报成果与验证边界。不要改项目或工作间主 Run 的绑定。`;
+    const prompt = `项目直接任务：${goal}\n来源：${source}；项目编号：${p.ref.id}；任务编号：${taskId}。只做此任务，保留他人改动，不再派子任务。完成后用 node ${JSON.stringify(client)} read ${p.ref.id} 核对项目当前绑定的 runId，再从自己的会话用 orca orchestration send --to run:<runId> 回报成果与验证边界。尚未绑定时先保存回报，等项目主会话绑定后送达。不要改项目或工作间主 Run 的绑定。`;
     const launched = call(['worktree', 'create', '--repo', `id:${p.ref.repoId}`, '--name', name, '--no-parent',
       '--setup', 'skip', ...agentFlags(t.roles[role]), '--prompt', prompt], p.ref.path);
     j.update('launch-returned', { launched });
@@ -180,20 +284,16 @@ export function dispatch(input) {
     const launchFile = path.join(evidenceDir, `${input.requestId}-launch.json`);
     writeFileSync(launchFile, JSON.stringify(launched, null, 2) + '\n', { flag: 'wx' });
     const fresh = project(p.ref.id);
-    bridge('submit', { projectId: p.ref.id, revision: fresh.revision, requestId: `${input.requestId}-receipt`, task: {
+    submitDispatch(fresh, `${input.requestId}-receipt`, {
       id: taskId, title: input.title || name, goal, phase: 'working',
       progress: `已启动 ${t.roles[role].agent}，提示词已送达；agent ${handle}。来源：${source}。启动回执不等于实际开工或完成。`,
       artifacts: [{ id: `${taskId}-launch`, label: 'Orca 派活回执', url: launchFile, version: 'v1' }],
-    } });
+    });
     j.update('notifying', { handle });
-    const notified = call(['orchestration', 'send', '--from', sender, '--to', `run:${fresh.runId}`, '--type', 'status',
-      '--subject', `直接派活：${name}`, '--body', `项目 ${p.ref.id} / 插件任务 ${taskId}\n来源：${source}\n用户原话：${goal}\n已由 Orca 独立工作树启动 ${t.roles[role].agent}：${handle}\n启动回执：${JSON.stringify(launched)}\n请关联原任务并继续跟进，不能将启动当作完成；来源原文见 ${provenance}`,
-      '--full'], p.ref.path);
-    if (notified.message?.run_id !== fresh.runId) {
-      j.update('notification-target-changed', { notified });
-      throw new Error('通知回执的 Run 与现读绑定不一致，请核对项目主会话变更，不自动补发');
-    }
-    j.update('notified', { notified });
+    const requestId = `${input.requestId}-notice`;
+    const notified = plugin('workspace.message', { projectId: p.ref.id, requestId, runId: main.runId,
+      text: `直接派活「${name}」已启动。请跟进项目任务 ${taskId}。\n执行 agent：${handle}\n任务记录含来源原话与 Orca 启动回执，请以实际成果为准。` });
+    j.update('notification-recorded', { notification: { requestId, status: notified.queued ? 'queued' : 'recorded', ...(notified.queued ? { message: notified.queued } : {}) } });
     return j.record;
   } catch (error) { j.update('needs-inspection', { error: error.message }); throw error; }
 }

@@ -40,9 +40,25 @@ const name = operation === 'connections' || operation.startsWith('connection-') 
 const maintenance = ['hide', 'restore', 'delete'].includes(operation);
 const args = ['plugin', 'dev', 'request', target, operation === 'main-targets' ? 'workspace.agent.targets' : maintenance ? operation === 'delete' ? 'project.delete' : 'project.visibility' : name, '--json'];
 if (maintenance) { delete input.operation; if (operation !== 'delete') input.hidden = operation === 'hide'; }
+if (operation === 'message') args.push('--environment', 'local');
 if (input) args.push('--data', JSON.stringify(input));
 try {
-  process.stdout.write(execFileSync(executable, args, { encoding: 'utf8', windowsHide: true, timeout: 40000, maxBuffer: 1024 * 1024 }));
+  const stdout = execFileSync(executable, args, { encoding: 'utf8', windowsHide: true, timeout: 40000, maxBuffer: 1024 * 1024 });
+  if (operation !== 'message') process.stdout.write(stdout);
+  else {
+    const reply = JSON.parse(stdout), result = reply.result?.result;
+    if (reply.ok && result?.project) {
+      if (result.queued) {
+        try {
+          const { autoProjectLead } = await import('../../workspace/workspace.mjs');
+          result.autoLaunch = autoProjectLead(input.projectId, input.runId);
+        } catch (error) {
+          result.autoLaunch = { status: 'not-confirmed', projectName: result.project.ref.name, reason: error.message };
+        }
+      } else result.autoLaunch = { status: 'already-bound', projectName: result.project.ref.name, reason: '项目已绑定主 agent' };
+    }
+    process.stdout.write(JSON.stringify(reply, null, 2) + '\n');
+  }
 } catch (e) {
   if (e.stdout) process.stderr.write(e.stdout);
   else process.stderr.write('Orca 请求未取得回执，请先读项目记录核对，勿直接重复写入。\n');

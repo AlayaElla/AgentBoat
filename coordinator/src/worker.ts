@@ -295,7 +295,7 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
   }
   async function flush(id: string): Promise<void> {
     const running = busy.get(id)
-    if (running) return running
+    if (running) { await running; return flush(id) }
     const work = (async () => {
       let attempted = false
       try {
@@ -306,15 +306,16 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
           if (!delivery) break
           const { refs, error } = await readCatalog()
           if (error || !refs?.some(ref => ref.id === id)) break
-          let claimed = false
+          let claimed = false, runId = ''
           await store.mutate(id, undefined, p => {
-            if (p.hidden && (delivery.external || delivery.targetRunId)) return
+            if (p.hidden && (delivery.external || delivery.targetRunId) || !delivery.external && !delivery.targetRunId && !p.runId) return
+            runId = p.runId
             p.deliveries.find(x => x.id === delivery.id)!.state = 'sending'; claimed = true
           })
           if (!claimed) continue
           attempted = true
           try {
-            const receipt = await sendDelivery(delivery, p.runId)
+            const receipt = await sendDelivery(delivery, runId)
             await store.mutate(id, undefined, p => {
               const d = p.deliveries.find(x => x.id === delivery.id)!
               d.state = 'sent'; if ('requestId' in receipt && receipt.requestId) d.requestId = receipt.requestId
@@ -390,16 +391,16 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
     const id = text(input.projectId, '项目编号', 200)
     await ensure(id)
     const requestId = text(input.requestId, '请求编号', 200), message = text(input.text, '消息', maxMessageLength)
-    await store.mutate(id, revision(input.revision), async p => {
+    await store.mutate(id, input.revision === undefined ? undefined : revision(input.revision), async p => {
       const w = await store.workspace()
       if (!w.runId || input.runId !== w.runId) fail('请使用已绑定的工作间主 agent Run')
-      if (!p.runId) fail('请先绑定项目主 agent')
       const eventId = `workspace-agent:${fingerprint([id, requestId])}`
       receiveEvent(p, { id: eventId, source: 'workspace-agent', sourceId: requestId, threadId: eventId,
         chatId: '', senderId: w.runId, text: message, receivedAt: new Date().toISOString() })
     }, { id: requestId, input })
     changed(id); defer(id)
-    return snapshot(id)
+    const result = await snapshot(id)
+    return { ...result, ...(!result.project?.runId ? { queued: '项目还没有主会话，已排队' } : {}) }
   })
   orca.panels.handle('projects.list', async () => {
     const { refs, error } = await readCatalog()
