@@ -13,7 +13,7 @@ export function install(home = os.homedir()) {
   for (const { target, link } of skills) {
     let entry;
     try { entry = lstatSync(link); } catch (e) { if (e.code !== 'ENOENT') throw e; }
-    if (entry && (!entry.isSymbolicLink() || realpathSync(link) !== path.resolve(target))) throw new Error(`Claude 位置已有其他内容，未覆盖：${link}`);
+    if (entry && (!entry.isSymbolicLink() || realpathSync(link) !== realpathSync(target))) throw new Error(`Claude 位置已有其他内容，未覆盖：${link}`);
     if (existsSync(target) && (!lstatSync(target).isDirectory() || lstatSync(target).isSymbolicLink())) throw new Error(`安装目标必须是普通目录：${target}`);
   }
   function render(directory) {
