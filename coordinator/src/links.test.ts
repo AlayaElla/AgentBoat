@@ -192,13 +192,43 @@ test('two loopback workspaces pair once, share only selected local projects, cha
     assert.deepEqual([...a.storage], beforeRestart)
     const address = (await a.links.snapshot()).listening
     assert.equal(address, invitation.listening)
-    await a.links.revoke(peer.id)
+    const otherConnection = structuredClone(b.storage.get('workspace.links').peers.find((p: { id: string }) => p.id === bc.id))
+    assert.deepEqual((await a.links.revoke(peer.id)).peers, [])
+    assert.deepEqual(a.storage.get('workspace.links').peers, [])
     assert.equal(await post(address, '/sync', { id: peer.id }, token), 401)
     assert.equal(a.secrets.has(`workspace-link:${peer.id}`), false)
-    await b.links.revoke(bc.id)
-    assert.equal((await c.links.snapshot()).peers[0].state, 'revoked')
-    assert.equal((await c.links.snapshot()).peers[0].report, undefined)
+    assert.deepEqual((await b.links.refresh()).peers.map(p => p.id), [bc.id])
+    assert.deepEqual(b.storage.get('workspace.links').peers, [otherConnection])
+    assert.equal(b.secrets.has(`workspace-link:${peer.id}`), false)
+
+    assert.deepEqual((await b.links.revoke(bc.id)).peers, [])
+    assert.deepEqual((await c.links.snapshot()).peers, [])
+    assert.deepEqual(c.storage.get('workspace.links').peers, [])
+    assert.equal(b.secrets.has(`workspace-link:${bc.id}`), false)
+    assert.equal(c.secrets.has(`workspace-link:${bc.id}`), false)
+
+    const rejoined = (await b.links.join((await a.links.invite()).invitation!.code)).peers
+    assert.equal(rejoined.length, 1)
+    assert.notEqual(rejoined[0].id, peer.id)
+    assert.equal(rejoined[0].status, 'connected')
+    assert.equal((await a.links.snapshot()).peers[0].id, rejoined[0].id)
+    assert.equal(await post(address, '/sync', { id: rejoined[0].id }, token), 401)
   } finally { a.links.stop(); b.links.stop(); c.links.stop() }
+})
+
+test('legacy revoked links disappear on read and the next save keeps only existing connections', async () => {
+  const a = await instance('A'), b = await instance('B')
+  try {
+    await b.links.join((await a.links.invite()).invitation!.code)
+    const raw = a.storage.get('workspace.links'), active = structuredClone(raw.peers[0])
+    raw.peers.unshift({ ...active, id: 'legacy-link', workspaceId: 'legacy-peer', state: 'revoked' })
+    const before = structuredClone(raw)
+    const snapshot = await a.links.snapshot()
+    assert.deepEqual(snapshot.peers.map(p => p.id), [active.id])
+    assert.deepEqual(a.storage.get('workspace.links'), before)
+    await a.links.rename({ revision: snapshot.revision, name: 'A renamed' })
+    assert.deepEqual(a.storage.get('workspace.links').peers, [active])
+  } finally { a.links.stop(); b.links.stop() }
 })
 
 test('invites expire/cancel, malformed and oversized requests fail closed, explicit binding and scope validation', async () => {

@@ -122,11 +122,10 @@ test('per-link pending cap preserves the queue, and revocation discards it in bo
     await a.coordinator.links.start()
     await b.coordinator.links.refresh()
     for (const w of [a, b]) {
-      const peer = (await w.read()).peers[0]
-      assert.equal(peer.status, 'revoked')
-      assert.equal(peer.pendingMessages, 0)
-      assert.deepEqual(peer.recentMessages, [])
-      await assert.rejects(() => w.send(id, 'revoked', '文字'), /请选择有效连接/)
+      assert.deepEqual((await w.read()).peers, [])
+      assert.deepEqual(w.host.data().storage['workspace.link-messages'], [])
+      assert.equal(w.host.data().secrets[`workspace-link:${id}`], undefined)
+      await assert.rejects(() => w.send(id, 'removed', '文字'), /请选择有效连接/)
       assert.equal(w.sends.length, w === a ? 1 : 0)
     }
   } finally { await a.close(); await b.close() }

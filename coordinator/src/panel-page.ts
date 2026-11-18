@@ -148,7 +148,7 @@ async function refresh(forceAgents = false) {
     const [overview, agents] = await Promise.all([req('workspace.overview'), req('workspace.agents', { refresh: forceAgents })])
     if (n !== epoch) return
     all = overview; live = agents
-    opened = Object.fromEntries(Object.entries(opened).filter(([id]) => id === 'self' || peers().some(p => p.id === id && p.status !== 'revoked')))
+    opened = Object.fromEntries(Object.entries(opened).filter(([id]) => id === 'self' || peers().some(p => p.id === id)))
     for (const id of Object.keys(drafts)) if (![...all.projects.map(p => p.ref.id), ...(all.hidden ?? []).map(p => p.id)].includes(id)) delete drafts[id]
     await loadPage(); render()
   } catch (e) { error = `读取失败：${(e as Error).message}`; render() }

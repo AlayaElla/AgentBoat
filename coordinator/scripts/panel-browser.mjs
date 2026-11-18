@@ -50,8 +50,8 @@ async function setup(options = {}) {
       project.tasks.push({ ...clone(task), id: 't3', title: '动效交付', acceptance: [acceptance('a3')] },
         { ...clone(task), id: 'd1', title: '设计决定', phase: 'working', acceptance: [], decisions: [{ id: 'd1', question: '选择方案', options: ['方案一'], history: [] }] });
     }
-    const p = (id, relation, status = 'connected', scope = 'details') => ({ id, name: '工作间 ' + id, workspaceId: 'ws-' + id, state: status === 'pending' ? 'pending' : status === 'revoked' ? 'revoked' : 'active', relation, sharingSet: false, status, scope: 'none', projectIds: [], lastSyncAt: new Date(now - 100000).toISOString(), receivedAt: new Date(now).toISOString(), ...(status === 'connected' ? { report: { scope, projects: scope === 'none' ? [] : [{ id: 'remote-p', name: '开放的项目', updatedAt: new Date().toISOString(), pending: 0, counts: { blocked: 1 }, ...(scope === 'details' ? { tasks: [{ title: '受阻任务', phase: 'blocked', decisions: [], acceptance: [] }] } : {}) }] } } : {}) });
-    const links = { version: 1, revision: 1, workspaceId: 'self', name: '我的工作间', enabled: false, host: '127.0.0.1', port: 0, publicUrl: '', tls: false, listening: '', error: '', peers: [p('up', 'above'), p('down', 'below'), p('off', 'below', 'offline'), p('side', 'peer'), p('free', undefined), p('pending', undefined, 'pending'), p('revoked', 'below', 'revoked')] };
+    const p = (id, relation, status = 'connected', scope = 'details') => ({ id, name: '工作间 ' + id, workspaceId: 'ws-' + id, state: status === 'pending' ? 'pending' : 'active', relation, sharingSet: false, status, scope: 'none', projectIds: [], lastSyncAt: new Date(now - 100000).toISOString(), receivedAt: new Date(now).toISOString(), ...(status === 'connected' ? { report: { scope, projects: scope === 'none' ? [] : [{ id: 'remote-p', name: '开放的项目', updatedAt: new Date().toISOString(), pending: 0, counts: { blocked: 1 }, ...(scope === 'details' ? { tasks: [{ title: '受阻任务', phase: 'blocked', decisions: [], acceptance: [] }] } : {}) }] } } : {}) });
+    const links = { version: 1, revision: 1, workspaceId: 'self', name: '我的工作间', enabled: false, host: '127.0.0.1', port: 0, publicUrl: '', tls: false, listening: '', error: '', peers: [p('up', 'above'), p('down', 'below'), p('off', 'below', 'offline'), p('side', 'peer'), p('free', undefined), p('pending', undefined, 'pending')] };
     const live = { ok: true, at: now, agents: [{ id: 'agent-need', projectId: 'p1', agent: 'codex', role: 'worker', state: 'need', rawState: 'waiting', verified: true, title: '等批准', last: '等待用户批准', since: now - 60000 }, { id: 'agent-work', projectId: 'p1', agent: 'claude', role: 'session', state: 'work', rawState: 'working', verified: false, title: '正在工作', last: '正在处理', since: now - 20000 }] };
     const workspace = { revision: 1, runId: options.unbound ? '' : 'run_main', ...(!options.unbound ? { session: { handle: 'main', agent: 'claude', title: '统筹会话', online: 'online' } } : {}) };
     const sessions = ['甲', '乙'].map((name, i) => ({ handle: 'session-' + i, title: name + '会话', workspace: 'identity:test', workspaceName: '示例工作区', path: '/test/工作区 with spaces', agent: i ? 'codex' : 'claude', online: 'online' }));
@@ -110,6 +110,7 @@ async function setup(options = {}) {
         const peer = links.peers.find(p => p.id === input.id);
         if (input.operation === 'relate') peer.relation = input.relation ?? undefined;
         if (input.operation === 'share') Object.assign(peer, input, { sharingSet: true });
+        if (input.operation === 'revoke') links.peers = links.peers.filter(p => p.id !== input.id);
         links.revision++; return clone(links);
       }
       if (name === 'workspace.agent.targets') return { sessions: clone(sessions), workspaces: [{ workspace: 'identity:test', name: '示例工作区', path: '/test/工作区 with spaces' }] };
@@ -510,7 +511,7 @@ try {
     assert.equal(await page.locator('[data-workspace=self]').count(), 1);
     assert.equal(await page.locator('.inbox .pill').innerText(), '2');
     assert.equal(await page.locator('[data-workspace=self] .wsr-top .pill').innerText(), '2');
-    assert.equal(await page.locator('[data-workspace=pending],[data-workspace=revoked]').count(), 0);
+    assert.equal(await page.locator('[data-workspace=pending]').count(), 0);
     assert.equal(await page.locator('.org-up [data-workspace=up],.org-kids [data-workspace=down],.org-side [data-workspace=side]').count(), 3);
     assert.equal(await page.locator('[data-workspace=down] .flag').count(), 1);
     assert.equal(await page.locator('[data-workspace=off] .flag').count(), 0);
@@ -645,6 +646,19 @@ try {
     ]);
     assert.equal(await advanced.evaluate(e => e.open), false);
     assert.equal(await page.locator('#panel').evaluate(e => e.scrollWidth <= e.clientWidth), true);
+  });
+  await setup();
+  await test('disconnect removes only the selected workspace from the connection list', async () => {
+    await page.getByRole('button', { name: '设置', exact: true }).click();
+    await page.getByRole('button', { name: '工作间连接', exact: true }).click();
+    const list = page.getByRole('region', { name: '工作间', exact: true });
+    const disconnected = list.getByRole('button', { name: '工作间 down', exact: true });
+    await disconnected.click();
+    await page.getByRole('checkbox', { name: '确认断开这个工作间', exact: true }).check();
+    await page.getByRole('button', { name: '断开连接', exact: true }).click();
+    await list.getByRole('button', { name: '工作间 side', exact: true }).waitFor();
+    assert.equal(await disconnected.count(), 0);
+    assert.deepEqual(await page.evaluate(() => fixture.calls.filter(c => c.name === 'workspace.links').map(c => c.input)), [{ operation: 'revoke', id: 'down' }]);
   });
   await setup();
   await test('workspace name saves independently of invalid network draft and updates the organization', async () => {
