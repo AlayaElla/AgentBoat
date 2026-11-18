@@ -75,6 +75,7 @@ async function setup(options = {}) {
           return { ...clone(links), invitation: { code: 'AB1.fixture', expiresAt: new Date(Date.now() + 120000).toISOString() } };
         }
         if (input.operation === 'join') links.peers.push(p('joined', undefined));
+        if (input.operation === 'rename') links.name = input.name.trim();
         const peer = links.peers.find(p => p.id === input.id);
         if (input.operation === 'relate') peer.relation = input.relation ?? undefined;
         if (input.operation === 'share') Object.assign(peer, input, { sharingSet: true });
@@ -354,14 +355,14 @@ try {
     });
   }
   await setup();
-  await test('connection opens with two actions and collapsed advanced settings; invite copies and join needs only a code', async () => {
+  await test('connection keeps advanced settings collapsed; invite copies and join needs only a code', async () => {
     await page.context().grantPermissions(['clipboard-read', 'clipboard-write']);
     await page.getByRole('button', { name: '设置', exact: true }).click();
     await page.getByRole('button', { name: '工作间连接', exact: true }).click();
     const invite = page.getByRole('button', { name: '邀请', exact: true }), join = page.getByRole('button', { name: '加入', exact: true });
     const advanced = page.locator('details', { hasText: '高级' });
     assert.equal(await advanced.evaluate(e => e.open), false);
-    for (const label of ['工作间名称', '监听 IP', '端口', '访问地址', 'TLS', 'TLS 证书', 'TLS 私钥']) assert.equal(await advanced.getByLabel(label, { exact: true }).isVisible(), false);
+    for (const label of ['监听 IP', '端口', '访问地址', 'TLS', 'TLS 证书', 'TLS 私钥']) assert.equal(await advanced.getByLabel(label, { exact: true }).isVisible(), false);
     assert.equal(await join.isDisabled(), true);
     await page.evaluate(() => { fixture.inviteError = '无法监听，请检查地址、端口和 TLS 证书'; });
     await invite.click();
@@ -387,19 +388,77 @@ try {
     assert.equal(await page.locator('#panel').evaluate(e => e.scrollWidth <= e.clientWidth), true);
   });
   await setup();
+  await test('workspace name saves independently of invalid network draft and updates the organization', async () => {
+    await page.getByRole('button', { name: '＋ 连接', exact: true }).click();
+    const advanced = page.locator('details', { hasText: '高级' });
+    const name = page.getByLabel('工作间名称', { exact: true });
+    assert.equal(await advanced.getByLabel('工作间名称', { exact: true }).count(), 0);
+    assert.equal(await name.isVisible(), true);
+    await advanced.locator('summary').click();
+    await advanced.getByLabel('监听 IP', { exact: true }).fill('invalid');
+    await name.fill('更新后的工作间');
+    await page.getByRole('button', { name: '保存名称', exact: true }).click();
+    await page.getByRole('status').filter({ hasText: '名称已保存' }).waitFor();
+    assert.equal(await advanced.getByLabel('监听 IP', { exact: true }).inputValue(), 'invalid');
+    assert.deepEqual(await page.evaluate(() => fixture.calls.filter(c => c.name === 'workspace.links').map(c => c.input)), [
+      { operation: 'rename', revision: 1, name: '更新后的工作间' }
+    ]);
+    await home();
+    await page.locator('[data-workspace=self]').getByText('更新后的工作间', { exact: true }).waitFor();
+  });
+  await setup();
   await test('relation suggestions are drafts, user edits survive relation switches, later relation preserves sharing', async () => {
     await page.locator('[data-workspace=free]').getByRole('button', { name: '标关系' }).click();
     await page.getByRole('radio', { name: '上级 · 画在你上面' }).check();
     assert.equal(await page.getByLabel('开放范围').inputValue(), 'summary');
+    assert.equal(await page.getByRole('checkbox', { name: '全部项目', exact: true }).isChecked(), true);
+    assert.equal(await page.getByRole('checkbox', { name: '示例项目', exact: true }).isDisabled(), true);
     assert.equal(await page.evaluate(() => fixture.links.peers.find(p => p.id === 'free').relation), undefined);
     await page.getByLabel('开放范围').selectOption('details'); await page.getByRole('radio', { name: '下级 · 画在你下面' }).check();
     assert.equal(await page.getByLabel('开放范围').inputValue(), 'details');
     await page.getByRole('button', { name: '保存', exact: true }).click(); await page.getByRole('heading', { name: '组织', exact: true }).waitFor();
     assert.equal(await page.evaluate(() => fixture.links.peers.find(p => p.id === 'free').scope), 'details');
+    assert.deepEqual(await page.evaluate(() => fixture.calls.find(c => c.input?.operation === 'share').input.projectIds), []);
+    assert.equal(await page.evaluate(() => fixture.links.peers.find(p => p.id === 'free').allProjects), true);
     await page.locator('[data-workspace=free] .wsr-h').click(); await page.locator('[data-workspace=free]').getByRole('button', { name: '连接设置' }).click(); await page.getByRole('button', { name: '改关系', exact: true }).click();
     await page.getByRole('radio', { name: '平级 · 虚线相连' }).check(); assert.equal(await page.getByLabel('开放范围').count(), 0);
     await page.getByRole('button', { name: '保存', exact: true }).click(); await page.waitForFunction(() => fixture.links.peers.find(p => p.id === 'free').relation === 'peer');
     assert.equal(await page.evaluate(() => fixture.links.peers.find(p => p.id === 'free').scope), 'details');
+    assert.equal(await page.evaluate(() => fixture.calls.filter(c => c.input?.operation === 'share').length), 1);
+  });
+  await setup({ manyProjects: true });
+  await test('all projects disables checked project options, summarizes the saved scope and restores previous checks', async () => {
+    const node = page.locator('[data-workspace=free]');
+    const openPeer = async () => {
+      const settings = node.getByRole('button', { name: '连接设置' });
+      if (!await settings.isVisible()) await node.locator('.wsr-h').click();
+      await settings.click();
+    };
+    await openPeer();
+    await page.getByLabel('开放范围').selectOption('summary');
+    const selectAll = page.getByRole('checkbox', { name: '全部项目', exact: true });
+    const first = page.getByRole('checkbox', { name: '示例项目', exact: true });
+    const second = page.getByRole('checkbox', { name: '项目 2', exact: true });
+    await first.check();
+    await selectAll.check();
+    assert.deepEqual(await page.getByRole('region', { name: '开放哪些项目' }).locator('input[type=checkbox]').evaluateAll(inputs => inputs.slice(1).map(i => i.checked && i.disabled)), Array(14).fill(true));
+    assert.equal(await selectAll.evaluate(e => document.activeElement === e), true);
+    await page.getByRole('button', { name: '保存', exact: true }).click();
+    await page.getByRole('region', { name: '你向对方开放' }).getByText('全部项目', { exact: true }).waitFor();
+    assert.equal(await first.count(), 0);
+    await home();
+    await node.getByText(/你开放：全部项目/).waitFor();
+    await project();
+    await page.getByRole('button', { name: '项目设置', exact: true }).click();
+    await page.getByRole('region', { name: '开放给了谁' }).getByText('工作间 free', { exact: true }).waitFor();
+    await home(); await openPeer();
+    await page.getByRole('button', { name: '编辑开放设置', exact: true }).click();
+    await selectAll.uncheck();
+    assert.equal(await first.isChecked() && await first.isEnabled(), true);
+    assert.equal(!await second.isChecked() && await second.isEnabled(), true);
+    await page.getByRole('button', { name: '保存', exact: true }).click();
+    await page.getByRole('status').filter({ hasText: '已保存' }).waitFor();
+    assert.deepEqual(await page.evaluate(() => fixture.calls.filter(c => c.input?.operation === 'share').map(c => [c.input.allProjects, c.input.projectIds])), [[true, ['p1']], [false, ['p1']]]);
   });
   for (const id of ['down', 'off']) {
     await setup();

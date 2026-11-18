@@ -5,12 +5,12 @@ import { lookup } from 'node:dns'
 import { hostname, networkInterfaces } from 'node:os'
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto'
 import type { OrcaWorkerApi } from 'orca/worker'
-import { taskState, type Project, type WorkspaceRequest } from './model'
+import { isProjectShared, taskState, type Project, type WorkspaceRequest } from './model'
 import { fail, object, strings, text } from './store'
 import { WorkspaceRequests } from './requests'
 
 export type Scope = 'none' | 'summary' | 'details'
-export interface Sharing { scope: Scope; projectIds: string[]; acceptTasks: 'deny' | 'confirm' | 'auto' }
+export interface Sharing { scope: Scope; allProjects: boolean; projectIds: string[]; acceptTasks: 'deny' | 'confirm' | 'auto' }
 export interface SharedReport {
   workspaceId: string; name: string; scope: Scope; updatedAt: string
   acceptTasks: Sharing['acceptTasks']
@@ -28,7 +28,7 @@ export interface LinksSnapshot extends Omit<LinkData, 'peers'> {
   peers: (Peer & { status: 'connected' | 'offline' | 'pending' | 'revoked'; receivedAt?: string; report?: SharedReport })[]
   invitation?: { code: string; expiresAt: string }
 }
-const defaults = (): Sharing => ({ scope: 'none', projectIds: [], acceptTasks: 'deny' })
+const defaults = (): Sharing => ({ scope: 'none', allProjects: false, projectIds: [], acceptTasks: 'deny' })
 const secretKey = (id: string) => `workspace-link:${id}`
 const id = (v: unknown) => {
   const s = text(v, '工作间编号', 64)
@@ -56,6 +56,9 @@ export function invitationHost(interfaces = networkInterfaces()): string {
   const addresses = Object.values(interfaces).flat().filter(info => info && !info.internal && httpNetwork(info.address) === 'tailscale')
   return (addresses.find(info => info?.family === 'IPv4') ?? addresses[0])?.address ?? '127.0.0.1'
 }
+export function defaultWorkspaceName(host = hostname()): string {
+  return host.split('.')[0] || '我的工作间'
+}
 export function endpoint(value: unknown): string {
   let u: URL
   try { u = new URL(text(value, '访问地址', 2048)) } catch { return fail('请填写完整的 HTTP(S) 地址') }
@@ -68,15 +71,16 @@ function validateListener(d: Pick<LinkData, 'host' | 'port' | 'publicUrl' | 'tls
   if (d.publicUrl) endpoint(d.publicUrl)
   if (d.enabled && !httpNetwork(d.host) && (!d.tls || !d.publicUrl.startsWith('https://'))) fail('此监听地址需要 TLS 和 HTTPS 访问地址')
 }
-function sharing(raw: unknown): Sharing {
+function sharing(raw: unknown): Omit<Sharing, 'projectIds'> & { projectIds?: string[] } {
   const r = object(raw)
   if (!['none', 'summary', 'details'].includes(r.scope) || !['deny', 'confirm', 'auto'].includes(r.acceptTasks)) fail('开放范围或派活设置不正确')
-  return { scope: r.scope, projectIds: strings(r.projectIds, '开放的项目'), acceptTasks: r.acceptTasks }
+  if (r.allProjects !== undefined && typeof r.allProjects !== 'boolean') fail('全部项目设置不正确')
+  return { scope: r.scope, allProjects: r.allProjects === true, projectIds: r.projectIds === undefined ? undefined : strings(r.projectIds, '开放的项目'), acceptTasks: r.acceptTasks }
 }
 // Only locally owned project records enter this projection. Incoming reports have no route into it.
 export function report(projects: Project[], peer: Sharing, workspaceId: string, name: string): SharedReport {
-  return { workspaceId, name, scope: peer.scope, acceptTasks: peer.acceptTasks, updatedAt: new Date().toISOString(), projects: peer.scope === 'none' ? [] :
-    projects.filter(p => !p.hidden && peer.projectIds.includes(p.ref.id)).map(p => {
+  return { workspaceId, name, scope: peer.scope, acceptTasks: peer.acceptTasks, updatedAt: new Date().toISOString(), projects:
+    projects.filter(p => isProjectShared(p, peer)).map(p => {
       const external = p.events.filter(e => e.source === 'workspace-external')
       const tasks = p.tasks.filter(t => !external.some(e => e.taskId === t.id || t.sourceIds.includes(e.id)))
       const counts: Record<string, number> = {}
@@ -94,7 +98,7 @@ function received(raw: unknown, peer: Peer): SharedReport {
   if (!['deny', 'confirm', 'auto'].includes(r.acceptTasks)) fail('对端派活规则不正确')
   const str = (v: unknown, max = 4000) => typeof v === 'string' && v.length <= max ? v : fail('对端文字格式不正确')
   const titles = (v: unknown) => { if (!Array.isArray(v) || v.length > 100) fail('对端标题格式不正确'); return v.map(x => str(x)) }
-  return { workspaceId: peer.workspaceId, name: str(r.name, 200), scope: r.scope, acceptTasks: r.acceptTasks, updatedAt: str(r.updatedAt, 100), projects: r.projects.map((raw: unknown) => {
+  return { workspaceId: peer.workspaceId, name: text(r.name, '工作间名称', 200), scope: r.scope, acceptTasks: r.acceptTasks, updatedAt: str(r.updatedAt, 100), projects: r.projects.map((raw: unknown) => {
     const p = object(raw), c = object(p.counts), counts: Record<string, number> = {}
     for (const k of ['working', 'decision', 'review', 'rework', 'completed', 'blocked', 'paused']) if (c[k] !== undefined) {
       if (!Number.isSafeInteger(c[k]) || c[k] < 0) fail('对端计数不正确'); counts[k] = c[k]
@@ -142,7 +146,7 @@ async function call(url: string, route: string, body: unknown, token = ''): Prom
 
 export class WorkspaceLinks {
   readonly requests: WorkspaceRequests
-  private initial: LinkData = { version: 1, revision: 0, workspaceId: randomUUID(), name: hostname() || '我的工作间', enabled: false, host: '127.0.0.1', port: 0, publicUrl: '', tls: false, peers: [] }
+  private initial: LinkData = { version: 1, revision: 0, workspaceId: randomUUID(), name: defaultWorkspaceName(), enabled: false, host: '127.0.0.1', port: 0, publicUrl: '', tls: false, peers: [] }
   private server?: http.Server | https.Server
   private timer?: ReturnType<typeof setInterval>
   private invitation?: { token: string; expires: number }
@@ -159,10 +163,20 @@ export class WorkspaceLinks {
     if (!raw) return structuredClone(this.initial)
     const d = structuredClone(object(raw)) as LinkData
     if (d.version !== 1 || !Array.isArray(d.peers)) fail('工作间连接记录不兼容，请保留数据并检查版本')
-    for (const p of d.peers) if (p.sharingSet === undefined && (p.scope !== 'none' || p.projectIds.length || p.acceptTasks !== 'deny')) p.sharingSet = true
+    for (const p of d.peers) {
+      p.allProjects = p.allProjects === true
+      if (p.sharingSet === undefined && (p.scope !== 'none' || p.allProjects || p.projectIds.length || p.acceptTasks !== 'deny')) p.sharingSet = true
+    }
     return d
   }
   private async save(d: LinkData) { if (Buffer.byteLength(JSON.stringify(d)) > 100_000) fail('连接记录已达上限'); await this.orca.storage.set('workspace.links', d as any) }
+  private async recordIncoming(d: LinkData, peer: Peer, report: SharedReport) {
+    const receivedAt = new Date().toISOString()
+    if (!peer.lastSyncAt || peer.name !== report.name) {
+      peer.name = report.name; peer.lastSyncAt = receivedAt; await this.save(d)
+    }
+    this.incoming.set(peer.id, { report, receivedAt }); this.failures.delete(peer.id)
+  }
   async snapshot(): Promise<LinksSnapshot> {
     const d = await this.serial(async () => {
       const d = await this.data(); let changed = false
@@ -185,7 +199,7 @@ export class WorkspaceLinks {
       if (d.revision !== input.revision) fail('连接设置已更新，请刷新后再保存')
       if (typeof input.enabled !== 'boolean' || typeof input.tls !== 'boolean') fail('监听与 TLS 设置不正确')
       const publicUrl = input.publicUrl ? endpoint(input.publicUrl) : ''
-      const next = { ...d, name: text(input.name, '工作间名称', 200), enabled: input.enabled, host: input.host, port: input.port, publicUrl, tls: input.tls, revision: d.revision + 1 }
+      const next = { ...d, name: input.name === undefined ? d.name : text(input.name, '工作间名称', 200), enabled: input.enabled, host: input.host, port: input.port, publicUrl, tls: input.tls, revision: d.revision + 1 }
       validateListener(next)
       if (input.certificate || input.privateKey) {
         if (!input.certificate || !input.privateKey) fail('请同时填写证书与私钥')
@@ -196,6 +210,15 @@ export class WorkspaceLinks {
       if (input.enabled && input.tls && !await this.orca.secrets.get('workspace-links-tls')) fail('请填写 TLS 证书与私钥')
       await this.save(next)
       await this.listen(next)
+    })
+    this.changed(); return this.snapshot()
+  }
+  async rename(input: Record<string, any>) {
+    const name = text(input.name, '工作间名称', 200)
+    await this.serial(async () => {
+      const d = await this.data()
+      if (d.revision !== input.revision) fail('连接设置已更新，请刷新后再保存')
+      if (d.name !== name) await this.save({ ...d, name, revision: d.revision + 1 })
     })
     this.changed(); return this.snapshot()
   }
@@ -270,9 +293,16 @@ export class WorkspaceLinks {
     this.changed(); return this.snapshot()
   }
   async share(input: Record<string, any>) {
-    const setting = sharing(input), own = await this.projects()
-    if (setting.projectIds.some(id => !own.some(p => p.ref.id === id))) fail('只能开放本工作间自己的项目')
-    await this.serial(async () => { const d = await this.data(); if (input.revision !== d.revision) fail('连接已更新，请刷新后再保存'); const p = d.peers.find(p => p.id === input.id && p.state === 'active'); if (!p) fail('请选择有效连接'); Object.assign(p, setting, { sharingSet: true }); d.revision++; await this.save(d) })
+    const { projectIds, ...setting } = sharing(input), own = await this.projects()
+    await this.serial(async () => {
+      const d = await this.data()
+      if (input.revision !== d.revision) fail('连接已更新，请刷新后再保存')
+      const p = d.peers.find(p => p.id === input.id && p.state === 'active')
+      if (!p) fail('请选择有效连接')
+      const knownIds = new Set([...p.projectIds, ...own.map(p => p.ref.id)])
+      if (projectIds?.some(id => !knownIds.has(id))) fail('只能开放本工作间自己的项目')
+      Object.assign(p, setting, { projectIds: projectIds ?? p.projectIds, sharingSet: true }); d.revision++; await this.save(d)
+    })
     await this.sync(input.id); this.changed(); return this.snapshot()
   }
   async relate(input: Record<string, any>) {
@@ -329,8 +359,7 @@ export class WorkspaceLinks {
       await this.serial(async () => { const now = await this.data(), current = now.peers.find(x => x.id === p.id); if (!current || current.state === 'revoked') return
         if (current.state === 'pending') { current.state = 'active'; now.revision++; await this.save(now) }
         await this.requests.receive(p.id, p.workspaceId, current.acceptTasks, result.exchange)
-        if (!current.lastSyncAt) { current.lastSyncAt = new Date().toISOString(); await this.save(now) }
-        this.incoming.set(p.id, { report: incoming, receivedAt: new Date().toISOString() }); this.failures.delete(p.id)
+        await this.recordIncoming(now, current, incoming)
       })
     } catch (e) {
       if ((e as { status?: number }).status === 401) await this.serial(async () => {
@@ -370,8 +399,7 @@ export class WorkspaceLinks {
         await this.requests.receive(p.id, p.workspaceId, p.acceptTasks, body.exchange)
         const response = { report: outgoing, exchange: await this.requests.envelope(p.id) }
         if (Buffer.byteLength(JSON.stringify(response)) > LIMIT) fail('工作间上报过大')
-        if (!p.lastSyncAt) { p.lastSyncAt = new Date().toISOString(); await this.save(d) }
-        this.incoming.set(p.id, { report: incoming, receivedAt: new Date().toISOString() }); this.failures.delete(p.id)
+        await this.recordIncoming(d, p, incoming)
         reply(200, response); this.changed()
       })
     } catch { if (!res.headersSent) reply(400, { error: 'Invalid workspace request' }); req.resume() }

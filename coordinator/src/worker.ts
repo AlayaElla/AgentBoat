@@ -85,6 +85,7 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
     switch (input.operation) {
       case 'read': return links.snapshot()
       case 'configure': return links.configure(input)
+      case 'rename': return links.rename(input)
       case 'invite': return links.invite()
       case 'cancel-invite': return links.cancelInvite()
       case 'join': return links.join(text(input.code, '连接码', 6000))

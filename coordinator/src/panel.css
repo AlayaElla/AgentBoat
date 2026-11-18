@@ -105,6 +105,7 @@ html.dark .switch>input::after{background:var(--orca-foreground)}html.dark .swit
 .opt>input{appearance:none;flex:none;width:16px;height:16px;margin-top:2px;border:0;background:color-mix(in oklab,var(--orca-foreground) 15%,transparent);cursor:pointer;position:relative}
 .opt>input[type=radio]{border-radius:50%}.opt>input[type=checkbox]{border-radius:4px}
 .opt>input:checked{background:var(--orca-primary)}
+.opt:has(input:disabled){opacity:.65}.opt:has(input:disabled),.opt>input:disabled{cursor:default}
 .opt>input[type=radio]:checked::after{content:"";position:absolute;inset:5px;border-radius:50%;background:var(--orca-primary-foreground)}
 .opt>input[type=checkbox]:checked::after{content:"";position:absolute;inset:0;background:var(--orca-primary-foreground);-webkit-mask:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'><path d='M20 6 9 17l-5-5'/></svg>") center/12px no-repeat;mask:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'><path d='M20 6 9 17l-5-5'/></svg>") center/12px no-repeat}
 .fold>summary{display:flex;align-items:center;gap:6px;min-height:28px;border-radius:var(--r-md);font-weight:500;cursor:pointer;list-style:none}

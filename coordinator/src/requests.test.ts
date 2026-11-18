@@ -58,9 +58,9 @@ async function connect(a: Awaited<ReturnType<typeof workspace>>, b: Awaited<Retu
   const joined = await b.coordinator.links.join((await a.coordinator.links.invite()).invitation!.code)
   return joined.peers.find(p => p.workspaceId === s.workspaceId)!.id
 }
-async function rule(w: Awaited<ReturnType<typeof workspace>>, peerId: string, acceptTasks: string) {
+async function rule(w: Awaited<ReturnType<typeof workspace>>, peerId: string, acceptTasks: string, allProjects = false) {
   const s = await w.coordinator.links.snapshot()
-  await w.coordinator.links.share({ id: peerId, revision: s.revision, scope: 'details', projectIds: ['p1'], acceptTasks })
+  await w.coordinator.links.share({ id: peerId, revision: s.revision, scope: 'details', projectIds: ['p1'], allProjects, acceptTasks })
 }
 const content = (peerId: string, requestId: string) => ({ peerId, requestId, title: `测试请求 ${requestId}`, context: '测试背景，仅回环', expected: '测试文字和链接', links: ['https://example.com/input'] })
 
@@ -173,9 +173,9 @@ test('durable retries/restart, revoke both ways, third-party isolation, auth and
       const legacy = structuredClone(p.tasks[1]); legacy.id = 'legacy-external'; legacy.sourceIds = []; p.tasks.push(legacy)
       p.events.push({ ...event, id: 'legacy-source', taskId: legacy.id })
     })
-    await rule(b, bc, 'auto'); await b.coordinator.links.refresh()
+    await rule(b, bc, 'auto', true); await b.coordinator.links.refresh()
     const cs = await c.coordinator.links.snapshot(), third = cs.peers.find(p => p.id === bc)!
-    assert.deepEqual(third.report!.projects.map(p => p.id), ['p1'])
+    assert.deepEqual(third.report!.projects.map(p => p.id), ['p1', 'p2'])
     assert.deepEqual(third.report!.projects[0].tasks!.map(t => t.title), ['B LOCAL TITLE'])
     assert.deepEqual(third.report!.projects[0].counts, { working: 1 })
     assert.equal(third.report!.projects[0].pending, 0)

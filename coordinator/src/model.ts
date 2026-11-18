@@ -136,6 +136,9 @@ export const roles = { design: '设计', code: '代码', review: '审查' }
 export const agents = { claude: 'Claude', codex: 'Codex', opencode: 'OpenCode' }
 export const agentName = (v = '') => agents[v as keyof typeof agents] || v || '未知'
 export const scopes = { none: '不开放', summary: '项目摘要', details: '含任务详情' }
+export function isProjectShared(project: Pick<Project, 'ref' | 'hidden'>, sharing: Pick<import('./links').Sharing, 'scope' | 'allProjects' | 'projectIds'>): boolean {
+  return !project.hidden && sharing.scope !== 'none' && (sharing.allProjects === true || sharing.projectIds.includes(project.ref.id))
+}
 export const rules = { deny: '不接受', confirm: '需我确认', auto: '自动受理' }
 export const statuses = { connected: '已连接', offline: '离线', pending: '待核对', revoked: '已断开' }
 export const connectionStates = { off: '未启用', connecting: '连接中', connected: '已连接', error: '连接异常', unchecked: '未检查' }

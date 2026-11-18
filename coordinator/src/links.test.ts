@@ -1,7 +1,7 @@
 import { assert, test, mockHost, mountWorker } from 'orca/testing'
 import { hostname } from 'node:os'
 import type { OrcaWorkerApi } from 'orca/worker'
-import { WorkspaceLinks, endpoint, invitationHost, report } from './links'
+import { WorkspaceLinks, defaultWorkspaceName, endpoint, invitationHost, report } from './links'
 import { refs, sample } from './fixtures'
 import { fresh } from './store'
 import { testCoordinator as createCoordinator } from './test-runtime'
@@ -46,7 +46,9 @@ test('one-click invite binds the selected address and keeps the assigned port af
   const restarted = a.create()
   try {
     const initial = await a.links.snapshot()
-    assert.equal(initial.name, hostname())
+    assert.equal(initial.name, defaultWorkspaceName(hostname()))
+    assert.equal(defaultWorkspaceName('Studio-Mac-mini.local'), 'Studio-Mac-mini')
+    assert.equal(defaultWorkspaceName(''), '我的工作间')
     assert.equal(initial.enabled, false)
     assert.equal(a.storage.has('workspace.links'), false)
     const s = await a.links.invite()
@@ -89,6 +91,54 @@ test('relations remain local, saved sharing is sticky, offline time survives a n
     const restarted = new WorkspaceLinks(api as any, async () => b.projects, () => {})
     assert.equal((await restarted.snapshot()).peers[0].lastSyncAt, offline.peers[0].lastSyncAt)
     await assert.rejects(() => b.links.relate({ revision: changed.revision, id: p.id, relation: 'invalid' }))
+  } finally { a.links.stop(); b.links.stop() }
+})
+
+test('all projects uses the current visible projects and preserves the legacy selection when switched off', async () => {
+  const a = await instance('A'), b = await instance('B')
+  try {
+    const joined = await b.links.join((await a.links.invite()).invitation!.code), id = joined.peers[0].id
+    const share = async (settings: { allProjects?: unknown; projectIds?: string[]; scope?: string }) => {
+      const previous = await a.links.snapshot()
+      return a.links.share({ id, revision: previous.revision, scope: 'summary', acceptTasks: 'confirm', ...settings })
+    }
+    const reported = async () => (await b.links.refresh()).peers[0].report!.projects.map(p => p.id)
+    await share({ projectIds: ['p1'] })
+    delete a.storage.get('workspace.links').peers[0].allProjects
+    assert.equal((await a.links.snapshot()).peers[0].allProjects, false)
+    assert.deepEqual(await reported(), ['p1'])
+    await assert.rejects(() => share({ allProjects: 'true' }), /全部项目设置不正确/)
+    const all = await share({ allProjects: true })
+    assert.deepEqual(all.peers[0].projectIds, ['p1'])
+    assert.deepEqual(await reported(), ['p1', 'p2'])
+    a.projects[1].hidden = true
+    a.projects.push(fresh({ ...refs[1], id: 'added', name: '新项目' }))
+    assert.deepEqual(await reported(), ['p1', 'added'])
+    await share({ allProjects: true, scope: 'none' })
+    assert.deepEqual(await reported(), [])
+    await share({ allProjects: false })
+    assert.deepEqual(await reported(), ['p1'])
+  } finally { a.links.stop(); b.links.stop() }
+})
+
+test('renaming preserves the listener and the next sync persists new names in both directions', async () => {
+  const a = await instance('A'), b = await instance('B')
+  try {
+    const invite = await a.links.invite(), before = structuredClone(a.storage.get('workspace.links'))
+    const renamed = await a.links.rename({ revision: invite.revision, name: ' A renamed ', host: 'invalid', port: -1, tls: true })
+    assert.equal(renamed.listening, invite.listening)
+    assert.deepEqual(a.storage.get('workspace.links'), { ...before, revision: before.revision + 1, name: 'A renamed' })
+    // The existing invitation still works and initially advertises A's old name.
+    const joined = await b.links.join(invite.invitation!.code)
+    assert.equal(joined.peers[0].name, 'A renamed')
+    const next = await a.links.rename({ revision: (await a.links.snapshot()).revision, name: 'A again' })
+    await b.links.rename({ revision: joined.revision, name: 'B renamed' })
+    assert.equal((await a.links.snapshot()).peers[0].name, 'B')
+    assert.equal((await b.links.snapshot()).peers[0].name, 'A renamed')
+    assert.equal((await b.links.refresh()).peers[0].name, next.name)
+    assert.equal((await a.links.snapshot()).peers[0].name, 'B renamed')
+    assert.equal((await a.create().snapshot()).peers[0].name, 'B renamed')
+    assert.equal((await b.create().snapshot()).peers[0].name, 'A again')
   } finally { a.links.stop(); b.links.stop() }
 })
 
@@ -188,6 +238,8 @@ test('plugin request/overview integration preserves all legacy project and works
     const s = await worker.request('workspace.links', { operation: 'read' })
     assert.equal(s.enabled, false)
     assert.equal(s.host, '127.0.0.1')
+    const named = await worker.request('workspace.links', { operation: 'rename', revision: s.revision, name: '本机名称' })
+    assert.equal(named.name, '本机名称')
     const all = await worker.request('workspace.overview')
     assert.equal(all.links!.workspaceId, s.workspaceId)
     assert.deepEqual(host.data().storage['project:p1'], storage['project:p1'])

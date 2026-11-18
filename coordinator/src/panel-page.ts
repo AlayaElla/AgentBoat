@@ -1,9 +1,9 @@
 import type {} from 'orca/frame'
 import './protocol'
-import { agentName, groupedAttention, labels, taskState, requestState, requestStates, scopes, rules, statuses, connectionStates, roles, mainAgentStates } from './model'
+import { agentName, groupedAttention, isProjectShared, labels, taskState, requestState, requestStates, scopes, rules, statuses, connectionStates, roles, mainAgentStates } from './model'
 import type { Overview, Project, Task, ProjectWorkspace } from './model'
 import type { AgentsSnapshot, LiveAgent } from './model'
-import type { LinksSnapshot } from './links'
+import type { LinksSnapshot, Sharing } from './links'
 
 type Page = { kind: string; projectId?: string; id?: string; pid?: string }
 type Draft = { taskId: string; kind: 'acceptance' | 'decision'; itemId: string; itemRevision?: number; fingerprint?: string; signature: string; title: string; result?: string; answer?: string; note?: string }
@@ -27,6 +27,7 @@ const key = (t: string, k: string, id: string) => JSON.stringify([t, k, id])
 const choices = () => drafts[page.projectId || ''] ?? {}
 const peers = () => all.links?.peers ?? []
 const peer = () => peers().find(p => p.id === page.id)
+const sharesAllProjects = (p: LinksSnapshot['peers'][number]) => p.state === 'active' && p.scope !== 'none' && p.allProjects
 const pending = (p?: string) => groupedAttention(all.attention).filter(a => !p || a.projectId === p)
 const needs = () => live.ok ? live.agents.filter(a => a.state === 'need') : []
 const requests = () => all.links?.requests ?? []
@@ -81,8 +82,8 @@ function select(label: string, options: Record<string, string>, initial: string,
   s.value = form[label]
   return el('label', { class: 'field' }, el('span', { class: 'lb' }, label), el('span', { class: 'sel' }, s))
 }
-function check(label: string, checked: boolean, change: (v: boolean) => void, type = 'checkbox', name?: string, value?: string) {
-  return el('label', { class: 'opt' }, el('input', { type, checked, name, value, onchange: (e: Event) => change((e.target as HTMLInputElement).checked) }), el('span', { class: 'any' }, label))
+function check(label: string, checked: boolean, change: (v: boolean) => void, options: { type?: string; name?: string; value?: string; disabled?: boolean; 'data-focus'?: string } = {}) {
+  return el('label', { class: 'opt' }, el('input', { type: 'checkbox', ...options, checked, onchange: (e: Event) => change((e.target as HTMLInputElement).checked) }), el('span', { class: 'any' }, label))
 }
 function tabs() {
   return el('div', { class: 'tabs', role: 'tablist', 'aria-label': '项目页面', onkeydown: (e: KeyboardEvent) => {
@@ -190,7 +191,7 @@ function workspaceNode(p?: LinksSnapshot['peers'][number]) {
   return el('article', { class: `wsr ${p ? '' : 'me'}`, 'data-workspace': id }, el('div', { class: 'wsr-top' },
     el('button', { type: 'button', class: 'wsr-h', 'aria-expanded': String(open), 'aria-controls': `workspace-${id}`, title: p ? `${p.name} · ${p.relation ? { above: '你标的上级', below: '你标的下级', peer: '你标的平级' }[p.relation] : '还没标关系'}` : '我的工作间', onclick: () => { opened[id] = !open; remember(); render() } },
       dot(active ? 'ok' : '', active ? '已连接' : '离线'), flagged ? dot('bad flag', '有受阻的任务') : null, el('span', { class: 'name trunc' }, p?.name ?? all.links?.name ?? '我的工作间'), !p ? tag('我', 'solid') : null,
-      el('span', { class: 'sum trunc xs muted' }, p ? !active ? `离线 · 最后同步 ${relative(p.lastSyncAt)}` : [report?.projects.length ? `${report.projects.length} 个项目` : '', unfinished.length ? `${unfinished.length} 个请求` : ''].filter(Boolean).join(' · ') : `${all.projects.length} 个项目`), pill(p ? incoming().filter(r => r.peerId === id).length : pending().length + needs().length), '›'),
+      el('span', { class: 'sum trunc xs muted' }, p ? [sharesAllProjects(p) ? '你开放：全部项目' : '', !active ? `离线 · 最后同步 ${relative(p.lastSyncAt)}` : report?.projects.length ? `${report.projects.length} 个项目` : '', active && unfinished.length ? `${unfinished.length} 个请求` : ''].filter(Boolean).join(' · ') : `${all.projects.length} 个项目`), pill(p ? incoming().filter(r => r.peerId === id).length : pending().length + needs().length), '›'),
     p && !p.relation ? button('标关系', () => go({ kind: 'relation', id }), 'sm') : null), open ? el('div', { class: 'wsr-b', id: `workspace-${id}` }, body) : null)
 }
 function home() {
@@ -210,7 +211,7 @@ function feedbackCards(tasks: Task[]) {
     return section(t.title, acceptance.length > 1 ? button(`这 ${acceptance.length} 项全部通过`, () => { for (const a of acceptance) choose({ taskId: t.id, kind: 'acceptance', itemId: a.id, itemRevision: a.revision, fingerprint: a.fingerprint, signature: a.fingerprint, title: a.title, result: 'passed' }); render() }, 'sm') : null,
       t.decisions.filter(d => d.answer === undefined).map(d => {
         const k = key(t.id, 'decision', d.id), draft = choices()[k], base: Draft = { taskId: t.id, kind: 'decision', itemId: d.id, title: d.question, signature: JSON.stringify([d.question, d.options]) }
-        return card(el('h3', { class: 'h2 any' }, d.question), ...[...d.options, '其他'].map(option => check(option, draft?.answer === option || option === '其他' && !!draft?.answer && !d.options.includes(draft.answer), () => { choose({ ...base, answer: option === '其他' ? '' : option }); form[`决定 ${k}`] = ''; render() }, 'radio', k, option)), draft && !d.options.includes(draft.answer ?? '') ? input(`决定 ${k}`, draft.answer ?? '', 'textarea', value => { choose({ ...base, answer: value }); renderSheet() }) : null, draft ? button('撤销', () => { delete choices()[k]; persist('panel.drafts', drafts); render() }, 'text sm') : null)
+        return card(el('h3', { class: 'h2 any' }, d.question), ...[...d.options, '其他'].map(option => check(option, draft?.answer === option || option === '其他' && !!draft?.answer && !d.options.includes(draft.answer), () => { choose({ ...base, answer: option === '其他' ? '' : option }); form[`决定 ${k}`] = ''; render() }, { type: 'radio', name: k, value: option })), draft && !d.options.includes(draft.answer ?? '') ? input(`决定 ${k}`, draft.answer ?? '', 'textarea', value => { choose({ ...base, answer: value }); renderSheet() }) : null, draft ? button('撤销', () => { delete choices()[k]; persist('panel.drafts', drafts); render() }, 'text sm') : null)
       }), acceptance.map(a => {
         const k = key(t.id, 'acceptance', a.id), draft = choices()[k], base: Draft = { taskId: t.id, kind: 'acceptance', itemId: a.id, itemRevision: a.revision, fingerprint: a.fingerprint, signature: a.fingerprint, title: a.title }
         return card(row(el('h3', { class: 'h2 any grow' }, a.title), tag(`第 ${a.revision} 版`)), el('p', { class: 'any' }, a.details), t.artifacts.filter(ar => a.artifactIds.includes(ar.id)).map(ar => button(`打开成果 · ${ar.label}`, () => /^https?:/i.test(ar.url) ? orca.shell?.openExternal(ar.url) : req('project.openArtifact', { projectId: page.projectId, taskId: t.id, artifactId: ar.id }), 'sm')),
@@ -250,7 +251,7 @@ function projectPage() {
   if (!current) return callout('正在读取项目…')
   const p = current
   if (page.kind === 'project-settings') return [section('分工', small(`项目主 agent：${agentName(projectLead)}`), ...Object.entries(roles).map(([k, title]) => select(title, { claude: 'Claude', codex: 'Codex' }, p.roles[k as keyof typeof roles])), button('保存', () => act(async () => { const s = await req('project.settings', { projectId: p.ref.id, revision: p.revision, roles: { design: form['设计'], code: form['代码'], review: form['审查'] } }); current = s.project; notice = '已保存' }), 'primary')),
-    section('开放给了谁', peers().filter(peer => peer.scope !== 'none' && peer.projectIds.includes(p.ref.id)).map(peer => small(peer.name))), small(`目录：${p.ref.path}`), button('导出记录', () => orca.files?.saveAs({ suggestedName: 'project-record.json', mimeType: 'application/json', data: JSON.stringify(p, null, 2) })),
+    section('开放给了谁', peers().filter(peer => peer.state === 'active' && isProjectShared(p, peer)).map(peer => small(peer.name))), small(`目录：${p.ref.path}`), button('导出记录', () => orca.files?.saveAs({ suggestedName: 'project-record.json', mimeType: 'application/json', data: JSON.stringify(p, null, 2) })),
     button(p.hidden ? '恢复显示' : '隐藏项目', () => act(async () => { await req('project.visibility', { projectId: p.ref.id, revision: p.revision, hidden: !p.hidden }); delete drafts[p.ref.id]; persist('panel.drafts', drafts); await go({ kind: 'home' }, true); await refresh() })),
     section('删除项目', callout('先导出记录，再从 Orca 移除项目并删除工作间记录，磁盘文件保留。有打开的会话时会拒绝。'), check('确认删除这个项目的全部工作间记录', !!form.delete, v => { form.delete = v; render() }), button('删除项目', () => act(async () => { const result = await req('project.delete', { projectId: p.ref.id, revision: p.revision, confirm: p.ref.id }); delete drafts[p.ref.id]; persist('panel.drafts', drafts); await go({ kind: 'home' }, true); await refresh(); notice = `已删除，记录已导出：${result.exportPath}` }), 'danger', !form.delete))]
   if (page.kind === 'task') {
@@ -268,11 +269,18 @@ function projectPage() {
   }), 'text sm', !!reason, reason)
   return [row(el('h2', { class: 'h1 grow trunc' }, p.ref.name), openMain, button('项目设置', () => go({ kind: 'project-settings', projectId: p.ref.id }), 'text sm')), reason && reason !== error ? callout(reason) : null, tabs(), el('div', { role: 'tabpanel', class: 'stack g3' }, tab === 'agents' ? agentsPage(p.ref.id) : tab === 'tasks' ? p.tasks.map(t => item(t.title, `${labels[taskState(t)]} · ${relative(t.updatedAt)}`, () => go({ kind: 'task', projectId: p.ref.id, id: t.id }))) : tab === 'messages' ? [section('通知', p.deliveries.map(d => card(d.subject, small(`${d.state === 'uncertain' ? '待核对，不会自动重发' : d.state === 'sent' ? '已通知' : '待通知'}`), small(d.error || ''), d.state === 'pending' ? button('发送通知', () => act(async () => { await req('project.deliver', { projectId: p.ref.id, deliveryId: d.id }); await refresh() })) : null))), section('来源消息', p.events.map(e => card(e.text)))] : feedbackCards(p.tasks.filter(t => t.phase === 'blocked' || t.decisions.some(d => d.answer === undefined) || t.phase === 'ready' && t.acceptance.some(a => a.status === 'pending'))))]
 }
-function sharingFields(p: LinksSnapshot['peers'][number], defaults?: any) {
-  if (!('scope' in form)) Object.assign(form, { scope: p.scope, accept: p.acceptTasks, projectIds: [...p.projectIds] }, defaults)
-  const scope = select('开放范围', scopes, form.scope, v => { form.scope = v; form.touched = true; render() }); form['开放范围'] ??= form.scope
-  const accept = select('对方给你派活', rules, form.accept, v => { form.accept = v; form.touched = true })
-  return [scope, form.scope !== 'none' ? section('开放哪些项目', all.projects.map(pr => check(pr.ref.name, form.projectIds.includes(pr.ref.id), v => { form.touched = true; form.projectIds = v ? [...form.projectIds, pr.ref.id] : form.projectIds.filter((id: string) => id !== pr.ref.id) }))) : null, accept]
+function sharingFields(p: LinksSnapshot['peers'][number], suggestion?: Sharing) {
+  const draft: Sharing = form.sharing ??= suggestion ?? { scope: p.scope, acceptTasks: p.acceptTasks, allProjects: p.allProjects === true, projectIds: [...p.projectIds] }
+  const scope = select('开放范围', scopes, draft.scope, v => { draft.scope = v as Sharing['scope']; form.touched = true; render() })
+  const accept = select('对方给你派活', rules, draft.acceptTasks, v => { draft.acceptTasks = v as Sharing['acceptTasks']; form.touched = true })
+  return [scope, draft.scope !== 'none' ? section('开放哪些项目',
+    row(check('全部项目', draft.allProjects, v => { form.touched = true; draft.allProjects = v; render() }, { 'data-focus': 'all-projects' }), small('以后新加的项目也会自动开放给对方')),
+    all.projects.map(pr => check(pr.ref.name, isProjectShared(pr, draft), v => {
+      form.touched = true; draft.projectIds = v ? [...draft.projectIds, pr.ref.id] : draft.projectIds.filter(id => id !== pr.ref.id)
+    }, { disabled: draft.allProjects }))) : null, accept]
+}
+async function saveSharing(id: string) {
+  all.links = await req('workspace.links', { operation: 'share', revision: all.links!.revision, id, ...form.sharing })
 }
 function peerPage() {
   const p = peer()
@@ -289,19 +297,35 @@ function peerPage() {
   }), 'primary', !!dispatchReason(p)), button('取消', back))]
   if (page.kind === 'relation') {
     form.relation ??= p.relation ?? 'none'
-    const suggest = (relation: string) => ({ scope: relation === 'above' ? 'summary' : 'none', accept: relation === 'none' ? p.acceptTasks : 'confirm', projectIds: relation === 'above' ? all.projects.map(p => p.ref.id) : [] })
-    const proposed = !p.sharingSet && form.relation !== 'none'
-    return [callout('关系只保存在你这边，不发给对方，不改变权限。'), ...Object.entries({ above: '上级 · 画在你上面', below: '下级 · 画在你下面', peer: '平级 · 虚线相连', none: '不标 · 不连线' }).map(([value, title]) => check(title, form.relation === value, () => { form.relation = value; if (!form.touched && !p.sharingSet) { const values = suggest(value); Object.assign(form, values, { '开放范围': values.scope, '对方给你派活': values.accept }) }; render() }, 'radio', 'relation', value)), proposed ? section('你这边对它的设置', sharingFields(p, suggest(form.relation))) : p.sharingSet ? callout(`开放设置保持：${scopes[p.scope]} · ${rules[p.acceptTasks]}。新关系建议：${form.relation === 'above' ? '项目摘要 · 全部项目 · 需我确认' : form.relation === 'none' ? '保持设置' : '不开放 · 需我确认'}。`) : null,
-      row(button('保存', () => act(async () => { let result = await req('workspace.links', { operation: 'relate', revision: all.links!.revision, id: p.id, relation: form.relation === 'none' ? null : form.relation }); all.links = result; if (proposed) { result = await req('workspace.links', { operation: 'share', revision: result.revision, id: p.id, scope: form.scope, projectIds: form.projectIds, acceptTasks: form.accept }); all.links = result }; await back(); await refresh() }), 'primary', p.state !== 'active'), button('取消', back))]
+    const suggest = (relation: string): Sharing => ({ scope: relation === 'above' ? 'summary' : 'none', acceptTasks: relation === 'none' ? p.acceptTasks : 'confirm', allProjects: relation === 'above', projectIds: [...p.projectIds] })
+    const first = !p.relation && !p.sharingSet, proposed = first && form.relation !== 'none'
+    return [callout('关系只保存在你这边，不发给对方，不改变权限。'), ...Object.entries({ above: '上级 · 画在你上面', below: '下级 · 画在你下面', peer: '平级 · 虚线相连', none: '不标 · 不连线' }).map(([value, title]) => check(title, form.relation === value, () => {
+      form.relation = value
+      if (first && !form.touched) {
+        const draft = form.sharing = suggest(value)
+        form['开放范围'] = draft.scope; form['对方给你派活'] = draft.acceptTasks
+      }
+      render()
+    }, { type: 'radio', name: 'relation', value })), proposed ? section('你这边对它的设置', sharingFields(p, suggest(form.relation))) : !first ? callout(`当前开放设置：${scopes[p.scope]}${sharesAllProjects(p) ? ' · 全部项目' : ''} · ${rules[p.acceptTasks]}`) : null,
+      row(button('保存', () => act(async () => { all.links = await req('workspace.links', { operation: 'relate', revision: all.links!.revision, id: p.id, relation: form.relation === 'none' ? null : form.relation }); if (proposed) await saveSharing(p.id); await back(); await refresh() }), 'primary', p.state !== 'active'), button('取消', back))]
   }
-  return [el('h2', { class: 'h1 any' }, p.name), small(`${statuses[p.status]} · 最后同步 ${relative(p.lastSyncAt)}`), section('关系', small(p.relation ? { above: '上级', below: '下级', peer: '平级' }[p.relation] : '未标'), button('改关系', () => go({ kind: 'relation', id: p.id }), '', p.state !== 'active')), section('对方向你开放', small(p.report ? scopes[p.report.scope] : '未知'), small(p.report ? `你给对方派活：${rules[p.report.acceptTasks]}` : '派活规则未知'), dispatchButton(p)), section('往来请求', requests().filter(r => r.peerId === p.id).map(r => item(r.title, requestStates[requestState(r)], () => go({ kind: 'request', id: r.id })))), section('你向对方开放', sharingFields(p), button('保存', () => act(async () => { all.links = await req('workspace.links', { operation: 'share', revision: all.links!.revision, id: p.id, scope: form.scope, projectIds: form.projectIds, acceptTasks: form.accept }); notice = '已保存' }), 'primary', p.state !== 'active')),
+  const sharing = sharesAllProjects(p) && !form.editingSharing
+    ? row(el('span', {}, '全部项目'), small(`${scopes[p.scope]} · ${rules[p.acceptTasks]}`), button('编辑开放设置', () => { form.editingSharing = true; render(); root.querySelector<HTMLElement>('[data-focus="开放范围"]')?.focus() }, 'text sm'))
+    : [sharingFields(p), button('保存', () => act(async () => { await saveSharing(p.id); form.editingSharing = false; notice = '已保存' }), 'primary', p.state !== 'active')]
+  return [el('h2', { class: 'h1 any' }, p.name), small(`${statuses[p.status]} · 最后同步 ${relative(p.lastSyncAt)}`), section('关系', small(p.relation ? { above: '上级', below: '下级', peer: '平级' }[p.relation] : '未标'), button('改关系', () => go({ kind: 'relation', id: p.id }), '', p.state !== 'active')), section('对方向你开放', small(p.report ? scopes[p.report.scope] : '未知'), small(p.report ? `你给对方派活：${rules[p.report.acceptTasks]}` : '派活规则未知'), dispatchButton(p)), section('往来请求', requests().filter(r => r.peerId === p.id).map(r => item(r.title, requestStates[requestState(r)], () => go({ kind: 'request', id: r.id })))), section('你向对方开放', sharing),
     check('确认断开这个工作间', !!form.revoke, v => { form.revoke = v; render() }), button('断开连接', () => act(async () => { all.links = await req('workspace.links', { operation: 'revoke', id: p.id }); await go({ kind: 'links' }); await refresh() }), 'danger', !form.revoke)]
 }
 function linksPage() {
   const s = all.links!
+  const name = input('工作间名称', s.name, 'text', () => render())
   const invitation: LinksSnapshot['invitation'] = form.invitation
   const code = invitation ? el('textarea', { class: 'in', rows: 2, readonly: true, 'aria-label': '邀请连接码', 'data-focus': '邀请连接码', value: invitation.code }) as HTMLTextAreaElement : null
   return [
+    name, button('保存名称', () => act(async () => {
+      all.links = await req('workspace.links', { operation: 'rename', revision: s.revision, name: form['工作间名称'] })
+      form['工作间名称'] = all.links!.name
+      notice = '名称已保存'
+    }), '', !form['工作间名称'].trim() || form['工作间名称'].trim() === s.name),
     button('邀请', () => act(async () => {
       const { invitation, ...links } = await req('workspace.links', { operation: 'invite' })
       all.links = links
@@ -342,13 +366,12 @@ function linksPage() {
       const details = e.currentTarget as HTMLDetailsElement
       if (details.isConnected) form.advanced = details.open
     } }, el('summary', {}, el('span', { class: 'i', 'aria-hidden': 'true' }, '›'), '高级'), el('div', { class: 'in-fold' },
-      input('工作间名称', s.name),
       check('启用工作间连接', form.enabled ?? s.enabled, v => { form.enabled = v }),
       input('监听 IP', s.host), input('端口', String(s.port), 'number'), input('访问地址', s.publicUrl),
       check('TLS', form.tls ?? s.tls, v => { form.tls = v }),
       input('TLS 证书', '', 'textarea'), input('TLS 私钥', '', 'password'),
       button('保存连接设置', () => act(async () => {
-        all.links = await req('workspace.links', { operation: 'configure', revision: s.revision, name: form['工作间名称'], enabled: form.enabled ?? s.enabled, host: form['监听 IP'], port: Number(form['端口']), publicUrl: form['访问地址'], tls: form.tls ?? s.tls, certificate: form['TLS 证书'], privateKey: form['TLS 私钥'] })
+        all.links = await req('workspace.links', { operation: 'configure', revision: s.revision, enabled: form.enabled ?? s.enabled, host: form['监听 IP'], port: Number(form['端口']), publicUrl: form['访问地址'], tls: form.tls ?? s.tls, certificate: form['TLS 证书'], privateKey: form['TLS 私钥'] })
         form['TLS 私钥'] = ''; form['TLS 证书'] = ''; delete form.invitation
         if (all.links?.error) throw new Error(all.links.error)
         notice = '已保存'
