@@ -50,7 +50,13 @@ async function setup(options = {}) {
       project.tasks.push({ ...clone(task), id: 't3', title: '动效交付', acceptance: [acceptance('a3')] },
         { ...clone(task), id: 'd1', title: '设计决定', phase: 'working', acceptance: [], decisions: [{ id: 'd1', question: '选择方案', options: ['方案一'], history: [] }] });
     }
-    const p = (id, relation, status = 'connected', scope = 'details') => ({ id, name: '工作间 ' + id, workspaceId: 'ws-' + id, state: status === 'pending' ? 'pending' : 'active', relation, sharingSet: false, status, scope: 'none', projectIds: [], lastSyncAt: new Date(now - 100000).toISOString(), receivedAt: new Date(now).toISOString(), ...(status === 'connected' ? { report: { scope, projects: scope === 'none' ? [] : [{ id: 'remote-p', name: '开放的项目', updatedAt: new Date().toISOString(), pending: 0, counts: { blocked: 1 }, ...(scope === 'details' ? { tasks: [{ title: '受阻任务', phase: 'blocked', decisions: [], acceptance: [] }] } : {}) }] } } : {}) });
+    const p = (id, relation, status = 'connected') => ({ id, name: '工作间 ' + id, workspaceId: 'ws-' + id, state: status === 'pending' ? 'pending' : 'active', relation, sharingSet: false, status, scope: 'none', projectIds: [], lastSyncAt: new Date(now - 100000).toISOString(), receivedAt: new Date(now).toISOString(),
+      ...(status === 'connected' ? { report: { scope: 'details', mainAgent: { agent: 'codex', title: '对方统筹会话', online: 'online' }, projects: [{ id: 'remote-p', name: '开放的项目', updatedAt: new Date().toISOString(), pending: 0, counts: { blocked: 1 },
+        tasks: [{ title: '受阻任务', phase: 'blocked', decisions: [], acceptance: [] }], activity: { truncated: true, agents: [
+          { agent: 'claude', role: 'session', state: 'need', title: '等待确认设计', since: now - 60_000 },
+          { agent: 'codex', role: 'worker', state: 'work', title: '正在检查布局', taskTitle: '核对布局', since: now - 180_000 },
+          { agent: 'codex', role: 'worker', state: 'done', title: '页面检查完成', since: now - 360_000 }
+        ] } }] } } : {}) });
     const links = { version: 1, revision: 1, workspaceId: 'self', name: '我的工作间', enabled: false, host: '127.0.0.1', port: 0, publicUrl: '', tls: false, listening: '', error: '', peers: [p('up', 'above'), p('down', 'below'), p('off', 'below', 'offline'), p('side', 'peer'), p('free', undefined), p('pending', undefined, 'pending')] };
     const live = { ok: true, at: now, agents: [{ id: 'agent-need', projectId: 'p1', agent: 'codex', role: 'worker', state: 'need', rawState: 'waiting', verified: true, title: '等批准', last: '等待用户批准', since: now - 60000 }, { id: 'agent-work', projectId: 'p1', agent: 'claude', role: 'session', state: 'work', rawState: 'working', verified: false, title: '正在工作', last: '正在处理', since: now - 20000 }] };
     const workspace = { revision: 1, runId: options.unbound ? '' : 'run_main', ...(!options.unbound ? { session: { handle: 'main', agent: 'claude', title: '统筹会话', online: 'online' } } : {}) };
@@ -518,7 +524,11 @@ try {
     assert.equal(await page.locator('.org-free [data-workspace=free]').count(), 1);
     assert.equal(await page.locator('.org-kids').evaluate(e => getComputedStyle(e.firstElementChild, '::before').borderLeftStyle), 'solid');
     assert.equal(await page.locator('.org-side').evaluate(e => getComputedStyle(e.firstElementChild, '::before').borderLeftStyle), 'dashed');
-    await page.evaluate(() => { fixture.links.peers.find(p => p.id === 'down').report.scope = 'summary'; fixture.emit(); });
+    await page.evaluate(() => {
+      const report = fixture.links.peers.find(p => p.id === 'down').report; report.scope = 'summary'; delete report.mainAgent;
+      for (const project of report.projects) { delete project.tasks; delete project.activity; }
+      fixture.emit();
+    });
     await page.waitForFunction(() => !document.querySelector('[data-workspace=down] .flag'));
   });
   await test('remote workspace shows connection and projects, readonly summary hides task details', async () => {
@@ -526,10 +536,34 @@ try {
     const body = page.locator('[data-workspace=down] .wsr-b');
     assert.equal(await body.getByRole('heading').allTextContents().then(x => x.join(',')), '项目');
     assert.equal(await body.getByText(/已连接/).count(), 1);
+    assert.equal(await body.getByText('对方只开放了项目摘要，看不到 agent', { exact: true }).count(), 1);
     assert.equal(await body.getByRole('button', { name: '派活', exact: true }).count(), 0);
     assert.equal(await body.getByText('主 agent', { exact: true }).count(), 0);
     await body.getByRole('button', { name: '开放的项目' }).click();
     assert.equal(await page.locator('input,textarea').count(), 0); assert.equal(await page.getByText('受阻任务', { exact: true }).count(), 0);
+    await home();
+  });
+  await setup({ width: 1040 });
+  await test('remote details reuse local main and project cards and show read-only live agents', async () => {
+    const own = page.locator('[data-workspace=self] .wsr-b');
+    const node = page.locator('[data-workspace=down]'), body = node.locator('.wsr-b');
+    await node.locator('.wsr-h').click();
+    const structure = target => target.locator('.lead, .pcard, .pcard-h, .pcard-b, .arow').evaluateAll(nodes => [...new Set(nodes.map(n => n.className))]);
+    assert.deepEqual(await structure(body), await structure(own));
+    await body.locator('.lead').getByText('Codex · 对方统筹会话 · 在线', { exact: true }).waitFor();
+    await body.locator('.pcard .arow').getByText('工作中 · 3 分钟前开始', { exact: true }).waitFor();
+    assert.equal(await body.getByText('✓ 已完成 1 个', { exact: true }).count(), 1);
+    assert.equal(await body.getByText('agent 未全部列出', { exact: true }).count(), 1);
+    for (const name of ['全部 agent', '打开主会话', '设为主 agent', '外部连接', '主 agent']) {
+      assert.equal(await body.getByRole('button', { name, exact: true }).count(), 0);
+    }
+    assert.equal(await body.getByText('外部连接', { exact: true }).count(), 0);
+    if (process.env.PANEL_EVIDENCE_DIR) await node.screenshot({ path: path.join(process.env.PANEL_EVIDENCE_DIR, 'peer-details.png') });
+    await body.getByRole('button', { name: '开放的项目', exact: true }).click();
+    await page.locator('.acol .aitem[data-st=work]').getByText('核对布局', { exact: true }).waitFor();
+    await page.getByText('受阻任务').waitFor();
+    assert.equal(await page.getByRole('button', { name: '打开主会话', exact: true }).count(), 0);
+    assert.equal(await page.locator('input,textarea').count(), 0);
     await home();
   });
   await test('bulk all-pass only selects; one submit click sends one project batch', async () => {

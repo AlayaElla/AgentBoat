@@ -59,7 +59,7 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
     if (runtimeError) fail('本机项目列表不可用，请恢复后再上报')
     const saved = await store.all()
     return mergeProjects(saved, catalog)
-  }, changed, undefined, async (peer, messages) => {
+  }, () => orca.panels.post('project.changed', { projectId: '' }), undefined, async (peer, messages) => {
     await store.mutateMessaging(m => {
       const sent = m.deliveries.filter(d => d.linkMessageHash && d.state === 'sent')
       const expired = new Set(sent.slice(0, Math.max(0, sent.length - linkMessageHistory)))
@@ -77,6 +77,9 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
       }
     })
     deferMailbox()
+  }, async () => {
+    const [workspace, live] = await Promise.all([main.read(), refreshAgents()])
+    return { workspace, live }
   })
   orca.panels.handle('workspace.links', async input => {
     switch (input.operation) {

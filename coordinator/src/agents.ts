@@ -1,4 +1,4 @@
-import type { Project, LiveAgent, AgentsSnapshot } from './model'
+import { isRecentAgent, type Project, type LiveAgent, type AgentsSnapshot } from './model'
 import type { HostApi, HostResult } from 'orca/host'
 import { projectKey } from './store'
 
@@ -32,7 +32,8 @@ export async function readAgents(host: HostApi<'worker'>, read: Read, projects: 
       for (const a of result.agents) {
         const since = a.stateStartedAt
         if (!Number.isFinite(since) || !['working', 'waiting', 'blocked', 'done'].includes(a.state)) throw Error('实时状态无效')
-        if (a.state === 'done' && at - since > 86400000) continue
+        const state = agentState(a.state)
+        if (!isRecentAgent({ state, since }, at)) continue
         if (agents.length >= maxAgents) { truncated = true; break workspaces }
         const identity = a.sessionId || a.terminalId
         const matches = (workers.get(projectId) ?? []).filter(d =>
@@ -41,7 +42,7 @@ export async function readAgents(host: HostApi<'worker'>, read: Read, projects: 
         const tasks = dispatch ? project?.tasks.filter(t => t.executions.some(e => e.dispatchId === (dispatch.dispatchId ?? dispatch.dispatch?.id))) ?? [] : []
         const task = tasks.length === 1 ? tasks[0] : undefined
         agents.push({ id: `${w.id}:${identity ?? agents.length}`, projectId, agent: a.agent || '', role: dispatch ? 'worker' : 'session',
-          state: agentState(a.state), rawState: a.state,
+          state, rawState: a.state,
           title: task?.title || a.task?.title || a.title || '会话', ...(task ? { taskId: task.id } : {}), since })
       }
     }

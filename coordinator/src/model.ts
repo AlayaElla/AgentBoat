@@ -131,7 +131,6 @@ export const scopes = { none: '不开放', summary: '项目摘要', details: '�
 export function isProjectShared(project: Pick<Project, 'ref' | 'hidden'>, sharing: Pick<import('./links').Sharing, 'scope' | 'allProjects' | 'projectIds'>): boolean {
   return !project.hidden && sharing.scope !== 'none' && (sharing.allProjects === true || sharing.projectIds.includes(project.ref.id))
 }
-export const rules = { deny: '不接受', confirm: '需我确认', auto: '自动受理' }
 export const statuses = { connected: '已连接', offline: '离线', pending: '待核对' }
 export const connectionStates = { off: '未启用', connecting: '连接中', connected: '已连接', error: '连接异常', unchecked: '未检查' }
 export const results: Record<string, string> = { passed: '已通过', changes_requested: '已退回修改', pending: '待验收' }
@@ -148,4 +147,9 @@ export interface LiveAgent {
   state: 'need' | 'work' | 'done'; rawState: string
   title: string; taskId?: string; since: number
 }
+export type MainAgentActivity = Pick<AgentSession, 'agent' | 'title' | 'online'>
+export type AgentActivity = Pick<LiveAgent, 'agent' | 'role' | 'state' | 'title' | 'since'> & { taskTitle?: string }
+export const isRecentAgent = (a: Pick<AgentActivity, 'state' | 'since'>, now = Date.now()) => a.state !== 'done' || now - a.since <= 86_400_000
+const agentPriority = { need: 0, work: 1, done: 2 }
+export const compareAgentActivity = (a: AgentActivity, b: AgentActivity) => agentPriority[a.state] - agentPriority[b.state] || b.since - a.since
 export interface AgentsSnapshot { ok: boolean; at: number; agents: LiveAgent[]; error?: string; truncated?: boolean }

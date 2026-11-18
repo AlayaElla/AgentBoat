@@ -1,10 +1,10 @@
 import type {} from 'orca/frame'
 import './protocol'
-import { agentName, groupedAttention, isProjectShared, labels, taskState, scopes, statuses, connectionStates, roles, mainAgentStates } from './model'
+import { agentName, compareAgentActivity, groupedAttention, isProjectShared, isRecentAgent, labels, taskState, scopes, statuses, connectionStates, roles, mainAgentStates } from './model'
 import type { Acceptance, Attention, Overview, Project, Task, ProjectWorkspace } from './model'
 import type { FeedbackItem } from './store'
-import type { AgentsSnapshot, LiveAgent } from './model'
-import type { LinksSnapshot, Sharing } from './links'
+import type { AgentActivity, AgentsSnapshot, MainAgentActivity } from './model'
+import type { LinksSnapshot, SharedReport, Sharing } from './links'
 
 type Page = { kind: string; projectId?: string; id?: string; pid?: string; inboxRow?: string }
 type Draft = { taskId: string; kind: 'acceptance' | 'decision'; itemId: string; itemRevision?: number; fingerprint?: string; signature: string; title: string; result?: string; answer?: string; note?: string }
@@ -39,7 +39,7 @@ const pending = (p?: string) => groupedAttention(all.attention).filter(a => !p |
 const needs = () => live.ok ? live.agents.filter(a => a.state === 'need') : []
 const total = () => pending().length + needs().length
 const projectCount = (id: string) => pending(id).length + needs().filter(a => a.projectId === id).length
-const projectAgents = (id?: string) => live.ok ? live.agents.filter(a => !id || a.projectId === id) : []
+const projectAgents = (id?: string) => live.ok ? live.agents.filter(a => (!id || a.projectId === id) && isRecentAgent(a)) : []
 const relative = (at?: number | string) => {
   if (!at) return '未知'
   const n = Date.now() - (typeof at === 'number' ? at : Date.parse(at))
@@ -184,41 +184,52 @@ function choose(d: Draft) {
   drafts[page.projectId!] ??= {}; drafts[page.projectId!][key(d.taskId, d.kind, d.itemId)] = d
   persist('panel.drafts', drafts)
 }
-function agentRow(a: LiveAgent, full = false) {
+function agentRow(a: AgentActivity, projectName?: string) {
   const duration = a.state === 'done' ? `${relative(a.since)}完成` : `${a.state === 'need' ? '等你' : '工作中'} · ${relative(a.since)}开始`
   const line = el('div', { class: 'arow' }, dot(a.state === 'need' ? 'need' : a.state === 'work' ? 'work' : 'ok'), el('span', { class: 'none' }, agentName(a.agent)), el('span', { class: 'grow trunc' }, a.title), small(duration))
-  return full ? el('article', { class: 'aitem', 'data-st': a.state }, line, small(`${a.role === 'worker' ? 'worker' : '会话'} · ${all.projects.find(p => p.ref.id === a.projectId)?.ref.name || '其他项目'}`)) : line
+  return projectName ? el('article', { class: 'aitem', 'data-st': a.state }, line, small(`${a.role === 'worker' ? 'worker' : '会话'} · ${projectName}`), a.taskTitle && a.taskTitle !== a.title ? small(a.taskTitle) : null) : line
 }
-function agentsPage(id?: string) {
-  if (!live.ok) return null
-  const list = projectAgents(id)
+function agentColumns<T extends AgentActivity>(list: T[], projectName: (a: T) => string) {
   return el('div', { class: 'cols3' }, ['need', 'work', 'done'].map(state => {
-    const selected = list.filter(a => a.state === state).sort((a, b) => b.since - a.since), visible = state === 'done' ? selected.slice(0, 20) : selected
-    return el('section', { class: 'acol', 'aria-label': ({ need: '需要你', work: '工作中', done: '已完成' } as any)[state] }, row(el('h2', { class: 'h2' }, ({ need: '需要你', work: '工作中', done: '已完成' } as any)[state]), tag(String(selected.length))), visible.map(a => agentRow(a, true)), !selected.length ? small('暂无') : null, selected.length > visible.length ? small(`另有 ${selected.length - visible.length} 条未列出`) : null)
+    const selected = list.filter(a => a.state === state).sort(compareAgentActivity), visible = state === 'done' ? selected.slice(0, 20) : selected
+    return el('section', { class: 'acol', 'aria-label': ({ need: '需要你', work: '工作中', done: '已完成' } as any)[state] }, row(el('h2', { class: 'h2' }, ({ need: '需要你', work: '工作中', done: '已完成' } as any)[state]), tag(String(selected.length))), visible.map(a => agentRow(a, projectName(a))), !selected.length ? small('暂无') : null, selected.length > visible.length ? small(`另有 ${selected.length - visible.length} 条未列出`) : null)
   }))
 }
-const agentContent = () => [agentsPage(), small('只列本机实时状态；已完成保留 24 小时。其他工作间没有上报 agent 状态。')]
+const agentsPage = (id?: string) => live.ok ? agentColumns(projectAgents(id), a => all.projects.find(p => p.ref.id === a.projectId)?.ref.name || '其他项目') : null
+const agentContent = () => [agentsPage(), small('已完成的 agent 保留 24 小时。')]
+function projectCard(p: { id: string; name: string; count: number; agents?: AgentActivity[]; note?: string; summary?: string }, open: () => void) {
+  const agents = p.agents ?? [], unfinished = agents.filter(a => a.state !== 'done').sort(compareAgentActivity).slice(0, 3), done = agents.filter(a => a.state === 'done').length
+  return el('article', { class: 'pcard', 'data-project': p.id },
+    el('button', { type: 'button', class: 'pcard-h', title: p.name, 'aria-label': p.name, 'aria-description': p.summary ?? (p.count ? `待处理 ${p.count}` : undefined), onclick: open }, el('span', { class: 'name grow trunc' }, p.name), pill(p.count), p.summary ? small(p.summary) : null, '›'),
+    agents.length || p.note ? el('div', { class: 'pcard-b' }, unfinished.map(a => agentRow(a)), done ? small(`✓ 已完成 ${done} 个`) : null, p.note ? small(p.note) : null) : null)
+}
+function mainAgentLine(agent: MainAgentActivity | null | undefined, open?: () => void, bound = !!agent) {
+  const title = agent ? [agentName(agent.agent), agent.title, mainAgentStates[agent.online].label].filter(Boolean).join(' · ') : bound ? '已绑定主 agent' : '还没有主 agent'
+  return el(open ? 'button' : 'div', { class: 'lead', type: open ? 'button' : undefined, onclick: open }, dot(agent?.online === 'online' ? 'ok' : ''), el('span', { class: 't' }, '主 agent'), el('span', { class: 'grow trunc xs muted', title }, title), open ? '›' : null)
+}
+const activityNote = (activity: SharedReport['projects'][number]['activity']) => activity === null ? 'agent 状态读不到' : activity?.truncated ? 'agent 未全部列出' : undefined
 function ownProjects() {
   const projects = all.projects.filter(p => !form['找项目'] || p.ref.name.toLowerCase().includes(form['找项目'].toLowerCase()))
-  const projectCard = (p: Overview['projects'][number]) => {
-    const agents = projectAgents(p.ref.id), unfinished = agents.filter(a => a.state !== 'done').slice(0, 3), done = agents.filter(a => a.state === 'done').length
-    return el('article', { class: 'pcard', 'data-project': p.ref.id },
-      el('button', { type: 'button', class: 'pcard-h', title: p.ref.name, onclick: () => { void go({ kind: 'project', projectId: p.ref.id }) } }, el('span', { class: 'name grow trunc' }, p.ref.name), pill(projectCount(p.ref.id)), '›'),
-      agents.length ? el('div', { class: 'pcard-b' }, unfinished.map(a => agentRow(a)), done ? small(`✓ 已完成 ${done} 个`) : null) : null)
-  }
+  const cardFor = (p: Overview['projects'][number]) => projectCard({ ...p.ref, count: projectCount(p.ref.id), agents: projectAgents(p.ref.id) }, () => { void go({ kind: 'project', projectId: p.ref.id }) })
   return [all.projects.length > 12 ? input('找项目', '', 'search', () => render(), '输入项目名') : null, ...(all.machines ?? [{ id: 'local', name: '', role: 'host' }]).map(m => {
     const list = projects.filter(p => p.ref.hostId === m.id), active = list.filter(p => Object.values(p.counts).some(Boolean) || projectAgents(p.ref.id).some(a => a.state !== 'done')), idle = list.filter(p => !active.includes(p))
-    return el('div', { class: 'stack g2' }, (all.machines?.length ?? 0) > 1 ? small(`${m.role === 'host' ? '主机' : '电脑'} · ${m.name}`) : null, el('div', { class: 'cards' }, active.sort((a, b) => projectCount(b.ref.id) - projectCount(a.ref.id)).map(projectCard)), idle.length ? el('details', { class: 'fold', open: !!form['找项目'] }, el('summary', {}, `还没有任务的项目 ${idle.length} 个`), el('div', { class: 'cards' }, idle.map(projectCard))) : null)
+    return el('div', { class: 'stack g2' }, (all.machines?.length ?? 0) > 1 ? small(`${m.role === 'host' ? '主机' : '电脑'} · ${m.name}`) : null, el('div', { class: 'cards' }, active.sort((a, b) => projectCount(b.ref.id) - projectCount(a.ref.id)).map(cardFor)), idle.length ? el('details', { class: 'fold', open: !!form['找项目'] }, el('summary', {}, `还没有任务的项目 ${idle.length} 个`), el('div', { class: 'cards' }, idle.map(cardFor))) : null)
   }), !all.projects.length ? small('还没有项目，在 Orca 中添加项目后会显示在这里。') : null]
 }
 function workspaceNode(p?: LinksSnapshot['peers'][number]) {
   const id = p?.id ?? 'self', open = opened[id] ?? false, active = !p || p.status === 'connected', report = active ? p?.report : null
   const flagged = p?.relation === 'below' && report?.scope === 'details' && report.projects.some(pr => pr.tasks?.some(t => t.phase === 'blocked'))
   const body = !p ? [row(small(`你的工作间${all.machines?.[0] ? ` · ${all.machines[0].name}` : ''}`), button('全部 agent', () => go({ kind: 'agents' }), 'text sm')),
-    el('button', { type: 'button', class: 'lead', onclick: () => { void go({ kind: 'main' }) } }, dot(all.workspace.session?.online === 'online' ? 'ok' : ''), el('span', { class: 't' }, '主 agent'), el('span', { class: 'grow trunc xs muted' }, all.workspace.runId ? `${agentName(all.workspace.session?.agent)} · ${all.workspace.session?.title || ''} · ${all.workspace.session ? mainAgentStates[all.workspace.session.online].label : '未知'}` : '还没有主 agent'), '›'),
+    mainAgentLine(all.workspace.session, () => { void go({ kind: 'main' }) }, !!all.workspace.runId),
     el('div', { class: 'under' }, row(small('外部连接'), all.connections?.map(c => button(c.name, () => go({ kind: 'connection', id: c.id }), 'text sm')), button('＋', () => go({ kind: 'add-connection' }), 'text sm')), ownProjects())]
     : [row(small(active ? `已连接 · ${relative(p.receivedAt)}同步` : `离线 · 最后同步 ${relative(p.lastSyncAt)}`), button('连接设置', () => go({ kind: 'peer', id }), 'text sm')),
-      section('项目', !active ? small('未知') : !report?.projects.length ? small('对方没有向你开放项目') : el('div', { class: 'cards' }, report.projects.map(pr => el('div', { class: 'pcard' }, item(pr.name, pr.counts.working ? `在做 ${pr.counts.working}` : pr.counts.review ? '等对方验收' : '项目进展', () => go({ kind: 'peer-project', id, pid: pr.id }))))))]
+      report?.scope === 'details' ? mainAgentLine(report.mainAgent) : report?.scope === 'summary' ? small('对方只开放了项目摘要，看不到 agent') : null,
+      section('项目', !active ? small('未知') : !report?.projects.length ? small('对方没有向你开放项目') : el('div', { class: 'cards' }, report.projects.map(pr => {
+        const agents = pr.activity?.agents.filter(a => isRecentAgent(a))
+        const count = report.scope === 'details' ? pr.pending + (agents?.filter(a => a.state === 'need').length ?? 0) : 0
+        const summary = report.scope === 'summary' ? pr.counts.working ? `在做 ${pr.counts.working}` : pr.counts.review ? '等对方验收' : '项目进展' : undefined
+        return projectCard({ id: pr.id, name: pr.name, count, agents, note: activityNote(pr.activity), summary }, () => { void go({ kind: 'peer-project', id, pid: pr.id }) })
+      })))]
   return el('article', { class: `wsr ${p ? '' : 'me'}`, 'data-workspace': id }, el('div', { class: 'wsr-top' },
     el('button', { type: 'button', class: 'wsr-h', 'aria-expanded': String(open), 'aria-controls': `workspace-${id}`, title: p ? `${p.name} · ${p.relation ? { above: '你标的上级', below: '你标的下级', peer: '你标的平级' }[p.relation] : '还没标关系'}` : '我的工作间', onclick: () => { opened[id] = !open; remember(); render() } },
       dot(active ? 'ok' : '', active ? '已连接' : '离线'), flagged ? dot('bad flag', '有受阻的任务') : null, el('span', { class: 'name trunc' }, p?.name ?? all.links?.name ?? '我的工作间'), !p ? tag('我', 'solid') : null,
@@ -388,7 +399,7 @@ function projectPage() {
     const t = p.tasks.find(t => t.id === page.id)
     if (!t) return callout('任务已不存在，请返回项目。')
     const inline = splitInbox()
-    return [inline ? null : el('h2', { class: 'h1 any' }, t.title), tag(labels[taskState(t)]), small(`记录里派给了 ${t.executions.map(e => agentName(e.agent)).join('、') || '尚未分派'}`), section('目标', el('p', { class: 'any' }, t.goal)), section('进展', el('p', { class: 'any' }, t.progress)), section('现在谁在做', !live.ok ? null : projectAgents(p.ref.id).filter(a => a.taskId === t.id && a.state !== 'done').length ? projectAgents(p.ref.id).filter(a => a.taskId === t.id && a.state !== 'done').map(a => agentRow(a, true)) : small('没有看到 agent 在做这个任务')), feedbackCards([t], inline ? '待处理' : undefined), section('成果', t.artifacts.map(a => button(a.label + ' · ' + a.version, () => /^https?:/i.test(a.url) ? orca.shell?.openExternal(a.url) : req('project.openArtifact', { projectId: p.ref.id, taskId: t.id, artifactId: a.id }), 'sm'))), section('来源消息', p.events.filter(e => t.sourceIds.includes(e.id) || e.taskId === t.id).map(e => card(e.text))), section('记录', ...t.decisions.filter(d => d.answer !== undefined).map(d => small(`${d.question}：${d.answer}`)), ...t.acceptance.filter(a => a.status !== 'pending').map(a => small(`${a.title}：${a.status === 'passed' ? '已通过' : '需要修改'} · ${a.history.at(-1)?.note || ''}`)))]
+    return [inline ? null : el('h2', { class: 'h1 any' }, t.title), tag(labels[taskState(t)]), small(`记录里派给了 ${t.executions.map(e => agentName(e.agent)).join('、') || '尚未分派'}`), section('目标', el('p', { class: 'any' }, t.goal)), section('进展', el('p', { class: 'any' }, t.progress)), section('现在谁在做', !live.ok ? null : projectAgents(p.ref.id).filter(a => a.taskId === t.id && a.state !== 'done').length ? projectAgents(p.ref.id).filter(a => a.taskId === t.id && a.state !== 'done').map(a => agentRow(a, p.ref.name)) : small('没有看到 agent 在做这个任务')), feedbackCards([t], inline ? '待处理' : undefined), section('成果', t.artifacts.map(a => button(a.label + ' · ' + a.version, () => /^https?:/i.test(a.url) ? orca.shell?.openExternal(a.url) : req('project.openArtifact', { projectId: p.ref.id, taskId: t.id, artifactId: a.id }), 'sm'))), section('来源消息', p.events.filter(e => t.sourceIds.includes(e.id) || e.taskId === t.id).map(e => card(e.text))), section('记录', ...t.decisions.filter(d => d.answer !== undefined).map(d => small(`${d.question}：${d.answer}`)), ...t.acceptance.filter(a => a.status !== 'pending').map(a => small(`${a.title}：${a.status === 'passed' ? '已通过' : '需要修改'} · ${a.history.at(-1)?.note || ''}`)))]
   }
   const reason = workspaceTarget && 'error' in workspaceTarget ? workspaceTarget.error : !workspaceTarget ? '正在查找项目工作区…' : ''
   const openMain = button('打开主会话', () => act(async () => {
@@ -416,8 +427,13 @@ function peerPage() {
   const p = peer()
   if (!p) return callout('连接不存在，请返回。')
   if (page.kind === 'peer-project') {
-    const pr = p.status === 'connected' ? p.report?.projects.find(pr => pr.id === page.pid) : undefined
-    return !pr ? callout('现在看不到这个项目') : [el('h2', { class: 'h1 any' }, pr.name), callout(`「${p.name}」开放给你的项目，只读。对方开放的是${scopes[p.report!.scope]}。`), small(`${relative(pr.updatedAt)}更新 · 对方待处理 ${pr.pending}`), row(Object.entries(pr.counts).map(([k, n]) => tag(`${(labels as any)[k] || k} ${n}`))), p.report?.scope === 'details' ? pr.tasks?.map(t => card(t.title, small((labels as any)[t.phase] || t.phase), ...t.decisions.map(q => small(`待决定：${q}`)), ...t.acceptance.map(a => small(`待验收：${a}`)))) : null]
+    const report = p.status === 'connected' ? p.report : undefined, pr = report?.projects.find(pr => pr.id === page.pid)
+    if (!report || !pr) return callout('现在看不到这个项目')
+    const note = activityNote(pr.activity)
+    return [el('h2', { class: 'h1 any' }, pr.name), callout(`「${p.name}」开放给你的项目，只读。对方开放的是${scopes[report.scope]}。`),
+      small(`${relative(pr.updatedAt)}更新 · 对方待处理 ${pr.pending}`), row(Object.entries(pr.counts).map(([k, n]) => tag(`${(labels as any)[k] || k} ${n}`))),
+      pr.activity ? agentColumns(pr.activity.agents.filter(a => isRecentAgent(a)), () => pr.name) : null, note ? small(note) : null,
+      pr.tasks?.map(t => card(t.title, small((labels as any)[t.phase] || t.phase), ...t.decisions.map(q => small(`待决定：${q}`)), ...t.acceptance.map(a => small(`待验收：${a}`))))]
   }
   if (page.kind === 'relation') {
     form.relation ??= p.relation ?? 'none'

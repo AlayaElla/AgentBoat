@@ -4,6 +4,7 @@ import type { OrcaWorkerApi } from 'orca/worker'
 import { WorkspaceLinks, defaultWorkspaceName, endpoint, invitationHost, report } from './links'
 import { refs, sample } from './fixtures'
 import { fresh } from './store'
+import type { LiveAgent } from './model'
 import { testCoordinator as createCoordinator } from './test-runtime'
 
 async function instance(name: string, configured = true, chooseHost = () => '127.0.0.1') {
@@ -231,6 +232,58 @@ test('legacy revoked links disappear on read and the next save keeps only existi
   } finally { a.links.stop(); b.links.stop() }
 })
 
+test('details sync shares current main and scoped live agents without local identifiers', async () => {
+  const b = await instance('B'), p = sample().project!, hidden = { ...fresh({ ...refs[1], id: 'hidden' }), hidden: true }
+  const session = { handle: 'private-handle', title: '统筹会话', workspace: 'private-workspace', workspaceName: 'private-machine', path: '/private/path', agent: 'claude', online: 'online' as const }
+  const workspace = { version: 1, revision: 1, runId: 'private-run', requests: [], session }
+  const host = mockHost({ storage: { 'project:p1': p as any, 'project:hidden': hidden as any, workspace } })
+  const now = Date.now()
+  const visible: LiveAgent = { id: 'private-terminal', projectId: 'p1', agent: 'codex', role: 'worker', state: 'work', rawState: 'working', title: '正在检查', taskId: p.tasks[0].id, since: now }
+  let live = [visible, { ...visible, id: 'unselected', projectId: 'p2', title: '未选项目 agent' },
+    { ...visible, id: 'hidden', projectId: 'hidden', title: '隐藏项目 agent' },
+    { ...visible, id: 'old', state: 'done' as const, title: '过期 agent', since: now - 86_400_001 }]
+  let reads = 0, online = true, coordinator!: ReturnType<typeof createCoordinator>
+  const worker = await mountWorker({ default: api => { coordinator = createCoordinator(api, {
+    projects: async () => refs,
+    targets: async () => ({ workspaces: [], sessions: online ? [session] : [] }),
+    agents: async () => { reads++; return { ok: true, at: Date.now(), agents: live } }
+  }) } }, { host })
+  try {
+    const before = await coordinator.links.snapshot()
+    await coordinator.links.configure({ ...before, name: 'A', host: '127.0.0.1', enabled: true })
+    const invitation = await coordinator.links.invite(), joined = await b.links.join(invitation.invitation!.code), id = joined.peers[0].id
+    const share = async (scope: string, projectIds: string[]) => {
+      await coordinator.links.share({ id, revision: (await coordinator.links.snapshot()).revision, scope, projectIds })
+      return (await b.links.refresh()).peers[0].report!
+    }
+    const summary = await share('summary', ['p1', 'hidden'])
+    assert.equal('mainAgent' in summary, false)
+    assert.equal('activity' in summary.projects[0], false)
+    assert.equal(reads, 0)
+
+    const details = await share('details', ['p1', 'hidden'])
+    assert.deepEqual(details.mainAgent, { agent: 'claude', title: '统筹会话', online: 'online' })
+    assert.deepEqual(details.projects.map(p => p.id), ['p1'])
+    assert.deepEqual(details.projects[0].activity, { truncated: false, agents: [
+      { agent: 'codex', role: 'worker', state: 'work', title: '正在检查', taskTitle: p.tasks[0].title, since: now }
+    ] })
+    assert.equal(/handle|runId|rawState|taskId|private-|[A-Z]:\\\\|未选项目|隐藏项目|过期 agent/.test(JSON.stringify(details)), false)
+
+    online = false
+    live = [{ ...visible, state: 'need', rawState: 'waiting', title: '等你回复' }, ...Array.from({ length: 25 }, (_, i) => ({ ...visible, id: 'copy-' + i }))]
+    await worker.emit('agent.status.changed', { workspaceId: 'fake', paneKey: 'fake', state: 'waiting', receivedAt: Date.now() })
+    const updated = (await b.links.refresh()).peers[0].report!
+    assert.equal(updated.mainAgent?.online, 'offline')
+    assert.equal(updated.projects[0].activity?.agents.length, 20)
+    assert.equal(updated.projects[0].activity?.agents[0].title, '等你回复')
+    assert.equal(updated.projects[0].activity?.truncated, true)
+
+    live = [{ ...visible, title: '保存项目后更新' }]
+    await worker.request('project.settings', { projectId: p.ref.id, revision: p.revision, roles: p.roles })
+    assert.equal((await b.links.refresh()).peers[0].report?.projects[0].activity?.agents[0].title, '保存项目后更新')
+  } finally { coordinator.stop(); b.links.stop(); await worker.deactivate() }
+})
+
 test('invites expire/cancel, malformed and oversized requests fail closed, explicit binding and scope validation', async () => {
   const a = await instance('A'), b = await instance('B')
   try {
@@ -260,6 +313,23 @@ test('invites expire/cancel, malformed and oversized requests fail closed, expli
     assert.equal(await post(s.listening, '/sync', { id: p.id, report: malformed, exchange: { messages: 'invalid', received: [] } }, token), 400)
     assert.equal(await post(s.listening, '/sync', { id: p.id, report: { ...malformed, workspaceId: 'wrong' }, exchange }, token), 400)
     assert.equal(await post(s.listening, '/sync', { id: p.id, report: { ...malformed, scope: 'none', projects: [{ secret: 'ignored' }] }, exchange }, token), 400)
+    const valid = report(b.projects, { scope: 'details', allProjects: false, projectIds: ['p1'] }, p.workspaceId, 'B')
+    const agent = { agent: 'codex', role: 'session', state: 'work', since: Date.now(), title: '检查' }
+    const project = { ...valid.projects[0], activity: { truncated: false, agents: [agent] } }
+    const packet = { ...valid, projects: [project] }
+    assert.equal(await post(s.listening, '/sync', { id: p.id, report: packet, exchange }, token), 200)
+    const accepted = (await a.links.snapshot()).peers[0].report
+    for (const changed of [
+      { ...packet, mainAgent: undefined }, { ...packet, mainAgent: { agent: [], title: '统筹', online: 'online' } },
+      { ...packet, mainAgent: { agent: 'claude', title: '统筹', online: 'somewhere' } },
+      { ...packet, projects: [{ ...project, activity: undefined }] },
+      ...[{ agent: 'invented' }, { role: 'owner' }, { state: 'online' }, { since: String(agent.since) }, { title: '甲'.repeat(201) }, { taskTitle: [{}] }]
+        .map(change => ({ ...packet, projects: [{ ...project, activity: { truncated: false, agents: [{ ...agent, ...change }] } }] })),
+      { ...packet, projects: [{ ...project, activity: { truncated: true, agents: Array(21).fill(agent) } }] },
+      { ...packet, projects: Array.from({ length: 6 }, (_, i) => ({ ...project, id: 'p' + i, activity: { truncated: false, agents: Array(20).fill(agent) } })) },
+      { ...packet, scope: 'summary' }
+    ]) assert.equal(await post(s.listening, '/sync', { id: p.id, report: changed, exchange }, token), 400)
+    assert.deepEqual((await a.links.snapshot()).peers[0].report, accepted)
   } finally { a.links.stop(); b.links.stop() }
 })
 
