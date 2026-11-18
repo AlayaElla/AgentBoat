@@ -327,7 +327,10 @@ export function revision(value: unknown): number {
   if (!Number.isSafeInteger(value) || (value as number) < 0) fail('请先读取当前版本')
   return value as number
 }
-export const mergeProjects = (saved: Project[], refs: ProjectRef[]) => [...saved, ...refs.filter(ref => !saved.some(p => p.ref.id === ref.id)).map(fresh)]
+export function mergeProjects(saved: Project[], refs: ProjectRef[]): Project[] {
+  const byId = new Map(saved.map(p => [p.ref.id, p]))
+  return refs.map(ref => ({ ...(byId.get(ref.id) ?? fresh(ref)), ref }))
+}
 export function feishuConfig(raw: unknown): import('./model').FeishuConfig {
   const f = object(raw)
   if (typeof f.enabled !== 'boolean') fail('飞书启用状态不正确')

@@ -119,10 +119,14 @@ test('hide preserves legacy records and agent writes, excludes all workspace sur
 test('delete refreshes Orca catalog, requires exact confirmation and revision, exports the complete record before removing only its key', async () => {
   const p = fresh(refs[0]); submitTask(p, deliverable)
   const other = fresh(refs[1]), directory = await mkdtemp(path.join(os.tmpdir(), 'agentboat-delete-test-'))
-  let catalog = refs, unavailable = false, c!: ReturnType<typeof createCoordinator>
+  let catalog = refs, unavailable = false, removeAllowed = false, c!: ReturnType<typeof createCoordinator>
   const host = mockHost({ storage: { 'project:p1': p as any, 'project:p2': other as any } })
   const worker = await mountWorker({ default: (api: OrcaWorkerApi) => { c = createCoordinator(api, {
-    projects: async () => { if (unavailable) throw Error('offline'); return catalog }, verifyRun: async () => {}, send: async () => ({})
+    projects: async () => { if (unavailable) throw Error('offline'); return catalog }, verifyRun: async () => {}, send: async () => ({}),
+    removeProject: async ref => {
+      if (!removeAllowed) throw Error('project still open')
+      catalog = catalog.filter(p => p.id !== ref.id)
+    }
   }, undefined, directory) } }, { host })
   const input = { projectId: 'p1', revision: 0, confirm: 'p1' }
   try {
@@ -134,6 +138,9 @@ test('delete refreshes Orca catalog, requires exact confirmation and revision, e
     assert.equal((await readdir(directory)).length, 1)
     assert.deepEqual(await c.store.get('p1'), p)
     unavailable = false
+    await assert.rejects(() => worker.request('project.delete', input), /项目已从 Orca 移除/)
+    assert.deepEqual(await c.store.get('p1'), p)
+    catalog = refs; removeAllowed = true
     const answer = await worker.request('project.delete', input)
     assert.equal(answer.deleted, 'p1')
     assert.equal(path.dirname(answer.exportPath), directory)
@@ -205,7 +212,7 @@ test('restart preserves an in-flight notification without resending', async () =
   await worker.deactivate()
 })
 
-test('overview reads legacy and closed projects without writing and includes every queue and execution', async () => {
+test('overview reads registered projects with closed workspaces without writing and includes their queues and executions', async () => {
   const p = fresh(refs[0]); p.runId = 'run_project'
   submitTask(p, { ...deliverable, executions: [{ runId: 'run_job', taskId: 'orca-task', dispatchId: 'dispatch', agent: 'codex' }] })
   submitTask(p, { id: 'blocked', title: '依赖受阻', goal: '修复依赖', phase: 'blocked', decisions: [{ id: 'ask', question: '选择方案？' }] })
@@ -213,7 +220,7 @@ test('overview reads legacy and closed projects without writing and includes eve
   feedback(p, { items: [{ taskId: 'rework', kind: 'acceptance', itemId: 'page-check', itemRevision: 1, result: 'changes_requested', note: '调整标题' }] })
   const host = mockHost({ storage: { 'project:p1': p as any } })
   const before = structuredClone(host.data().storage)
-  const runtime: Partial<CoordinatorRuntime> = { projects: async () => [refs[1]], verifyRun: async () => {}, send: async () => { throw new Error('must not send') } }
+  const runtime: Partial<CoordinatorRuntime> = { projects: async () => [{ ...refs[0], workspace: '' }, refs[1]], verifyRun: async () => {}, send: async () => { throw new Error('must not send') } }
   const worker = await mountWorker({ default: (orca: OrcaWorkerApi) => { createCoordinator(orca, runtime) } }, { host })
   const all = await worker.request('workspace.overview')
   assert.equal(all.workspace.revision, 0); assert.equal(all.workspace.runId, '')

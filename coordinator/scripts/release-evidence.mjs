@@ -25,7 +25,7 @@ if (operation === 'backup') {
 if (operation === 'backup' || operation === 'snapshot') {
   const raw = await json(path.join(data, 'storage.json'));
   const projects = {};
-  for (const key of Object.keys(raw).filter(k => k.startsWith('project:'))) projects[key.slice(8)] = request('read', key.slice(8)).project;
+  for (const key of Object.keys(raw).filter(k => k.startsWith('project:'))) projects[key.slice(8)] = raw[key];
   const snapshot = { at: new Date().toISOString(), workspace: request('main-read'), workspaceRecord: raw.workspace ?? null, catalog: request('projects'), projects };
   await save(path.join(destination, `snapshot-${name}.json`), snapshot);
   console.log(JSON.stringify({ snapshot: name, projects: Object.keys(projects).length, path: destination }));

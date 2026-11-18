@@ -244,7 +244,7 @@ test('details sync shares current main and scoped live agents without local iden
     { ...visible, id: 'old', state: 'done' as const, title: '过期 agent', since: now - 86_400_001 }]
   let reads = 0, online = true, coordinator!: ReturnType<typeof createCoordinator>
   const worker = await mountWorker({ default: api => { coordinator = createCoordinator(api, {
-    projects: async () => refs,
+    projects: async () => [...refs, hidden.ref],
     targets: async () => ({ workspaces: [], sessions: online ? [session] : [] }),
     agents: async () => { reads++; return { ok: true, at: Date.now(), agents: live } }
   }) } }, { host })
@@ -350,6 +350,76 @@ test('plugin request/overview integration preserves all legacy project and works
     assert.deepEqual(host.data().storage.workspace, storage.workspace)
     assert.deepEqual(worker.refusals, [])
   } finally { coordinator.stop(); await worker.deactivate() }
+})
+
+test('Orca catalog controls project visibility, pending counts, writes, notices and the next peer report', async () => {
+  const b = await instance('B'), p = sample().project!
+  p.deliveries.push({ id: 'queued', state: 'pending', subject: '待发通知', body: '示例' })
+  const closed = { ...refs[1], workspace: '' }, replacement = { ...refs[0], id: 'new-p1', repoId: 'new-repo' }
+  let catalog = [p.ref, closed], unavailable = true, sends = 0, coordinator!: ReturnType<typeof createCoordinator>
+  const host = mockHost({ storage: { 'project:p1': p as any }, results: { 'workspace.list': { workspaces: [], truncated: false } } })
+  const worker = await mountWorker({ default: api => { coordinator = createCoordinator(api, {
+    projects: async () => { if (unavailable) throw Error('offline'); return catalog },
+    send: async () => { sends++; return {} },
+    agents: async () => ({ ok: true, at: Date.now(), agents: [{ id: 'test', projectId: 'p1', agent: 'codex', role: 'session', state: 'need', rawState: 'waiting', title: '待处理', since: Date.now() }] })
+  }) } }, { host })
+  const overview = () => worker.request('workspace.overview')
+  try {
+    const first = await overview()
+    assert.ok(first.error?.includes('无法读取 Orca 项目')); assert.deepEqual(first.projects.map(p => p.ref.id), ['p1'])
+    await coordinator.flush('p1'); assert.equal(sends, 0)
+    unavailable = false
+    const live = await overview()
+    assert.deepEqual(live.projects.map(p => p.ref.id), ['p1', 'p2']); assert.ok(live.attention.length > 0)
+    const noWorkspace = await worker.request('project.read', { projectId: closed.id })
+    assert.deepEqual(noWorkspace.workspaceTarget, { error: '这个项目当前没有工作区' })
+    await assert.rejects(() => worker.request('project.openMain', { projectId: closed.id }), /当前没有工作区/)
+    assert.deepEqual(host.callsOf('workspace.open'), [])
+
+    const s = await coordinator.links.snapshot()
+    await coordinator.links.configure({ ...s, name: 'A', host: '127.0.0.1', enabled: true })
+    const joined = await b.links.join((await coordinator.links.invite()).invitation!.code)
+    await coordinator.links.share({ id: joined.peers[0].id, revision: (await coordinator.links.snapshot()).revision, scope: 'details', allProjects: true })
+    const received = async () => (await b.links.refresh()).peers[0].report
+    assert.deepEqual((await received())?.projects.map(p => p.id), ['p1', 'p2'])
+
+    catalog = [closed]
+    const input = { projectId: 'p1', revision: p.revision }
+    await assert.rejects(() => worker.request('project.agent', { ...input, operation: 'submit', requestId: 'submit' }), /项目已从 Orca 移除/)
+    await assert.rejects(() => worker.request('project.agent', { ...input, operation: 'bind', requestId: 'bind' }), /项目已从 Orca 移除/)
+    await assert.rejects(() => worker.request('project.feedback', { ...input, items: [] }), /项目已从 Orca 移除/)
+    await assert.rejects(() => worker.request('workspace.message', { ...input, requestId: 'message', runId: 'run_main', text: '测试' }), /项目已从 Orca 移除/)
+    await assert.rejects(() => worker.request('project.visibility', { ...input, hidden: true }), /项目已从 Orca 移除/)
+    await assert.rejects(() => worker.request('project.deliver', { projectId: 'p1', deliveryId: 'queued' }), /项目已从 Orca 移除/)
+    await assert.rejects(() => worker.request('project.read', { projectId: 'p1' }), /项目已从 Orca 移除/)
+    await coordinator.flush('p1')
+    assert.equal(sends, 0)
+    assert.deepEqual(await coordinator.store.get('p1'), p)
+    const removed = await overview()
+    assert.deepEqual(removed.projects.map(p => p.ref.id), ['p2']); assert.deepEqual(removed.attention, [])
+    await coordinator.updateStatus()
+    assert.equal((host.callsOf('statusBar.update').at(-1) as any).text, '工作间 · 待处理 0')
+    assert.deepEqual((await worker.request('workspace.agents')).agents, [])
+    assert.deepEqual((await received())?.projects.map(p => p.id), ['p2'])
+
+    unavailable = true
+    const cached = await overview()
+    assert.ok(cached.error?.includes('无法读取 Orca 项目')); assert.deepEqual(cached.projects.map(p => p.ref.id), ['p2'])
+    assert.equal(await received(), undefined)
+    unavailable = false
+    catalog = []
+    assert.deepEqual((await overview()).projects, [])
+    unavailable = true
+    assert.deepEqual((await overview()).projects, [])
+    unavailable = false
+    catalog = [replacement, closed]
+    const replaced = await overview()
+    assert.deepEqual(replaced.projects.map(p => p.ref.id), ['new-p1', 'p2']); assert.deepEqual(replaced.attention, [])
+    catalog = [p.ref, closed]
+    assert.deepEqual((await worker.request('project.read', { projectId: p.ref.id })).project, p)
+    assert.ok((await overview()).attention.length > 0)
+    assert.equal(sends, 0)
+  } finally { coordinator.stop(); b.links.stop(); await worker.deactivate() }
 })
 
 test('refresh does not broadcast changes when there is no outbound peer to sync', async () => {

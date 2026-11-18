@@ -2,13 +2,13 @@ import { randomBytes, randomUUID } from 'node:crypto'
 import { existsSync } from 'node:fs'
 import { clientPath } from '../scripts/orca-cli.mjs'
 import type { OrcaWorkerApi } from 'orca/worker'
-import type { WorkspaceBinding } from './model'
+import type { Project, WorkspaceBinding } from './model'
 import type { CoordinatorRuntime } from './runtime'
 import { ProjectStore, fail, fingerprint, text, revision } from './store'
 
 const mainSecurityBoundary = 'Run 归属由会话自报；替换授权来自面板一次性凭据。同一系统用户的本机程序可读写插件数据。'
 
-export function mainAgent(orca: OrcaWorkerApi, store: ProjectStore, runtime: CoordinatorRuntime, changed: () => void, bound: () => void) {
+export function mainAgent(orca: OrcaWorkerApi, store: ProjectStore, runtime: CoordinatorRuntime, changed: () => void, bound: () => void, projects: () => Promise<Project[]>) {
   async function read(): Promise<WorkspaceBinding> {
     const w = await store.workspace()
     const t = w.takeover
@@ -19,7 +19,7 @@ export function mainAgent(orca: OrcaWorkerApi, store: ProjectStore, runtime: Coo
     return { revision: w.revision, runId: w.runId,
       securityBoundary: mainSecurityBoundary,
       ...(s ? { session: { ...s, online } } : {}), ...(w.boundAt ? { boundAt: w.boundAt } : {}),
-      ...(w.runId ? { projectNames: (await store.all()).filter(p => p.runId === w.runId).map(p => p.ref.name) } : {}),
+      ...(w.runId ? { projectNames: (await projects()).filter(p => !p.hidden && p.runId === w.runId).map(p => p.ref.name) } : {}),
       ...(w.retired?.length ? { previousNotice: w.retired.at(-1)!.state } : {}),
       ...(takeover ? { takeover } : {}) }
   }

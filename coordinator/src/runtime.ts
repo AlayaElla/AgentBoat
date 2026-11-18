@@ -45,13 +45,13 @@ export class OrcaRuntime implements CoordinatorRuntime {
     return reply.result
   }
   async projects(host: HostApi<'worker'>): Promise<ProjectRef[]> {
-    const [list, spaces] = await Promise.all([host.call('project.list', {}), host.call('workspace.list', {})])
-    if (list.truncated || spaces.truncated) fail('Orca 项目列表未完整返回，请先缩小工作区范围')
-    return list.projects.filter(p => (p.hostId ?? 'local') === 'local').flatMap(p => {
-      const candidates = spaces.workspaces.filter(w => w.projectId === p.id && (w.hostId ?? 'local') === 'local')
+    const [list, spaces] = await Promise.all([host.call('project.list', {}), host.call('workspace.list', {}).catch(() => undefined)])
+    if (list.truncated) fail('Orca 项目列表未完整返回，请先缩小工作区范围')
+    return list.projects.filter(p => (p.hostId ?? 'local') === 'local').map(p => {
+      const candidates = spaces?.workspaces.filter(w => w.projectId === p.id && (w.hostId ?? 'local') === 'local') ?? []
       const w = candidates.find(w => path.resolve(w.path) === path.resolve(p.path)) ?? candidates[0]
-      return w ? [{ id: projectKey('local', p.id), repoId: p.id, hostId: 'local', name: p.name,
-        path: w.path, workspace: w.id.startsWith('identity:') ? w.id : `id:${w.id}` }] : []
+      return { id: projectKey('local', p.id), repoId: p.id, hostId: 'local', name: p.name,
+        path: w?.path ?? p.path, workspace: w ? w.id.startsWith('identity:') ? w.id : `id:${w.id}` : '' }
     })
   }
   async verifyRun(id: string, caller?: string): Promise<void> {

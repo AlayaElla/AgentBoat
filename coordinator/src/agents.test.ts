@@ -8,7 +8,7 @@ import { OrcaRuntime } from './runtime'
 
 const workspace = { id: 'ws-one', hostId: 'local', projectId: refs[0].repoId, path: '/example', kind: 'worktree', name: '示例', branch: 'main' }
 const agent = (state = 'working', sessionId = 's1') => ({ terminalId: null, title: '会话', agent: 'codex', state, stateStartedAt: Date.now(), sessionId })
-async function snapshot(workspaces: any[], agents: any, projects: any[] = [], read: (args: string[]) => Promise<any> = async () => ({}), truncated = false) {
+async function snapshot(workspaces: any[], agents: any, projects = [fresh({ ...refs[0], id: projectKey('local', refs[0].repoId) })], read: (args: string[]) => Promise<any> = async () => ({}), truncated = false) {
   const host = mockHost({ results: { 'workspace.list': { workspaces, truncated }, 'agents.list': agents } })
   let api!: OrcaWorkerApi
   const worker = await mountWorker({ default: value => { api = value } }, { host })
@@ -19,7 +19,7 @@ async function snapshot(workspaces: any[], agents: any, projects: any[] = [], re
 test('host status maps waiting/blocked to need, working to work and done to done', async () => {
   assert.deepEqual(['waiting', 'blocked', 'working', 'done'].map(s => agentState(s as any)), ['need', 'need', 'work', 'done'])
   const old = { ...agent('done', 'old'), stateStartedAt: Date.now() - 86400001 }
-  const { result, host } = await snapshot([workspace, { ...workspace, id: 'remote', hostId: 'ssh:remote' }], { agents: [...['waiting', 'blocked', 'working', 'done'].map((s, i) => agent(s, 's' + i)), old] })
+  const { result, host } = await snapshot([workspace, { ...workspace, id: 'remote', hostId: 'ssh:remote' }, { ...workspace, id: 'old', projectId: 'removed' }], { agents: [...['waiting', 'blocked', 'working', 'done'].map((s, i) => agent(s, 's' + i)), old] })
   assert.equal(result.ok, true); assert.deepEqual(result.agents.map(a => a.state), ['need', 'need', 'work', 'done'])
   assert.ok(result.agents.every(a => a.projectId === projectKey('local', refs[0].repoId)))
   assert.deepEqual(host.callsOf('agents.list'), [{ workspaceId: workspace.id }])
@@ -152,7 +152,7 @@ test('matching project writes record display identity, resolve its workspace, an
   } finally { c.stop(); await worker.deactivate() }
 })
 
-test('host catalog matches exact local project IDs and canonical workspaces, refusing truncation', async () => {
+test('host catalog matches exact local IDs even without workspaces, refusing a truncated project list', async () => {
   const host = mockHost({ results: {
     'project.list': { projects: [{ id: 'repo', name: '同名', kind: 'git', hostId: 'local', path: '/root' }, { id: 'remote', name: '同名', kind: 'git', hostId: 'ssh:remote', path: '/root' }], truncated: false },
     'workspace.list': { workspaces: [{ ...workspace, id: 'repo::/child', projectId: 'repo', path: '/child' }, { ...workspace, id: 'repo::/root', projectId: 'repo', path: '/root' }], truncated: false }
@@ -166,6 +166,10 @@ test('host catalog matches exact local project IDs and canonical workspaces, ref
     host.respond('workspace.list', { workspaces: [{ ...workspace, id: 'identity:wt2:local:exact', projectId: 'repo', path: '/root' }], truncated: false })
     assert.equal((await runtime.projects(api.host))[0].workspace, 'identity:wt2:local:exact')
     host.respond('workspace.list', { workspaces: [], truncated: true })
+    assert.deepEqual(await runtime.projects(api.host), [{ ...projects[0], workspace: '' }])
+    host.respond('workspace.list', () => { throw Error('workspaces unavailable') })
+    assert.deepEqual(await runtime.projects(api.host), [{ ...projects[0], workspace: '' }])
+    host.respond('project.list', { projects: [], truncated: true })
     await assert.rejects(() => runtime.projects(api.host), /未完整/)
     assert.deepEqual(host.refusals, [])
   } finally { await worker.deactivate() }
@@ -173,7 +177,7 @@ test('host catalog matches exact local project IDs and canonical workspaces, ref
 
 test('status events refresh panel and status bar without any panel request, recover errors and dispose', async () => {
   const host = mockHost(); let c!: ReturnType<typeof testCoordinator>, state = 'waiting', reads = 0, unavailable = false
-  const worker = await mountWorker({ default: api => { c = testCoordinator(api, { agents: async () => {
+  const worker = await mountWorker({ default: api => { c = testCoordinator(api, { projects: async () => refs, agents: async () => {
     reads++
     if (unavailable) throw Error('host unavailable')
     return { ok: true, at: Date.now(), agents: [{ id: 'one', projectId: 'p1', agent: 'codex', role: 'session', state: agentState(state as any), rawState: state, title: '测试', since: Date.now() }] }

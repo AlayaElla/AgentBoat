@@ -61,7 +61,8 @@ async function setup(options = {}) {
     const live = { ok: true, at: now, agents: [{ id: 'agent-need', projectId: 'p1', agent: 'codex', role: 'worker', state: 'need', rawState: 'waiting', verified: true, title: '等批准', last: '等待用户批准', since: now - 60000 }, { id: 'agent-work', projectId: 'p1', agent: 'claude', role: 'session', state: 'work', rawState: 'working', verified: false, title: '正在工作', last: '正在处理', since: now - 20000 }] };
     const workspace = { revision: 1, runId: options.unbound ? '' : 'run_main', ...(!options.unbound ? { session: { handle: 'main', agent: 'claude', title: '统筹会话', online: 'online' } } : {}) };
     const sessions = ['甲', '乙'].map((name, i) => ({ handle: 'session-' + i, title: name + '会话', workspace: 'identity:test', workspaceName: '示例工作区', path: '/test/工作区 with spaces', agent: i ? 'codex' : 'claude', online: 'online' }));
-    const attention = () => projects.flatMap(p => p.tasks.flatMap(t => {
+    const registered = () => projects.filter(p => !window.fixture.removedProjects?.includes(p.ref.id));
+    const attention = () => registered().flatMap(p => p.tasks.flatMap(t => {
       const base = { projectId: p.ref.id, taskId: t.id, title: t.title };
       return [
         ...t.decisions.filter(d => d.answer === undefined).map(d => ({ ...base, kind: 'decision', itemId: d.id, summary: d.question })),
@@ -73,9 +74,10 @@ async function setup(options = {}) {
     window.orca = { storage: { get: async k => clone(stored[k] ?? null), set: async (k, v) => { stored[k] = clone(v); }, delete: async k => { delete stored[k]; } }, plugin: { on: (name, callback) => { events[name] = callback; return { dispose() {} }; }, request: async (name, input) => {
       if (input !== undefined && !isJson(input)) throw Error('input: Invalid input');
       calls.push({ name, input: clone(input) });
-      if (name === 'workspace.overview') return clone({ workspace, projects: [...projects.map(p => ({ ref: p.ref, counts: { review: p.tasks.filter(t => t.phase === 'ready' && t.acceptance.some(a => a.status === 'pending')).length }, agents: [], bound: true, updatedAt: '' })), ...(options.manyProjects ? Array.from({ length: 13 }, (_, i) => ({ ref: { ...project.ref, id: 'p' + (i + 2), name: '项目 ' + (i + 2) }, counts: { working: options.idleProjects ? 0 : 1 }, agents: [], bound: true, updatedAt: '' })) : [])], hidden: [], attention: attention(), links, connections: [], machines: [{ id: 'local', name: '主机', role: 'host' }] });
-      if (name === 'workspace.agents') return clone(live);
+      if (name === 'workspace.overview') return clone({ workspace, projects: [...registered().map(p => ({ ref: p.ref, counts: { review: p.tasks.filter(t => t.phase === 'ready' && t.acceptance.some(a => a.status === 'pending')).length }, agents: [], bound: true, updatedAt: '' })), ...(options.manyProjects ? Array.from({ length: 13 }, (_, i) => ({ ref: { ...project.ref, id: 'p' + (i + 2), name: '项目 ' + (i + 2) }, counts: { working: options.idleProjects ? 0 : 1 }, agents: [], bound: true, updatedAt: '' })) : [])], hidden: [], attention: attention(), links, connections: [], machines: [{ id: 'local', name: '主机', role: 'host' }] });
+      if (name === 'workspace.agents') return clone({ ...live, agents: live.agents.filter(a => !window.fixture.removedProjects?.includes(a.projectId)) });
       if (name === 'project.read') {
+        if (window.fixture.removedProjects?.includes(input.projectId)) throw Error('项目已从 Orca 移除');
         if (window.fixture.delayProject === input.projectId) {
           delete window.fixture.delayProject;
           await new Promise(r => { window.fixture.finishRead = r; });
@@ -771,6 +773,30 @@ try {
   });
   await setup();
   await test('host agents distinguish need/work and show one unreadable notice', async () => { await page.getByRole('button', { name: '全部 agent', exact: true }).click(); assert.equal(await page.locator('[data-st=need]').count(), 1); assert.equal(await page.locator('[data-st=work]').count(), 1); assert.ok(!(await page.locator('[data-st=work]').innerText()).includes('未核实')); await page.evaluate(() => { fixture.live.ok = false; fixture.live.agents = []; fixture.emit(); }); await page.getByText('agent 状态读不到', { exact: true }).waitFor(); assert.equal(await page.getByText('agent 状态读不到', { exact: true }).count(), 1); });
+  await setup({ inboxBatch: true });
+  await test('home drops removed projects and stale details while showing registered projects without workspaces', async () => {
+    const local = page.locator('[data-workspace=self]');
+    await local.getByRole('button', { name: '示例项目', exact: true }).click();
+    await page.evaluate(() => {
+      fixture.removedProjects = ['p1']; fixture.workspaceTarget = { error: '这个项目当前没有工作区' };
+      fixture.projects[1].tasks[0].artifacts = [{ id: 'local', label: '本机成果', version: 'v1', url: '/example/file' }, { id: 'link', label: '网页成果', version: 'v1', url: 'https://example.com/' }];
+      fixture.emit();
+    });
+    await page.getByRole('alert').filter({ hasText: '项目已从 Orca 移除' }).waitFor();
+    assert.equal(await page.getByRole('button', { name: '打开主会话', exact: true }).count(), 0);
+    await home();
+    await local.getByRole('button', { name: '移动项目', exact: true }).waitFor();
+    assert.equal(await local.locator('.pcard').count(), 1);
+    assert.equal(await page.getByText('页面交付', { exact: true }).count(), 0);
+    assert.equal(await page.locator('.inbox .pill').innerText(), '1');
+    await local.getByRole('button', { name: '移动项目', exact: true }).click();
+    assert.equal(await page.getByRole('button', { name: '打开主会话', exact: true }).isDisabled(), true);
+    await page.getByText('这个项目当前没有工作区', { exact: true }).waitFor();
+    await page.getByRole('tab', { name: '任务', exact: true }).click();
+    await page.getByRole('button', { name: '移动端交付', exact: true }).click();
+    assert.equal(await page.getByRole('button', { name: '本机成果 · v1', exact: true }).isDisabled(), true);
+    assert.equal(await page.getByRole('button', { name: '网页成果 · v1', exact: true }).isEnabled(), true);
+  });
   await setup({ manyProjects: true });
   await test('agent failure and truncation each render once across home, project and task pages', async () => {
     await page.evaluate(() => { fixture.live.ok = false; fixture.emit(); });

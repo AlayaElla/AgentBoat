@@ -11,11 +11,12 @@ export async function readAgents(host: HostApi<'worker'>, read: Read, projects: 
   const at = Date.now()
   try {
     const list = await host.call('workspace.list', {})
-    const local = list.workspaces.filter(w => (w.hostId ?? 'local') === 'local' && w.projectId && !projects.find(p => p.ref.id === projectKey('local', w.projectId!))?.hidden)
+    const visible = new Map(projects.filter(p => !p.hidden).map(p => [p.ref.id, p]))
+    const local = list.workspaces.filter(w => (w.hostId ?? 'local') === 'local' && w.projectId && visible.has(projectKey('local', w.projectId)))
     let truncated = list.truncated || local.length > maxAgentWorkspaces
     const workers = new Map<string, any[]>(), agents: LiveAgent[] = []
     workspaces: for (const w of local.slice(0, maxAgentWorkspaces)) {
-      const projectId = projectKey('local', w.projectId!), project = projects.find(p => p.ref.id === projectId)
+      const projectId = projectKey('local', w.projectId!), project = visible.get(projectId)
       const result = await host.call('agents.list', { workspaceId: w.id })
       // Host caps each workspace at 50 without a truncation flag; do not present that boundary as a full count.
       if (result.agents.length >= 50) truncated = true

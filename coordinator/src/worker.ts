@@ -4,7 +4,7 @@ import type { OrcaWorkerApi } from 'orca/worker'
 import type { Project, ProjectRef, Snapshot, SourceEvent, Delivery, MessagingSnapshot } from './model'
 import { FeishuSources, notifyFeishu, type MessageTransport } from './feishu'
 import { OrcaRuntime, defaultExecutable, type CoordinatorRuntime } from './runtime'
-import { ProjectStore, artifactUrl, fail, feedback, fingerprint, maxMessageLength, notifyWorkspace, object, overview, receiveEvent, submitTask, text, revision, mergeProjects, feishuConfig } from './store'
+import { ProjectStore, artifactUrl, fail, feedback, fingerprint, fresh, maxMessageLength, notifyWorkspace, object, overview, receiveEvent, submitTask, text, revision, mergeProjects, feishuConfig } from './store'
 import { WorkspaceLinks } from './links'
 import { linkMessageHistory } from './link-messages'
 import { groupedAttention } from './model'
@@ -12,11 +12,11 @@ import { mainAgent } from './main-agent'
 
 export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRuntime, transport?: MessageTransport, exportDirectory?: string) {
   const store = new ProjectStore(orca.storage, exportDirectory)
-  let catalog: ProjectRef[] = []
-  let runtimeError = ''
+  let catalog: ProjectRef[] | undefined
+  let readingCatalog: Promise<{ refs?: ProjectRef[]; error?: string }> | undefined
   const busy = new Map<string, Promise<void>>()
   const changed = (projectId = '') => { agentsDirty = true; orca.panels.post('project.changed', { projectId }); void updateStatus().catch(() => {}) }
-  const main = mainAgent(orca, store, runtime, changed, deferMailbox)
+  const main = mainAgent(orca, store, runtime, changed, deferMailbox, async () => (await availableProjects()).list)
   let statusUpdates: Promise<unknown> = Promise.resolve()
   let live: import('./agents').AgentsSnapshot = { ok: false, at: 0, agents: [] }
   let agentsDirty = true, refreshingAgents: Promise<typeof live> | undefined
@@ -26,8 +26,9 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
     if (!agentsDirty && live.ok && Date.now() - live.at < 60000) return Promise.resolve(live)
     refreshingAgents = (async () => {
       do {
+        const { list } = await availableProjects()
         agentsDirty = false
-        try { live = await runtime.agents(await store.all(), orca.host) }
+        try { live = await runtime.agents(list, orca.host) }
         catch { live = { ok: false, at: Date.now(), agents: [], error: 'agent 状态读不到' } }
         await updateStatus()
       } while (agentsDirty)
@@ -35,13 +36,18 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
     })().finally(() => { refreshingAgents = undefined })
     return refreshingAgents
   }
-  orca.panels.handle('workspace.agents', input => refreshAgents(input?.refresh === true))
+  orca.panels.handle('workspace.agents', async input => {
+    const { list } = await availableProjects(), snapshot = await refreshAgents(input?.refresh === true)
+    const visible = new Set(list.filter(p => !p.hidden).map(p => p.ref.id))
+    return { ...snapshot, agents: snapshot.agents.filter(a => visible.has(a.projectId)) }
+  })
   const refreshActivity = async () => { await refreshAgents(true); orca.panels.post('project.changed', { projectId: '' }) }
-  const agentEvents = orca.events.on('agent.status.changed', refreshActivity)
+  const activityEvents = [orca.events.on('agent.status.changed', refreshActivity), orca.events.on('workspace.removed', refreshActivity), orca.events.on('workspace.created', refreshActivity)]
   function updateStatus() {
     const work = statusUpdates.then(async () => {
-      const saved = await store.all(), all = overview(saved, await store.workspace())
-      const count = groupedAttention(all.attention).length + (live.ok ? live.agents.filter(a => a.state === 'need' && !saved.find(p => p.ref.id === a.projectId)?.hidden).length : 0)
+      const { list } = await availableProjects(), all = overview(list, await store.workspace())
+      const visible = new Set(all.projects.map(p => p.ref.id))
+      const count = groupedAttention(all.attention).length + (live.ok ? live.agents.filter(a => a.state === 'need' && visible.has(a.projectId)).length : 0)
       await orca.host.call('statusBar.update', { id: 'coordinator', text: `工作间 · 待处理 ${count}${live.truncated ? '+' : ''}`, tooltip: `${!live.ok ? 'agent 状态读不到 · ' : live.truncated ? 'agent 状态未全部读取 · ' : ''}打开工作间总览 · Mod+Alt+Shift+J` })
     })
     statusUpdates = work.catch(() => {}); return work
@@ -55,10 +61,9 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
   orca.commands.register('workspace.overview', () => openOverview())
   orca.panels.handle('workspace.entry', () => openOverview(true))
   const links = new WorkspaceLinks(orca, async () => {
-    await projects()
-    if (runtimeError) fail('本机项目列表不可用，请恢复后再上报')
-    const saved = await store.all()
-    return mergeProjects(saved, catalog)
+    const { list, error } = await availableProjects()
+    if (error) fail('本机项目列表不可用，请恢复后再上报')
+    return list
   }, () => orca.panels.post('project.changed', { projectId: '' }), undefined, async (peer, messages) => {
     await store.mutateMessaging(m => {
       const sent = m.deliveries.filter(d => d.linkMessageHash && d.state === 'sent')
@@ -118,32 +123,48 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
     notifyFeishu(before, after, (await store.messaging()).feishu)
   }
 
-  async function projects() {
-    try { catalog = await runtime.projects(orca.host); runtimeError = '' }
-    catch (e) { runtimeError = `无法读取 Orca 项目：${e instanceof Error ? e.message.slice(0, 2000) : '请检查 Orca 与 CLI 路径'}` }
-    return { projects: catalog, ...(runtimeError ? { error: runtimeError } : {}) }
+  function readCatalog() {
+    return readingCatalog ??= (async () => {
+      try {
+        const refs = await runtime.projects(orca.host)
+        if (!catalog || catalog.length !== refs.length || catalog.some((p, i) => p.id !== refs[i].id)) agentsDirty = true
+        return { refs: catalog = refs }
+      } catch (e) {
+        return { refs: catalog, error: `无法读取 Orca 项目：${e instanceof Error ? e.message.slice(0, 2000) : '请检查 Orca 与 CLI 路径'}` }
+      }
+    })().finally(() => { readingCatalog = undefined })
   }
-  async function ensure(id: string): Promise<Project> {
-    if (!catalog.length) await projects()
-    const ref = catalog.find(p => p.id === id)
-    if (!ref) fail('项目不在当前 Orca 本机项目列表中，请刷新后选择')
-    return store.register(ref)
+  async function availableProjects() {
+    const { refs, error } = await readCatalog(), saved = await store.all()
+    return { list: refs ? mergeProjects(saved, refs) : saved, error }
   }
+  async function requireProject(id: string): Promise<ProjectRef> {
+    await readingCatalog
+    const { refs, error } = await readCatalog()
+    if (error) fail(error)
+    const ref = refs?.find(p => p.id === id)
+    if (!ref) fail('项目已从 Orca 移除')
+    return ref
+  }
+  async function ensure(id: string): Promise<Project> { return store.register(await requireProject(id)) }
   async function snapshot(id: string): Promise<Snapshot> {
-    if (!catalog.length) await projects()
-    const project = catalog.some(p => p.id === id) ? await ensure(id) : (await store.all()).find(p => p.ref.id === id) ?? await ensure(id)
+    const { refs, error: runtimeError } = await readCatalog(), ref = refs?.find(p => p.id === id)
+    if (refs && !ref) fail('项目已从 Orca 移除')
+    const project = ref && !runtimeError ? await store.register(ref)
+      : (await store.all()).find(p => p.ref.id === id) ?? (ref ? fresh(ref) : fail(runtimeError ?? '项目已从 Orca 移除'))
     const mainAgent = /^orca_session_id:(claude|codex)_/.exec(project.mainAgentHandle ?? '')?.[1] as Snapshot['mainAgent']
-    return { projects: catalog, project,
-      ...(mainAgent ? { mainAgent } : {}), workspaceTarget: await projectWorkspace(project.ref, project.mainAgentHandle),
+    return { projects: refs ?? [], project,
+      ...(mainAgent ? { mainAgent } : {}), workspaceTarget: runtimeError ? { error: runtimeError } : await projectWorkspace(ref ?? project.ref, project.mainAgentHandle),
       ...(runtimeError ? { runtimeError } : {}) }
   }
   async function projectWorkspace(ref: ProjectRef, handle?: string): Promise<import('./model').ProjectWorkspace> {
     try {
       const list = await orca.host.call('workspace.list', {})
       const session = handle ? await runtime.targets().then(t => t.sessions.find(s => s.handle === handle)).catch(() => undefined) : undefined
-      const workspace = (session && list.workspaces.find(w => w.id === session.workspace.replace(/^id:/, '') && (w.hostId ?? 'local') === 'local'))
-        || list.workspaces.find(w => w.id === ref.workspace.replace(/^id:/, '') && w.projectId === ref.repoId && (w.hostId ?? 'local') === ref.hostId)
-      if (!workspace) fail(list.truncated ? '工作区列表未完整返回，请刷新后重试' : '项目工作区已被移除或不可用')
+      const candidates = list.workspaces.filter(w => w.projectId === ref.repoId && (w.hostId ?? 'local') === ref.hostId)
+      const workspace = (session && candidates.find(w => w.id === session.workspace.replace(/^id:/, '')))
+        || candidates.find(w => w.id === ref.workspace.replace(/^id:/, ''))
+      if (!workspace) fail(list.truncated ? '工作区列表未完整返回，请刷新后重试' : ref.workspace ? '项目工作区已被移除或不可用' : '这个项目当前没有工作区')
       const conversations = await orca.host.call('agents.list', { workspaceId: workspace.id }).catch(() => undefined)
       return { workspaceId: workspace.id, ...(conversations ? { multipleConversations: conversations.agents.length > 1 } : {}) }
     } catch (e) {
@@ -186,7 +207,7 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
     let reply = ''
     if (target) {
       try {
-        const p = all.find(p => p.ref.id === target.projectId)!, task = p?.tasks.find(t => t.id === target.taskId)
+        const p = await ensure(target.projectId), task = p.tasks.find(t => t.id === target.taskId)
         const d = task?.decisions.find(d => d.id === target.itemId)
         const requestId = `feishu-feedback:${event.id}`
         if (value.length > 7000) fail('反馈过长，请将决定或修改意见控制在 7000 字以内')
@@ -257,18 +278,22 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
     const running = busy.get(id)
     if (running) return running
     const work = (async () => {
+      let attempted = false
       try {
         while (true) {
           const p = await store.get(id)
           const f = (await store.messaging()).feishu
           const delivery = p.deliveries.find(x => x.state === 'pending' && (x.external ? !p.hidden && f.enabled && x.external.appId === f.appId && f.chatIds.includes(x.external.chatId) : (!p.hidden || !x.targetRunId) && (x.targetRunId || p.runId)))
           if (!delivery) break
+          const { refs, error } = await readCatalog()
+          if (error || !refs?.some(ref => ref.id === id)) break
           let claimed = false
           await store.mutate(id, undefined, p => {
             if (p.hidden && (delivery.external || delivery.targetRunId)) return
             p.deliveries.find(x => x.id === delivery.id)!.state = 'sending'; claimed = true
           })
           if (!claimed) continue
+          attempted = true
           try {
             const receipt = await sendDelivery(delivery, p.runId)
             await store.mutate(id, undefined, p => {
@@ -284,7 +309,7 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
             break
           }
         }
-      } finally { busy.delete(id); changed(id) }
+      } finally { busy.delete(id); if (attempted) changed(id) }
     })()
     busy.set(id, work)
     return work
@@ -338,10 +363,9 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
     await flushMailbox(); return messagingSnapshot()
   })
   orca.panels.handle('workspace.overview', async () => {
-    await projects()
-    const saved = await store.all()
-    // Include stored projects even when their worktree is currently closed; overview never registers or rewrites them.
-    return { ...overview(mergeProjects(saved, catalog), await store.workspace(), runtimeError), workspace: await main.read(), links: await links.snapshot(), connections: await connections.list(), machines: [{ id: 'local', name: os.hostname(), role: 'host' as const, online: true }] }
+    const { list, error } = await availableProjects()
+    // Orca registration defines membership. A project can be registered without a workspace.
+    return { ...overview(list, await store.workspace(), error), workspace: await main.read(), links: await links.snapshot(), connections: await connections.list(), machines: [{ id: 'local', name: os.hostname(), role: 'host' as const, online: true }] }
   })
   orca.panels.handle('workspace.message', async input => {
     const id = text(input.projectId, '项目编号', 200)
@@ -358,11 +382,14 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
     changed(id); defer(id)
     return snapshot(id)
   })
-  orca.panels.handle('projects.list', projects)
+  orca.panels.handle('projects.list', async () => {
+    const { refs, error } = await readCatalog()
+    return { projects: refs ?? (await store.all()).map(p => p.ref), ...(error ? { error } : {}) }
+  })
   orca.panels.handle('project.visibility', async input => {
     const id = text(input.projectId, '项目编号', 200)
     if (typeof input.hidden !== 'boolean') fail('隐藏状态不正确')
-    await snapshot(id)
+    await ensure(id)
     await store.mutate(id, revision(input.revision), p => { p.hidden = input.hidden; rememberProjectCaller(p, input) })
     changed(id); if (!input.hidden) defer(id)
     return snapshot(id)
@@ -371,16 +398,11 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
     const id = text(input.projectId, '项目编号', 200)
     if (input.confirm !== id) fail('删除前请确认项目编号；会删除任务、成果、决定、验收、来源、通知及项目设置记录，并先导出 JSON')
     await busy.get(id)
-    await projects()
-    if (runtimeError) fail('无法确认 Orca 项目列表，未删除记录；请恢复连接后重试')
+    await requireProject(id)
     const exportPath = await store.remove(id, revision(input.revision), async () => {
-      await projects()
-      if (runtimeError) fail('无法确认 Orca 项目列表，未删除记录；请恢复连接后重试')
-      if (catalog.some(p => p.id === id)) {
-        await runtime.removeProject((await store.get(id)).ref, orca.host)
-        await projects()
-        if (runtimeError || catalog.some(p => p.id === id)) fail('Orca 未确认移除，工作间记录保留')
-      }
+      await runtime.removeProject(await requireProject(id), orca.host)
+      const { refs, error } = await readCatalog()
+      if (error || refs?.some(p => p.id === id)) fail('Orca 未确认移除，工作间记录保留')
     })
     changed(id)
     await syncSources()
@@ -388,7 +410,6 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
   })
   orca.panels.handle('project.read', input => snapshot(text(input.projectId, '项目编号', 200)))
   orca.panels.handle('project.openMain', async input => {
-    await projects()
     const { workspaceTarget } = await snapshot(text(input.projectId, '项目编号', 200))
     if (!workspaceTarget || 'error' in workspaceTarget) fail(workspaceTarget?.error || '项目工作区不可用')
     await orca.host.call('workspace.open', { workspaceId: workspaceTarget.workspaceId })
@@ -446,16 +467,17 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
     return snapshot(input.projectId)
   })
   orca.panels.handle('project.openArtifact', async input => {
-    const p = await ensure(input.projectId)
+    const ref = await requireProject(input.projectId), p = await store.register(ref)
     const a = p.tasks.find(x => x.id === input.taskId)?.artifacts.find(x => x.id === input.artifactId)
     if (!a || /^https?:/i.test(a.url)) fail('请选择本项目的本机成果')
-    const url = artifactUrl(a.url, p.ref.path)
-    await orca.host.call('editor.open', { workspaceId: p.ref.workspace.replace(/^id:/, ''), path: url })
+    if (!ref.workspace) fail('这个项目当前没有工作区')
+    const url = artifactUrl(a.url, ref.path)
+    await orca.host.call('editor.open', { workspaceId: ref.workspace.replace(/^id:/, ''), path: url })
     return { opened: true }
   })
 
   let refreshMain: ReturnType<typeof setInterval> | undefined
-  return { store, links, connections, ingest, flush, flushMailbox, updateStatus, stop: () => { clearInterval(refreshMain); agentEvents.dispose(); connections.stop(); links.stop(); sources.stop() }, async start() {
+  return { store, links, connections, ingest, flush, flushMailbox, updateStatus, stop: () => { clearInterval(refreshMain); for (const event of activityEvents) event.dispose(); connections.stop(); links.stop(); sources.stop() }, async start() {
     await links.start()
     await connections.start()
     await main.recover()
@@ -463,7 +485,8 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
     refreshMain = setInterval(() => { void refreshActivity().catch(() => {}) }, 60000)
     refreshMain.unref()
     await refreshAgents(true)
-    for (const p of await store.all()) {
+    const { refs, error } = await readCatalog(), current = error ? [] : (await store.all()).filter(p => refs?.some(ref => ref.id === p.ref.id))
+    for (const p of current) {
       if (p.deliveries.some(x => x.state === 'sending')) await store.mutate(p.ref.id, undefined, p => {
         for (const d of p.deliveries.filter(x => x.state === 'sending')) { d.state = 'uncertain'; d.error = '插件重启前通知结果待核对' }
       })
@@ -471,7 +494,7 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
     if ((await store.messaging()).deliveries.some(d => d.state === 'sending')) await store.mutateMessaging(m => { for (const d of m.deliveries) if (d.state === 'sending') { d.state = 'uncertain'; d.error = '重启前发送结果待核对' } })
     await syncSources()
     for (const entry of (await store.messaging()).inbox.filter(x => x.state === 'pending')) await processMessage(entry.event.id)
-    for (const p of await store.all()) defer(p.ref.id)
+    for (const p of current) defer(p.ref.id)
     await flushMailbox()
   } }
 }
