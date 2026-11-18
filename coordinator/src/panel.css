@@ -61,6 +61,7 @@ html.dark .btn.danger{background:color-mix(in oklab,var(--orca-destructive) 60%,
    标签的配法照 Orca 仪表盘里的小胶囊：状态色 10% 到 15% 的底加同色的字，没有边。 */
 .pill{flex:none;min-width:18px;height:18px;padding:0 6px;border-radius:999px;background:color-mix(in oklab,var(--ab-need) 15%,transparent);color:var(--ab-need-text);font-size:11px;line-height:18px;font-weight:600;text-align:center;font-variant-numeric:tabular-nums}
 .tag{display:inline-flex;flex:none;align-items:center;padding:2px 8px;border-radius:999px;background:var(--fill);color:var(--orca-muted-foreground);font-size:12px;line-height:16px;font-weight:500;white-space:nowrap}
+.stack>.tag,.panel>.tag{align-self:flex-start}
 .tag.solid{background:var(--orca-primary);color:var(--orca-primary-foreground)}
 .tag.ok{background:color-mix(in oklab,var(--ab-done) 10%,transparent);color:var(--ab-done-text)}
 .tag.need{background:color-mix(in oklab,var(--ab-need) 15%,transparent);color:var(--ab-need-text)}
@@ -123,7 +124,8 @@ html.dark .sheet{box-shadow:0 -10px 24px #00000080}
 
 /* 首页只有两块：等你处理、工作间树，之间 20px。宽面板分左右两栏：左边是等你处理，和整页一起滚，没有自己的滚动条；右边是树。 */
 .home{display:flex;flex-direction:column;gap:20px;min-width:0}
-.home.wide{display:grid;grid-template-columns:minmax(280px,340px) minmax(0,1fr);align-items:start}
+.home.wide{display:grid;grid-template-columns:minmax(240px,300px) minmax(0,1fr);align-items:start}
+.home.wide .inbox-extra{display:contents}.home.wide .inbox-more{display:none}
 
 /* 等你处理：照 Orca 给「agent 在等你」的卡片配的底色（--agent-question 的 6%），不画它那一圈边。全页只有这一块是这个底色。
    没有事的时候变回普通的块。圆角是 Orca 仪表盘每一栏用的 rounded-xl。 */
@@ -136,6 +138,11 @@ html.dark .inbox{background:color-mix(in oklab,var(--ab-need) 10%,var(--orca-bac
 .inbox-extra{display:none}.inbox-extra.expanded{display:contents}
 .inbox-review{display:flex;align-items:flex-start;min-width:0}
 .panel .inbox-review>input{width:16px;height:16px;flex:none;margin:8px 0 0 8px;accent-color:var(--orca-primary)}
+.inbox .item[aria-expanded=true]{background:var(--orca-accent,var(--orca-secondary))}
+.inbox-detail{position:sticky;top:52px;max-height:calc(100dvh - 64px - var(--inbox-footer,0px));min-width:0;display:flex;flex-direction:column;gap:8px;padding:12px;border-radius:var(--r-xl);background:var(--s-card);container-type:inline-size}
+.inbox-detail-top{flex:none;justify-content:flex-end}
+.inbox-detail-body{min-height:0;overflow-y:auto;scrollbar-width:thin}
+.inbox-detail-body>*{flex:none}
 
 /* 工作间：一块底色（块的底色），没有边框。树上一个工作间一行；展开后这块底色往下长，里面是它的内容。
    树上没有「上级、下级、平级」这些字，关系用连线表示。连线照 Orca 侧栏里父 agent 和子 agent 之间那种线：
@@ -223,6 +230,6 @@ button.lead{cursor:pointer}button.lead:hover{background:color-mix(in oklab,var(-
 
 /* ④ 以下是样稿自己的外框和控制栏，不是面板的一部分，不会做进产品 */
 
-html,body{height:100%;overflow:hidden}#panel{height:100%;width:100%}.sr-only{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%)}.panel{container-type:inline-size}@container (min-width:620px){.home{display:grid;grid-template-columns:minmax(240px,300px) minmax(0,1fr);align-items:start}.inbox-extra{display:contents}.inbox-more{display:none}}@container (max-width:619px){.cols3{grid-template-columns:minmax(0,1fr)}}.dot.flag{width:5px;height:5px;margin-left:-5px}.field .lb{line-height:20px}.org-tools{min-width:0}.error{overflow-wrap:anywhere}button{overflow:hidden;text-overflow:ellipsis}.panel[aria-busy=true]{cursor:progress}.inbox .h2{white-space:nowrap}
+html,body{height:100%;overflow:hidden}#panel{height:100%;width:100%}.sr-only{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%)}.panel{container-type:inline-size}@container (max-width:619px){.cols3{grid-template-columns:minmax(0,1fr)}}.dot.flag{width:5px;height:5px;margin-left:-5px}.field .lb{line-height:20px}.org-tools{min-width:0}.error{overflow-wrap:anywhere}button{overflow:hidden;text-overflow:ellipsis}.panel[aria-busy=true]{cursor:progress}.inbox .h2{white-space:nowrap}
 
 .card,.callout{overflow-wrap:anywhere}.card>.any,.callout>.any,p.any{white-space:pre-wrap}

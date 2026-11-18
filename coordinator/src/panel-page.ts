@@ -6,7 +6,7 @@ import type { FeedbackItem } from './store'
 import type { AgentsSnapshot, LiveAgent } from './model'
 import type { LinksSnapshot, Sharing } from './links'
 
-type Page = { kind: string; projectId?: string; id?: string; pid?: string }
+type Page = { kind: string; projectId?: string; id?: string; pid?: string; inboxRow?: string }
 type Draft = { taskId: string; kind: 'acceptance' | 'decision'; itemId: string; itemRevision?: number; fingerprint?: string; signature: string; title: string; result?: string; answer?: string; note?: string }
 type InboxTask = { title: string; items: Draft[] }
 type InboxBatch = { name: string; tasks: Map<string, InboxTask>; requestId?: string }
@@ -17,6 +17,9 @@ const req = (name: string, input?: any): Promise<any> => input === undefined
 let all: Overview, live: AgentsSnapshot = { ok: false, at: 0, agents: [] }, current: Project | null = null, projectLead = ''
 let workspaceTarget: ProjectWorkspace | undefined
 let page: Page = { kind: 'home' }, stack: { page: Page; y: number }[] = [], opened: Record<string, boolean> = { self: true }
+let wideInbox = false
+const splitInbox = () => wideInbox && !!page.inboxRow
+const showHome = () => page.kind === 'home' || splitInbox()
 let drafts: Record<string, Record<string, Draft>> = {}, form: Record<string, any> = {}, detail: any, targets: any
 const inboxBatches = new Map<string, InboxBatch>()
 let error = '', notice = '', busy = false, more = false, tab = 'inbox', epoch = 0
@@ -113,14 +116,31 @@ async function loadPage() {
   if (current) reconcile(current)
 }
 async function go(next: Page, reset = false) {
-  stack = reset ? [] : [...stack, { page, y: root.scrollTop }]; page = next; form = {}; detail = null; current = null; epoch++; error = ''; notice = ''; tab = 'inbox'
-  remember(); render(0)
-  try { await loadPage() } catch (e) { error = (e as Error).message }
-  render(0); root.querySelector<HTMLElement>('[data-heading]')?.focus()
+  const y = root.scrollTop, previous = stack.at(-1)
+  if (reset) stack = []
+  else if (page.inboxRow && next.inboxRow && previous?.page.kind === 'home') previous.y = y
+  else stack.push({ page, y })
+  page = next; form = {}; detail = null; current = null; const n = ++epoch; error = ''; notice = ''; tab = 'inbox'
+  remember(); render(splitInbox() ? y : 0)
+  try { await loadPage() } catch (e) { if (n === epoch) error = (e as Error).message }
+  if (n !== epoch) return
+  render(splitInbox() ? root.scrollTop : 0)
+  root.querySelector<HTMLElement>(splitInbox() ? '#inbox-detail' : '[data-heading]')?.focus({ preventScroll: true })
 }
-async function back() {
-  const prev = stack.pop() ?? { page: { kind: 'home' }, y: 0 }; page = prev.page; form = {}; current = null; epoch++; error = ''; notice = ''
-  remember(); await loadPage().catch(e => { error = e.message }); render(prev.y); root.querySelector<HTMLElement>('[data-heading]')?.focus()
+async function back(keepNotice = false) {
+  const origin = page.inboxRow
+  const prev = stack.pop() ?? { page: { kind: 'home' }, y: 0 }; page = prev.page; form = {}; current = null; const n = ++epoch; error = ''
+  if (!keepNotice) notice = ''
+  remember(); await loadPage().catch(e => { if (n === epoch) error = e.message })
+  if (n !== epoch) return
+  render(prev.y)
+  const opener = origin && page.kind === 'home' ? `[data-inbox-row="${CSS.escape(origin)}"]` : undefined
+  if (opener && root.querySelector(opener)?.closest('.inbox-extra:not(.expanded)') && !wideInbox) {
+    more = true; render(prev.y)
+  }
+  const row = opener ? root.querySelector<HTMLElement>(opener) : null
+  const focus = row ?? root.querySelector<HTMLElement>(opener ? '#inbox-title' : '[data-heading]')
+  focus?.focus()
 }
 async function refresh(forceAgents = false) {
   const n = epoch
@@ -177,6 +197,7 @@ function agentsPage(id?: string) {
     return el('section', { class: 'acol', 'aria-label': ({ need: '需要你', work: '工作中', done: '已完成' } as any)[state] }, row(el('h2', { class: 'h2' }, ({ need: '需要你', work: '工作中', done: '已完成' } as any)[state]), tag(String(selected.length))), visible.map(a => agentRow(a, true)), !selected.length ? small('暂无') : null, selected.length > visible.length ? small(`另有 ${selected.length - visible.length} 条未列出`) : null)
   }))
 }
+const agentContent = () => [agentsPage(), small('只列本机实时状态；已完成保留 24 小时。其他工作间没有上报 agent 状态。')]
 function ownProjects() {
   const projects = all.projects.filter(p => !form['找项目'] || p.ref.name.toLowerCase().includes(form['找项目'].toLowerCase()))
   const projectCard = (p: Overview['projects'][number]) => {
@@ -223,29 +244,48 @@ function selectReview(a: InboxRow, checked: boolean) {
   if (!batch) { batch = { name: inboxProjectName(a.projectId), tasks: new Map() }; inboxBatches.set(a.projectId, batch) }
   batch.tasks.set(a.taskId, { title: a.title, items }); delete batch.requestId
 }
+function inboxAction(title: string, summary: string, next: Page, id: string, extra?: HTMLElement | null) {
+  const action = item(title, summary, () => { if (page.inboxRow !== id) void go({ ...next, inboxRow: id }) }, extra)
+  action.dataset.inboxRow = id
+  action.dataset.focus = `inbox-row:${id}`
+  if (wideInbox) {
+    const selected = page.inboxRow === id
+    action.setAttribute('aria-expanded', String(selected))
+    if (selected) action.setAttribute('aria-controls', 'inbox-detail')
+  }
+  return action
+}
 function inboxRow(a: InboxRow, summary: string, kind: Attention['kind']) {
   const name = inboxProjectName(a.projectId)
-  const action = item(a.title, `${summary} · ${name}`, () => go({ kind: 'task', projectId: a.projectId, id: a.taskId }), kind === 'review' ? null : dot(kind === 'blocked' ? 'bad' : 'need'))
+  const action = inboxAction(a.title, `${summary} · ${name}`, { kind: 'task', projectId: a.projectId, id: a.taskId }, JSON.stringify([a.projectId, a.taskId, kind]), kind === 'review' ? null : dot(kind === 'blocked' ? 'bad' : 'need'))
   if (kind !== 'review') return action
   const checkbox = el('input', { type: 'checkbox', 'aria-label': `选择验收 · ${a.title} · ${name}`, 'data-focus': JSON.stringify([a.projectId, a.taskId]),
     checked: inboxBatches.get(a.projectId)?.tasks.has(a.taskId), onchange: (e: Event) => { selectReview(a, (e.target as HTMLInputElement).checked); render() } })
   return el('div', { class: 'inbox-review' }, checkbox, action)
 }
+function inboxDetail() {
+  return el('section', { id: 'inbox-detail', class: 'inbox-detail', 'aria-label': '待处理详情', tabindex: '-1', 'data-focus': 'inbox-detail' },
+    el('div', { class: 'row inbox-detail-top' }, button('关闭', back, 'text sm')),
+    el('div', { class: 'inbox-detail-body stack g3', 'data-detail-for': page.inboxRow }, page.kind === 'agents' ? agentContent() : projectPage()))
+}
 function home() {
   const attention = pending()
-  const entries = [...needs().map(a => item(a.title, `agent 等你 · ${agentName(a.agent)}`, () => go({ kind: 'agents' }), dot('need'))),
+  const entries = [...needs().map(a => inboxAction(a.title, `agent 等你 · ${agentName(a.agent)}`, { kind: 'agents' }, JSON.stringify(['agent', a.id]), dot('need'))),
     ...attention.map(a => inboxRow(a, a.kind === 'review' ? `${a.count} 项成果等你验收` : a.kind === 'decision' ? '待决定' : '受阻', a.kind))]
   for (const [projectId, batch] of inboxBatches) for (const [taskId, selected] of batch.tasks) {
     if (!attention.some(a => a.kind === 'review' && a.projectId === projectId && a.taskId === taskId)) entries.push(inboxRow({ projectId, taskId, title: selected.title }, '验收项已变更', 'review'))
   }
-  const direct = peers().filter(p => ['connected', 'offline'].includes(p.status)), up = direct.filter(p => p.relation === 'above'), down = direct.filter(p => p.relation === 'below').sort((a, b) => Number(a.status === 'offline') - Number(b.status === 'offline')), side = direct.filter(p => p.relation === 'peer'), free = direct.filter(p => !p.relation)
   return [!all.workspace.runId ? callout('还没有主 agent，请在设置中绑定。') : null, peers().some(p => p.status === 'pending') ? button('有工作间连接待核对', () => go({ kind: 'links' }), 'text') : null,
     all.error ? callout(all.error, 'danger') : null, all.links?.error ? callout(all.links.error, 'danger') : null,
     all.connections?.filter(c => c.enabled && c.state === 'error').map(c => button(`外部连接「${c.name}」异常`, () => go({ kind: 'connection', id: c.id }), 'text')),
-    Object.entries(drafts).filter(([, d]) => Object.keys(d).length).map(([id, d]) => button(`${all.projects.find(p => p.ref.id === id)?.ref.name || '项目'} 有 ${Object.keys(d).length} 条选好了还没提交`, () => go({ kind: 'project', projectId: id }), 'text')),
-    el('div', { class: 'home' }, el('section', { class: `inbox ${entries.length ? '' : 'none'}`, 'aria-label': '等你处理' }, el('div', { class: 'sec-h' }, el('h2', { class: 'h2' }, '等你处理'), pill(total())), entries.slice(0, 3), el('div', { class: `inbox-extra ${more ? 'expanded' : ''}` }, entries.slice(3)), entries.length > 3 && !more ? button(`再看 ${entries.length - 3} 条`, () => { more = true; render() }, 'text sm inbox-more') : null, !entries.length ? small('没有要你处理的事') : null),
-    section('组织', button('＋ 连接', () => go({ kind: 'links' }), 'text sm'), el('div', { class: 'org' }, up.length ? el('div', { class: 'org-up', role: 'group', 'aria-label': '上级' }, up.map(p => workspaceNode(p))) : null,
-      el('div', { class: `org-in ${up.length || side.length ? 'l1' : ''} ${up.length ? 'up' : ''}` }, el('div', { class: `org-self ${side.length ? 'sib' : ''}` }, workspaceNode(), down.length ? el('div', { class: 'org-kids', role: 'group', 'aria-label': '下级' }, down.length > 8 ? el('div', { class: 'org-tools' }, input('找工作间', '', 'search', () => render())) : null, down.filter(p => !form['找工作间'] || p.name.includes(form['找工作间'])).map(p => workspaceNode(p))) : null), side.length ? el('div', { class: 'org-side', role: 'group', 'aria-label': '平级' }, side.map(p => workspaceNode(p))) : null), free.length ? el('div', { class: 'org-free', role: 'group', 'aria-label': '还没标关系' }, free.map(p => workspaceNode(p))) : null)))]
+    Object.entries(drafts).filter(([id, d]) => id !== page.projectId && Object.keys(d).length).map(([id, d]) => button(`${all.projects.find(p => p.ref.id === id)?.ref.name || '项目'} 有 ${Object.keys(d).length} 条选好了还没提交`, () => go({ kind: 'project', projectId: id }), 'text')),
+    el('div', { class: wideInbox ? 'home wide' : 'home' }, el('section', { class: `inbox ${entries.length ? '' : 'none'}`, 'aria-label': '等你处理' }, el('div', { class: 'sec-h' }, el('h2', { id: 'inbox-title', class: 'h2', tabindex: '-1' }, '等你处理'), pill(total())), entries.slice(0, 3), el('div', { class: `inbox-extra ${more ? 'expanded' : ''}` }, entries.slice(3)), entries.length > 3 && !more ? button(`再看 ${entries.length - 3} 条`, () => { more = true; render() }, 'text sm inbox-more') : null, !entries.length ? small('没有要你处理的事') : null),
+      splitInbox() ? inboxDetail() : organization())]
+}
+function organization() {
+  const direct = peers().filter(p => ['connected', 'offline'].includes(p.status)), up = direct.filter(p => p.relation === 'above'), down = direct.filter(p => p.relation === 'below').sort((a, b) => Number(a.status === 'offline') - Number(b.status === 'offline')), side = direct.filter(p => p.relation === 'peer'), free = direct.filter(p => !p.relation)
+  return section('组织', button('＋ 连接', () => go({ kind: 'links' }), 'text sm'), el('div', { class: 'org' }, up.length ? el('div', { class: 'org-up', role: 'group', 'aria-label': '上级' }, up.map(p => workspaceNode(p))) : null,
+    el('div', { class: `org-in ${up.length || side.length ? 'l1' : ''} ${up.length ? 'up' : ''}` }, el('div', { class: `org-self ${side.length ? 'sib' : ''}` }, workspaceNode(), down.length ? el('div', { class: 'org-kids', role: 'group', 'aria-label': '下级' }, down.length > 8 ? el('div', { class: 'org-tools' }, input('找工作间', '', 'search', () => render())) : null, down.filter(p => !form['找工作间'] || p.name.includes(form['找工作间'])).map(p => workspaceNode(p))) : null), side.length ? el('div', { class: 'org-side', role: 'group', 'aria-label': '平级' }, side.map(p => workspaceNode(p))) : null), free.length ? el('div', { class: 'org-free', role: 'group', 'aria-label': '还没标关系' }, free.map(p => workspaceNode(p))) : null))
 }
 function feedbackCards(tasks: Task[]) {
   return tasks.map(t => {
@@ -263,18 +303,20 @@ function feedbackCards(tasks: Task[]) {
 }
 function renderSheet() {
   root.querySelector('[data-sheet]')?.remove()
-  if (page.kind === 'home' && inboxBatches.size) {
-    const selected = [...inboxBatches.values()].flatMap(batch => [...batch.tasks.values()])
-    root.append(sheet(`已选 ${selected.length} 个任务，共 ${selected.reduce((n, t) => n + t.items.length, 0)} 项成果`,
+  const selected = ['project', 'task'].includes(page.kind) ? Object.values(choices()) : []
+  let bar: HTMLElement | undefined
+  if (selected.length) {
+    const invalid = selected.some(d => d.kind === 'decision' ? !d.answer?.trim() : d.result === 'changes_requested' && !d.note?.trim())
+    bar = sheet(invalid ? '有条目还没写内容' : `已选 ${selected.length} 条`, button(`提交 ${selected.length} 条`, submitFeedback, 'primary', invalid),
+      button('清空', () => { drafts[page.projectId!] = {}; persist('panel.drafts', drafts); render() }))
+  } else if (showHome() && inboxBatches.size) {
+    const tasks = [...inboxBatches.values()].flatMap(batch => [...batch.tasks.values()])
+    bar = sheet(`已选 ${tasks.length} 个任务，共 ${tasks.reduce((n, t) => n + t.items.length, 0)} 项成果`,
       button('全部通过', submitInboxFeedback, 'primary'), button('全选', () => { for (const a of pending()) if (a.kind === 'review') selectReview(a, true); render() }),
-      button('清空', () => { inboxBatches.clear(); render() })))
-    return
+      button('清空', () => { inboxBatches.clear(); render() }))
   }
-  if (!['project', 'task'].includes(page.kind)) return
-  const selected = Object.values(choices())
-  if (!selected.length) return
-  const invalid = selected.some(d => d.kind === 'decision' ? !d.answer?.trim() : d.result === 'changes_requested' && !d.note?.trim())
-  root.append(sheet(invalid ? '有条目还没写内容' : `已选 ${selected.length} 条`, button(`提交 ${selected.length} 条`, submitFeedback, 'primary', invalid), button('清空', () => { drafts[page.projectId!] = {}; persist('panel.drafts', drafts); render() })))
+  if (bar) root.append(bar)
+  root.style.setProperty('--inbox-footer', `${bar?.offsetHeight ?? 0}px`)
 }
 const sheet = (label: string, ...actions: HTMLElement[]) => el('section', { class: 'sheet', 'data-sheet': '', 'aria-label': '批量提交' }, small(label), row(actions))
 async function submitInboxFeedback() {
@@ -312,6 +354,8 @@ async function submitInboxFeedback() {
   })
 }
 async function submitFeedback() {
+  const target = page
+  let closeDetail = false
   await act(async () => {
     const id = page.projectId!, before = Object.keys(choices()).length, s = await req('project.read', { projectId: id }); current = s.project; reconcile(current!)
     if (Object.keys(choices()).length !== before) { notice = `这次一条都没有提交。${notice}`; return }
@@ -321,11 +365,13 @@ async function submitFeedback() {
       const result = await req('project.feedback', { projectId: id, requestId: form.feedbackRequestId, items })
       current = result.project; drafts[id] = {}; persist('panel.drafts', drafts); notice = `已提交 ${items.length} 条，已记录一条汇总通知。`; delete form.feedbackRequestId
       await refresh()
+      closeDetail = page === target && splitInbox() && !pending(id).some(a => a.taskId === target.id)
     } catch (e) {
       const latest = await req('project.read', { projectId: id }); current = latest.project; reconcile(current!)
       error = `这次未确认提交，请核对记录。${notice || (e as Error).message}`
     }
   })
+  if (closeDetail && page === target) await back(true)
 }
 function projectPage() {
   if (!current) return callout('正在读取项目…')
@@ -486,11 +532,12 @@ function mainPage() {
     el('details', { class: 'fold' }, el('summary', {}, '绑定详情'), el('dl', { class: 'kv' }, Object.entries({ Run: w.runId || '未绑定', 会话: w.session?.handle || '未知', 目录: w.session?.path || '未知', 绑定时间: w.boundAt || '未知', 授权边界: w.securityBoundary || '未知' }).map(([k, v]) => [el('dt', {}, k), el('dd', {}, v)])))]
 }
 function content(): any {
+  if (showHome()) return home()
   if (page.projectId) return projectPage()
   if (['peer', 'relation', 'peer-project'].includes(page.kind)) return peerPage()
   if (page.kind === 'links') return linksPage()
   if (page.kind === 'connection' || page.kind === 'add-connection') return connectionPage()
-  if (page.kind === 'agents') return [agentsPage(), small('只列本机实时状态；已完成保留 24 小时。其他工作间没有上报 agent 状态。')]
+  if (page.kind === 'agents') return agentContent()
   if (page.kind === 'settings') return ['main', 'connections', 'links', 'machines', 'hidden'].map(kind => item(({ main: '主 agent', connections: '外部连接', links: '工作间连接', machines: '机器', hidden: '隐藏的项目' } as any)[kind], kind === 'main' ? all.workspace.session?.title || '未绑定' : '', () => go({ kind })))
   if (page.kind === 'main') return mainPage()
   if (page.kind === 'connections') return [all.connections?.map(c => item(c.name, `${c.type === 'a2a' ? 'A2A agent' : '飞书'} · ${connectionStates[c.state]}`, () => go({ kind: 'connection', id: c.id }))), button('添加连接', () => go({ kind: 'add-connection' }), 'primary')]
@@ -500,11 +547,13 @@ function content(): any {
 }
 function render(y = root.scrollTop) {
   actionIds = {}
+  const detailBody = root.querySelector<HTMLElement>('[data-detail-for]')
+  const detailScroll = detailBody && detailBody.dataset.detailFor === page.inboxRow ? detailBody.scrollTop : 0
   const focused = document.activeElement as HTMLInputElement | null, focusKey = focused?.dataset.focus, selection = focused && ['text', 'search', 'password'].includes(focused.type) || focused?.tagName === 'TEXTAREA' ? [focused?.selectionStart, focused?.selectionEnd] : null
   root.setAttribute('aria-busy', String(busy))
   root.inert = busy
-  const title = ({ home: '工作间', settings: '设置', main: '主 agent', connections: '外部连接', connection: '连接', 'add-connection': '添加连接', links: '工作间连接', machines: '机器', hidden: '隐藏的项目', relation: '标关系', agents: 'Agent', peer: '工作间', 'peer-project': '项目', project: '项目', task: '任务', 'project-settings': '项目设置' } as any)[page.kind] || '工作间'
-  root.replaceChildren(el('header', { class: 'top' }, page.kind !== 'home' ? button('‹ 返回', back, 'text back') : null, el('h1', { class: 'h1 grow trunc', tabindex: '-1', 'data-heading': '' }, title), page.kind !== 'home' && all ? button(`待处理 ${total()}`, () => go({ kind: 'home' }, true), 'text sm') : null, button('↻', () => refresh(true), 'text icon', false, '刷新'), button('⚙', () => go({ kind: 'settings' }), 'text icon', false, '设置')))
+  const title = ({ home: '工作间', settings: '设置', main: '主 agent', connections: '外部连接', connection: '连接', 'add-connection': '添加连接', links: '工作间连接', machines: '机器', hidden: '隐藏的项目', relation: '标关系', agents: 'Agent', peer: '工作间', 'peer-project': '项目', project: '项目', task: '任务', 'project-settings': '项目设置' } as any)[showHome() ? 'home' : page.kind] || '工作间'
+  root.replaceChildren(el('header', { class: 'top' }, !showHome() ? button('‹ 返回', back, 'text back') : null, el('h1', { class: 'h1 grow trunc', tabindex: '-1', 'data-heading': '' }, title), !showHome() && all ? button(`待处理 ${total()}`, () => go({ kind: 'home' }, true), 'text sm') : null, button('↻', () => refresh(true), 'text icon', false, '刷新'), button('⚙', () => go({ kind: 'settings' }), 'text icon', false, '设置')))
   if (error) root.append(callout(error, 'danger'))
   if (notice) root.append(callout(notice))
   if (all && !live.ok) root.append(callout('agent 状态读不到', 'danger'))
@@ -512,9 +561,18 @@ function render(y = root.scrollTop) {
   if (all) root.append(...[content()].flat(12).filter(Boolean))
   else root.append(callout('正在读取工作间…'))
   renderSheet(); root.scrollTop = y
+  const rebuiltDetail = root.querySelector<HTMLElement>('[data-detail-for]')
+  if (rebuiltDetail) rebuiltDetail.scrollTop = detailScroll
   if (focusKey) { const target = Array.from(root.querySelectorAll<HTMLInputElement>('[data-focus]')).find(e => e.dataset.focus === focusKey); target?.focus({ preventScroll: true }); if (target && selection) try { target.setSelectionRange(selection[0] ?? 0, selection[1] ?? 0) } catch {} }
 }
-root.addEventListener('keydown', e => { if (e.key === 'Escape' && page.kind !== 'home') { e.preventDefault(); void back() } })
+document.addEventListener('keydown', e => { if (e.key === 'Escape' && page.kind !== 'home' && !busy) { e.preventDefault(); void back() } })
+new ResizeObserver(([entry]) => {
+  const wide = entry.contentRect.width >= 620
+  if (wide === wideInbox) return
+  const wasSplit = splitInbox()
+  wideInbox = wide
+  if (all) render(wasSplit ? 0 : splitInbox() ? stack.at(-1)?.y ?? 0 : root.scrollTop)
+}).observe(root)
 async function start() {
   try {
     await orca.storage.delete('org.canvas.layout')

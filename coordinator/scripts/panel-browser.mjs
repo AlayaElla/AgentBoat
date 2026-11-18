@@ -69,7 +69,13 @@ async function setup(options = {}) {
       calls.push({ name, input: clone(input) });
       if (name === 'workspace.overview') return clone({ workspace, projects: [...projects.map(p => ({ ref: p.ref, counts: { review: p.tasks.filter(t => t.phase === 'ready' && t.acceptance.some(a => a.status === 'pending')).length }, agents: [], bound: true, updatedAt: '' })), ...(options.manyProjects ? Array.from({ length: 13 }, (_, i) => ({ ref: { ...project.ref, id: 'p' + (i + 2), name: '项目 ' + (i + 2) }, counts: { working: options.idleProjects ? 0 : 1 }, agents: [], bound: true, updatedAt: '' })) : [])], hidden: [], attention: attention(), links, connections: [], machines: [{ id: 'local', name: '主机', role: 'host' }] });
       if (name === 'workspace.agents') return clone(live);
-      if (name === 'project.read') return clone({ project: projects.find(p => p.ref.id === input.projectId) ?? null, projects: projects.map(p => p.ref), workspaceTarget: window.fixture.workspaceTarget, mainAgent: window.fixture.mainAgent });
+      if (name === 'project.read') {
+        if (window.fixture.delayProject === input.projectId) {
+          delete window.fixture.delayProject;
+          await new Promise(r => { window.fixture.finishRead = r; });
+        }
+        return clone({ project: projects.find(p => p.ref.id === input.projectId) ?? null, projects: projects.map(p => p.ref), workspaceTarget: window.fixture.workspaceTarget, mainAgent: window.fixture.mainAgent });
+      }
       if (name === 'project.openMain') {
         if (window.fixture.delayOpen) await new Promise(r => { window.fixture.finishOpen = r; });
         if (window.fixture.openError) throw Error(window.fixture.openError);
@@ -154,7 +160,22 @@ try {
   }
   const inboxBox = label => page.getByRole('checkbox', { name: new RegExp('选择验收 · ' + label) });
   const batchBar = () => page.getByRole('region', { name: '批量提交' });
+  const inboxRow = name => page.getByRole('region', { name: '等你处理' }).getByRole('button', { name, exact: true });
+  const rightDetail = () => page.getByRole('region', { name: '待处理详情' });
+  const organization = () => page.getByRole('heading', { name: '组织', exact: true });
   const approvalCalls = () => page.evaluate(() => fixture.calls.filter(c => c.name === 'project.feedback').map(c => c.input));
+  await test('task status badge is narrower than its container in both detail layouts', async () => {
+    const widths = [];
+    for (const width of [400, 1070]) {
+      await setup({ width });
+      await inboxRow('页面交付').click();
+      const badge = page.locator(width === 400 ? '#panel > .tag' : '.inbox-detail-body > .tag').filter({ hasText: '待验收' });
+      await badge.waitFor();
+      widths.push(await badge.evaluate(e => ({ badge: e.getBoundingClientRect().width,
+        available: e.parentElement.clientWidth - parseFloat(getComputedStyle(e.parentElement).paddingLeft) - parseFloat(getComputedStyle(e.parentElement).paddingRight) })));
+    }
+    assert.ok(widths.every(({ badge, available }) => badge < available), JSON.stringify(widths));
+  });
   await setup({ inboxBatch: true });
   await test('narrow inbox keeps decisions and detail navigation separate from selection and includes folded reviews in select all', async () => {
     const inbox = page.getByRole('region', { name: '等你处理' });
@@ -164,7 +185,10 @@ try {
     assert.equal(await inboxBox('移动端交付').isVisible(), false);
     await inbox.getByRole('button', { name: '页面交付', exact: true }).click();
     await page.getByRole('heading', { name: '目标', exact: true }).waitFor();
-    await home();
+    assert.equal(await rightDetail().count(), 0);
+    assert.equal(await inbox.count(), 0);
+    await page.getByRole('button', { name: '‹ 返回', exact: true }).click();
+    await organization().waitFor();
     await inboxBox('页面交付').check();
     assert.equal(await inbox.getByRole('button', { name: '页面交付', exact: true }).locator('input').count(), 0);
     await batchBar().getByText('已选 1 个任务，共 2 项成果', { exact: true }).waitFor();
@@ -178,6 +202,103 @@ try {
     assert.equal(await batchBar().count(), 0);
     assert.equal(await inbox.locator('input:checked').count(), 0);
     assert.deepEqual(await approvalCalls(), []);
+  });
+  await setup({ inboxBatch: true, width: 1070 });
+  await test('wide inbox keeps the list, highlights the active row, swaps task and agent content and restores focus on close', async () => {
+    const task = inboxRow('页面交付'), decision = inboxRow('设计决定'), agent = inboxRow('等批准');
+    await task.click();
+    await rightDetail().getByRole('heading', { name: '页面交付', exact: true }).first().waitFor();
+    assert.equal(await organization().count(), 0);
+    assert.equal(await task.getAttribute('aria-expanded'), 'true');
+    assert.equal(await task.evaluate(e => getComputedStyle(e).backgroundColor), 'rgb(245, 245, 245)');
+    assert.equal(await task.evaluate(e => getComputedStyle(e).borderTopWidth), '0px');
+    if (process.env.PANEL_EVIDENCE_DIR) await page.screenshot({ path: path.join(process.env.PANEL_EVIDENCE_DIR, 'inbox-detail-wide.png') });
+    await decision.click();
+    await rightDetail().getByRole('radio', { name: '方案一', exact: true }).waitFor();
+    assert.equal(await task.getAttribute('aria-expanded'), 'false');
+    assert.equal(await decision.getAttribute('aria-expanded'), 'true');
+    await rightDetail().getByRole('button', { name: '关闭', exact: true }).click();
+    await organization().waitFor();
+    assert.equal(await decision.evaluate(e => e === document.activeElement), true);
+    await agent.click();
+    await rightDetail().getByRole('heading', { name: '需要你', exact: true }).waitFor();
+    assert.equal(await agent.getAttribute('aria-expanded'), 'true');
+    await page.keyboard.press('Escape');
+    await organization().waitFor();
+    assert.equal(await agent.evaluate(e => e === document.activeElement), true);
+  });
+  await setup({ inboxBatch: true, width: 950 });
+  await test('a delayed task read cannot replace the latest row, and resizing preserves the detail and its home return', async () => {
+    await page.evaluate(() => { fixture.delayProject = 'p1'; });
+    await inboxRow('页面交付').click();
+    await page.waitForFunction(() => typeof fixture.finishRead === 'function');
+    await inboxRow('移动端交付').click();
+    await rightDetail().getByRole('heading', { name: '移动端交付', exact: true }).first().waitFor();
+    await page.evaluate(() => fixture.finishRead());
+    await page.setViewportSize({ width: 400, height: 900 });
+    await page.getByRole('heading', { level: 1, name: '任务', exact: true }).waitFor();
+    assert.equal(await rightDetail().count(), 0);
+    await page.getByRole('heading', { name: '移动端交付', exact: true }).first().waitFor();
+    await page.setViewportSize({ width: 950, height: 900 });
+    await rightDetail().getByRole('heading', { name: '移动端交付', exact: true }).first().waitFor();
+    await page.setViewportSize({ width: 400, height: 900 });
+    await page.getByRole('button', { name: '‹ 返回', exact: true }).click();
+    await organization().waitFor();
+    assert.equal(await inboxRow('移动端交付').evaluate(e => e === document.activeElement), true);
+    await page.setViewportSize({ width: 950, height: 900 });
+    await project();
+    await page.getByRole('tab', { name: '任务', exact: true }).click();
+    await page.getByRole('button', { name: '页面交付', exact: true }).click();
+    await page.getByRole('heading', { level: 1, name: '任务', exact: true }).waitFor();
+    assert.equal(await rightDetail().count(), 0);
+  });
+  await setup({ inboxBatch: true, width: 950 });
+  await test('the detail batch bar takes priority, partial submission stays open and completion restores the inbox bar', async () => {
+    await inboxBox('移动端交付').check();
+    await inboxRow('页面交付').click();
+    await batchBar().getByRole('button', { name: '全部通过', exact: true }).waitFor();
+    await rightDetail().getByRole('button', { name: '通过', exact: true }).first().click();
+    assert.equal(await batchBar().count(), 1);
+    assert.equal(await batchBar().getByRole('button', { name: '全部通过', exact: true }).count(), 0);
+    await batchBar().getByRole('button', { name: '提交 1 条', exact: true }).click();
+    await page.getByRole('status').filter({ hasText: '已提交 1 条' }).waitFor();
+    assert.equal(await rightDetail().count(), 1);
+    await batchBar().getByRole('button', { name: '全部通过', exact: true }).waitFor();
+    await rightDetail().getByRole('button', { name: '通过', exact: true }).click();
+    await batchBar().getByRole('button', { name: '提交 1 条', exact: true }).click();
+    await organization().waitFor();
+    assert.equal(await rightDetail().count(), 0);
+    assert.equal(await batchBar().count(), 1);
+    await batchBar().getByRole('button', { name: '全部通过', exact: true }).waitFor();
+    assert.equal(await inboxBox('移动端交付').isChecked(), true);
+    assert.deepEqual((await approvalCalls()).map(r => [r.projectId, r.items[0].itemId]), [['p1', 'a1'], ['p1', 'a2']]);
+  });
+  await setup({ width: 950 });
+  await test('a detail opened near the bottom stays below the header and only tall details scroll internally', async () => {
+    await page.evaluate(() => {
+      fixture.live.agents.push(...Array.from({ length: 40 }, (_, i) => ({ ...fixture.live.agents[0], id: 'scroll-' + i, title: '等待项 ' + i })));
+      fixture.emit();
+    });
+    const task = inboxRow('页面交付');
+    await page.waitForFunction(() => document.querySelector('.inbox .pill')?.textContent === '42');
+    await task.scrollIntoViewIfNeeded();
+    const panel = page.locator('#panel'), y = await panel.evaluate(e => e.scrollTop);
+    assert.ok(y > 500);
+    await task.click();
+    await rightDetail().getByRole('heading', { name: '目标', exact: true }).waitFor();
+    const body = rightDetail().locator('[data-detail-for]');
+    assert.equal(await body.evaluate(e => e.scrollHeight <= e.clientHeight), true);
+    const top = await page.locator('.top').boundingBox(), detail = await rightDetail().boundingBox();
+    assert.ok(detail.y >= top.y + top.height && detail.y + detail.height <= page.viewportSize().height);
+    assert.ok(Math.abs(await panel.evaluate(e => e.scrollTop) - y) <= 1);
+    await page.evaluate(() => { fixture.project.tasks[0].goal = '长任务目标'.repeat(900); fixture.emit(); });
+    await page.waitForFunction(() => { const e = document.querySelector('[data-detail-for]'); return e.scrollHeight > e.clientHeight; });
+    await body.evaluate(e => { e.scrollTop = 300; });
+    await page.evaluate(() => { fixture.project.tasks[0].progress = '收到更新'; fixture.emit(); });
+    await rightDetail().getByText('收到更新', { exact: true }).waitFor();
+    assert.equal(await body.evaluate(e => e.scrollTop), 300);
+    assert.equal(await page.locator('.inbox').evaluate(e => e.scrollTop), 0);
+    assert.ok(await rightDetail().getByRole('button', { name: '关闭', exact: true }).isVisible());
   });
   await setup({ inboxBatch: true, width: 950 });
   await test('inbox approves two projects in one click with one request per project and blocks duplicate clicks while busy', async () => {
