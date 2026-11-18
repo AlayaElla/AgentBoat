@@ -264,9 +264,13 @@ function inboxRow(a: InboxRow, summary: string, kind: Attention['kind']) {
   return el('div', { class: 'inbox-review' }, checkbox, action)
 }
 function inboxDetail() {
+  const agent = page.kind === 'agents'
+  const title = agent ? 'Agent' : current?.tasks.find(t => t.id === page.id)?.title ?? '任务'
+  const close = button('✕ 关闭', back, 'sm', false, '关闭详情')
+  close.setAttribute('aria-label', '关闭详情')
   return el('section', { id: 'inbox-detail', class: 'inbox-detail', 'aria-label': '待处理详情', tabindex: '-1', 'data-focus': 'inbox-detail' },
-    el('div', { class: 'row inbox-detail-top' }, button('关闭', back, 'text sm')),
-    el('div', { class: 'inbox-detail-body stack g3', 'data-detail-for': page.inboxRow }, page.kind === 'agents' ? agentContent() : projectPage()))
+    el('div', { class: 'row g2 inbox-detail-top' }, close, el('h2', { class: 'h1 grow trunc' }, title)),
+    el('div', { class: 'inbox-detail-body stack g3', 'data-detail-for': page.inboxRow }, agent ? agentContent() : projectPage()))
 }
 function home() {
   const attention = pending()
@@ -287,10 +291,10 @@ function organization() {
   return section('组织', button('＋ 连接', () => go({ kind: 'links' }), 'text sm'), el('div', { class: 'org' }, up.length ? el('div', { class: 'org-up', role: 'group', 'aria-label': '上级' }, up.map(p => workspaceNode(p))) : null,
     el('div', { class: `org-in ${up.length || side.length ? 'l1' : ''} ${up.length ? 'up' : ''}` }, el('div', { class: `org-self ${side.length ? 'sib' : ''}` }, workspaceNode(), down.length ? el('div', { class: 'org-kids', role: 'group', 'aria-label': '下级' }, down.length > 8 ? el('div', { class: 'org-tools' }, input('找工作间', '', 'search', () => render())) : null, down.filter(p => !form['找工作间'] || p.name.includes(form['找工作间'])).map(p => workspaceNode(p))) : null), side.length ? el('div', { class: 'org-side', role: 'group', 'aria-label': '平级' }, side.map(p => workspaceNode(p))) : null), free.length ? el('div', { class: 'org-free', role: 'group', 'aria-label': '还没标关系' }, free.map(p => workspaceNode(p))) : null))
 }
-function feedbackCards(tasks: Task[]) {
+function feedbackCards(tasks: Task[], title?: string) {
   return tasks.map(t => {
     const acceptance = pendingAcceptances(t)
-    return section(t.title, acceptance.length > 1 ? button(`这 ${acceptance.length} 项全部通过`, () => { for (const a of acceptance) choose({ ...acceptanceDraft(t.id, a), result: 'passed' }); render() }, 'sm') : null,
+    return section(title ?? t.title, acceptance.length > 1 ? button(`这 ${acceptance.length} 项全部通过`, () => { for (const a of acceptance) choose({ ...acceptanceDraft(t.id, a), result: 'passed' }); render() }, 'sm') : null,
       t.decisions.filter(d => d.answer === undefined).map(d => {
         const k = key(t.id, 'decision', d.id), draft = choices()[k], base: Draft = { taskId: t.id, kind: 'decision', itemId: d.id, title: d.question, signature: JSON.stringify([d.question, d.options]) }
         return card(el('h3', { class: 'h2 any' }, d.question), ...[...d.options, '其他'].map(option => check(option, draft?.answer === option || option === '其他' && !!draft?.answer && !d.options.includes(draft.answer), () => { choose({ ...base, answer: option === '其他' ? '' : option }); form[`决定 ${k}`] = ''; render() }, { type: 'radio', name: k, value: option })), draft && !d.options.includes(draft.answer ?? '') ? input(`决定 ${k}`, draft.answer ?? '', 'textarea', value => { choose({ ...base, answer: value }); renderSheet() }) : null, draft ? button('撤销', () => { delete choices()[k]; persist('panel.drafts', drafts); render() }, 'text sm') : null)
@@ -383,7 +387,8 @@ function projectPage() {
   if (page.kind === 'task') {
     const t = p.tasks.find(t => t.id === page.id)
     if (!t) return callout('任务已不存在，请返回项目。')
-    return [el('h2', { class: 'h1 any' }, t.title), tag(labels[taskState(t)]), small(`记录里派给了 ${t.executions.map(e => agentName(e.agent)).join('、') || '尚未分派'}`), section('目标', el('p', { class: 'any' }, t.goal)), section('进展', el('p', { class: 'any' }, t.progress)), section('现在谁在做', !live.ok ? null : projectAgents(p.ref.id).filter(a => a.taskId === t.id && a.state !== 'done').length ? projectAgents(p.ref.id).filter(a => a.taskId === t.id && a.state !== 'done').map(a => agentRow(a, true)) : small('没有看到 agent 在做这个任务')), feedbackCards([t]), section('成果', t.artifacts.map(a => button(a.label + ' · ' + a.version, () => /^https?:/i.test(a.url) ? orca.shell?.openExternal(a.url) : req('project.openArtifact', { projectId: p.ref.id, taskId: t.id, artifactId: a.id }), 'sm'))), section('来源消息', p.events.filter(e => t.sourceIds.includes(e.id) || e.taskId === t.id).map(e => card(e.text))), section('记录', ...t.decisions.filter(d => d.answer !== undefined).map(d => small(`${d.question}：${d.answer}`)), ...t.acceptance.filter(a => a.status !== 'pending').map(a => small(`${a.title}：${a.status === 'passed' ? '已通过' : '需要修改'} · ${a.history.at(-1)?.note || ''}`)))]
+    const inline = splitInbox()
+    return [inline ? null : el('h2', { class: 'h1 any' }, t.title), tag(labels[taskState(t)]), small(`记录里派给了 ${t.executions.map(e => agentName(e.agent)).join('、') || '尚未分派'}`), section('目标', el('p', { class: 'any' }, t.goal)), section('进展', el('p', { class: 'any' }, t.progress)), section('现在谁在做', !live.ok ? null : projectAgents(p.ref.id).filter(a => a.taskId === t.id && a.state !== 'done').length ? projectAgents(p.ref.id).filter(a => a.taskId === t.id && a.state !== 'done').map(a => agentRow(a, true)) : small('没有看到 agent 在做这个任务')), feedbackCards([t], inline ? '待处理' : undefined), section('成果', t.artifacts.map(a => button(a.label + ' · ' + a.version, () => /^https?:/i.test(a.url) ? orca.shell?.openExternal(a.url) : req('project.openArtifact', { projectId: p.ref.id, taskId: t.id, artifactId: a.id }), 'sm'))), section('来源消息', p.events.filter(e => t.sourceIds.includes(e.id) || e.taskId === t.id).map(e => card(e.text))), section('记录', ...t.decisions.filter(d => d.answer !== undefined).map(d => small(`${d.question}：${d.answer}`)), ...t.acceptance.filter(a => a.status !== 'pending').map(a => small(`${a.title}：${a.status === 'passed' ? '已通过' : '需要修改'} · ${a.history.at(-1)?.note || ''}`)))]
   }
   const reason = workspaceTarget && 'error' in workspaceTarget ? workspaceTarget.error : !workspaceTarget ? '正在查找项目工作区…' : ''
   const openMain = button('打开主会话', () => act(async () => {

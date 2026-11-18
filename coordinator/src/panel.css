@@ -140,7 +140,7 @@ html.dark .inbox{background:color-mix(in oklab,var(--ab-need) 10%,var(--orca-bac
 .panel .inbox-review>input{width:16px;height:16px;flex:none;margin:8px 0 0 8px;accent-color:var(--orca-primary)}
 .inbox .item[aria-expanded=true]{background:var(--orca-accent,var(--orca-secondary))}
 .inbox-detail{position:sticky;top:52px;max-height:calc(100dvh - 64px - var(--inbox-footer,0px));min-width:0;display:flex;flex-direction:column;gap:8px;padding:12px;border-radius:var(--r-xl);background:var(--s-card);container-type:inline-size}
-.inbox-detail-top{flex:none;justify-content:flex-end}
+.inbox-detail-top{flex:none}
 .inbox-detail-body{min-height:0;overflow-y:auto;scrollbar-width:thin}
 .inbox-detail-body>*{flex:none}
 

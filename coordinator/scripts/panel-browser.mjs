@@ -206,8 +206,19 @@ try {
   await setup({ inboxBatch: true, width: 1070 });
   await test('wide inbox keeps the list, highlights the active row, swaps task and agent content and restores focus on close', async () => {
     const task = inboxRow('页面交付'), decision = inboxRow('设计决定'), agent = inboxRow('等批准');
+    const close = rightDetail().getByRole('button', { name: '关闭详情', exact: true });
+    const checkTitle = async name => {
+      const title = rightDetail().getByRole('heading', { name, exact: true });
+      await title.waitFor();
+      assert.equal(await title.count(), 1);
+      assert.equal(await close.innerText(), '✕ 关闭');
+      const buttonBox = await close.boundingBox(), titleBox = await title.boundingBox();
+      assert.ok(buttonBox.x + buttonBox.width <= titleBox.x);
+      assert.ok(Math.abs(buttonBox.y + buttonBox.height / 2 - titleBox.y - titleBox.height / 2) <= 1);
+    };
     await task.click();
-    await rightDetail().getByRole('heading', { name: '页面交付', exact: true }).first().waitFor();
+    await checkTitle('页面交付');
+    assert.equal(await close.getAttribute('class'), await rightDetail().getByRole('button', { name: '这 2 项全部通过', exact: true }).getAttribute('class'));
     assert.equal(await organization().count(), 0);
     assert.equal(await task.getAttribute('aria-expanded'), 'true');
     assert.equal(await task.evaluate(e => getComputedStyle(e).backgroundColor), 'rgb(245, 245, 245)');
@@ -217,10 +228,11 @@ try {
     await rightDetail().getByRole('radio', { name: '方案一', exact: true }).waitFor();
     assert.equal(await task.getAttribute('aria-expanded'), 'false');
     assert.equal(await decision.getAttribute('aria-expanded'), 'true');
-    await rightDetail().getByRole('button', { name: '关闭', exact: true }).click();
+    await close.click();
     await organization().waitFor();
     assert.equal(await decision.evaluate(e => e === document.activeElement), true);
     await agent.click();
+    await checkTitle('Agent');
     await rightDetail().getByRole('heading', { name: '需要你', exact: true }).waitFor();
     assert.equal(await agent.getAttribute('aria-expanded'), 'true');
     await page.keyboard.press('Escape');
@@ -298,7 +310,7 @@ try {
     await rightDetail().getByText('收到更新', { exact: true }).waitFor();
     assert.equal(await body.evaluate(e => e.scrollTop), 300);
     assert.equal(await page.locator('.inbox').evaluate(e => e.scrollTop), 0);
-    assert.ok(await rightDetail().getByRole('button', { name: '关闭', exact: true }).isVisible());
+    assert.ok(await rightDetail().getByRole('button', { name: '关闭详情', exact: true }).isVisible());
   });
   await setup({ inboxBatch: true, width: 950 });
   await test('inbox approves two projects in one click with one request per project and blocks duplicate clicks while busy', async () => {
