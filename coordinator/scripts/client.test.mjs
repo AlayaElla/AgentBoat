@@ -49,9 +49,11 @@ syncBuiltinESMExports();`);
       assert.equal(value.handler, 'workspace.connections');
       assert.deepEqual(value.input, ['read','check'].includes(operation) ? {operation,name:'Hermes'} : {...input,operation});
     }
-    const input = { id: 'local-connection', runId: 'mock-main', requestId: 'mock-message', text: '模拟主 agent 消息' };
-    const value = JSON.parse(execFileSync(process.execPath, ['--import', pathToFileURL(fixture).href, 'scripts/client.mjs', 'links-send'], { encoding: 'utf8', windowsHide: true, input: JSON.stringify(input) }));
-    assert.deepEqual(value, { handler: 'workspace.links', input: { ...input, operation: 'send' } });
+    for (const message of [{ text: '模拟主 agent 消息' }, { files: [path.join(dir, 'fixture.png')] }]) {
+      const input = { id: 'local-connection', runId: 'mock-main', requestId: 'mock-message', ...message };
+      const value = JSON.parse(execFileSync(process.execPath, ['--import', pathToFileURL(fixture).href, 'scripts/client.mjs', 'links-send'], { encoding: 'utf8', windowsHide: true, input: JSON.stringify(input) }));
+      assert.deepEqual(value, { handler: 'workspace.links', input: { ...input, operation: 'send' } });
+    }
   } finally { rmSync(dir, {recursive:true,force:true}); }
 });
 

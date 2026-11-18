@@ -56,7 +56,7 @@
 - `connection-reply`（stdin）：`{name,runId,id,requestId,text}`，id 是对方发来的 task.id。
 - `feishu-reply`：`{runId,eventId,requestId,text}`，回到原消息所在的会话。
 - 工作间互联 `links-*` 的输入见 `{{AGENTBOAT_REPO}}/coordinator/LINKS.md`。
-- `links-send`（stdin）：`{id,runId,requestId,text}`。id 用 `links-read` 里的本机连接编号，runId 必须等于本工作间已绑定的主 agent Run。重试沿用同一编号和正文。
+- `links-send`（stdin）接受 `{id,runId,requestId,text?,files?}`。id 用 `links-read` 里的本机连接编号，runId 必须等于本工作间已绑定的主 agent Run。files 是本机绝对路径数组，带附件时可省略文字。重试沿用同一编号、正文和附件。
 - `links-share`（stdin）：`{revision,id,scope,allProjects?,projectIds?}`。`allProjects: true` 开放当前及以后新增的未隐藏项目。省略 `allProjects` 按 false 处理，省略 `projectIds` 保留逐项选择。
 - `links-rename`（stdin）：`{revision,name}`。名称在下一次工作间同步时传给对方，监听继续运行。
 - `links-relate`（stdin）：`{revision,id,relation}`，relation 为 `above`、`below`、`peer` 或 `null`。只在主人明确要求时修改本机关系；不发送给对方，也不改变开放范围。

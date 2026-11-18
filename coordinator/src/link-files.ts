@@ -1,0 +1,264 @@
+import { createHash, randomUUID } from 'node:crypto'
+import { createReadStream } from 'node:fs'
+import { lstat, mkdir, open, readFile, readdir, realpath, rename, rm, writeFile } from 'node:fs/promises'
+import path from 'node:path'
+import { userDataPath } from '../scripts/orca-cli.mjs'
+import { fail, fingerprint, object } from './store'
+
+export const maxLinkFileBytes = 25 * 1024 ** 2, maxLinkFiles = 10
+export const maxOutgoingFiles = 100 * 1024 ** 2, maxReceivedFiles = 1024 ** 3
+export const fileChunkBytes = 48_000
+const manifestName = '.agentboat-transfer.json'
+export type LinkFile = { name: string; size: number; sha256: string; type: string }
+export type FileChunk = { index: number; offset: number; data: string }
+type Manifest = { key: string; requestId: string; hash: string; at: string; files: LinkFile[] }
+export type ReceivedFile = LinkFile & { path: string }
+const mime = new Map(Object.entries({ '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
+  '.webp': 'image/webp', '.gif': 'image/gif', '.pdf': 'application/pdf', '.txt': 'text/plain', '.zip': 'application/zip' }))
+const fileType = (name: string) => mime.get(path.extname(name).toLowerCase()) ?? 'application/octet-stream'
+const hashPattern = /^[a-f0-9]{64}$/
+const segment = (value: string) => /^[\w-]{1,64}$/.test(value) ? value : fail('工作间文件目录编号不正确')
+const missing = (e: unknown) => (e as NodeJS.ErrnoException).code === 'ENOENT'
+const stat = (file: string) => lstat(file).catch(e => { if (!missing(e)) throw e })
+const sha256 = async (file: string) => {
+  const hash = createHash('sha256')
+  for await (const bytes of createReadStream(file)) hash.update(bytes)
+  return hash.digest('hex')
+}
+
+export function safeNames(values: string[]) {
+  const used = new Set([manifestName])
+  return values.map(value => {
+    const base = (value.split(/[/\\]/).at(-1) ?? '').normalize('NFC').replace(/[\u0000-\u001f\u007f<>:"|?*]/g, '_').trim().replace(/[. ]+$/g, '')
+    const extension = path.extname(base).slice(0, 12)
+    let name = [...base.slice(0, base.length - path.extname(base).length)].slice(0, 44 - extension.length).join('') + extension
+    if (!name) name = '附件'
+    if (/^(?:con|prn|aux|nul|conin\$|conout\$|com[0-9¹²³]|lpt[0-9¹²³])(?:\.|$)/i.test(name)) name = '_' + name
+    const ext = path.extname(name), stem = name.slice(0, name.length - ext.length)
+    let candidate = name
+    for (let n = 2; used.has(candidate.toLowerCase()); n++) candidate = stem + '-' + n + ext
+    used.add(candidate.toLowerCase())
+    return candidate
+  })
+}
+
+export function safeFiles(files: LinkFile[]) {
+  const names = safeNames(files.map(f => f.name))
+  return files.map((f, i) => ({ ...f, name: names[i], type: fileType(names[i]) }))
+}
+
+export function wireFiles(raw: unknown): LinkFile[] | undefined {
+  if (raw === undefined) return
+  if (!Array.isArray(raw) || !raw.length || raw.length > maxLinkFiles) fail('工作间附件列表不正确')
+  return raw.map(value => {
+    const f = object(value)
+    if (typeof f.name !== 'string' || !f.name || f.name.length > 240 || !Number.isSafeInteger(f.size) || f.size < 0 || f.size > maxLinkFileBytes ||
+      typeof f.sha256 !== 'string' || !hashPattern.test(f.sha256)) fail('工作间附件规格不正确')
+    return { name: f.name as string, size: f.size as number, sha256: f.sha256 as string, type: fileType(f.name) }
+  })
+}
+
+export function wireChunk(raw: unknown): FileChunk | undefined {
+  if (raw === undefined) return
+  const c = object(raw)
+  if (!Number.isSafeInteger(c.index) || c.index < 0 || c.index >= maxLinkFiles || !Number.isSafeInteger(c.offset) || c.offset < 0 || c.offset >= maxLinkFileBytes ||
+    typeof c.data !== 'string' || !c.data || c.data.length > Math.ceil(fileChunkBytes / 3) * 4) fail('工作间文件分块不正确')
+  return { index: c.index, offset: c.offset, data: c.data }
+}
+
+export class LinkFiles {
+  constructor(private root = path.join(userDataPath(), 'plugins-data', 'local.project-coordinator'),
+    private limits = { outgoing: maxOutgoingFiles, received: maxReceivedFiles }) {}
+
+  private async folder(...parts: string[]) {
+    let result = this.root
+    await mkdir(result, { recursive: true, mode: 0o700 })
+    for (const name of ['', ...parts]) {
+      if (name) { result = path.join(result, name); await mkdir(result, { mode: 0o700 }).catch(e => { if (e.code !== 'EEXIST') throw e }) }
+      if (!(await lstat(result)).isDirectory()) fail('工作间文件目录不安全')
+    }
+    return result
+  }
+
+  private async existingFolder(...parts: string[]) {
+    let result = this.root
+    for (const name of ['', ...parts]) {
+      if (name) result = path.join(result, name)
+      const info = await stat(result)
+      if (!info) return
+      if (!info.isDirectory()) fail('工作间文件目录不安全')
+    }
+    return result
+  }
+
+  async messageJournal() {
+    const folder = await this.existingFolder()
+    if (!folder) return
+    const file = path.join(folder, 'link-messages.json'), info = await stat(file)
+    if (info && !info.isFile()) fail('工作间消息记录目录不安全')
+    if (info) return JSON.parse(await readFile(file, 'utf8')) as unknown
+  }
+
+  async saveMessageJournal(records: unknown[]) {
+    const folder = await this.folder(), target = path.join(folder, 'link-messages.json')
+    const temporary = path.join(folder, '.link-messages-' + randomUUID())
+    try {
+      await writeFile(temporary, JSON.stringify(records), { flag: 'wx', mode: 0o600, flush: true })
+      await rename(temporary, target)
+    } finally { await rm(temporary, { force: true }) }
+  }
+
+  async stage(peer: string, raw: unknown, pendingBytes: number) {
+    if (!Array.isArray(raw) || !raw.length || raw.length > maxLinkFiles) fail('一条消息须包含 1 到 10 个文件')
+    const sources = []
+    let total = 0
+    for (const value of raw) {
+      if (typeof value !== 'string' || value.length > 4096 || !path.isAbsolute(value) ||
+        (process.platform === 'win32' && !/^[a-z]:[/\\]/i.test(value))) fail('请填写本机文件的绝对路径')
+      const source = await realpath(value), info = await stat(source)
+      if (!info?.isFile() || (process.platform === 'win32' && !/^[a-z]:[/\\]/i.test(source))) fail('仅可发送本机普通文件')
+      if (info.size > maxLinkFileBytes) fail('单个附件不得超过 25 MB')
+      total += info.size
+      if (total > this.limits.outgoing || total + pendingBytes > this.limits.outgoing) fail('此连接待发附件已达 100 MB 上限，原记录已保留')
+      sources.push({ source, size: info.size, name: path.basename(value) })
+    }
+    const spool = randomUUID(), folder = await this.folder('outgoing', segment(peer), spool)
+    try {
+      const files: LinkFile[] = [], names = safeNames(sources.map(f => f.name))
+      for (const [index, { source, size }] of sources.entries()) {
+        const input = await open(source, 'r')
+        try {
+          const info = await input.stat()
+          if (!info.isFile() || info.size !== size) fail('读取过程中附件已变化，请重新选择')
+          const output = await open(path.join(folder, String(index)), 'wx', 0o600)
+          const buffer = Buffer.alloc(Math.min(65_536, size)), hash = createHash('sha256')
+          try {
+            let offset = 0
+            while (offset < size) {
+              const { bytesRead } = await input.read(buffer, 0, Math.min(buffer.length, size - offset), offset)
+              if (!bytesRead) fail('读取过程中附件已变化，请重新选择')
+              const bytes = buffer.subarray(0, bytesRead)
+              hash.update(bytes)
+              await output.writeFile(bytes)
+              offset += bytesRead
+            }
+            if ((await input.stat()).mtimeMs !== info.mtimeMs) fail('读取过程中附件已变化，请重新选择')
+            await output.sync()
+          } finally { await output.close() }
+          files.push({ name: names[index], size, sha256: hash.digest('hex'), type: fileType(names[index]) })
+        } finally { await input.close() }
+      }
+      return { spool, files }
+    } catch (e) { await this.discard(peer, spool); throw e }
+  }
+
+  async chunk(peer: string, spool: string, files: LinkFile[], offsets: number[]) {
+    const index = files.findIndex((f, i) => offsets[i] < f.size)
+    if (index < 0) return
+    const offset = offsets[index], folder = await this.existingFolder('outgoing', segment(peer), segment(spool))
+    if (!folder) fail('待发附件未找到')
+    const file = path.join(folder, String(index))
+    if (!(await stat(file))?.isFile()) fail('待发附件未找到')
+    const input = await open(file, 'r'), data = Buffer.alloc(Math.min(fileChunkBytes, files[index].size - offset))
+    try {
+      const { bytesRead } = await input.read(data, 0, data.length, offset)
+      if (bytesRead !== data.length) fail('待发附件已变化')
+      return { index, offset, data: data.toString('base64') }
+    } finally { await input.close() }
+  }
+
+  async discard(peer: string, spool?: string) {
+    const folder = await this.existingFolder('outgoing', segment(peer), ...(spool ? [segment(spool)] : []))
+    if (folder) await rm(folder, { recursive: true, force: true })
+  }
+  async revoke(peer: string) {
+    await this.discard(peer)
+    const folder = await this.existingFolder('receiving', segment(peer))
+    if (folder) await rm(folder, { recursive: true, force: true })
+  }
+
+  private async manifests(folder: string) {
+    const rows: { folder: string; record: Manifest }[] = []
+    for (const entry of await readdir(folder, { withFileTypes: true }).catch(e => { if (!missing(e)) throw e; return [] })) {
+      if (!entry.isDirectory()) continue
+      const directory = path.join(folder, entry.name), file = path.join(directory, manifestName)
+      if (!(await stat(file))?.isFile()) continue
+      rows.push({ folder: directory, record: JSON.parse(await readFile(file, 'utf8')) as Manifest })
+    }
+    return rows
+  }
+
+  private async offsets(directory: string, files: LinkFile[]) {
+    const names = safeNames(files.map(f => f.name))
+    return Promise.all(names.map(async (name, index) => {
+      const info = await stat(path.join(directory, name))
+      if (info && (!info.isFile() || info.size > files[index].size)) fail('工作间附件临时文件不安全')
+      return info?.size ?? 0
+    }))
+  }
+
+  async incomplete(peer: string) {
+    const folder = await this.existingFolder('receiving', segment(peer))
+    if (!folder) return []
+    const rows = await this.manifests(folder)
+    return Promise.all(rows.map(async ({ folder, record }) => ({
+      requestId: record.requestId, at: record.at, files: safeFiles(record.files), offsets: await this.offsets(folder, record.files)
+    })))
+  }
+
+  async receive(peer: string, workspace: string, requestId: string, hash: string, files: LinkFile[], chunk?: FileChunk):
+    Promise<{ offsets: number[] } | { files: ReceivedFile[] } | { error: 'capacity' | 'checksum' }> {
+    const key = fingerprint([peer, requestId]), finalRoot = await this.folder('received', segment(workspace))
+    const incoming = await this.folder('receiving', segment(peer)), directory = path.join(incoming, key)
+    const cleanFiles = safeFiles(files), names = cleanFiles.map(f => f.name)
+    const attach = (folder: string) => ({ files: cleanFiles.map(f => ({ ...f, path: path.join(folder, f.name) })) })
+    const journal = path.join(directory, manifestName)
+    const existingDirectory = await stat(directory)
+    if (existingDirectory && !existingDirectory.isDirectory()) fail('工作间文件目录不安全')
+    let record: Manifest
+    if ((await stat(journal))?.isFile()) {
+      record = JSON.parse(await readFile(journal, 'utf8'))
+      if (record.hash !== hash) fail('对端消息编号重复且正文不同')
+    } else {
+      const done = await this.manifests(finalRoot), existing = done.find(row => row.record.key === key)
+      if (existing) {
+        if (existing.record.hash !== hash) fail('对端消息编号重复且正文不同')
+        return attach(existing.folder)
+      }
+      const amount = (items: LinkFile[]) => items.reduce((n, f) => n + f.size, 0)
+      const partial = await this.manifests(incoming)
+      if (partial.length >= 10) fail('此连接正在接收的消息已达上限')
+      const reserved = [...done, ...partial].reduce((n, row) => n + amount(row.record.files), 0)
+      if (reserved + amount(files) > this.limits.received) return { error: 'capacity' }
+      record = { key, requestId, hash, at: new Date().toISOString(), files }
+      await this.folder('receiving', peer, key)
+      const temporary = path.join(directory, '.agentboat-manifest-' + randomUUID())
+      try {
+        await writeFile(temporary, JSON.stringify(record), { flag: 'wx', mode: 0o600, flush: true })
+        await rename(temporary, journal)
+      } finally { await rm(temporary, { force: true }) }
+    }
+    const offsets = await this.offsets(directory, files)
+    if (chunk) {
+      const { index, offset, data } = chunk, f = files[index], bytes = Buffer.from(data, 'base64')
+      if (!f || !bytes.length || bytes.length > fileChunkBytes || bytes.toString('base64') !== data || offset + bytes.length > f.size) fail('工作间文件分块不正确')
+      if (offset === offsets[index]) {
+        const file = path.join(directory, names[index])
+        await writeFile(file, bytes, { flag: 'a', mode: 0o600, flush: true })
+        offsets[index] += bytes.length
+      }
+    }
+    if (files.some((f, i) => offsets[i] !== f.size)) return { offsets }
+    for (const [i, f] of files.entries()) {
+      const file = path.join(directory, names[i])
+      if (f.size === 0 && !await stat(file)) await writeFile(file, '', { flag: 'wx', mode: 0o600, flush: true })
+      if (await sha256(file) !== f.sha256) {
+        await rm(directory, { recursive: true, force: true })
+        return { error: 'checksum' }
+      }
+    }
+    const destination = path.join(finalRoot, record.at.slice(0, 10) + '-' + safeNames([requestId])[0] + '-' + key.slice(0, 12))
+    await rename(directory, destination)
+    return attach(destination)
+  }
+}

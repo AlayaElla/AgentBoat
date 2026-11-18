@@ -7,7 +7,9 @@ import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto'
 import type { OrcaWorkerApi } from 'orca/worker'
 import { agents, compareAgentActivity, groupedAttention, isProjectShared, isRecentAgent, mainAgentStates, taskState, type AgentActivity, type AgentsSnapshot, type MainAgentActivity, type Project, type WorkspaceBinding } from './model'
 import { attention, fail, object, strings, text } from './store'
-import { LinkMessages, type MessageExchange, type WireMessage } from './link-messages'
+import { LinkMessages, type IncomingMessage, type MessageExchange, type WireMessage } from './link-messages'
+import { LinkFiles } from './link-files'
+import { setTimeout as delay } from 'node:timers/promises'
 
 export type Scope = 'none' | 'summary' | 'details'
 export interface Sharing { scope: Scope; allProjects: boolean; projectIds: string[] }
@@ -26,7 +28,7 @@ interface LinkData {
 }
 export interface LinksSnapshot extends Omit<LinkData, 'peers'> {
   listening: string; error: string
-  peers: (Peer & { status: 'connected' | 'offline' | 'pending'; receivedAt?: string; report?: SharedReport } & Partial<ReturnType<LinkMessages['summarize']>>)[]
+  peers: (Peer & { status: 'connected' | 'offline' | 'pending'; receivedAt?: string; report?: SharedReport } & Partial<Awaited<ReturnType<LinkMessages['summarize']>>>)[]
   invitation?: { code: string; expiresAt: string }
 }
 const defaults = (): Sharing => ({ scope: 'none', allProjects: false, projectIds: [] })
@@ -79,7 +81,11 @@ function sharing(raw: unknown): Omit<Sharing, 'projectIds'> & { projectIds?: str
   return { scope: r.scope, allProjects: r.allProjects === true, projectIds: r.projectIds === undefined ? undefined : strings(r.projectIds, '开放的项目') }
 }
 const LIMIT = 180_000
-const maxProjectAgents = 20, maxReportAgents = 100, maxActivityTitle = 200
+const waitTime = 25_000
+type Receipts = Omit<MessageExchange, 'messages'>
+const noReceipts: Receipts = { received: [] }
+const hasReceipts = (r: Receipts) => !!(r.received.length || r.progress?.length || r.rejected?.length)
+const maxPeers = 50, maxProjectAgents = 20, maxReportAgents = 100, maxActivityTitle = 200
 const knownAgent = (value: unknown): value is string => typeof value === 'string' && (value === '' || Object.hasOwn(agents, value))
 const publicAgent = (value: string) => knownAgent(value) ? value : ''
 
@@ -159,9 +165,9 @@ function received(raw: unknown, peer: Peer): SharedReport {
     return out
   }) }
 }
-function syncPacket(report: SharedReport, pending: WireMessage[], received: string[], id?: string) {
-  const exchange: MessageExchange = { messages: [], received }
-  const packet = { id, report: report as SharedReport | undefined, exchange }
+function syncPacket(report: SharedReport, pending: WireMessage[], receipts: Receipts, id?: string, version?: string) {
+  const exchange: MessageExchange = { messages: [], ...receipts }
+  const packet = { id, version, report: report as SharedReport | undefined, exchange }
   const fits = () => Buffer.byteLength(JSON.stringify(packet)) <= LIMIT
   for (const m of pending) {
     exchange.messages.push(m)
@@ -169,7 +175,7 @@ function syncPacket(report: SharedReport, pending: WireMessage[], received: stri
     if (!fits() && exchange.messages.length === 1) packet.report = undefined
     if (!fits()) { exchange.messages.pop(); break }
   }
-  if (received.length && !fits()) packet.report = undefined
+  if (hasReceipts(receipts) && !fits()) packet.report = undefined
   return packet
 }
 async function jsonBody(stream: AsyncIterable<Buffer>): Promise<any> {
@@ -188,34 +194,42 @@ const lookupHttpHost: LookupFunction = (host, options, callback) => {
     else callback(null, safe[0].address, safe[0].family)
   })
 }
-async function call(url: string, route: string, body: unknown, token = ''): Promise<any> {
+async function call(url: string, route: string, body: unknown, token = '', signal?: AbortSignal): Promise<any> {
   const u = new URL(endpoint(url) + route), data = JSON.stringify(body)
   if (Buffer.byteLength(data) > LIMIT) fail('工作间上报过大，请减少开放的项目')
   return new Promise((resolve, reject) => {
-    const req = (u.protocol === 'https:' ? https : http).request(u, { method: 'POST', rejectUnauthorized: true,
+    const req = (u.protocol === 'https:' ? https : http).request(u, { method: 'POST', rejectUnauthorized: true, signal,
       ...(u.protocol === 'http:' ? { agent: false, lookup: lookupHttpHost } : {}), headers: {
       'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(data), ...(token ? { Authorization: `Bearer ${token}` } : {})
     } }, res => {
       if (res.statusCode !== 200) { res.resume(); reject(Object.assign(new Error(res.statusCode === 401 ? '连接已断开或凭据无效' : '对端未接受请求，请核对连接状态'), { status: res.statusCode })); return }
       void jsonBody(res).then(resolve, () => reject(new Error('对端未返回有效的工作间消息')))
     })
-    req.setTimeout(5000, () => req.destroy()); req.once('error', () => reject(new Error('无法连接对端，请核对地址和网络'))); req.end(data)
+    req.setTimeout(route === '/wait' ? waitTime + 5000 : 5000, () => req.destroy()); req.once('error', () => reject(new Error('无法连接对端，请核对地址和网络'))); req.end(data)
   })
 }
 
 export class WorkspaceLinks {
   private messages: LinkMessages
-  private receipts = new Map<string, string[]>()
+  private receipts = new Map<string, Receipts>()
+  private originVersion = randomUUID()
+  private versions = new Map<string, string>()
+  private waiters = new Map<string, (status?: number) => void>()
+  private watchers = new Map<string, AbortController>()
+  private running = false
+  private signaling = false
+  private recentActivity?: { at: number; result: Promise<LocalActivity> }
   private initial: LinkData = { version: 1, revision: 0, workspaceId: randomUUID(), name: defaultWorkspaceName(), enabled: false, host: '127.0.0.1', port: 0, publicUrl: '', tls: false, peers: [] }
   private server?: http.Server | https.Server
   private timer?: ReturnType<typeof setInterval>
+  private catalogTimer?: ReturnType<typeof setInterval>
   private invitation?: { token: string; expires: number }
   private incoming = new Map<string, { report: SharedReport; receivedAt: string }>()
   private chain: Promise<unknown> = Promise.resolve()
-  private syncing = new Map<string, Promise<void>>()
+  private syncing = new Map<string, Promise<string | undefined>>()
   private listening = ''
   private error = ''
-  constructor(private orca: Pick<OrcaWorkerApi, 'storage' | 'secrets'>, private projects: () => Promise<Project[]>, private changed: () => void, private chooseHost = invitationHost, private enqueue?: (peer: Peer, messages: WireMessage[]) => Promise<void>, private activity?: () => Promise<LocalActivity>) { this.messages = new LinkMessages(orca.storage) }
+  constructor(private orca: Pick<OrcaWorkerApi, 'storage' | 'secrets'>, private projects: () => Promise<Project[]>, private changed: () => void, private chooseHost = invitationHost, private enqueue?: (peer: Peer, messages: IncomingMessage[]) => Promise<void>, private activity?: () => Promise<LocalActivity>, files?: LinkFiles, private checkCatalog?: () => Promise<unknown>) { this.messages = new LinkMessages(orca.storage, files) }
   private serial<T>(fn: () => Promise<T>): Promise<T> { const p = this.chain.then(fn); this.chain = p.catch(() => {}); return p }
   private async data(): Promise<LinkData> {
     const raw = await this.orca.storage.get('workspace.links')
@@ -239,20 +253,22 @@ export class WorkspaceLinks {
     this.incoming.set(peer.id, { report, receivedAt })
   }
   async snapshot(includeMessages = false): Promise<LinksSnapshot> {
-    const { d, records } = await this.serial(async () => {
+    const { d, summaries } = await this.serial(async () => {
       const d = await this.data(); let changed = false
       for (const p of d.peers) {
         const incoming = this.incoming.get(p.id)
         if (incoming && Date.now() - Date.parse(incoming.receivedAt) >= 35_000 && p.lastSyncAt !== incoming.receivedAt) { p.lastSyncAt = incoming.receivedAt; changed = true }
       }
       if (changed) await this.save(d)
-      return { d, records: includeMessages ? await this.messages.data() : undefined }
+      const records = includeMessages ? await this.messages.data() : undefined
+      const summaries = records ? await Promise.all(d.peers.map(p => this.messages.summarize(records, p.id))) : []
+      return { d, summaries }
     })
-    return { ...d, listening: this.listening, error: this.error, peers: d.peers.map(p => {
+    return { ...d, listening: this.listening, error: this.error, peers: d.peers.map((p, i) => {
       const incoming = this.incoming.get(p.id), fresh = incoming && Date.now() - Date.parse(incoming.receivedAt) < 35_000
       return { ...p, status: fresh ? 'connected' : p.state === 'pending' ? 'pending' : 'offline',
         ...(incoming ? { receivedAt: incoming.receivedAt, lastSyncAt: incoming.receivedAt } : {}), ...(p.state === 'active' && fresh ? { report: incoming!.report } : {}),
-        ...(records ? this.messages.summarize(records, p.id) : {}) }
+        ...summaries[i] }
     }) }
   }
   async configure(input: Record<string, any>) {
@@ -282,12 +298,24 @@ export class WorkspaceLinks {
       if (d.revision !== input.revision) fail('连接设置已更新，请刷新后再保存')
       if (d.name !== name) await this.save({ ...d, name, revision: d.revision + 1 })
     })
-    this.changed(); return this.snapshot()
+    this.localChanged(); this.changed(); return this.snapshot()
   }
   async start() {
-    await this.serial(async () => this.listen(await this.data()))
+    const d = await this.serial(async () => { const d = await this.data(); await this.listen(d); return d })
+    this.running = true
+    for (const p of d.peers) this.watch(p)
     clearInterval(this.timer)
     this.timer = setInterval(() => { void this.refresh().catch(() => {}) }, 10_000); this.timer.unref()
+    clearInterval(this.catalogTimer)
+    if (this.checkCatalog) {
+      // shortcut: Orca has no project catalog event; read the local catalog while sharing.
+      this.catalogTimer = setInterval(() => {
+        void this.data().then(d => {
+          if (d.peers.some(p => p.state === 'active' && p.scope !== 'none')) return this.checkCatalog!()
+        }).catch(() => {})
+      }, 1000)
+      this.catalogTimer.unref()
+    }
   }
   private async listen(d: LinkData) {
     this.closeListener()
@@ -301,7 +329,7 @@ export class WorkspaceLinks {
           void this.serve(q, s)
         }
         this.server = d.tls ? https.createServer(JSON.parse(await this.orca.secrets.get('workspace-links-tls') || '{}'), serve) : http.createServer(serve)
-        this.server.requestTimeout = 5000; this.server.headersTimeout = 5000; this.server.maxConnections = 32
+        this.server.requestTimeout = 5000; this.server.headersTimeout = 5000; this.server.maxConnections = 2 * maxPeers + 16
         await new Promise<void>((resolve, reject) => { this.server!.once('error', reject); this.server!.listen(d.port, d.host, resolve) })
         this.listening = `${d.tls ? 'https' : 'http'}://${isIP(d.host) === 6 ? `[${d.host}]` : d.host}:${(this.server.address() as AddressInfo).port}`
         this.server.on('error', () => { this.closeListener(); this.error = '监听已停止，请检查地址与端口'; this.changed() })
@@ -310,7 +338,14 @@ export class WorkspaceLinks {
     }
   }
   private closeListener() { this.server?.closeAllConnections(); this.server?.close(); this.server = undefined; this.listening = ''; this.invitation = undefined }
-  stop() { clearInterval(this.timer); this.closeListener() }
+  stop() {
+    this.running = false
+    clearInterval(this.timer)
+    clearInterval(this.catalogTimer)
+    for (const watcher of this.watchers.values()) watcher.abort()
+    this.watchers.clear()
+    this.closeListener()
+  }
   async invite() {
     const invitation = await this.serial(async () => {
       const d = await this.data(), enabled = d.enabled
@@ -342,7 +377,7 @@ export class WorkspaceLinks {
     const d = await this.serial(async () => {
       const d = await this.data()
       if (d.workspaceId === workspaceId || d.peers.some(p => p.workspaceId === workspaceId)) fail('工作间已连接或结果待核对，请刷新原连接')
-      if (d.peers.length >= 50) fail('连接数量已达上限')
+      if (d.peers.length >= maxPeers) fail('连接数量已达上限')
       await this.orca.secrets.set(secretKey(connectionId), token)
       d.peers.push({ id: connectionId, workspaceId, name, endpoint: url, state: 'pending', ...defaults() }); d.revision++; await this.save(d); return d
     })
@@ -354,6 +389,7 @@ export class WorkspaceLinks {
         if (p) { p.state = 'active'; d.revision++; await this.save(d) }
       })
       await this.sync(connectionId)
+      this.watch({ id: connectionId, endpoint: url })
     } catch { /* Pairing may have succeeded remotely. Refresh the pending connection. */ }
     this.changed(); return this.snapshot()
   }
@@ -368,7 +404,7 @@ export class WorkspaceLinks {
       if (projectIds?.some(id => !knownIds.has(id))) fail('只能开放本工作间自己的项目')
       Object.assign(p, setting, { projectIds: projectIds ?? p.projectIds, sharingSet: true }); d.revision++; await this.save(d)
     })
-    await this.sync(input.id); this.changed(); return this.snapshot()
+    this.wake(input.id); await this.sync(input.id); this.changed(); return this.snapshot()
   }
   async relate(input: Record<string, any>) {
     if (input.relation !== null && !['above', 'below', 'peer'].includes(input.relation)) fail('请选择有效关系')
@@ -400,12 +436,18 @@ export class WorkspaceLinks {
       const d = await this.data(), p = d.peers.find(p => p.id === connectionId && p.state === 'active')
       if (!p) fail('请选择有效连接')
       await this.messages.send(p.id, input)
+      this.wake(p.id)
     })
-    await this.sync(connectionId); this.changed(); return this.snapshot(true)
+    if (this.running) void this.sync(connectionId).catch(() => {})
+    else await this.sync(connectionId)
+    this.changed(); return this.snapshot(true)
   }
   private async removePeer(d: LinkData, connectionId: string) {
     await this.orca.secrets.delete(secretKey(connectionId))
     await this.messages.revoke(connectionId)
+    this.waiters.get(connectionId)?.(401)
+    this.watchers.get(connectionId)?.abort()
+    this.versions.delete(connectionId)
     this.receipts.delete(connectionId)
     this.incoming.delete(connectionId)
     d.peers = d.peers.filter(p => p.id !== connectionId)
@@ -413,21 +455,93 @@ export class WorkspaceLinks {
     await this.save(d)
   }
   private receiveMessages(peer: Peer, exchange: unknown) {
-    return this.messages.receive(peer.id, exchange, messages => this.enqueue?.(peer, messages) ?? Promise.resolve())
+    return this.messages.receive(peer.id, exchange, messages => this.enqueue?.(peer, messages) ?? Promise.resolve(), peer.workspaceId)
   }
   private async localReport(p: Peer, d: LinkData) {
-    const activity = p.scope === 'details' ? await this.activity?.() : undefined
+    let activity: LocalActivity | undefined
+    if (p.scope === 'details' && this.activity) {
+      if (!this.recentActivity || Date.now() - this.recentActivity.at >= 2000)
+        this.recentActivity = { at: Date.now(), result: this.activity() }
+      activity = await this.recentActivity.result
+    }
     return report(await this.projects(), p, d.workspaceId, d.name, activity)
   }
-  async refresh() { const d = await this.serial(() => this.data()); const peers = d.peers.filter(p => p.endpoint); await Promise.all(peers.map(p => this.sync(p.id))); if (peers.length) this.changed(); return this.snapshot() }
-  private async sync(connectionId: string): Promise<void> {
-    const running = this.syncing.get(connectionId)
-    if (running) { await running; return this.sync(connectionId) }
-    const work = this.syncOne(connectionId)
-    this.syncing.set(connectionId, work)
-    try { await work } finally { if (this.syncing.get(connectionId) === work) this.syncing.delete(connectionId) }
+  private version(peerId: string) { return this.versions.get(peerId) ?? this.originVersion }
+  private wake(peerId: string) {
+    this.versions.set(peerId, randomUUID())
+    this.waiters.get(peerId)?.()
   }
-  private async syncOne(connectionId: string) {
+  localChanged() {
+    this.recentActivity = undefined
+    if (!this.running || this.signaling) return
+    this.signaling = true
+    setImmediate(() => {
+      this.signaling = false
+      if (!this.running) return
+      void this.serial(() => this.data()).then(d => {
+        for (const p of d.peers) {
+          this.wake(p.id)
+          if (p.endpoint) void this.sync(p.id).catch(() => {})
+        }
+      }).catch(() => {})
+    })
+  }
+  private watch(p: Pick<Peer, 'id' | 'endpoint'>) {
+    if (!this.running || !p.endpoint || this.watchers.has(p.id)) return
+    const state = new AbortController(), signal = state.signal
+    this.watchers.set(p.id, state)
+    void (async () => {
+      let backoff = 250
+      while (!signal.aborted) {
+        try {
+          const version = await this.sync(p.id, signal)
+          if (signal.aborted) return
+          const token = await this.orca.secrets.get(secretKey(p.id))
+          if (!token) return
+          if (!version) throw Error()
+          await call(p.endpoint, '/wait', { id: p.id, since: version }, token, signal)
+          backoff = 250
+        } catch (e) {
+          if (signal.aborted) return
+          await this.syncFailed(p.id, e)
+          this.changed()
+          await delay(backoff, undefined, { signal, ref: false })
+          backoff = Math.min(backoff * 2, 10_000)
+        }
+      }
+    })().catch(() => {}).finally(() => { if (this.watchers.get(p.id) === state) this.watchers.delete(p.id) })
+  }
+  async refresh() { const d = await this.serial(() => this.data()); const peers = d.peers.filter(p => p.endpoint); await Promise.all(peers.map(p => this.sync(p.id))); if (peers.length) this.changed(); return this.snapshot() }
+  private async packet(p: Peer, outgoing: SharedReport, receipts: Receipts, request = false) {
+    const packet = syncPacket(outgoing, await this.messages.pending(p.id), receipts, request ? p.id : undefined, request ? undefined : this.version(p.id))
+    const m = packet.exchange.messages.find(m => m.files)
+    if (m) {
+      const chunk = await this.messages.chunk(p.id, m)
+      if (chunk) {
+        m.chunk = chunk
+        const tooLarge = () => Buffer.byteLength(JSON.stringify(packet)) > LIMIT
+        if (tooLarge()) packet.report = undefined
+        while (tooLarge() && packet.exchange.messages.at(-1) !== m) packet.exchange.messages.pop()
+        if (tooLarge()) delete m.chunk
+      }
+    }
+    return packet
+  }
+  private async sync(connectionId: string, signal?: AbortSignal): Promise<string | undefined> {
+    signal ??= this.watchers.get(connectionId)?.signal
+    if (signal?.aborted) return
+    const running = this.syncing.get(connectionId)
+    if (running) { await running; return this.sync(connectionId, signal) }
+    const work = (async () => {
+      while (!signal?.aborted) {
+        const result = await this.syncOne(connectionId, signal)
+        if (!result?.more) return result?.version
+      }
+    })()
+    this.syncing.set(connectionId, work)
+    try { return await work } finally { if (this.syncing.get(connectionId) === work) this.syncing.delete(connectionId) }
+  }
+  private async syncOne(connectionId: string, signal?: AbortSignal) {
     try {
       const d = await this.serial(() => this.data()), p = d.peers.find(p => p.id === connectionId)
       if (!p?.endpoint) return
@@ -436,39 +550,48 @@ export class WorkspaceLinks {
       const outgoing = await this.localReport(p, d)
       const packet = await this.serial(async () => {
         if ((await this.data()).revision !== d.revision) return
-        return syncPacket(outgoing, await this.messages.pending(p.id), this.receipts.get(p.id) ?? [], p.id)
+        return this.packet(p, outgoing, this.receipts.get(p.id) ?? noReceipts, true)
       })
       if (!packet) return
-      const result = await call(p.endpoint, '/sync', packet, token)
+      const result = await call(p.endpoint, '/sync', packet, token, signal)
+      const version = id(result.version)
       const incoming = result.report === undefined ? undefined : received(result.report, p)
-      await this.serial(async () => { const now = await this.data(), current = now.peers.find(x => x.id === p.id); if (!current) return
-        const acknowledgements = await this.receiveMessages(incoming ? { ...current, name: incoming.name } : current, result.exchange)
-        if (acknowledgements.length) this.receipts.set(p.id, acknowledgements)
+      const more = await this.serial(async () => { const now = await this.data(), current = now.peers.find(x => x.id === p.id); if (!current) return false
+        const { more, ...acknowledgements } = await this.receiveMessages(incoming ? { ...current, name: incoming.name } : current, result.exchange)
+        if (hasReceipts(acknowledgements)) this.receipts.set(p.id, acknowledgements)
         else this.receipts.delete(p.id)
         if (current.state === 'pending') { current.state = 'active'; now.revision++; await this.save(now) }
         if (incoming) await this.recordIncoming(now, current, incoming)
+        const nextReceipt = hasReceipts(acknowledgements) && JSON.stringify(acknowledgements) !== JSON.stringify(this.exchangeReceipts(packet.exchange))
+        return more || nextReceipt && (this.running || !!acknowledgements.progress?.length)
       })
+      if (this.running) this.changed()
+      return { version, more }
     } catch (e) {
-      await this.serial(async () => {
-        const last = this.incoming.get(connectionId)?.receivedAt, d = await this.data(), p = d.peers.find(p => p.id === connectionId)
-        if (!p) return
-        if ((e as { status?: number }).status === 401) return this.removePeer(d, connectionId)
-        if (last && p.lastSyncAt !== last) { p.lastSyncAt = last; await this.save(d) }
-        this.incoming.delete(connectionId)
-      })
+      if (!signal?.aborted) await this.syncFailed(connectionId, e)
     }
+  }
+  private exchangeReceipts({ messages, ...receipts }: MessageExchange): Receipts { return receipts }
+  private async syncFailed(connectionId: string, e: unknown) {
+    await this.serial(async () => {
+      const last = this.incoming.get(connectionId)?.receivedAt, d = await this.data(), p = d.peers.find(p => p.id === connectionId)
+      if (!p) return
+      if ((e as { status?: number }).status === 401) return this.removePeer(d, connectionId)
+      if (last && p.lastSyncAt !== last) { p.lastSyncAt = last; await this.save(d) }
+      this.incoming.delete(connectionId)
+    })
   }
   private async serve(req: http.IncomingMessage, res: http.ServerResponse) {
     const reply = (status: number, body: unknown) => { res.writeHead(status, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }); res.end(JSON.stringify(body)) }
     try {
-      if (req.method !== 'POST' || !['/pair', '/sync', '/revoke'].includes(req.url || '')) { req.resume(); reply(404, { error: 'Not found' }); return }
+      if (req.method !== 'POST' || !['/pair', '/sync', '/revoke', '/wait'].includes(req.url || '')) { req.resume(); reply(404, { error: 'Not found' }); return }
       const body = await jsonBody(req)
       await this.serial(async () => {
         const d = await this.data()
         if (req.url === '/pair') {
           if (!this.invitation || this.invitation.expires <= Date.now() || typeof body.invite !== 'string' || !equal(body.invite, this.invitation.token)) { reply(401, { error: 'Unauthorized' }); return }
           const workspaceId = id(body.workspaceId), connectionId = id(body.id), token = text(body.token, '凭据', 100)
-          if (!/^[A-Za-z0-9_-]{43}$/.test(token) || workspaceId === d.workspaceId || d.peers.some(p => p.id === connectionId || p.workspaceId === workspaceId) || d.peers.length >= 50) fail('连接请求不正确')
+          if (!/^[A-Za-z0-9_-]{43}$/.test(token) || workspaceId === d.workspaceId || d.peers.some(p => p.id === connectionId || p.workspaceId === workspaceId) || d.peers.length >= maxPeers) fail('连接请求不正确')
           const name = text(body.name, '工作间名称', 200)
           this.invitation = undefined
           await this.orca.secrets.set(secretKey(connectionId), token)
@@ -477,12 +600,26 @@ export class WorkspaceLinks {
         }
         const p = d.peers.find(p => p.id === body.id && p.state === 'active'), token = p && await this.orca.secrets.get(secretKey(p.id))
         if (!p || !token || !equal(req.headers.authorization || '', `Bearer ${token}`)) { reply(401, { error: 'Unauthorized' }); return }
+        if (req.url === '/wait') {
+          const since = id(body.since)
+          this.waiters.get(p.id)?.()
+          if (since !== this.version(p.id)) { reply(200, {}); return }
+          const cleanup = () => {
+            clearTimeout(timer)
+            if (this.waiters.get(p.id) === finish) this.waiters.delete(p.id)
+          }
+          const finish = (status = 200) => { cleanup(); if (!res.destroyed) reply(status, {}) }
+          const timer = setTimeout(finish, waitTime)
+          res.once('close', cleanup)
+          this.waiters.set(p.id, finish)
+          return
+        }
         if (req.url === '/revoke') {
           await this.removePeer(d, p.id); reply(200, {}); this.changed(); return
         }
         const incoming = body.report === undefined ? undefined : received(body.report, p), outgoing = await this.localReport(p, d)
-        const acknowledgements = await this.receiveMessages(incoming ? { ...p, name: incoming.name } : p, body.exchange)
-        const response = syncPacket(outgoing, await this.messages.pending(p.id), acknowledgements)
+        const { more: _, ...acknowledgements } = await this.receiveMessages(incoming ? { ...p, name: incoming.name } : p, body.exchange)
+        const response = await this.packet(p, outgoing, acknowledgements)
         if (Buffer.byteLength(JSON.stringify(response)) > LIMIT) fail('工作间上报过大')
         if (incoming) await this.recordIncoming(d, p, incoming)
         reply(200, response); this.changed()
