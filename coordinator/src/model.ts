@@ -84,10 +84,10 @@ export interface Workspace extends WorkspaceBinding {
   retired?: Delivery[]
 }
 export type TaskState = ReturnType<typeof taskState>
-export interface Attention {
-  projectId: string; taskId: string; kind: 'decision' | 'review' | 'blocked' | 'rework'
+export type Attention = {
+  projectId: string; taskId: string
   itemId: string; title: string; summary: string
-}
+} & ({ kind: 'review'; itemRevision: number; fingerprint: string } | { kind: 'decision' | 'blocked' | 'rework' })
 export interface Overview {
   connections?: import('./connections').Connection[]
   machines?: { id: string; name: string; role: 'host' | 'client'; online?: boolean }[]

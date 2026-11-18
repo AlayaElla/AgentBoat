@@ -1,12 +1,15 @@
 import type {} from 'orca/frame'
 import './protocol'
 import { agentName, groupedAttention, isProjectShared, labels, taskState, scopes, statuses, connectionStates, roles, mainAgentStates } from './model'
-import type { Overview, Project, Task, ProjectWorkspace } from './model'
+import type { Acceptance, Attention, Overview, Project, Task, ProjectWorkspace } from './model'
+import type { FeedbackItem } from './store'
 import type { AgentsSnapshot, LiveAgent } from './model'
 import type { LinksSnapshot, Sharing } from './links'
 
 type Page = { kind: string; projectId?: string; id?: string; pid?: string }
 type Draft = { taskId: string; kind: 'acceptance' | 'decision'; itemId: string; itemRevision?: number; fingerprint?: string; signature: string; title: string; result?: string; answer?: string; note?: string }
+type InboxTask = { title: string; items: Draft[] }
+type InboxBatch = { name: string; tasks: Map<string, InboxTask>; requestId?: string }
 const root = document.getElementById('panel')!
 const req = (name: string, input?: any): Promise<any> => input === undefined
   ? orca.plugin.request(name as any)
@@ -15,6 +18,7 @@ let all: Overview, live: AgentsSnapshot = { ok: false, at: 0, agents: [] }, curr
 let workspaceTarget: ProjectWorkspace | undefined
 let page: Page = { kind: 'home' }, stack: { page: Page; y: number }[] = [], opened: Record<string, boolean> = { self: true }
 let drafts: Record<string, Record<string, Draft>> = {}, form: Record<string, any> = {}, detail: any, targets: any
+const inboxBatches = new Map<string, InboxBatch>()
 let error = '', notice = '', busy = false, more = false, tab = 'inbox', epoch = 0
 let actionIds: Record<string, number> = {}, clickedAction = '', busyAction = ''
 let persistChain: Promise<unknown> = Promise.resolve()
@@ -132,11 +136,28 @@ async function refresh(forceAgents = false) {
 function reconcile(p: Project) {
   let stale = 0
   for (const [k, d] of Object.entries(drafts[p.ref.id] ?? {})) {
-    const t = p.tasks.find(t => t.id === d.taskId), a = d.kind === 'acceptance' ? t?.acceptance.find(a => a.id === d.itemId) : t?.decisions.find(a => a.id === d.itemId)
-    const valid = t && t.phase !== 'paused' && a && (d.kind === 'acceptance' ? t.phase === 'ready' && 'status' in a && a.status === 'pending' && a.revision === d.itemRevision && a.fingerprint === d.fingerprint : 'answer' in a ? a.answer === undefined && JSON.stringify([a.question, a.options]) === d.signature : 'question' in a && JSON.stringify([a.question, a.options]) === d.signature)
-    if (!valid) { delete drafts[p.ref.id][k]; stale++ }
+    if (!validDraft(p.tasks.find(t => t.id === d.taskId), d)) { delete drafts[p.ref.id][k]; stale++ }
   }
   if (stale) { notice = `${stale} 条已更新或已处理，原选择已作废；其余选择保留，请重新查看后提交。`; persist('panel.drafts', drafts) }
+}
+function validDraft(task: Task | undefined, draft: Draft) {
+  if (!task || task.phase === 'paused') return false
+  if (draft.kind === 'acceptance') {
+    const item = task.acceptance.find(a => a.id === draft.itemId)
+    return task.phase === 'ready' && item?.status === 'pending' && item.revision === draft.itemRevision && item.fingerprint === draft.fingerprint
+  }
+  const item = task.decisions.find(d => d.id === draft.itemId)
+  return !!item && item.answer === undefined && JSON.stringify([item.question, item.options]) === draft.signature
+}
+const pendingAcceptances = (task?: Task) => task?.phase === 'ready' ? task.acceptance.filter(a => a.status === 'pending') : []
+const acceptanceDraft = (taskId: string, a: Pick<Acceptance, 'id' | 'revision' | 'fingerprint' | 'title'>): Draft =>
+  ({ taskId, kind: 'acceptance', itemId: a.id, itemRevision: a.revision, fingerprint: a.fingerprint, signature: a.fingerprint, title: a.title })
+function feedbackItems(drafts: Draft[]): Promise<FeedbackItem[]> {
+  return Promise.all(drafts.map(async d => {
+    let fingerprint = d.fingerprint
+    if (d.kind === 'decision') fingerprint = [...new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(d.signature)))].map(v => v.toString(16).padStart(2, '0')).join('')
+    return { taskId: d.taskId, kind: d.kind, itemId: d.itemId, itemRevision: d.itemRevision, result: d.result, note: d.note, answer: d.answer, fingerprint }
+  }))
 }
 function choose(d: Draft) {
   delete form.feedbackRequestId
@@ -183,8 +204,40 @@ function workspaceNode(p?: LinksSnapshot['peers'][number]) {
       el('span', { class: 'sum trunc xs muted' }, p ? !active ? `离线 · 最后同步 ${relative(p.lastSyncAt)}` : report?.projects.length ? `${report.projects.length} 个项目` : '' : `${all.projects.length} 个项目`), p ? null : pill(total()), '›'),
     p && !p.relation ? button('标关系', () => go({ kind: 'relation', id }), 'sm') : null), open ? el('div', { class: 'wsr-b', id: `workspace-${id}` }, body) : null)
 }
+type InboxRow = Pick<Attention, 'projectId' | 'taskId' | 'title'>
+const inboxProjectName = (projectId: string) => all.projects.find(p => p.ref.id === projectId)?.ref.name ?? inboxBatches.get(projectId)?.name ?? projectId
+function selectReview(a: InboxRow, checked: boolean) {
+  let batch = inboxBatches.get(a.projectId)
+  if (!checked) {
+    if (!batch) return
+    batch.tasks.delete(a.taskId); delete batch.requestId
+    if (!batch.tasks.size) inboxBatches.delete(a.projectId)
+    return
+  }
+  if (batch?.tasks.has(a.taskId)) return
+  const items = all.attention.flatMap(i => {
+    if (i.kind !== 'review' || i.projectId !== a.projectId || i.taskId !== a.taskId) return []
+    return [{ ...acceptanceDraft(i.taskId, { id: i.itemId, revision: i.itemRevision, fingerprint: i.fingerprint, title: i.summary }), result: 'passed' }]
+  })
+  if (!items.length) return
+  if (!batch) { batch = { name: inboxProjectName(a.projectId), tasks: new Map() }; inboxBatches.set(a.projectId, batch) }
+  batch.tasks.set(a.taskId, { title: a.title, items }); delete batch.requestId
+}
+function inboxRow(a: InboxRow, summary: string, kind: Attention['kind']) {
+  const name = inboxProjectName(a.projectId)
+  const action = item(a.title, `${summary} · ${name}`, () => go({ kind: 'task', projectId: a.projectId, id: a.taskId }), kind === 'review' ? null : dot(kind === 'blocked' ? 'bad' : 'need'))
+  if (kind !== 'review') return action
+  const checkbox = el('input', { type: 'checkbox', 'aria-label': `选择验收 · ${a.title} · ${name}`, 'data-focus': JSON.stringify([a.projectId, a.taskId]),
+    checked: inboxBatches.get(a.projectId)?.tasks.has(a.taskId), onchange: (e: Event) => { selectReview(a, (e.target as HTMLInputElement).checked); render() } })
+  return el('div', { class: 'inbox-review' }, checkbox, action)
+}
 function home() {
-  const entries = [...needs().map(a => item(a.title, `agent 等你 · ${agentName(a.agent)}`, () => go({ kind: 'agents' }), dot('need'))), ...pending().map(a => item(a.title, `${a.kind === 'review' ? `${a.count} 项成果等你验收` : a.kind === 'decision' ? '待决定' : '受阻'} · ${all.projects.find(p => p.ref.id === a.projectId)?.ref.name || ''}`, () => go({ kind: 'task', projectId: a.projectId, id: a.taskId }), dot(a.kind === 'blocked' ? 'bad' : 'need')))]
+  const attention = pending()
+  const entries = [...needs().map(a => item(a.title, `agent 等你 · ${agentName(a.agent)}`, () => go({ kind: 'agents' }), dot('need'))),
+    ...attention.map(a => inboxRow(a, a.kind === 'review' ? `${a.count} 项成果等你验收` : a.kind === 'decision' ? '待决定' : '受阻', a.kind))]
+  for (const [projectId, batch] of inboxBatches) for (const [taskId, selected] of batch.tasks) {
+    if (!attention.some(a => a.kind === 'review' && a.projectId === projectId && a.taskId === taskId)) entries.push(inboxRow({ projectId, taskId, title: selected.title }, '验收项已变更', 'review'))
+  }
   const direct = peers().filter(p => ['connected', 'offline'].includes(p.status)), up = direct.filter(p => p.relation === 'above'), down = direct.filter(p => p.relation === 'below').sort((a, b) => Number(a.status === 'offline') - Number(b.status === 'offline')), side = direct.filter(p => p.relation === 'peer'), free = direct.filter(p => !p.relation)
   return [!all.workspace.runId ? callout('还没有主 agent，请在设置中绑定。') : null, peers().some(p => p.status === 'pending') ? button('有工作间连接待核对', () => go({ kind: 'links' }), 'text') : null,
     all.error ? callout(all.error, 'danger') : null, all.links?.error ? callout(all.links.error, 'danger') : null,
@@ -196,13 +249,13 @@ function home() {
 }
 function feedbackCards(tasks: Task[]) {
   return tasks.map(t => {
-    const acceptance = t.phase === 'ready' ? t.acceptance.filter(a => a.status === 'pending') : []
-    return section(t.title, acceptance.length > 1 ? button(`这 ${acceptance.length} 项全部通过`, () => { for (const a of acceptance) choose({ taskId: t.id, kind: 'acceptance', itemId: a.id, itemRevision: a.revision, fingerprint: a.fingerprint, signature: a.fingerprint, title: a.title, result: 'passed' }); render() }, 'sm') : null,
+    const acceptance = pendingAcceptances(t)
+    return section(t.title, acceptance.length > 1 ? button(`这 ${acceptance.length} 项全部通过`, () => { for (const a of acceptance) choose({ ...acceptanceDraft(t.id, a), result: 'passed' }); render() }, 'sm') : null,
       t.decisions.filter(d => d.answer === undefined).map(d => {
         const k = key(t.id, 'decision', d.id), draft = choices()[k], base: Draft = { taskId: t.id, kind: 'decision', itemId: d.id, title: d.question, signature: JSON.stringify([d.question, d.options]) }
         return card(el('h3', { class: 'h2 any' }, d.question), ...[...d.options, '其他'].map(option => check(option, draft?.answer === option || option === '其他' && !!draft?.answer && !d.options.includes(draft.answer), () => { choose({ ...base, answer: option === '其他' ? '' : option }); form[`决定 ${k}`] = ''; render() }, { type: 'radio', name: k, value: option })), draft && !d.options.includes(draft.answer ?? '') ? input(`决定 ${k}`, draft.answer ?? '', 'textarea', value => { choose({ ...base, answer: value }); renderSheet() }) : null, draft ? button('撤销', () => { delete choices()[k]; persist('panel.drafts', drafts); render() }, 'text sm') : null)
       }), acceptance.map(a => {
-        const k = key(t.id, 'acceptance', a.id), draft = choices()[k], base: Draft = { taskId: t.id, kind: 'acceptance', itemId: a.id, itemRevision: a.revision, fingerprint: a.fingerprint, signature: a.fingerprint, title: a.title }
+        const k = key(t.id, 'acceptance', a.id), draft = choices()[k], base = acceptanceDraft(t.id, a)
         return card(row(el('h3', { class: 'h2 any grow' }, a.title), tag(`第 ${a.revision} 版`)), el('p', { class: 'any' }, a.details), t.artifacts.filter(ar => a.artifactIds.includes(ar.id)).map(ar => button(`打开成果 · ${ar.label}`, () => /^https?:/i.test(ar.url) ? orca.shell?.openExternal(ar.url) : req('project.openArtifact', { projectId: page.projectId, taskId: t.id, artifactId: ar.id }), 'sm')),
           row(...['passed', 'changes_requested'].map(result => { const b = button(result === 'passed' ? '通过' : '需要修改', () => { choose({ ...base, result, note: draft?.note ?? '' }); render() }, 'sm'); b.setAttribute('aria-pressed', String(draft?.result === result)); return b }), draft ? button('撤销', () => { delete choices()[k]; persist('panel.drafts', drafts); render() }, 'text sm') : null), draft?.result === 'changes_requested' ? input(`修改意见 ${k}`, draft.note ?? '', 'textarea', note => { choose({ ...draft, note }); renderSheet() }) : null)
       }), t.phase === 'blocked' ? callout(t.progress || t.goal, 'danger') : null)
@@ -210,21 +263,59 @@ function feedbackCards(tasks: Task[]) {
 }
 function renderSheet() {
   root.querySelector('[data-sheet]')?.remove()
+  if (page.kind === 'home' && inboxBatches.size) {
+    const selected = [...inboxBatches.values()].flatMap(batch => [...batch.tasks.values()])
+    root.append(sheet(`已选 ${selected.length} 个任务，共 ${selected.reduce((n, t) => n + t.items.length, 0)} 项成果`,
+      button('全部通过', submitInboxFeedback, 'primary'), button('全选', () => { for (const a of pending()) if (a.kind === 'review') selectReview(a, true); render() }),
+      button('清空', () => { inboxBatches.clear(); render() })))
+    return
+  }
   if (!['project', 'task'].includes(page.kind)) return
   const selected = Object.values(choices())
   if (!selected.length) return
   const invalid = selected.some(d => d.kind === 'decision' ? !d.answer?.trim() : d.result === 'changes_requested' && !d.note?.trim())
-  root.append(el('section', { class: 'sheet', 'data-sheet': '', 'aria-label': '批量提交' }, small(invalid ? '有条目还没写内容' : `已选 ${selected.length} 条`), row(button(`提交 ${selected.length} 条`, submitFeedback, 'primary', invalid), button('清空', () => { drafts[page.projectId!] = {}; persist('panel.drafts', drafts); render() }))))
+  root.append(sheet(invalid ? '有条目还没写内容' : `已选 ${selected.length} 条`, button(`提交 ${selected.length} 条`, submitFeedback, 'primary', invalid), button('清空', () => { drafts[page.projectId!] = {}; persist('panel.drafts', drafts); render() })))
+}
+const sheet = (label: string, ...actions: HTMLElement[]) => el('section', { class: 'sheet', 'data-sheet': '', 'aria-label': '批量提交' }, small(label), row(actions))
+async function submitInboxFeedback() {
+  if (!inboxBatches.size) return
+  await act(async () => {
+    let tasks = 0, items = 0
+    const skipped: string[] = []
+    for (const [projectId, batch] of inboxBatches) {
+      const selected = [...batch.tasks.values()], drafts = selected.flatMap(t => t.items)
+      try {
+        const { project: p }: { project: Project | null } = await req('project.read', { projectId })
+        if (!p) { skipped.push(`「${batch.name}」未提交，项目记录读不到。`); continue }
+        if (!batch.requestId || !p.requests.some(r => r.id === batch.requestId)) {
+          if (p.hidden) { skipped.push(`「${batch.name}」未提交，项目已隐藏。`); continue }
+          const stale = [...batch.tasks].filter(([taskId, selected]) => {
+            const task = p.tasks.find(t => t.id === taskId)
+            return pendingAcceptances(task).length !== selected.items.length || selected.items.some(d => !validDraft(task, d))
+          })
+          if (stale.length) {
+            skipped.push(`「${batch.name}」未提交，${stale.map(([, t]) => `「${t.title}」`).join('、')}的验收项已更新或已处理。`)
+            continue
+          }
+          batch.requestId ??= crypto.randomUUID()
+          await req('project.feedback', { projectId, revision: p.revision, requestId: batch.requestId, items: await feedbackItems(drafts) })
+        }
+        inboxBatches.delete(projectId)
+        tasks += selected.length; items += drafts.length
+      } catch (e) {
+        skipped.push(`「${batch.name}」提交未确认（${selected.map(t => t.title).join('、')}）。${e instanceof Error ? e.message : '请核对后重试。'}`)
+      }
+    }
+    await refresh()
+    notice = [`已通过 ${tasks} 个任务，共 ${items} 项成果。`, ...skipped].join(' ')
+    root.scrollTop = 0
+  })
 }
 async function submitFeedback() {
   await act(async () => {
     const id = page.projectId!, before = Object.keys(choices()).length, s = await req('project.read', { projectId: id }); current = s.project; reconcile(current!)
     if (Object.keys(choices()).length !== before) { notice = `这次一条都没有提交。${notice}`; return }
-    const items = await Promise.all(Object.values(choices()).map(async d => {
-      let fingerprint = d.fingerprint
-      if (d.kind === 'decision') fingerprint = [...new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(d.signature)))].map(v => v.toString(16).padStart(2, '0')).join('')
-      return { taskId: d.taskId, kind: d.kind, itemId: d.itemId, itemRevision: d.itemRevision, result: d.result, note: d.note, answer: d.answer, fingerprint }
-    }))
+    const items = await feedbackItems(Object.values(choices()))
     form.feedbackRequestId ??= crypto.randomUUID()
     try {
       const result = await req('project.feedback', { projectId: id, requestId: form.feedbackRequestId, items })

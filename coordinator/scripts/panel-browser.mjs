@@ -41,20 +41,35 @@ async function setup(options = {}) {
     const acceptance = id => ({ id, title: '成果 ' + id, details: '核对布局和内容', artifactIds: [], revision: 1, status: 'pending', history: [], fingerprint: 'version-1-' + id });
     const task = { id: 't1', title: '页面交付', goal: '完成页面', progress: '已交付', phase: 'ready', executions: [], artifacts: [], acceptance: [acceptance('a1'), acceptance('a2')], decisions: [], updatedAt: new Date().toISOString(), sourceIds: [] };
     const project = { version: 1, ref: { id: 'p1', name: '示例项目', hostId: 'local', repoId: 'repo', workspace: 'id:repo', path: '/example' }, revision: 2, runId: 'run_project', roles: { design: 'claude', code: 'codex', review: 'codex' }, tasks: [task], events: [], deliveries: [], requests: [] };
+    const projects = [project];
+    if (options.inboxBatch) {
+      const other = clone(project);
+      Object.assign(other.ref, { id: 'p2', name: '移动项目' });
+      other.tasks = [{ ...clone(task), id: 't2', title: '移动端交付', acceptance: [acceptance('b1')] }];
+      projects.push(other);
+      project.tasks.push({ ...clone(task), id: 't3', title: '动效交付', acceptance: [acceptance('a3')] },
+        { ...clone(task), id: 'd1', title: '设计决定', phase: 'working', acceptance: [], decisions: [{ id: 'd1', question: '选择方案', options: ['方案一'], history: [] }] });
+    }
     const p = (id, relation, status = 'connected', scope = 'details') => ({ id, name: '工作间 ' + id, workspaceId: 'ws-' + id, state: status === 'pending' ? 'pending' : status === 'revoked' ? 'revoked' : 'active', relation, sharingSet: false, status, scope: 'none', projectIds: [], lastSyncAt: new Date(now - 100000).toISOString(), receivedAt: new Date(now).toISOString(), ...(status === 'connected' ? { report: { scope, projects: scope === 'none' ? [] : [{ id: 'remote-p', name: '开放的项目', updatedAt: new Date().toISOString(), pending: 0, counts: { blocked: 1 }, ...(scope === 'details' ? { tasks: [{ title: '受阻任务', phase: 'blocked', decisions: [], acceptance: [] }] } : {}) }] } } : {}) });
     const links = { version: 1, revision: 1, workspaceId: 'self', name: '我的工作间', enabled: false, host: '127.0.0.1', port: 0, publicUrl: '', tls: false, listening: '', error: '', peers: [p('up', 'above'), p('down', 'below'), p('off', 'below', 'offline'), p('side', 'peer'), p('free', undefined), p('pending', undefined, 'pending'), p('revoked', 'below', 'revoked')] };
     const live = { ok: true, at: now, agents: [{ id: 'agent-need', projectId: 'p1', agent: 'codex', role: 'worker', state: 'need', rawState: 'waiting', verified: true, title: '等批准', last: '等待用户批准', since: now - 60000 }, { id: 'agent-work', projectId: 'p1', agent: 'claude', role: 'session', state: 'work', rawState: 'working', verified: false, title: '正在工作', last: '正在处理', since: now - 20000 }] };
     const workspace = { revision: 1, runId: options.unbound ? '' : 'run_main', ...(!options.unbound ? { session: { handle: 'main', agent: 'claude', title: '统筹会话', online: 'online' } } : {}) };
     const sessions = ['甲', '乙'].map((name, i) => ({ handle: 'session-' + i, title: name + '会话', workspace: 'identity:test', workspaceName: '示例工作区', path: '/test/工作区 with spaces', agent: i ? 'codex' : 'claude', online: 'online' }));
-    const attention = () => task.acceptance.filter(a => a.status === 'pending').map(a => ({ projectId: 'p1', taskId: 't1', kind: 'review', itemId: a.id, title: task.title, summary: a.title }));
+    const attention = () => projects.flatMap(p => p.tasks.flatMap(t => {
+      const base = { projectId: p.ref.id, taskId: t.id, title: t.title };
+      return [
+        ...t.decisions.filter(d => d.answer === undefined).map(d => ({ ...base, kind: 'decision', itemId: d.id, summary: d.question })),
+        ...t.acceptance.filter(a => t.phase === 'ready' && a.status === 'pending').map(a => ({ ...base, kind: 'review', itemId: a.id, summary: a.title, itemRevision: a.revision, fingerprint: a.fingerprint }))
+      ];
+    }));
     const calls = [];
-    window.fixture = { project, links, live, workspace, calls, stored, workspaceTarget: { workspaceId: 'identity:project-workspace', multipleConversations: true }, emit: () => events['project.changed']?.({}), race: false, prune: () => { task.acceptance[0].revision++; task.acceptance[0].fingerprint = 'new-version'; project.revision++; } };
+    window.fixture = { project, projects, links, live, workspace, calls, stored, workspaceTarget: { workspaceId: 'identity:project-workspace', multipleConversations: true }, emit: () => events['project.changed']?.({}), race: false, prune: () => { task.acceptance[0].revision++; task.acceptance[0].fingerprint = 'new-version'; project.revision++; } };
     window.orca = { storage: { get: async k => clone(stored[k] ?? null), set: async (k, v) => { stored[k] = clone(v); }, delete: async k => { delete stored[k]; } }, plugin: { on: (name, callback) => { events[name] = callback; return { dispose() {} }; }, request: async (name, input) => {
       if (input !== undefined && !isJson(input)) throw Error('input: Invalid input');
       calls.push({ name, input: clone(input) });
-      if (name === 'workspace.overview') return clone({ workspace, projects: [{ ref: project.ref, counts: { review: task.acceptance.filter(a => a.status === 'pending').length ? 1 : 0 }, agents: [], bound: true, updatedAt: '' }, ...(options.manyProjects ? Array.from({ length: 13 }, (_, i) => ({ ref: { ...project.ref, id: 'p' + (i + 2), name: '项目 ' + (i + 2) }, counts: { working: options.idleProjects ? 0 : 1 }, agents: [], bound: true, updatedAt: '' })) : [])], hidden: [], attention: attention(), links, connections: [], machines: [{ id: 'local', name: '主机', role: 'host' }] });
+      if (name === 'workspace.overview') return clone({ workspace, projects: [...projects.map(p => ({ ref: p.ref, counts: { review: p.tasks.filter(t => t.phase === 'ready' && t.acceptance.some(a => a.status === 'pending')).length }, agents: [], bound: true, updatedAt: '' })), ...(options.manyProjects ? Array.from({ length: 13 }, (_, i) => ({ ref: { ...project.ref, id: 'p' + (i + 2), name: '项目 ' + (i + 2) }, counts: { working: options.idleProjects ? 0 : 1 }, agents: [], bound: true, updatedAt: '' })) : [])], hidden: [], attention: attention(), links, connections: [], machines: [{ id: 'local', name: '主机', role: 'host' }] });
       if (name === 'workspace.agents') return clone(live);
-      if (name === 'project.read') return clone({ project, projects: [project.ref], workspaceTarget: window.fixture.workspaceTarget, mainAgent: window.fixture.mainAgent });
+      if (name === 'project.read') return clone({ project: projects.find(p => p.ref.id === input.projectId) ?? null, projects: projects.map(p => p.ref), workspaceTarget: window.fixture.workspaceTarget, mainAgent: window.fixture.mainAgent });
       if (name === 'project.openMain') {
         if (window.fixture.delayOpen) await new Promise(r => { window.fixture.finishOpen = r; });
         if (window.fixture.openError) throw Error(window.fixture.openError);
@@ -63,10 +78,20 @@ async function setup(options = {}) {
       if (name === 'project.feedback') {
         if (window.fixture.delayFeedback) { window.fixture.delayFeedback = false; await new Promise(r => { window.fixture.finishFeedback = r; }); }
         if (window.fixture.race) { window.fixture.race = false; window.fixture.prune(); throw Error('成果已更新'); }
-        for (const i of input.items) { const a = i.kind === 'acceptance' ? task.acceptance.find(a => a.id === i.itemId) : task.decisions.find(d => d.id === i.itemId); if (!a || i.kind === 'acceptance' && a.revision !== i.itemRevision) throw Error('stale'); }
-        for (const i of input.items) { if (i.kind === 'acceptance') task.acceptance.find(a => a.id === i.itemId).status = i.result; else task.decisions.find(d => d.id === i.itemId).answer = i.answer; }
-        project.deliveries.push({ id: 'summary', subject: '用户反馈', body: '', state: 'pending' }); project.revision++;
-        return clone({ project });
+        if (window.fixture.failFeedback) { window.fixture.failFeedback = false; throw Error('回执连接中断'); }
+        const target = projects.find(p => p.ref.id === input.projectId);
+        if (!target || input.revision !== undefined && target.revision !== input.revision) throw Error('项目已更新');
+        const updates = input.items.map(i => {
+          const t = target.tasks.find(t => t.id === i.taskId);
+          const a = i.kind === 'acceptance' ? t?.acceptance.find(a => a.id === i.itemId) : t?.decisions.find(d => d.id === i.itemId);
+          if (!a || i.kind === 'acceptance' && (t.phase !== 'ready' || a.status !== 'pending' || a.revision !== i.itemRevision || a.fingerprint !== i.fingerprint)) throw Error('stale');
+          return [i, a];
+        });
+        for (const [i, a] of updates) { if (i.kind === 'acceptance') a.status = i.result; else a.answer = i.answer; }
+        target.deliveries.push({ id: 'summary', subject: '用户反馈', body: '', state: 'pending' }); target.revision++;
+        target.requests.push({ id: input.requestId, fingerprint: 'fixture' });
+        if (window.fixture.loseFeedbackReceipt) { window.fixture.loseFeedbackReceipt = false; throw Error('提交回执丢失'); }
+        return clone({ project: target });
       }
       if (name === 'workspace.links') {
         if (input.operation === 'invite') {
@@ -102,27 +127,123 @@ const project = async () => { await page.locator('[data-project=p1] .pcard-h').c
 try {
   for (const wide of [false, true]) {
     await setup({ width: wide ? 1040 : 400 });
-    await test(`${wide ? 'wide inbox lists every item and scrolls independently' : 'narrow inbox keeps three items and expands on demand'}`, async () => {
+    await test(`${wide ? 'wide inbox lists every item and shares page scrolling with the batch bar visible' : 'narrow inbox keeps three items and expands on demand'}`, async () => {
       await page.evaluate(() => { fixture.live.agents.push(...Array.from({ length: 40 }, (_, i) => ({ ...fixture.live.agents[0], id: 'need-' + i, state: 'need' }))); fixture.emit(); });
       await page.waitForFunction(() => document.querySelector('.inbox .pill')?.textContent === '42');
       const inbox = page.locator('.inbox'), more = inbox.getByRole('button', { name: /^再看 / });
       assert.equal(await inbox.locator('.item:visible').count(), wide ? 42 : 3);
       if (wide) {
         assert.equal(await more.isVisible(), false);
-        assert.equal(await inbox.evaluate(e => e.scrollHeight > e.clientHeight && getComputedStyle(e).overflowY === 'auto'), true);
-        await inbox.hover();
+        assert.equal(await inbox.evaluate(e => e.scrollHeight <= e.clientHeight && getComputedStyle(e).overflowY === 'visible'), true);
+        await inbox.getByRole('checkbox').check();
+        await page.locator('#panel').evaluate(e => { e.scrollTop = 0; });
+        const { x, y } = await inbox.boundingBox();
+        await page.mouse.move(x + 20, y + 30);
         const organizationTop = (await page.locator('.home>section').nth(1).boundingBox()).y;
-        const rootTop = await page.locator('#panel').evaluate(e => e.scrollTop);
         await page.mouse.wheel(0, 600);
-        await page.waitForFunction(() => document.querySelector('.inbox').scrollTop > 0);
-        assert.equal(await page.locator('#panel').evaluate(e => e.scrollTop), rootTop);
-        assert.equal((await page.locator('.home>section').nth(1).boundingBox()).y, organizationTop);
+        await page.waitForFunction(() => document.querySelector('#panel').scrollTop > 0);
+        assert.equal(await inbox.evaluate(e => e.scrollTop), 0);
+        assert.ok((await page.locator('.home>section').nth(1).boundingBox()).y < organizationTop);
+        const bar = await page.getByRole('region', { name: '批量提交' }).boundingBox();
+        assert.ok(bar.y >= 0 && bar.y + bar.height <= page.viewportSize().height);
       } else {
         assert.equal(await more.textContent(), '再看 39 条'); await more.click();
         assert.equal(await inbox.locator('.item:visible').count(), 42);
       }
     });
   }
+  const inboxBox = label => page.getByRole('checkbox', { name: new RegExp('选择验收 · ' + label) });
+  const batchBar = () => page.getByRole('region', { name: '批量提交' });
+  const approvalCalls = () => page.evaluate(() => fixture.calls.filter(c => c.name === 'project.feedback').map(c => c.input));
+  await setup({ inboxBatch: true });
+  await test('narrow inbox keeps decisions and detail navigation separate from selection and includes folded reviews in select all', async () => {
+    const inbox = page.getByRole('region', { name: '等你处理' });
+    assert.equal(await inbox.getByRole('button', { name: '设计决定', exact: true }).count(), 1);
+    assert.equal(await inboxBox('设计决定').count(), 0);
+    assert.equal(await inboxBox('等批准').count(), 0);
+    assert.equal(await inboxBox('移动端交付').isVisible(), false);
+    await inbox.getByRole('button', { name: '页面交付', exact: true }).click();
+    await page.getByRole('heading', { name: '目标', exact: true }).waitFor();
+    await home();
+    await inboxBox('页面交付').check();
+    assert.equal(await inbox.getByRole('button', { name: '页面交付', exact: true }).locator('input').count(), 0);
+    await batchBar().getByText('已选 1 个任务，共 2 项成果', { exact: true }).waitFor();
+    await batchBar().getByRole('button', { name: '全选', exact: true }).click();
+    await batchBar().getByText('已选 3 个任务，共 4 项成果', { exact: true }).waitFor();
+    assert.equal(await inboxBox('移动端交付').isVisible(), false);
+    await inbox.getByRole('button', { name: /^再看 / }).click();
+    assert.equal(await inboxBox('移动端交付').isChecked(), true);
+    assert.equal(await inboxBox('动效交付').isChecked(), true);
+    await batchBar().getByRole('button', { name: '清空', exact: true }).click();
+    assert.equal(await batchBar().count(), 0);
+    assert.equal(await inbox.locator('input:checked').count(), 0);
+    assert.deepEqual(await approvalCalls(), []);
+  });
+  await setup({ inboxBatch: true, width: 950 });
+  await test('inbox approves two projects in one click with one request per project and blocks duplicate clicks while busy', async () => {
+    await inboxBox('页面交付').check();
+    await inboxBox('移动端交付').check();
+    const approve = batchBar().getByRole('button', { name: '全部通过', exact: true });
+    await approve.evaluate(button => { fixture.delayFeedback = true; button.click(); button.click(); });
+    await page.waitForFunction(() => typeof fixture.finishFeedback === 'function');
+    const busy = page.locator('[data-sheet] button[data-action="全部通过:1"]');
+    assert.equal(await busy.getAttribute('aria-busy'), 'true');
+    assert.equal(await busy.evaluate(e => e.disabled), true);
+    assert.equal(await page.locator('#panel').evaluate(e => e.inert), true);
+    assert.equal((await approvalCalls()).length, 1);
+    await page.evaluate(() => fixture.finishFeedback());
+    await page.getByRole('status').filter({ hasText: '已通过 2 个任务，共 3 项成果。' }).waitFor();
+    const requests = await approvalCalls();
+    assert.deepEqual(requests.map(r => [r.projectId, r.revision, r.items]), [
+      ['p1', 2, ['a1', 'a2'].map(id => ({ taskId: 't1', kind: 'acceptance', itemId: id, itemRevision: 1, result: 'passed', fingerprint: 'version-1-' + id }))],
+      ['p2', 2, [{ taskId: 't2', kind: 'acceptance', itemId: 'b1', itemRevision: 1, result: 'passed', fingerprint: 'version-1-b1' }]]
+    ]);
+    assert.ok(requests.every(r => r.requestId) && requests[0].requestId !== requests[1].requestId);
+    assert.deepEqual(await page.evaluate(() => fixture.projects.map(p => p.deliveries.length)), [1, 1]);
+    assert.equal(await batchBar().count(), 0);
+  });
+  for (const change of ['revision', 'withdrawn', 'added']) {
+    await setup({ inboxBatch: true, width: 950 });
+    await test('inbox keeps the entire stale project selected and submits the other project after ' + change, async () => {
+      await inboxBox('页面交付').check();
+      await batchBar().getByRole('button', { name: '全选', exact: true }).click();
+      await page.evaluate(change => {
+        const task = fixture.project.tasks[0];
+        if (change === 'revision') fixture.prune();
+        if (change === 'withdrawn') task.phase = 'working';
+        if (change === 'added') task.acceptance.push({ ...task.acceptance[0], id: 'new', fingerprint: 'version-1-new' });
+        fixture.emit();
+      }, change);
+      await batchBar().getByRole('button', { name: '全部通过', exact: true }).click();
+      const result = page.getByRole('status').filter({ hasText: '已通过 1 个任务，共 1 项成果。' });
+      await result.waitFor();
+      assert.match(await result.innerText(), /示例项目.*未提交.*页面交付.*验收项已更新或已处理/);
+      assert.deepEqual((await approvalCalls()).map(r => r.projectId), ['p2']);
+      assert.equal(await inboxBox('页面交付').isChecked(), true);
+      assert.equal(await inboxBox('动效交付').isChecked(), true);
+      await batchBar().getByText('已选 2 个任务，共 3 项成果', { exact: true }).waitFor();
+    });
+  }
+  await setup({ inboxBatch: true, width: 950 });
+  await test('inbox retries the same batch ID and recognizes an already-recorded request after a lost receipt', async () => {
+    await inboxBox('页面交付').check();
+    const approve = batchBar().getByRole('button', { name: '全部通过', exact: true });
+    await page.evaluate(() => { fixture.failFeedback = true; });
+    await approve.click();
+    await page.getByRole('status').filter({ hasText: '回执连接中断' }).waitFor();
+    assert.equal(await inboxBox('页面交付').isChecked(), true);
+    await page.evaluate(() => { fixture.loseFeedbackReceipt = true; });
+    await approve.click();
+    await page.getByRole('status').filter({ hasText: '提交回执丢失' }).waitFor();
+    const requests = await approvalCalls();
+    assert.equal(requests.length, 2);
+    assert.deepEqual(requests[0], requests[1]);
+    await approve.click();
+    await page.getByRole('status').filter({ hasText: '已通过 1 个任务，共 2 项成果。' }).waitFor();
+    assert.deepEqual(await approvalCalls(), requests);
+    assert.equal(await page.evaluate(() => fixture.project.deliveries.length), 1);
+    assert.equal(await batchBar().count(), 0);
+  });
   for (const multipleConversations of [true, false]) {
     await setup({ width: 300 });
     await test(`project opens main workspace once and ${multipleConversations ? 'shows' : 'omits'} tab hint`, async () => {
