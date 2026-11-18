@@ -1,15 +1,17 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, writeFileSync, existsSync, rmSync, mkdirSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync, existsSync, rmSync, mkdirSync, realpathSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
 
-const sandbox = path.resolve(process.env.AGENTBOAT_SANDBOX || path.join(os.tmpdir(), 'agentboat-sandbox'));
-mkdirSync(sandbox, { recursive: true });
+const sandboxPath = path.resolve(process.env.AGENTBOAT_SANDBOX || path.join(os.tmpdir(), 'agentboat-sandbox'));
+mkdirSync(sandboxPath, { recursive: true });
+const sandbox = realpathSync(sandboxPath);
 const testHome = mkdtempSync(path.join(sandbox, 'agentboat-demo-unit-'));
 process.env.AGENTBOAT_HOME = testHome;
+process.env.AGENTBOAT_SANDBOX = sandbox;
 process.env.AGENTBOAT_TEST_ONLY = '1';
 const api = await import('./workspace.mjs');
 

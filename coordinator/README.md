@@ -55,7 +55,7 @@ node scripts/release-evidence.mjs compare "$evidence" after
 node ../workspace/install.mjs
 ```
 
-检查失败时停止，先修复再构建。重新加载若需审批，先与备份内 `plugin/orca-plugin.json` 核对清单和权限，再按回执批准；批准后再拍快照比较。保留终端打印的备份位置；如有可解释的正常项目更新，核实后另存基线重比；解释不了的差异或数据丢失应立即恢复旧构建并回报，保留当前数据，不自行修记录。没有修改清单和权限的更新不应增加授权。
+检查失败时停止，先修复再构建。每次 `orca plugin dev reload` 都可能返回 `approval_required`，这是 Orca 对开发插件的审批流程。先与上一版核对回执里的插件身份、清单和权限，完全相同才按回执批准，有差异就停下问主人；批准后再拍快照比较。保留终端打印的备份位置；如有可解释的正常项目更新，核实后另存基线重比；解释不了的差异或数据丢失应立即恢复旧构建并回报，保留当前数据，不自行修记录。没有修改清单和权限的更新不应增加授权。
 
 macOS 默认插件数据目录为 `~/Library/Application Support/orca/plugins-data/local.project-coordinator`；Windows 默认位于用户的 `AppData/Roaming/orca/plugins-data/local.project-coordinator`（使用系统 APPDATA）。两者均优先使用 `ORCA_USER_DATA_PATH` 指定的 Orca 用户数据目录。备份脚本与项目导出共用这条规则；开发版或自定义 profile 应在当前 Orca 终端内执行，或显式设置该环境变量。
 
