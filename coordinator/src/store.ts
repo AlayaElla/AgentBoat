@@ -3,7 +3,7 @@ import path from 'node:path'
 import { userDataPath } from '../scripts/orca-cli.mjs'
 import { mkdir, writeFile } from 'node:fs/promises'
 import type { StorageApi } from 'orca'
-import { taskState, type Acceptance, type Artifact, type Project, type ProjectRef, type SourceEvent, type Task, type Workspace, type Overview, type Attention, type Messaging, type AgentSession, sourceName } from './model'
+import { taskState, type Acceptance, type Artifact, type Project, type ProjectRef, type SourceEvent, type Task, type Workspace, type Overview, type Attention, type Messaging, type AgentSession, type StoredTakeover, sourceName } from './model'
 
 export const maxMessageLength = 16000
 export function fail(message: string): never { throw Object.assign(new Error(message), { code: 'invalid_request' }) }
@@ -21,6 +21,15 @@ export function strings(value: unknown, label: string, max = 100): string[] {
 }
 export function fingerprint(value: unknown): string {
   return createHash('sha256').update(JSON.stringify(value)).digest('hex')
+}
+export const takeoverActive = (t?: StoredTakeover) => !!t && Date.parse(t.expiresAt) > Date.now()
+export function verifyTakeover(t: StoredTakeover | undefined, token: unknown, session: AgentSession, oldRun: string, newRun: string): StoredTakeover {
+  if (!t || !takeoverActive(t) || typeof token !== 'string' || !token || t.tokenHash !== fingerprint(token)) fail('替换主会话需要有效的一次性接管凭据；请让主人重新发起切换')
+  if (!t.target.handle) fail('启动回执尚未确认目标会话；请稍后重读绑定状态再试')
+  if (t.target.handle !== session.handle) fail('接管凭据不属于当前会话；请在选中的目标会话调用')
+  if (t.target.workspace !== session.workspace || t.target.agent !== session.agent) fail('目标会话的工作区或 agent 已变化；请重新发起切换')
+  if (oldRun === newRun) fail('接管会话必须创建自己的新 Run')
+  return t
 }
 export const projectKey = (hostId: string, repoId: string) => fingerprint([hostId, repoId]).slice(0, 24)
 export function fresh(ref: ProjectRef): Project {
@@ -143,12 +152,7 @@ export class ProjectStore {
       if (w.revision !== expected) fail('工作间已更新，请刷新后再提交')
       if ((await this.all()).some(p => p.runId === runId)) fail('该 Run 已绑定项目；请在当前会话创建独立的工作间主 agent Run')
       if (w.runId || w.takeover || token) {
-        const t = w.takeover
-        if (!t || typeof token !== 'string' || !token || t.tokenHash !== fingerprint(token) || !Number.isFinite(Date.parse(t.expiresAt)) || Date.parse(t.expiresAt) <= Date.now()) fail('替换主 agent 需要面板发起的有效一次性接管凭据；请让主人在面板重新发起切换')
-        if (!t.target.handle) fail('启动回执尚未确认目标会话；请稍后重读 main-read 再试')
-        if (t.target.handle !== session.handle) fail('接管凭据不属于当前会话；请在面板选中的目标会话调用')
-        if (t.target.workspace !== session.workspace || t.target.agent !== session.agent) fail('目标会话的工作区或 agent 已变化；请在面板重新发起切换')
-        if (w.runId === runId) fail('接管会话必须创建自己的新 Run')
+        const t = verifyTakeover(w.takeover, token, session, w.runId, runId)
         if (checkOnly) return w
         w.retired ??= []
         if (w.runId) w.retired.push({ id: `retired:${t.id}`, targetRunId: w.runId, subject: '工作间主 agent 已切换',

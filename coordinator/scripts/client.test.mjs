@@ -17,7 +17,7 @@ cp.execFileSync = (_exe, args) => {
     return JSON.stringify({ok:true,result:{run:process.env.TEST_NO_RUN ? null : {id:'run_self'}}});
   }
   const input = JSON.parse(args[args.indexOf('--data') + 1]);
-  return JSON.stringify({input});
+  return JSON.stringify({input, handler:args[4]});
 };
 syncBuiltinESMExports();`);
   try {
@@ -32,6 +32,14 @@ syncBuiltinESMExports();`);
       assert.equal(input.currentRunId, 'run_self'); assert.equal(input.checkOnly, true);
     }
     assert.throws(() => call(true, {TEST_NO_RUN:'1'}), /没有协调 Run/);
+    const projectLead = (command, input) => JSON.parse(execFileSync(process.execPath,
+      ['--import', pathToFileURL(fixture).href, 'scripts/client.mjs', command],
+      { encoding:'utf8', windowsHide:true, input:JSON.stringify(input), env:{ ...process.env, ORCA_AGENT_SESSION_ID:'project-chat' } }));
+    const switchInput = { projectId:'p1', revision:2, mode:'new', agent:'codex', runId:'run_forged' };
+    assert.deepEqual(projectLead('project-lead-switch', switchInput), { handler:'workspace.projectLead', input:{ ...switchInput, runId:'run_self' } });
+    const bindInput = { projectId:'p1', revision:3, requestId:'project-bind', runId:'run_self', token:'test-only' };
+    assert.deepEqual(projectLead('project-lead-bind', bindInput), { handler:'project.agent', input:{
+      ...bindInput, operation:'bind', caller:'orca_session_id:project-chat', currentRunId:'run_self' } });
   } finally { rmSync(dir, {recursive:true,force:true}); }
 });
 

@@ -7,9 +7,146 @@ import { refs } from './fixtures'
 import { mainTargets, OrcaRuntime } from './runtime'
 import path from 'node:path'
 import { existsSync } from 'node:fs'
+import { projectLeadDefaults } from '../../workspace/agent-launch.mjs'
 
 const session: AgentSession = { handle: 'orca_session_id:test-next', title: '测试接管会话', workspace: 'identity:test-workspace', workspaceName: '测试工作区', path: '/test/workspace', agent: 'claude', online: 'online' }
 const tokenFrom = (prompt: string) => /一次性接管凭据：([^\n]+)/.exec(prompt)![1]
+
+const projectWorkspaceId = 'identity:wt2:local:project'
+const projectRef = { ...refs[0], workspace: projectWorkspaceId }
+const projectSession: AgentSession = { ...session, workspace: projectWorkspaceId, path: projectRef.path }
+const testWorkspace = { id: projectWorkspaceId, projectId: projectRef.repoId, hostId: 'local', path: projectRef.path, kind: 'worktree', name: '本项目', branch: 'main' }
+
+test('project lead switches only within its workspace and preserves tasks and queued deliveries', async () => {
+  const p = fresh(projectRef), other = fresh(refs[1])
+  p.runId = 'run_old'
+  p.mainAgentHandle = 'orca_session_id:claude_old'
+  p.tasks.push({ id: 'task', title: '已存在的问题', goal: '保留现场', phase: 'working', progress: '', executions: [
+    { runId: 'run_existing', taskId: 'task_existing', dispatchId: 'dispatch_existing', agent: 'codex' }
+  ], artifacts: [], decisions: [{ id: 'decision', question: '下一步', options: ['继续'], history: [] }], acceptance: [], sourceIds: [], updatedAt: '' })
+  p.deliveries.push({ id: 'queued', subject: '队列', body: '给当前项目主会话', state: 'pending' })
+  other.runId = 'run_taken'
+  const old: AgentSession = { ...projectSession, handle: p.mainAgentHandle, title: '当前会话' }
+  const replacement: AgentSession = { ...projectSession, handle: 'terminal-opencode', title: '替补会话', agent: 'opencode' }
+  const outsider = { ...projectSession, handle: 'other-workspace', workspace: 'identity:elsewhere' }
+  let sessions = [old, projectSession, replacement, outsider]
+  const host = mockHost({ storage: { 'project:p1': p as any, 'project:p2': other as any, workspace: { runId: 'run_owner' } }, results: {
+    'workspace.list': { workspaces: [testWorkspace, { ...testWorkspace, id: outsider.workspace, projectId: refs[1].repoId }], truncated: false },
+    'agents.list': { agents: [] }
+  } })
+  let c!: ReturnType<typeof createCoordinator>
+  const requests: { handle: string; prompt: string; subject?: string }[] = [], notices: { run: string; body: string }[] = []
+  const worker = await mountWorker({ default: api => { c = createCoordinator(api, {
+    projects: async () => [projectRef, refs[1]],
+    targets: async () => ({ sessions, workspaces: [{ workspace: projectWorkspaceId, name: '本项目', path: p.ref.path }] }),
+    identify: async (handle, run, own) => {
+      const target = sessions.find(s => s.handle === handle && s.online === 'online')
+      if (!target || run !== own) throw Error('会话不在线或 Run 不匹配')
+      return target
+    },
+    requestTakeover: async (handle, prompt, subject) => { requests.push({ handle, prompt, subject }) },
+    send: async (run, d) => { notices.push({ run, body: d.body }); return {} }
+  }) } }, { host })
+  const read = () => worker.request('project.lead', { projectId: 'p1' })
+  const choose = async (handle: string) => worker.request('project.lead', { projectId: 'p1', revision: (await read()).binding.revision, mode: 'existing', handle })
+  const bind = async (r: number, i: number, runId: string, caller = requests[i].handle) => worker.request('project.agent', {
+    projectId: 'p1', operation: 'bind', revision: r, requestId: 'handoff-' + runId, runId, currentRunId: runId, caller, token: tokenFrom(requests[i].prompt)
+  })
+  try {
+    const start = await read()
+    assert.deepEqual(start.sessions.map(s => s.handle), [old.handle, projectSession.handle, replacement.handle])
+    assert.deepEqual(start.binding.session, old)
+    await assert.rejects(() => choose(outsider.handle), /不可用/)
+    await assert.rejects(() => worker.request('workspace.projectLead', { projectId: 'p1', revision: 0, mode: 'existing', handle: projectSession.handle, runId: 'run_other' }), /已绑定的工作间主 agent Run/)
+    assert.equal(requests.length, 0)
+    const first = await worker.request('workspace.projectLead', { projectId: 'p1', revision: 0, mode: 'existing', handle: projectSession.handle, runId: 'run_owner' })
+    assert.equal(first.binding.runId, 'run_old')
+    assert.equal(first.binding.takeover?.state, 'waiting')
+    assert.ok(requests[0].prompt.includes('$orca-project-coordinator'))
+    assert.ok(requests[0].prompt.includes('project-lead-bind'))
+    assert.ok(requests[0].subject?.includes('接管项目主会话'))
+    assert.equal(JSON.stringify(first).includes('tokenHash'), false)
+    const snapshot = await worker.request('project.read', { projectId: 'p1' })
+    assert.equal(JSON.stringify(snapshot).includes('tokenHash'), false)
+    assert.equal(JSON.stringify(host.data().storage).includes(tokenFrom(requests[0].prompt)), false)
+    await assert.rejects(() => choose(projectSession.handle), /已发起/)
+    const switched = await choose(replacement.handle)
+    await assert.rejects(() => bind(switched.binding.revision, 0, 'run_replaced'), /接管凭据/)
+    await assert.rejects(() => bind(switched.binding.revision, 1, 'run_taken'), /已绑定其他项目/)
+    await assert.rejects(() => bind(switched.binding.revision, 1, 'run_owner'), /独立的项目 Run/)
+    await assert.rejects(() => bind(switched.binding.revision, 1, 'run_wrong_identity', projectSession.handle), /不属于当前会话/)
+    const cancelled = await worker.request('project.lead', { projectId: 'p1', revision: switched.binding.revision, mode: 'cancel' })
+    assert.equal(cancelled.binding.takeover, undefined)
+    await assert.rejects(() => bind(cancelled.binding.revision, 1, 'run_cancelled'), /接管凭据/)
+    await choose(projectSession.handle)
+    await c.store.mutate('p1', undefined, p => { p.takeover!.expiresAt = new Date(Date.now() - 1).toISOString() })
+    const expired = await read()
+    assert.equal(expired.binding.takeover?.state, 'expired')
+    await assert.rejects(() => bind(expired.binding.revision, 2, 'run_expired'), /接管凭据/)
+    const final = await choose(replacement.handle)
+    sessions = [old, projectSession]
+    await assert.rejects(() => bind(final.binding.revision, 3, 'run_next'), /不在线/)
+    sessions.push(replacement)
+    const bound = await bind(final.binding.revision, 3, 'run_next')
+    assert.equal(bound.project?.runId, 'run_next')
+    assert.equal(bound.lead?.takeover, undefined)
+    assert.equal(bound.lead?.session?.title, replacement.title)
+    assert.deepEqual(bound.project?.tasks, p.tasks)
+    await c.flush('p1')
+    assert.equal(notices.filter(n => n.run === 'run_old' && n.body.includes('停止派活') && n.body.includes(replacement.title)).length, 1)
+    assert.deepEqual(notices.filter(n => n.run === 'run_next').map(n => n.body), ['给当前项目主会话'])
+    await bind(final.binding.revision, 3, 'run_next')
+    await c.flush('p1')
+    assert.equal(notices.length, 2)
+    sessions = []
+    const offline = (await read()).binding.session
+    assert.equal(offline?.online, 'offline'); assert.equal(offline?.title, replacement.title)
+  } finally { c.stop(); await worker.deactivate() }
+})
+
+test('project lead new uses the shared template and an unavailable workspace blocks launch', async () => {
+  const launches: string[][] = [], fakeCli = new OrcaRuntime(async () => 'never-start-a-real-process')
+  ;(fakeCli as any).call = async (args: string[]) => {
+    launches.push(args)
+    return { outcome: { kind: 'structured', sessionId: 'fake-' + launches.length }, prompt: { outcome: 'journaled' } }
+  }
+  const host = mockHost({ storage: { 'project:p1': fresh(projectRef) as any }, results: {
+    'workspace.list': { workspaces: [testWorkspace], truncated: false }, 'agents.list': { agents: [] }
+  } })
+  let c!: ReturnType<typeof createCoordinator>, ref = projectRef
+  const worker = await mountWorker({ default: api => { c = createCoordinator(api, {
+    projects: async () => [ref], launchMain: fakeCli.launchMain.bind(fakeCli),
+    targets: async () => ({ sessions: [], workspaces: [{ workspace: projectWorkspaceId, name: '本项目', path: ref.path }] })
+  }) } }, { host })
+  const read = () => worker.request('project.lead', { projectId: ref.id })
+  const launch = async (agent?: string) => worker.request('project.lead', { projectId: ref.id, revision: (await read()).binding.revision, mode: 'new', ...(agent ? { agent } : {}) })
+  try {
+    assert.equal((await read()).defaultAgent, projectLeadDefaults.agent)
+    for (const choice of [undefined, 'codex', 'opencode']) {
+      const result = await launch(choice)
+      assert.equal(result.binding.takeover?.target.handle, 'orca_session_id:fake-' + launches.length)
+      assert.equal(result.binding.takeover?.state, 'waiting')
+      const argv = launches.at(-1)!, agent = choice ?? projectLeadDefaults.agent
+      const flag = (k: string) => argv.includes('--' + k) ? argv[argv.indexOf('--' + k) + 1] : undefined
+      assert.equal(flag('agent'), agent)
+      assert.equal(flag('model'), choice ? undefined : 'claude-opus-5-5')
+      assert.equal(flag('effort'), choice ? undefined : 'xhigh')
+      assert.equal(flag('surface'), 'chat')
+      assert.equal(flag('worktree'), projectWorkspaceId)
+      await assert.rejects(() => launch(choice), /已发起/)
+    }
+    await c.store.mutate(ref.id, undefined, project => { project.takeover!.state = 'sending' })
+    await c.start()
+    assert.equal((await read()).binding.takeover?.state, 'uncertain')
+    await assert.rejects(() => launch('opencode'), /已发起/)
+    assert.equal(launches.length, 3)
+    ref = { ...ref, workspace: '' }
+    host.respond('workspace.list', { workspaces: [], truncated: false })
+    assert.ok((await read()).workspaceError?.includes('没有工作区'))
+    await assert.rejects(() => launch(), /没有工作区/)
+    assert.equal(launches.length, 3)
+  } finally { c.stop(); await worker.deactivate() }
+})
 
 for (const runId of ['', 'run_old']) test(`takeover can be replaced and cancelled while sending, old credentials stay invalid (${runId || 'unbound'})`, async () => {
   const other = { ...session, handle: 'orca_session_id:other', title: '另一个会话' }

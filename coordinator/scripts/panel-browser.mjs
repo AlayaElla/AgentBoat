@@ -62,6 +62,11 @@ async function setup(options = {}) {
     if (options.twoWaitingAgents) live.agents.push({ id: 'agent-chat', projectId: 'p1', agent: 'claude', role: 'session', state: 'need', title: '等待设计决定', since: now - 120000, workspaceId: 'identity:chat-workspace' });
     const workspace = { revision: 1, runId: options.unbound ? '' : 'run_main', ...(!options.unbound ? { session: { handle: 'main', agent: 'claude', title: '统筹会话', online: 'online' } } : {}) };
     const sessions = ['甲', '乙'].map((name, i) => ({ handle: 'session-' + i, title: name + '会话', workspace: 'identity:test', workspaceName: '示例工作区', path: '/test/工作区 with spaces', agent: i ? 'codex' : 'claude', online: 'online' }));
+    const projectSessions = [{ ...sessions[0], handle: 'project-session-0', title: '当前设计会话' },
+      { ...sessions[1], handle: 'project-session-1', title: '编码会话' },
+      { ...sessions[1], handle: 'project-session-2', title: '审查会话', agent: 'opencode' }];
+    const binding = p => ({ revision: p.revision, runId: p.runId, ...(p.runId && p.activeSession ? { session: p.activeSession } : {}), ...(p.takeover ? { takeover: p.takeover } : {}) });
+    if (options.projectLead) project.activeSession = projectSessions[0];
     const registered = () => projects.filter(p => !window.fixture.removedProjects?.includes(p.ref.id));
     const attention = () => registered().flatMap(p => p.tasks.flatMap(t => {
       const base = { projectId: p.ref.id, taskId: t.id, title: t.title };
@@ -89,7 +94,24 @@ async function setup(options = {}) {
           delete window.fixture.delayProject;
           await new Promise(r => { window.fixture.finishRead = r; });
         }
-        return clone({ project: projects.find(p => p.ref.id === input.projectId) ?? null, projects: projects.map(p => p.ref), workspaceTarget: window.fixture.workspaceTarget, mainAgent: window.fixture.mainAgent });
+        const p = projects.find(p => p.ref.id === input.projectId);
+        return clone({ project: p ?? null, lead: p ? binding(p) : undefined, projects: projects.map(p => p.ref), workspaceTarget: window.fixture.workspaceTarget });
+      }
+      if (name === 'project.lead') {
+        const p = projects.find(p => p.ref.id === input.projectId);
+        if (input.mode) {
+          if (p.revision !== input.revision) throw Error('项目已更新');
+          if (window.fixture.delayProjectSwitch) {
+            window.fixture.delayProjectSwitch = false;
+            await new Promise(r => { window.fixture.finishProjectSwitch = r; });
+          }
+          p.revision++;
+          if (input.mode === 'cancel') delete p.takeover;
+          else p.takeover = { id: String(p.revision), target: input.mode === 'new' ? { title: '新的 ' + input.agent + ' 会话' } : projectSessions.find(s => s.handle === input.handle),
+            state: 'waiting', expiresAt: new Date(Date.now() + 600000).toISOString() };
+        }
+        const workspaceError = window.fixture.workspaceTarget.error;
+        return clone({ binding: binding(p), defaultAgent: 'claude', sessions: workspaceError ? [] : projectSessions, ...(workspaceError ? { workspaceError } : {}) });
       }
       if (name === 'project.openMain') {
         if (window.fixture.delayOpen) await new Promise(r => { window.fixture.finishOpen = r; });
@@ -457,14 +479,29 @@ try {
       assert.deepEqual(await page.evaluate(() => fixture.calls.filter(c => c.name === 'project.openMain')), [{ name: 'project.openMain', input: { projectId: 'p1' } }]);
     });
   }
-  await setup();
-  await test('project workspace opens with no bound Run and unreadable conversation count', async () => {
-    await page.evaluate(() => { fixture.project.runId = ''; delete fixture.workspaceTarget.multipleConversations; });
-    await project();
-    assert.equal(await page.getByRole('button', { name: '打开主会话', exact: true }).isEnabled(), true);
-    await page.getByRole('button', { name: '打开主会话', exact: true }).click();
-    await page.getByRole('status').filter({ hasText: '已打开项目所在的工作区' }).waitFor();
-    assert.equal((await page.getByRole('status').allTextContents()).some(t => t.includes('点一下主会话的标签')), false);
+  await setup({ width: 400 });
+  await test('an unbound project has create and bind actions in the header and empty inbox', async () => {
+    await page.evaluate(() => { fixture.project.runId = ''; fixture.project.tasks = []; });
+    await page.locator('[data-project=p1] .pcard-h').click();
+    const panel = page.getByRole('tabpanel');
+    await panel.getByText('这个项目还没有主会话').waitFor();
+    const create = page.getByRole('button', { name: '新建主会话', exact: true });
+    const bind = page.getByRole('button', { name: '绑定已有会话', exact: true });
+    assert.equal(await create.count(), 2); assert.equal(await bind.count(), 2);
+    assert.equal(await create.first().evaluate(b => b.classList.contains('primary')), true);
+    assert.equal(await page.getByRole('button', { name: '打开主会话', exact: true }).count(), 0);
+    if (process.env.PROJECT_LEAD_SCREENSHOT_DIR) await page.screenshot({ path: path.join(process.env.PROJECT_LEAD_SCREENSHOT_DIR, 'project-lead-empty.png') });
+    await panel.getByRole('button', { name: '绑定已有会话' }).click();
+    await page.getByRole('region', { name: '在线会话' }).getByText('编码会话').waitFor();
+    await page.getByRole('button', { name: '‹ 返回' }).click();
+    await create.first().click();
+    await page.getByRole('button', { name: '新开一个主会话' }).waitFor();
+    await page.evaluate(() => { fixture.workspaceTarget = { error: '这个项目当前没有工作区' }; fixture.emit(); });
+    await page.getByText('这个项目当前没有工作区', { exact: true }).waitFor();
+    assert.equal(await page.getByRole('button', { name: '新开一个主会话' }).isDisabled(), true);
+    await page.getByRole('button', { name: '‹ 返回' }).click();
+    assert.equal(await create.first().isDisabled(), true); assert.equal(await bind.last().isDisabled(), true);
+    assert.equal(await page.locator('#panel').evaluate(e => e.scrollWidth <= e.clientWidth), true);
   });
   for (const reason of ['项目工作区已被移除或不可用', '工作区列表未完整返回，请刷新后重试', 'Orca: workspace inventory unavailable']) {
     await setup();
@@ -479,14 +516,35 @@ try {
       await page.waitForFunction(() => [...document.querySelectorAll('button')].some(b => b.textContent === '打开主会话' && !b.disabled));
     });
   }
-  await setup();
-  await test('project settings show recorded agent type and unknown without a record', async () => {
-    await project(); await page.getByRole('button', { name: '项目设置', exact: true }).click();
-    await page.getByText('项目主 agent：未知', { exact: true }).waitFor();
-    for (const [value, label] of [['claude', 'Claude'], ['codex', 'Codex']]) {
-      await page.evaluate(value => { fixture.mainAgent = value; fixture.emit(); }, value);
-      await page.getByText('项目主 agent：' + label, { exact: true }).waitFor();
-    }
+  await setup({ projectLead: true, width: 1040 });
+  await test('project lead shows current and online sessions, prevents duplicate clicks and allows reselect and cancel', async () => {
+    await project();
+    await page.getByText('Claude · 当前设计会话 · 在线', { exact: true }).waitFor();
+    assert.equal(await page.getByRole('button', { name: '打开主会话', exact: true }).count(), 1);
+    await page.getByRole('button', { name: '切换主会话', exact: true }).click();
+    const sessions = page.getByRole('region', { name: '在线会话' }), buttons = sessions.getByRole('button', { name: '换成它' });
+    await sessions.getByText('当前主会话').waitFor();
+    assert.equal(await buttons.count(), 2);
+    await sessions.getByText('OpenCode', { exact: true }).waitFor();
+    await page.evaluate(() => { fixture.delayProjectSwitch = true; });
+    await buttons.first().evaluate(button => { button.click(); button.click(); });
+    await page.waitForFunction(() => !!fixture.finishProjectSwitch);
+    const busy = page.locator('button[aria-busy=true]');
+    assert.equal(await busy.textContent(), '处理中…'); assert.equal(await busy.isDisabled(), true);
+    await page.evaluate(() => fixture.finishProjectSwitch());
+    await page.getByText('正在等 编码会话 接管，还剩 10 分钟', { exact: true }).waitFor();
+    if (process.env.PROJECT_LEAD_SCREENSHOT_DIR) await page.screenshot({ path: path.join(process.env.PROJECT_LEAD_SCREENSHOT_DIR, 'project-lead-settings.png') });
+    await buttons.last().click();
+    await page.getByText('正在等 审查会话 接管，还剩 10 分钟', { exact: true }).waitFor();
+    await page.getByRole('button', { name: '取消', exact: true }).click();
+    await page.getByRole('button', { name: '取消', exact: true }).waitFor({ state: 'detached' });
+    const select = page.getByRole('combobox', { name: 'Agent', exact: true });
+    assert.equal(await select.inputValue(), 'claude');
+    await select.selectOption('codex');
+    await page.getByRole('button', { name: '新开一个主会话', exact: true }).click();
+    await page.getByText('正在等 新的 codex 会话 接管，还剩 10 分钟', { exact: true }).waitFor();
+    assert.deepEqual(await page.evaluate(() => fixture.calls.filter(c => c.name === 'project.lead' && c.input.mode).map(c => [c.input.mode, c.input.handle ?? c.input.agent ?? null])),
+      [['existing', 'project-session-1'], ['existing', 'project-session-2'], ['cancel', null], ['new', 'codex']]);
   });
   await setup();
   await test('shared actions immediately show submission feedback and respect reduced motion', async () => {

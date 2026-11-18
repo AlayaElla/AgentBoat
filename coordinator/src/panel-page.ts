@@ -1,7 +1,7 @@
 import type {} from 'orca/frame'
 import './protocol'
-import { agentName, compareAgentActivity, groupedAttention, isProjectShared, isRecentAgent, labels, taskState, scopes, statuses, connectionStates, roles, mainAgentStates } from './model'
-import type { Acceptance, Attention, Overview, Project, Task, ProjectWorkspace } from './model'
+import { agents, agentName, compareAgentActivity, groupedAttention, isProjectShared, isRecentAgent, labels, taskState, scopes, statuses, connectionStates, roles, mainAgentStates } from './model'
+import type { Acceptance, AgentSession, Attention, LeadSwitch, MainTakeover, Overview, Project, ProjectLead, Task, ProjectWorkspace, WorkspaceBinding } from './model'
 import type { FeedbackItem } from './store'
 import type { AgentActivity, AgentsSnapshot, MainAgentActivity } from './model'
 import type { LinksSnapshot, SharedReport, Sharing } from './links'
@@ -14,7 +14,8 @@ const root = document.getElementById('panel')!
 const req = (name: string, input?: any): Promise<any> => input === undefined
   ? orca.plugin.request(name as any)
   : orca.plugin.request(name as any, JSON.parse(JSON.stringify(input)))
-let all: Overview, live: AgentsSnapshot = { ok: false, at: 0, agents: [] }, current: Project | null = null, projectLead = ''
+let all: Overview, live: AgentsSnapshot = { ok: false, at: 0, agents: [] }, current: Project | null = null
+let projectLead: WorkspaceBinding | undefined, projectLeadPanel: ProjectLead | undefined
 let workspaceTarget: ProjectWorkspace | undefined
 let page: Page = { kind: 'home' }, stack: { page: Page; y: number }[] = [], opened: Record<string, boolean> = { self: true }
 let wideInbox = false
@@ -22,7 +23,7 @@ const splitInbox = () => wideInbox && !!page.inboxRow
 const showHome = () => page.kind === 'home' || splitInbox()
 let drafts: Record<string, Record<string, Draft>> = {}, form: Record<string, any> = {}, detail: any, targets: any
 const inboxBatches = new Map<string, InboxBatch>()
-let error = '', notice = '', busy = false, more = false, tab = 'inbox', epoch = 0
+let error = '', notice = '', busy = false, more = false, tab = 'inbox', epoch = 0, pageLoad = 0
 let actionIds: Record<string, number> = {}, clickedAction = '', busyAction = ''
 let persistChain: Promise<unknown> = Promise.resolve()
 const persist = (key: string, value: any) => {
@@ -99,21 +100,23 @@ function tabs() {
     root.querySelector<HTMLElement>('[role=tab][aria-selected=true]')?.focus()
   } }, [['inbox', '待处理'], ['tasks', '任务'], ['agents', 'Agent'], ['messages', '消息']].map(([v, text]) => el('button', { type: 'button', role: 'tab', class: 'tab', tabindex: tab === v ? 0 : -1, 'aria-selected': String(tab === v), onclick: () => { tab = v; render() } }, text)))
 }
-async function act(work: () => Promise<void>) {
+async function act(work: () => Promise<void>, completionNotice = true) {
   if (busy) return
   busy = true; busyAction = clickedAction; error = ''; notice = ''; render()
-  try { await work(); if (!notice) notice = '已完成' } catch (e) { error = e instanceof Error ? e.message : '未完成，请刷新核对；不要重复发送' }
+  try { await work(); if (completionNotice && !notice) notice = '已完成' } catch (e) { error = e instanceof Error ? e.message : '未完成，请刷新核对；不要重复发送' }
   finally { busy = false; busyAction = ''; render() }
 }
 async function loadPage() {
-  const n = epoch, p = page
-  const [snapshot, connection, sessions] = await Promise.all([
+  const n = epoch, p = page, request = ++pageLoad
+  const [snapshot, connection, sessions, leadPanel] = await Promise.all([
     p.projectId ? req('project.read', { projectId: p.projectId }) : null,
     p.kind === 'connection' && p.id ? req('workspace.connections', { operation: 'read', connectionId: p.id }) : null,
-    p.kind === 'main' ? req('workspace.agent.targets') : null
+    p.kind === 'main' ? req('workspace.agent.targets') : null,
+    p.kind === 'project-settings' && p.projectId ? req('project.lead', { projectId: p.projectId }) : undefined
   ])
-  if (n !== epoch) return
-  current = snapshot?.project ?? null; projectLead = snapshot?.mainAgent ?? ''; workspaceTarget = snapshot?.workspaceTarget; detail = connection; targets = sessions
+  if (n !== epoch || request !== pageLoad) return
+  current = snapshot?.project ?? null; projectLead = snapshot?.lead; projectLeadPanel = leadPanel
+  workspaceTarget = snapshot?.workspaceTarget; detail = connection; targets = sessions
   if (current) reconcile(current)
 }
 async function go(next: Page, reset = false) {
@@ -411,7 +414,7 @@ function projectPage() {
   if (!current) return callout('正在读取项目…')
   const p = current
   const reason = workspaceTarget && 'error' in workspaceTarget ? workspaceTarget.error : !workspaceTarget ? '正在查找项目工作区…' : ''
-  if (page.kind === 'project-settings') return [section('分工', small(`项目主 agent：${agentName(projectLead)}`), ...Object.entries(roles).map(([k, title]) => select(title, { claude: 'Claude', codex: 'Codex' }, p.roles[k as keyof typeof roles])), button('保存', () => act(async () => { const s = await req('project.settings', { projectId: p.ref.id, revision: p.revision, roles: { design: form['设计'], code: form['代码'], review: form['审查'] } }); current = s.project; notice = '已保存' }), 'primary')),
+  if (page.kind === 'project-settings') return [projectLeadSettings(p.ref.id), section('分工', ...Object.entries(roles).map(([k, title]) => select(title, { claude: 'Claude', codex: 'Codex' }, p.roles[k as keyof typeof roles])), button('保存', () => act(async () => { const s = await req('project.settings', { projectId: p.ref.id, revision: p.revision, roles: { design: form['设计'], code: form['代码'], review: form['审查'] } }); current = s.project; if (projectLeadPanel) projectLeadPanel.binding.revision = s.project.revision; notice = '已保存' }), 'primary')),
     section('开放给了谁', peers().filter(peer => peer.state === 'active' && isProjectShared(p, peer)).map(peer => small(peer.name))), small(`目录：${p.ref.path}`), button('导出记录', () => orca.files?.saveAs({ suggestedName: 'project-record.json', mimeType: 'application/json', data: JSON.stringify(p, null, 2) })),
     button(p.hidden ? '恢复显示' : '隐藏项目', () => act(async () => { await req('project.visibility', { projectId: p.ref.id, revision: p.revision, hidden: !p.hidden }); delete drafts[p.ref.id]; persist('panel.drafts', drafts); await go({ kind: 'home' }, true); await refresh() })),
     section('删除项目', callout('先导出记录，再从 Orca 移除项目并删除工作间记录，磁盘文件保留。有打开的会话时会拒绝。'), check('确认删除这个项目的全部工作间记录', !!form.delete, v => { form.delete = v; render() }), button('删除项目', () => act(async () => { const result = await req('project.delete', { projectId: p.ref.id, revision: p.revision, confirm: p.ref.id }); delete drafts[p.ref.id]; persist('panel.drafts', drafts); await go({ kind: 'home' }, true); await refresh(); notice = `已删除，记录已导出：${result.exportPath}` }), 'danger', !form.delete))]
@@ -425,6 +428,16 @@ function projectPage() {
     })
     return [inline ? null : el('h2', { class: 'h1 any' }, t.title), tag(labels[taskState(t)]), small(`记录里派给了 ${t.executions.map(e => agentName(e.agent)).join('、') || '尚未分派'}`), section('目标', el('p', { class: 'any' }, t.goal)), section('进展', el('p', { class: 'any' }, t.progress)), section('现在谁在做', !live.ok ? null : projectAgents(p.ref.id).filter(a => a.taskId === t.id && a.state !== 'done').length ? projectAgents(p.ref.id).filter(a => a.taskId === t.id && a.state !== 'done').map(a => agentRow(a, p.ref.name)) : small('没有看到 agent 在做这个任务')), feedbackCards([t], inline ? '待处理' : undefined), section('成果', artifacts, reason && t.artifacts.some(a => !/^https?:/i.test(a.url)) ? small(reason) : null), section('来源消息', p.events.filter(e => t.sourceIds.includes(e.id) || e.taskId === t.id).map(e => card(e.text))), section('记录', ...t.decisions.filter(d => d.answer !== undefined).map(d => small(`${d.question}：${d.answer}`)), ...t.acceptance.filter(a => a.status !== 'pending').map(a => small(`${a.title}：${a.status === 'passed' ? '已通过' : '需要修改'} · ${a.history.at(-1)?.note || ''}`)))]
   }
+  const manage = (sectionName: '在线会话' | '新会话') => async () => {
+    await go({ kind: 'project-settings', projectId: p.ref.id })
+    const target = root.querySelector<HTMLElement>(`section[aria-label="${sectionName}"]`)
+    target?.scrollIntoView({ block: 'nearest' })
+    target?.querySelector<HTMLElement>('select, button:not(:disabled)')?.focus({ preventScroll: true })
+  }
+  const unboundActions = () => row(button('新建主会话', manage('新会话'), 'primary sm', !!reason, reason),
+    button('绑定已有会话', manage('在线会话'), 'sm', !!reason, reason))
+  const inbox = p.tasks.filter(t => t.phase === 'blocked' || t.decisions.some(d => d.answer === undefined) || t.phase === 'ready' && t.acceptance.some(a => a.status === 'pending'))
+  const emptyUnbound = !p.runId && tab === 'inbox' && !inbox.length
   const openMain = button('打开主会话', () => act(async () => {
     notice = ''
     try {
@@ -432,7 +445,8 @@ function projectPage() {
       notice = result.multipleConversations ? '已打开项目所在的工作区；如果有多个对话，点一下主会话的标签' : '已打开项目所在的工作区'
     } catch (e) { await loadPage().catch(() => {}); throw e }
   }), 'text sm', !!reason, reason)
-  return [row(el('h2', { class: 'h1 grow trunc' }, p.ref.name), openMain, button('项目设置', () => go({ kind: 'project-settings', projectId: p.ref.id }), 'text sm')), reason && reason !== error ? callout(reason) : null, tabs(), el('div', { role: 'tabpanel', class: 'stack g3' }, tab === 'agents' ? agentsPage(p.ref.id) : tab === 'tasks' ? p.tasks.map(t => item(t.title, `${labels[taskState(t)]} · ${relative(t.updatedAt)}`, () => go({ kind: 'task', projectId: p.ref.id, id: t.id }))) : tab === 'messages' ? [section('通知', p.deliveries.map(d => card(d.subject, small(`${d.state === 'uncertain' ? '待核对，不会自动重发' : d.state === 'sent' ? '已通知' : '待通知'}`), small(d.error || ''), d.state === 'pending' ? button('发送通知', () => act(async () => { await req('project.deliver', { projectId: p.ref.id, deliveryId: d.id }); await refresh() })) : null))), section('来源消息', p.events.map(e => card(e.text)))] : feedbackCards(p.tasks.filter(t => t.phase === 'blocked' || t.decisions.some(d => d.answer === undefined) || t.phase === 'ready' && t.acceptance.some(a => a.status === 'pending'))))]
+  return [row(el('h2', { class: 'h1 grow trunc' }, p.ref.name), p.runId ? openMain : unboundActions(), button('项目设置', () => go({ kind: 'project-settings', projectId: p.ref.id }), 'text sm')),
+    !emptyUnbound || projectLead?.takeover ? section('主会话', p.runId || projectLead?.takeover ? button('切换主会话', manage('在线会话'), 'text sm') : null, el('p', { class: 'any' }, leadDescription(projectLead, '主会话')), pendingLead(projectLead?.takeover)) : null, reason && reason !== error ? callout(reason) : null, tabs(), el('div', { role: 'tabpanel', class: 'stack g3' }, tab === 'agents' ? agentsPage(p.ref.id) : tab === 'tasks' ? p.tasks.map(t => item(t.title, `${labels[taskState(t)]} · ${relative(t.updatedAt)}`, () => go({ kind: 'task', projectId: p.ref.id, id: t.id }))) : tab === 'messages' ? [section('通知', p.deliveries.map(d => card(d.subject, small(`${d.state === 'uncertain' ? '待核对，不会自动重发' : d.state === 'sent' ? '已通知' : '待通知'}`), small(d.error || ''), d.state === 'pending' ? button('发送通知', () => act(async () => { await req('project.deliver', { projectId: p.ref.id, deliveryId: d.id }); await refresh() })) : null))), section('来源消息', p.events.map(e => card(e.text)))] : emptyUnbound ? card(el('p', {}, '这个项目还没有主会话'), unboundActions()) : feedbackCards(inbox))]
 }
 function sharingFields(p: LinksSnapshot['peers'][number], suggestion?: Sharing) {
   const draft: Sharing = form.sharing ??= suggestion ?? { scope: p.scope, allProjects: p.allProjects === true, projectIds: [...p.projectIds] }
@@ -560,18 +574,48 @@ function connectionPage() {
     a ? section('最近往来', a.entries.map((e: any) => card(`${e.direction === 'incoming' ? '收到' : '发出'} · ${e.task.status.state}`, small(e.task.status.timestamp)))) : null,
     c ? [check('确认删除这个连接的设置、凭据和往来记录', !!form.delete, v => { form.delete = v; render() }), button('删除连接', () => act(async () => { await req('workspace.connections', { operation: 'delete', connectionId: c.id, confirm: true }); await go({ kind: 'connections' }); await refresh() }), 'danger', !form.delete)] : null]
 }
+function leadDescription(binding: WorkspaceBinding | undefined, label: string) {
+  const s = binding?.session
+  return s ? [agentName(s.agent), s.title, label === '主会话' && s.online === 'unknown' ? '状态未知' : mainAgentStates[s.online].label].filter(Boolean).join(' · ')
+    : binding?.runId ? `已绑定${label}` : `还没有${label}`
+}
+type SwitchChoice = Omit<LeadSwitch, 'revision'>
+function pendingLead(t: MainTakeover | undefined, cancel?: () => unknown) {
+  if (!t) return null
+  const minutes = Math.max(0, Math.ceil((Date.parse(t.expiresAt) - Date.now()) / 60000))
+  return card(callout(minutes ? t.error || `正在等 ${t.target.title || agentName(t.target.agent)} 接管，还剩 ${minutes} 分钟` : '对方没在有效期内完成绑定',
+    !minutes || t.error ? 'danger' : ''), cancel ? button('取消', cancel) : null)
+}
+function leadChoices(w: WorkspaceBinding, sessions: AgentSession[], choose: (input: SwitchChoice) => unknown, project = false) {
+  const label = project ? '主会话' : '主 agent'
+  return [pendingLead(w.takeover, () => choose({ mode: 'cancel' })),
+    section('在线会话', sessions.map(s => card(row(el('span', { class: 'grow any' }, s.title || agentName(s.agent)),
+      w.session?.handle === s.handle ? tag(`当前${label}`) : button(project || w.runId ? '换成它' : '设为主 agent', () => choose({ mode: 'existing', handle: s.handle }), 'primary')),
+    small(project ? agentName(s.agent) : `${agentName(s.agent)} · ${s.workspaceName} · ${s.path}`))),
+    !sessions.length ? small('没有可接管的在线会话') : null)]
+}
+function projectLeadSettings(id: string) {
+  const data = projectLeadPanel
+  if (!data) return section('主会话', callout('正在读取主会话…'))
+  const w = data.binding
+  const choose = (input: SwitchChoice) => act(async () => {
+    projectLeadPanel = await req('project.lead', { projectId: id, revision: w.revision, ...input })
+    await loadPage()
+  }, false)
+  return section('主会话', el('p', { class: 'any' }, leadDescription(w, '主会话')), leadChoices(w, data.sessions, choose, true),
+    section('新会话', select('Agent', agents, data.defaultAgent),
+      button('新开一个主会话', () => choose({ mode: 'new', agent: form.Agent }), 'primary', !!data.workspaceError),
+      data.workspaceError ? callout(data.workspaceError) : null))
+}
 function mainPage() {
-  const w = all.workspace, t = w.takeover, workspaces = targets?.workspaces ?? []
-  const minutes = t ? Math.max(0, Math.ceil((Date.parse(t.expiresAt) - Date.now()) / 60000)) : 0
-  const switchMain = async (input: any) => {
+  const w = all.workspace, workspaces = targets?.workspaces ?? []
+  const switchMain = async (input: SwitchChoice) => {
     error = ''
     try { await req('workspace.agent.switch', { revision: all.workspace.revision, ...input }) }
     catch (e) { error = (e as Error).message }
     await refresh()
   }
-  return [el('p', {}, w.session ? `${agentName(w.session.agent)} · ${w.session.title} · ${mainAgentStates[w.session.online].label}` : w.runId ? '已绑定主 agent' : '还没有主 agent'),
-    t ? card(callout(minutes ? t.error || `正在等 ${t.target.title} 接管，还剩 ${minutes} 分钟` : '对方没在有效期内完成绑定', !minutes || t.error ? 'danger' : ''), button('取消', () => switchMain({ mode: 'cancel' }))) : null,
-    section('在线会话', (targets?.sessions ?? []).map((s: any) => card(row(el('span', { class: 'grow any' }, s.title), w.session?.handle === s.handle ? tag('当前主 agent') : button(w.runId ? '换成它' : '设为主 agent', () => switchMain({ mode: 'existing', handle: s.handle }), 'primary')), small(`${agentName(s.agent)} · ${s.workspaceName} · ${s.path}`))), !targets?.sessions?.length ? small('没有可接管的在线会话') : null),
+  return [el('p', { class: 'any' }, leadDescription(w, '主 agent')), leadChoices(w, targets?.sessions ?? [], switchMain),
     section('新会话', select('工作区', Object.fromEntries(workspaces.map((s: any) => [s.workspace, `${s.name} · ${s.path}`])), workspaces[0]?.workspace ?? ''), select('Agent', { claude: 'Claude', codex: 'Codex' }, 'claude'), button('新开一个主 agent', () => switchMain({ mode: 'new', workspace: form['工作区'], agent: form.Agent }), 'primary', !workspaces.length)),
     el('details', { class: 'fold' }, el('summary', {}, '绑定详情'), el('dl', { class: 'kv' }, Object.entries({ Run: w.runId || '未绑定', 会话: w.session?.handle || '未知', 目录: w.session?.path || '未知', 绑定时间: w.boundAt || '未知', 授权边界: w.securityBoundary || '未知' }).map(([k, v]) => [el('dt', {}, k), el('dd', {}, v)])))]
 }
@@ -631,4 +675,8 @@ async function start() {
   } catch (e) { error = (e as Error).message; render() }
 }
 void start()
-setInterval(() => { if (page.kind === 'main' && all?.workspace.takeover) render() }, 30000)
+setInterval(() => {
+  if (page.kind === 'main' && all?.workspace.takeover ||
+    page.kind === 'project-settings' && projectLeadPanel?.binding.takeover ||
+    page.kind === 'project' && projectLead?.takeover) render()
+}, 30000)

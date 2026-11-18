@@ -51,6 +51,8 @@ export interface MessagingSnapshot extends Messaging { secretSaved: boolean; con
 export interface Project {
   version: 1; ref: ProjectRef; revision: number; runId: string
   mainAgentHandle?: string
+  mainSession?: AgentSession
+  takeover?: StoredTakeover
   hidden?: boolean
   updatedAt?: string
   roles: { design: 'codex' | 'claude'; code: 'codex' | 'claude'; review: 'codex' | 'claude' }
@@ -58,7 +60,8 @@ export interface Project {
 }
 export interface ConnectionState { state: 'off' | 'connecting' | 'connected' | 'error'; message: string }
 export interface Snapshot {
-  mainAgent?: 'claude' | 'codex'
+  mainAgent?: keyof typeof agents
+  lead?: WorkspaceBinding
   workspaceTarget?: ProjectWorkspace
   projects: ProjectRef[]; project: Project | null; runtimeError?: string
 }
@@ -71,6 +74,14 @@ export interface MainTakeover {
   id: string; target: AgentSession; expiresAt: string; state: 'sending' | 'waiting' | 'uncertain' | 'expired'
   error?: string
 }
+export type StoredTakeover = MainTakeover & { tokenHash: string; mode?: 'existing' | 'new' }
+export type LeadSwitch = { revision: number; mode: 'existing' | 'new' | 'cancel'; handle?: string; workspace?: string; agent?: string }
+export interface ProjectLead {
+  binding: WorkspaceBinding
+  sessions: AgentSession[]
+  defaultAgent: string
+  workspaceError?: string
+}
 export interface WorkspaceBinding {
   revision: number; runId: string; session?: AgentSession; boundAt?: string
   projectNames?: string[]; takeover?: MainTakeover
@@ -80,7 +91,7 @@ export interface WorkspaceBinding {
 }
 export interface Workspace extends WorkspaceBinding {
   version: 1; requests: { id: string; fingerprint: string }[]
-  takeover?: MainTakeover & { tokenHash: string }
+  takeover?: StoredTakeover
   retired?: Delivery[]
 }
 export type TaskState = ReturnType<typeof taskState>

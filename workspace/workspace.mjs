@@ -6,6 +6,8 @@ import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import os from 'node:os';
 import { initialize as initializeSkills } from './project-skills.mjs';
+import { agentFlags, launchReceipt, projectLeadDefaults } from './agent-launch.mjs';
+export { launchReceipt } from './agent-launch.mjs';
 
 export const root = fileURLToPath(new URL('../', import.meta.url));
 export const home = path.resolve(process.env.AGENTBOAT_HOME || path.join(os.homedir(), '.agentboat'));
@@ -49,7 +51,7 @@ export function key(value) {
 export function template(id) {
   const value = json(path.join(home, 'templates', `${key(id)}.json`));
   if (id === 'code' && value.mainAgent?.agent === 'claude') {
-    const defaults = json(fileURLToPath(new URL('./templates/code.json', import.meta.url))).mainAgent;
+    const defaults = projectLeadDefaults;
     const model = value.mainAgent.model ?? defaults.model;
     value.mainAgent = { surface: defaults.surface, ...(model === defaults.model ? { effort: defaults.effort } : {}), ...value.mainAgent, model };
   }
@@ -62,9 +64,6 @@ export function template(id) {
   if (!value.mainAgent || !['empty', 'existing', 'clone'].includes(value.source?.kind)) throw new Error('模板缺少 mainAgent 或 source.kind');
   text(value.firstMessage, 'firstMessage');
   return value;
-}
-function agentFlags(role) {
-  return ['--agent', role.agent, ...(role.model ? ['--model', role.model] : []), ...(role.effort ? ['--effort', role.effort] : []), ...(role.surface ? ['--surface', role.surface] : [])];
 }
 export function init() {
   mkdirSync(home, { recursive: true });
@@ -102,9 +101,9 @@ function project(id) {
   const refs = catalog.projects.filter(p => p.id === id);
   if (refs.length !== 1 || refs[0].hostId !== 'local') throw new Error('只支持 Orca 本机登记的项目，请核对完整编号和主机');
   testPath(refs[0].path);
-  const { project, runtimeError } = bridge('read', id);
+  const { project, lead, runtimeError } = bridge('read', id);
   if (runtimeError || !project) throw new Error(runtimeError || '项目已从 Orca 移除');
-  return { ...project, ref: refs[0] };
+  return { ...project, ref: refs[0], ...(lead?.takeover ? { pendingLead: lead.takeover } : {}) };
 }
 function journal(dir, requestId, input, reuse = false) {
   const file = path.join(home, dir, `${key(requestId)}.json`);
@@ -116,14 +115,6 @@ function journal(dir, requestId, input, reuse = false) {
     throw new Error(`请求已执行或结果待核对，先读 ${file}，不要另起 agent`);
   }
   return { record, update: (stage, data = {}) => { Object.assign(record, data, { stage }); save(file, record); } };
-}
-export function launchReceipt(result) {
-  const launch = result.launch ?? result;
-  const handle = launch.outcome?.kind === 'structured' ? (launch.outcome.sessionId && `orca_session_id:${launch.outcome.sessionId}`) : launch.outcome?.handle;
-  if (!handle || !['journaled', 'handed-to-terminal'].includes(launch.prompt?.outcome)) {
-    throw new Error('未确认 agent 收到提示词，请检查日志中的启动回执，不要重复启动');
-  }
-  return handle;
 }
 function initIfNeeded() {
   if (!existsSync(path.join(home, 'requests')) || !existsSync(path.join(home, 'templates/code.json')) || !existsSync(path.join(home, 'memory/.git/index'))) init();
@@ -150,6 +141,9 @@ function currentWorkspaceMain(runId) {
   return main;
 }
 const alreadyBound = p => ({ status: 'already-bound', projectName: p.ref.name, reason: '项目已绑定主 agent' });
+const pendingSwitch = p => p.pendingLead && p.pendingLead.state !== 'expired' && ({
+  status: 'awaiting-project-binding', projectName: p.ref.name, handle: p.pendingLead.target.handle || undefined, reused: true, reason: '项目正在等待主会话接管'
+});
 const launchSettings = ({ agent, model, effort, surface } = {}) => ({ agent, model, effort, surface });
 const bindingWindow = 10 * 60_000;
 function startProjectLead(p, templateId, goal, createJournal) {
@@ -164,7 +158,7 @@ function startProjectLead(p, templateId, goal, createJournal) {
     try { prior = json(file); }
     catch { prior = { stage: 'needs-inspection', error: '启动日志未完整写入，请用原请求核对' }; }
     const at = Date.parse(prior.at) || statSync(file).mtimeMs;
-    if (Date.now() - at < bindingWindow) {
+    if (prior.stage !== 'delegated-to-takeover' && Date.now() - at < bindingWindow) {
       createJournal?.update(prior.stage, { context: prior.context, launched: prior.launched });
       return { status: prior.stage === 'needs-inspection' ? 'needs-inspection' : 'awaiting-project-binding',
         projectName: p.ref.name, handle: prior.handle, ...launchSettings(prior.mainAgent), reused: true, ...(prior.error ? { reason: prior.error } : {}) };
@@ -176,6 +170,8 @@ function startProjectLead(p, templateId, goal, createJournal) {
     initIfNeeded();
     const latest = project(id);
     if (latest.runId) { j.update('already-bound'); return alreadyBound(latest); }
+    const pending = pendingSwitch(latest);
+    if (pending) { j.update('delegated-to-takeover', { handle: pending.handle }); return pending; }
     if (latest.ref.repoId !== p.ref.repoId || latest.ref.workspace !== p.ref.workspace || canonical(latest.ref.path) !== workspaceDirectory) throw new Error('项目身份或工作区已变化，请核对后再操作');
     const t = template(templateId), handle = launchProjectLead(j, t, latest, goal);
     createJournal?.update(j.record.stage, { context: j.record.context, launched: j.record.launched });
@@ -185,6 +181,8 @@ function startProjectLead(p, templateId, goal, createJournal) {
 export function autoProjectLead(id, runId, templateId = 'code') {
   const p = project(id);
   if (p.runId) return alreadyBound(p);
+  const pending = pendingSwitch(p);
+  if (pending) return pending;
   const main = currentWorkspaceMain(runId);
   if (!main.session.path || !existsSync(main.session.path)) throw new Error('无法核对工作间主 agent 的目录，请核对当前绑定');
   const repos = call(['repo', 'list']).repos.filter(r => (r.executionHostId ?? (r.connectionId ? 'ssh' : 'local')) === 'local');

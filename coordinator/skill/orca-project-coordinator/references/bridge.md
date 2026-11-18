@@ -7,6 +7,7 @@
 - `projects`：项目列表。
 - `overview`：`{workspace,attention,projects,hidden,links,connections,machines}`。attention 是待决定、待验收、受阻、返修；执行记录不代表 agent 在线。
 - `read <projectId>`：`{project}`，含 revision、runId、roles、tasks、events、deliveries。
+- `project-lead <projectId>` 读取项目的主会话、待接管状态和在线目标会话。
 - `main-read`：主 agent 绑定；`main-targets`：可接管的在线会话。
 - `connections`、`connection-read <名字>`、`connection-check <名字>`（只做无害查询）、`feishu-read`。
 
@@ -14,7 +15,11 @@
 
 `bind`：`{projectId,revision,requestId,runId}`。
 
-项目写命令自动从当前 Orca 环境附带 caller；未给 runId 时尝试读取当前会话的 Run。Run 与项目绑定一致时，插件记住此调用会话，用于显示 Claude/Codex 类型和打开主会话所在工作区；已有项目在下一次写入时自动补齐。caller 是自报的显示和导航信息，不用于授权；没有记录或前缀无法识别时显示「未知」。
+项目写命令自动从当前 Orca 环境附带 caller；未给 runId 时尝试读取当前会话的 Run。Run 与项目绑定一致时，插件记住此调用会话，用于显示 agent 类型和打开主会话所在工作区；已有项目在下一次写入时自动补齐。普通项目写入的 caller 用于显示和导航，没有记录时显示「未知」。
+
+- 主人要求切换、新开或取消时，已绑定的工作间主 agent 先读 `project-lead <projectId>`，再用 `project-lead-switch`（stdin）传 `{projectId,revision,mode,handle?,agent?}`。revision 取 `binding.revision`。已有会话用 `mode:"existing"` 和该项目在线列表里的 handle。新开用 `mode:"new"`，省略 agent 时用代码项目模板默认设置，也可选 codex 或 opencode。取消用 `mode:"cancel"`。
+- 接到项目接管请求的目标会话先创建自己的协调 Run，再用 `read <projectId>` 取当前 revision，由本会话用 `project-lead-bind`（stdin）传 `{projectId,revision,requestId,runId,token}`。凭据只用于本次接管，10 分钟后失效。绑定后读取项目任务、执行记录和待处理项。
+- 收到项目主会话已切换的通知后，停止承担该项目主会话，把进行中的情况交给新主会话。
 
 `submit`：
 

@@ -115,7 +115,7 @@ cp.execFileSync = (executable, args, options) => {
         }
         s.project.tasks.push(input.task); s.project.revision++; save();
       }
-      return plugin({ project: s.project });
+      return plugin({ project: s.project, lead: s.lead });
     case 'workspace.message':
       if (input.runId !== s.main.runId) throw Error('主 Run 不匹配');
       if (!s.project.messages.some(m => m.requestId === input.requestId)) { s.project.messages.push(input); s.project.revision++; save(); }
@@ -154,6 +154,17 @@ test('first message initializes only its own home, opens a chat and reuses the p
   assert.deepEqual(f.read().project.messages.map(m => m.requestId), ['message-1', 'message-2', 'message-3']);
   assert.deepEqual(f.read().project.roles, f.state.project.roles);
   assert.equal(f.calls().some(args => ['repo add', 'project setup-update'].includes(args.slice(0,2).join(' ')) || args[4] === 'project.settings'), false);
+});
+
+test('an in-flight panel takeover keeps a relayed message queued without opening a second project lead', t => {
+  const f = fakeWorkspace(t);
+  f.state.lead = { takeover: { state: 'waiting', target: { handle: 'orca_session_id:fixture-takeover' } } };
+  f.set();
+  const result = f.message('during-takeover');
+  assert.equal(result.autoLaunch.status, 'awaiting-project-binding');
+  assert.equal(result.autoLaunch.handle, 'orca_session_id:fixture-takeover');
+  assert.equal(f.calls().filter(args => args[0] === 'agent').length, 0);
+  assert.equal(f.read().project.messages.length, 1);
 });
 
 test('auto launch refuses the main directory, duplicate paths, remote or already bound projects and missing workspaces', t => {

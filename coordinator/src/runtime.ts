@@ -7,6 +7,7 @@ import { fail, projectKey } from './store'
 import { readAgents, type AgentsSnapshot } from './agents'
 import type { Project } from './model'
 import type { HostApi } from 'orca/host'
+import { agentFlags, launchReceipt, type AgentLaunch } from '../../workspace/agent-launch.mjs'
 
 const execute = promisify(execFile)
 export interface CoordinatorRuntime {
@@ -14,8 +15,8 @@ export interface CoordinatorRuntime {
   verifyRun(id: string, caller?: string): Promise<void>
   targets(): Promise<{ sessions: AgentSession[]; workspaces: { workspace: string; name: string; path: string }[] }>
   identify(handle: string, runId: string, currentRunId?: string): Promise<AgentSession>
-  requestTakeover(handle: string, prompt: string): Promise<void>
-  launchMain(workspace: string, agent: string, prompt: string): Promise<string>
+  requestTakeover(handle: string, prompt: string, subject?: string): Promise<void>
+  launchMain(workspace: string, agent: string, prompt: string, options?: Omit<AgentLaunch, 'agent'>): Promise<string>
   openOverview(): Promise<void>
   removeProject(ref: ProjectRef, host: HostApi<'worker'>): Promise<void>
   agents(projects: Project[], host: HostApi<'worker'>): Promise<AgentsSnapshot>
@@ -72,17 +73,14 @@ export class OrcaRuntime implements CoordinatorRuntime {
     if (!session || session.online !== 'online') fail('无法核实目标会话在线或身份；请从目标会话调用 main-bind，已关闭时请主人在面板重新选择')
     return session
   }
-  async requestTakeover(handle: string, prompt: string) {
-    await this.call(['orchestration', 'send', '--from', 'plugin:local.project-coordinator', '--to', handle, '--type', 'status', '--subject', '【项目协作】请接管工作间主 agent', '--body', prompt])
+  async requestTakeover(handle: string, prompt: string, subject = '【项目协作】请接管工作间主 agent') {
+    await this.call(['orchestration', 'send', '--from', 'plugin:local.project-coordinator', '--to', handle, '--type', 'status', '--subject', subject, '--body', prompt])
   }
-  async launchMain(workspace: string, agent: string, prompt: string) {
-    const result = await this.call(['agent', 'launch', '--agent', agent, '--worktree', workspace, '--prompt', prompt])
-    const launch = result
-    const handle = launch.outcome?.kind === 'structured'
-      ? (launch.outcome.sessionId ? `orca_session_id:${launch.outcome.sessionId}` : undefined)
-      : launch.outcome?.handle
-    if (!handle || !['journaled', 'handed-to-terminal'].includes(launch?.prompt?.outcome)) fail('启动或提示词回执待核对，不会自动重启')
-    return handle as string
+  async launchMain(workspace: string, agent: string, prompt: string, options?: Omit<AgentLaunch, 'agent'>) {
+    const result = await this.call(['agent', 'launch', ...agentFlags({ agent, ...options }), '--worktree', workspace, '--prompt', prompt])
+    const launch = result.launch ?? result
+    if (options?.surface === 'chat' && launch.outcome?.kind !== 'structured') fail('聊天会话启动回执待核对，不会自动重启')
+    return launchReceipt(launch)
   }
   async openOverview() { await this.call(['plugin', 'open', 'local.project-coordinator', '--panel', 'project-coordinator']) }
   async agents(projects: Project[], host: HostApi<'worker'>) { return readAgents(host, args => this.call(args), projects) }
