@@ -37,6 +37,7 @@ const peer = () => peers().find(p => p.id === page.id)
 const sharesAllProjects = (p: LinksSnapshot['peers'][number]) => p.state === 'active' && p.scope !== 'none' && p.allProjects
 const pending = (p?: string) => groupedAttention(all.attention).filter(a => !p || a.projectId === p)
 const needs = () => live.ok ? live.agents.filter(a => a.state === 'need') : []
+const agentInboxKey = (id: string) => JSON.stringify(['agent', id])
 const total = () => pending().length + needs().length
 const projectCount = (id: string) => pending(id).length + needs().filter(a => a.projectId === id).length
 const projectAgents = (id?: string) => live.ok ? live.agents.filter(a => (!id || a.projectId === id) && isRecentAgent(a)) : []
@@ -188,10 +189,11 @@ function choose(d: Draft) {
   drafts[page.projectId!] ??= {}; drafts[page.projectId!][key(d.taskId, d.kind, d.itemId)] = d
   persist('panel.drafts', drafts)
 }
-function agentRow(a: AgentActivity, projectName?: string) {
+function agentRow(a: AgentActivity, projectName?: string, expanded = false) {
   const duration = a.state === 'done' ? `${relative(a.since)}完成` : `${a.state === 'need' ? '等你' : '工作中'} · ${relative(a.since)}开始`
-  const line = el('div', { class: 'arow' }, dot(a.state === 'need' ? 'need' : a.state === 'work' ? 'work' : 'ok'), el('span', { class: 'none' }, agentName(a.agent)), el('span', { class: 'grow trunc' }, a.title), small(duration))
-  return projectName ? el('article', { class: 'aitem', 'data-st': a.state }, line, small(`${a.role === 'worker' ? 'worker' : '会话'} · ${projectName}`), a.taskTitle && a.taskTitle !== a.title ? small(a.taskTitle) : null) : line
+  const line = el('div', { class: 'arow' }, dot(a.state === 'need' ? 'need' : a.state === 'work' ? 'work' : 'ok'), el('span', { class: 'none' }, agentName(a.agent)), el('span', { class: expanded ? 'grow any' : 'grow trunc' }, a.title), small(duration))
+  const task = expanded ? small(`关联任务 · ${a.taskTitle || '未关联'}`) : a.taskTitle && a.taskTitle !== a.title ? small(a.taskTitle) : null
+  return projectName ? el('article', { class: 'aitem', 'data-st': a.state }, line, small(`${a.role === 'worker' ? 'worker' : '会话'} · ${projectName}`), task) : line
 }
 function agentColumns<T extends AgentActivity>(list: T[], projectName: (a: T) => string) {
   return el('div', { class: 'cols3' }, ['need', 'work', 'done'].map(state => {
@@ -201,6 +203,19 @@ function agentColumns<T extends AgentActivity>(list: T[], projectName: (a: T) =>
 }
 const agentsPage = (id?: string) => live.ok ? agentColumns(projectAgents(id), a => all.projects.find(p => p.ref.id === a.projectId)?.ref.name || '其他项目') : null
 const agentContent = () => [agentsPage(), small('已完成的 agent 保留 24 小时。')]
+function agentNeedContent() {
+  if (!live.ok) return null
+  const agent = live.agents.find(a => agentInboxKey(a.id) === page.inboxRow)
+  if (agent?.state !== 'need') return callout(!agent && live.truncated ? '请刷新后核对这个 Agent' : '已不需要你处理')
+  return [agentRow(agent, all.projects.find(p => p.ref.id === agent.projectId)?.ref.name || '其他项目', true),
+    small('这里暂不能查看或回答聊天问题，请在打开的会话里回答。'),
+    row(button('打开会话去回答', () => act(async () => {
+      try {
+        const result = await req('workspace.agent.open', { id: agent.id })
+        notice = result.focusedTerminal ? '已打开会话' : '已打开工作区，请选择会话后回答'
+      } catch (e) { await refresh(true); throw e }
+    }), 'primary'), button('全部 agent', () => go({ kind: 'agents' }), 'text sm'))]
+}
 function projectCard(p: { id: string; name: string; count: number; agents?: AgentActivity[]; note?: string; summary?: string }, open: () => void) {
   const agents = p.agents ?? [], unfinished = agents.filter(a => a.state !== 'done').sort(compareAgentActivity).slice(0, 3), done = agents.filter(a => a.state === 'done').length
   return el('article', { class: 'pcard', 'data-project': p.id },
@@ -285,11 +300,11 @@ function inboxDetail() {
   close.setAttribute('aria-label', '关闭详情')
   return el('section', { id: 'inbox-detail', class: 'inbox-detail', 'aria-label': '待处理详情', tabindex: '-1', 'data-focus': 'inbox-detail' },
     el('div', { class: 'row g2 inbox-detail-top' }, close, el('h2', { class: 'h1 grow trunc' }, title)),
-    el('div', { class: 'inbox-detail-body stack g3', 'data-detail-for': page.inboxRow }, agent ? agentContent() : projectPage()))
+    el('div', { class: 'inbox-detail-body stack g3', 'data-detail-for': page.inboxRow }, agent ? agentNeedContent() : projectPage()))
 }
 function home() {
   const attention = pending()
-  const entries = [...needs().map(a => inboxAction(a.title, `agent 等你 · ${agentName(a.agent)}`, { kind: 'agents' }, JSON.stringify(['agent', a.id]), dot('need'))),
+  const entries = [...needs().map(a => inboxAction(a.title, `agent 等你 · ${agentName(a.agent)}`, { kind: 'agents' }, agentInboxKey(a.id), dot('need'))),
     ...attention.map(a => inboxRow(a, a.kind === 'review' ? `${a.count} 项成果等你验收` : a.kind === 'decision' ? '待决定' : '受阻', a.kind))]
   for (const [projectId, batch] of inboxBatches) for (const [taskId, selected] of batch.tasks) {
     if (!attention.some(a => a.kind === 'review' && a.projectId === projectId && a.taskId === taskId)) entries.push(inboxRow({ projectId, taskId, title: selected.title }, '验收项已变更', 'review'))
@@ -566,7 +581,7 @@ function content(): any {
   if (['peer', 'relation', 'peer-project'].includes(page.kind)) return peerPage()
   if (page.kind === 'links') return linksPage()
   if (page.kind === 'connection' || page.kind === 'add-connection') return connectionPage()
-  if (page.kind === 'agents') return agentContent()
+  if (page.kind === 'agents') return page.inboxRow ? agentNeedContent() : agentContent()
   if (page.kind === 'settings') return ['main', 'connections', 'links', 'machines', 'hidden'].map(kind => item(({ main: '主 agent', connections: '外部连接', links: '工作间连接', machines: '机器', hidden: '隐藏的项目' } as any)[kind], kind === 'main' ? all.workspace.session?.title || '未绑定' : '', () => go({ kind })))
   if (page.kind === 'main') return mainPage()
   if (page.kind === 'connections') return [all.connections?.map(c => item(c.name, `${c.type === 'a2a' ? 'A2A agent' : '飞书'} · ${connectionStates[c.state]}`, () => go({ kind: 'connection', id: c.id }))), button('添加连接', () => go({ kind: 'add-connection' }), 'primary')]

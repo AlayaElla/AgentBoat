@@ -36,15 +36,16 @@ export async function readAgents(host: HostApi<'worker'>, read: Read, projects: 
         const state = agentState(a.state)
         if (!isRecentAgent({ state, since }, at)) continue
         if (agents.length >= maxAgents) { truncated = true; break workspaces }
-        const identity = a.sessionId || a.terminalId
+        const identity = a.terminalId || a.sessionId
         const matches = (workers.get(projectId) ?? []).filter(d =>
           a.terminalId && [d.agentTerminalHandle, d.terminal, d.resource?.terminalHandle].includes(a.terminalId))
         const dispatch = matches.length === 1 ? matches[0] : undefined
         const tasks = dispatch ? project?.tasks.filter(t => t.executions.some(e => e.dispatchId === (dispatch.dispatchId ?? dispatch.dispatch?.id))) ?? [] : []
         const task = tasks.length === 1 ? tasks[0] : undefined
+        const taskTitle = task?.title || a.task?.title
         agents.push({ id: `${w.id}:${identity ?? agents.length}`, projectId, agent: a.agent || '', role: dispatch ? 'worker' : 'session',
-          state, rawState: a.state,
-          title: task?.title || a.task?.title || a.title || '会话', ...(task ? { taskId: task.id } : {}), since })
+          state, rawState: a.state, workspaceId: w.id, ...(a.terminalId ? { terminalId: a.terminalId } : {}),
+          title: taskTitle || a.title || '会话', ...(task ? { taskId: task.id } : {}), ...(taskTitle ? { taskTitle } : {}), since })
       }
     }
     return { ok: true, at, agents, ...(truncated ? { truncated: true } : {}) }

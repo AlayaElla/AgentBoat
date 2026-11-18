@@ -145,10 +145,11 @@ export const mainAgentStates = {
 export interface LiveAgent {
   id: string; projectId: string; agent: string; role: 'worker' | 'session'
   state: 'need' | 'work' | 'done'; rawState: string
-  title: string; taskId?: string; since: number
+  title: string; taskId?: string; taskTitle?: string; since: number
+  workspaceId?: string; terminalId?: string
 }
 export type MainAgentActivity = Pick<AgentSession, 'agent' | 'title' | 'online'>
-export type AgentActivity = Pick<LiveAgent, 'agent' | 'role' | 'state' | 'title' | 'since'> & { taskTitle?: string }
+export type AgentActivity = Pick<LiveAgent, 'agent' | 'role' | 'state' | 'title' | 'since' | 'taskTitle'>
 export const isRecentAgent = (a: Pick<AgentActivity, 'state' | 'since'>, now = Date.now()) => a.state !== 'done' || now - a.since <= 86_400_000
 const agentPriority = { need: 0, work: 1, done: 2 }
 export const compareAgentActivity = (a: AgentActivity, b: AgentActivity) => agentPriority[a.state] - agentPriority[b.state] || b.since - a.since

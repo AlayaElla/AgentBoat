@@ -41,6 +41,25 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
     const visible = new Set(list.filter(p => !p.hidden).map(p => p.ref.id))
     return { ...snapshot, agents: snapshot.agents.filter(a => visible.has(a.projectId)) }
   })
+  async function openWorkspace(workspaceId: string) {
+    return orca.host.call('workspace.open', { workspaceId })
+  }
+  orca.panels.handle('workspace.agent.open', async input => {
+    const id = text(input.id, 'Agent 编号', 2049), snapshot = await refreshAgents(true)
+    if (!snapshot.ok) fail('Agent 状态读不到，请刷新后重试')
+    const agent = snapshot.agents.find(a => a.id === id)
+    if (!agent && snapshot.truncated) fail('未能确认这个 Agent 的状态，请刷新后重试')
+    if (!agent || agent.state !== 'need') fail('已不需要你处理')
+    await requireProject(agent.projectId)
+    if (agent.terminalId) {
+      const { focused } = await orca.host.call('terminal.focus', { terminalId: agent.terminalId })
+      if (!focused) fail('Orca 未切换到这个会话，请刷新后重试')
+      return { opened: true, focusedTerminal: true }
+    }
+    if (!agent.workspaceId) fail('找不到这个会话的工作区，请刷新后重试')
+    const { opened } = await openWorkspace(agent.workspaceId)
+    return { opened, focusedTerminal: false }
+  })
   const refreshActivity = async () => { await refreshAgents(true); orca.panels.post('project.changed', { projectId: '' }) }
   const activityEvents = [orca.events.on('agent.status.changed', refreshActivity), orca.events.on('workspace.removed', refreshActivity), orca.events.on('workspace.created', refreshActivity)]
   function updateStatus() {
@@ -412,7 +431,7 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
   orca.panels.handle('project.openMain', async input => {
     const { workspaceTarget } = await snapshot(text(input.projectId, '项目编号', 200))
     if (!workspaceTarget || 'error' in workspaceTarget) fail(workspaceTarget?.error || '项目工作区不可用')
-    await orca.host.call('workspace.open', { workspaceId: workspaceTarget.workspaceId })
+    await openWorkspace(workspaceTarget.workspaceId)
     return { opened: true, ...(workspaceTarget.multipleConversations === undefined ? {} : { multipleConversations: workspaceTarget.multipleConversations }) }
   })
   orca.panels.handle('project.settings', async input => {

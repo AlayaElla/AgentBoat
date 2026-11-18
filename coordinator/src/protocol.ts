@@ -6,6 +6,7 @@ declare module 'orca' {
     'workspace.connections': { input: import('./connections').ConnectionsInput; output: import('./connections').Connection[] | import('./connections').ConnectionDetail }
     'workspace.canvas': { output: { opened: boolean } }
     'workspace.agents': { input: { refresh?: boolean }; output: import('./model').AgentsSnapshot }
+    'workspace.agent.open': { input: { id: string }; output: { opened: boolean; focusedTerminal: boolean } }
     'project.visibility': { input: { projectId: string; revision: number; hidden: boolean; runId?: string; caller?: string }; output: Snapshot }
     'project.delete': { input: { projectId: string; revision: number; confirm: string }; output: { deleted: string; exportPath: string } }
     'workspace.links': { input: { operation: 'read' | 'configure' | 'rename' | 'invite' | 'cancel-invite' | 'join' | 'share' | 'revoke' | 'refresh' | 'relate' | 'send'; runId?: string; requestId?: string; text?: string; relation?: 'above' | 'below' | 'peer' | null; revision?: number; id?: string; code?: string; name?: string; enabled?: boolean; host?: string; port?: number; publicUrl?: string; tls?: boolean; certificate?: string; privateKey?: string; scope?: Sharing['scope']; allProjects?: boolean; projectIds?: string[] }; output: LinksSnapshot }

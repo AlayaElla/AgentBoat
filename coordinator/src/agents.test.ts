@@ -26,6 +26,37 @@ test('host status maps waiting/blocked to need, working to work and done to done
   assert.deepEqual(host.refusals, [])
 })
 
+test('opening a waiting agent uses its live terminal or workspace and rejects stale selections', async () => {
+  const ref = { ...refs[0], id: projectKey('local', refs[0].repoId) }
+  const terminal = { ...agent('waiting', 'shared-session'), terminalId: 'terminal-exact' }
+  const chat = { ...agent('blocked', 'shared-session'), task: { title: '关联的任务' } }
+  const host = mockHost({ results: {
+    'workspace.list': { workspaces: [workspace], truncated: false }, 'agents.list': { agents: [terminal, chat] },
+    'terminal.focus': { focused: true }, 'workspace.open': { opened: true }
+  } })
+  let c!: ReturnType<typeof testCoordinator>
+  const worker = await mountWorker({ default: api => {
+    c = testCoordinator(api, { projects: async () => [ref], agents: projects => readAgents(api.host, async () => ({}), projects) })
+  } }, { host })
+  try {
+    const [a, b] = (await worker.request('workspace.agents')).agents
+    assert.equal(a.terminalId, terminal.terminalId); assert.equal(a.workspaceId, workspace.id)
+    assert.equal(b.terminalId, undefined); assert.equal(b.workspaceId, workspace.id); assert.equal(b.taskTitle, '关联的任务')
+    const open = (id: string) => worker.request('workspace.agent.open', { id })
+    assert.deepEqual(await open(a.id), { opened: true, focusedTerminal: true })
+    assert.deepEqual(host.callsOf('terminal.focus'), [{ terminalId: terminal.terminalId }]); assert.deepEqual(host.callsOf('workspace.open'), [])
+    assert.deepEqual(await open(b.id), { opened: true, focusedTerminal: false })
+    assert.deepEqual(host.callsOf('workspace.open'), [{ workspaceId: workspace.id }])
+    host.respond('terminal.focus', { focused: false })
+    await assert.rejects(() => open(a.id), /未切换到这个会话/)
+    host.respond('agents.list', { agents: [{ ...terminal, state: 'working' }] })
+    await assert.rejects(() => open(a.id), /已不需要你处理/)
+    await assert.rejects(() => open(b.id), /已不需要你处理/)
+    assert.equal(host.callsOf('terminal.focus').length, 2); assert.equal(host.callsOf('workspace.open').length, 1)
+    assert.deepEqual(host.refusals, [])
+  } finally { c.stop(); await worker.deactivate() }
+})
+
 test('exact terminal identities join saved executions; provider sessions, titles and ambiguous identities never join', async () => {
   const p = fresh({ ...refs[0], id: projectKey('local', refs[0].repoId) }); p.runId = 'run_one'
   p.tasks = [{ id: 't1', title: '插件任务', executions: [{ dispatchId: 'd1' }] }] as any

@@ -238,7 +238,7 @@ test('details sync shares current main and scoped live agents without local iden
   const workspace = { version: 1, revision: 1, runId: 'private-run', requests: [], session }
   const host = mockHost({ storage: { 'project:p1': p as any, 'project:hidden': hidden as any, workspace } })
   const now = Date.now()
-  const visible: LiveAgent = { id: 'private-terminal', projectId: 'p1', agent: 'codex', role: 'worker', state: 'work', rawState: 'working', title: '正在检查', taskId: p.tasks[0].id, since: now }
+  const visible: LiveAgent = { id: 'private-live-agent', terminalId: 'private-terminal', workspaceId: 'private-workspace', projectId: 'p1', agent: 'codex', role: 'worker', state: 'work', rawState: 'working', title: '正在检查', taskId: p.tasks[0].id, since: now }
   let live = [visible, { ...visible, id: 'unselected', projectId: 'p2', title: '未选项目 agent' },
     { ...visible, id: 'hidden', projectId: 'hidden', title: '隐藏项目 agent' },
     { ...visible, id: 'old', state: 'done' as const, title: '过期 agent', since: now - 86_400_001 }]
@@ -267,7 +267,7 @@ test('details sync shares current main and scoped live agents without local iden
     assert.deepEqual(details.projects[0].activity, { truncated: false, agents: [
       { agent: 'codex', role: 'worker', state: 'work', title: '正在检查', taskTitle: p.tasks[0].title, since: now }
     ] })
-    assert.equal(/handle|runId|rawState|taskId|private-|[A-Z]:\\\\|未选项目|隐藏项目|过期 agent/.test(JSON.stringify(details)), false)
+    assert.equal(/handle|runId|terminalId|rawState|taskId|private-|[A-Z]:\\\\|未选项目|隐藏项目|过期 agent/.test(JSON.stringify(details)), false)
 
     online = false
     live = [{ ...visible, state: 'need', rawState: 'waiting', title: '等你回复' }, ...Array.from({ length: 25 }, (_, i) => ({ ...visible, id: 'copy-' + i }))]

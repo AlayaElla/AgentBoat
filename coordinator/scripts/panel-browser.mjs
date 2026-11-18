@@ -58,7 +58,8 @@ async function setup(options = {}) {
           { agent: 'codex', role: 'worker', state: 'done', title: '页面检查完成', since: now - 360_000 }
         ] } }] } } : {}) });
     const links = { version: 1, revision: 1, workspaceId: 'self', name: '我的工作间', enabled: false, host: '127.0.0.1', port: 0, publicUrl: '', tls: false, listening: '', error: '', peers: [p('up', 'above'), p('down', 'below'), p('off', 'below', 'offline'), p('side', 'peer'), p('free', undefined), p('pending', undefined, 'pending')] };
-    const live = { ok: true, at: now, agents: [{ id: 'agent-need', projectId: 'p1', agent: 'codex', role: 'worker', state: 'need', rawState: 'waiting', verified: true, title: '等批准', last: '等待用户批准', since: now - 60000 }, { id: 'agent-work', projectId: 'p1', agent: 'claude', role: 'session', state: 'work', rawState: 'working', verified: false, title: '正在工作', last: '正在处理', since: now - 20000 }] };
+    const live = { ok: true, at: now, agents: [{ id: 'agent-need', projectId: 'p1', agent: 'codex', role: 'worker', state: 'need', rawState: 'waiting', verified: true, title: '等批准', taskTitle: '页面交付', last: '等待用户批准', since: now - 60000, workspaceId: 'identity:project-workspace', terminalId: 'term-need' }, { id: 'agent-work', projectId: 'p1', agent: 'claude', role: 'session', state: 'work', rawState: 'working', verified: false, title: '正在工作', last: '正在处理', since: now - 20000 }] };
+    if (options.twoWaitingAgents) live.agents.push({ id: 'agent-chat', projectId: 'p1', agent: 'claude', role: 'session', state: 'need', title: '等待设计决定', since: now - 120000, workspaceId: 'identity:chat-workspace' });
     const workspace = { revision: 1, runId: options.unbound ? '' : 'run_main', ...(!options.unbound ? { session: { handle: 'main', agent: 'claude', title: '统筹会话', online: 'online' } } : {}) };
     const sessions = ['甲', '乙'].map((name, i) => ({ handle: 'session-' + i, title: name + '会话', workspace: 'identity:test', workspaceName: '示例工作区', path: '/test/工作区 with spaces', agent: i ? 'codex' : 'claude', online: 'online' }));
     const registered = () => projects.filter(p => !window.fixture.removedProjects?.includes(p.ref.id));
@@ -70,12 +71,18 @@ async function setup(options = {}) {
       ];
     }));
     const calls = [];
-    window.fixture = { project, projects, links, live, workspace, calls, stored, workspaceTarget: { workspaceId: 'identity:project-workspace', multipleConversations: true }, emit: () => events['project.changed']?.({}), race: false, prune: () => { task.acceptance[0].revision++; task.acceptance[0].fingerprint = 'new-version'; project.revision++; } };
+    window.fixture = { project, projects, links, live, workspace, calls, hostCalls: [], stored, workspaceTarget: { workspaceId: 'identity:project-workspace', multipleConversations: true }, emit: () => events['project.changed']?.({}), race: false, prune: () => { task.acceptance[0].revision++; task.acceptance[0].fingerprint = 'new-version'; project.revision++; } };
     window.orca = { storage: { get: async k => clone(stored[k] ?? null), set: async (k, v) => { stored[k] = clone(v); }, delete: async k => { delete stored[k]; } }, plugin: { on: (name, callback) => { events[name] = callback; return { dispose() {} }; }, request: async (name, input) => {
       if (input !== undefined && !isJson(input)) throw Error('input: Invalid input');
       calls.push({ name, input: clone(input) });
       if (name === 'workspace.overview') return clone({ workspace, projects: [...registered().map(p => ({ ref: p.ref, counts: { review: p.tasks.filter(t => t.phase === 'ready' && t.acceptance.some(a => a.status === 'pending')).length }, agents: [], bound: true, updatedAt: '' })), ...(options.manyProjects ? Array.from({ length: 13 }, (_, i) => ({ ref: { ...project.ref, id: 'p' + (i + 2), name: '项目 ' + (i + 2) }, counts: { working: options.idleProjects ? 0 : 1 }, agents: [], bound: true, updatedAt: '' })) : [])], hidden: [], attention: attention(), links, connections: [], machines: [{ id: 'local', name: '主机', role: 'host' }] });
       if (name === 'workspace.agents') return clone({ ...live, agents: live.agents.filter(a => !window.fixture.removedProjects?.includes(a.projectId)) });
+      if (name === 'workspace.agent.open') {
+        const agent = live.agents.find(a => a.id === input.id && a.state === 'need');
+        if (!agent) throw Error('已不需要你处理');
+        window.fixture.hostCalls.push(agent.terminalId ? { method: 'terminal.focus', terminalId: agent.terminalId } : { method: 'workspace.open', workspaceId: agent.workspaceId });
+        return { opened: true, focusedTerminal: !!agent.terminalId };
+      }
       if (name === 'project.read') {
         if (window.fixture.removedProjects?.includes(input.projectId)) throw Error('项目已从 Orca 移除');
         if (window.fixture.delayProject === input.projectId) {
@@ -242,11 +249,58 @@ try {
     assert.equal(await decision.evaluate(e => e === document.activeElement), true);
     await agent.click();
     await checkTitle('Agent');
-    await rightDetail().getByRole('heading', { name: '需要你', exact: true }).waitFor();
+    await rightDetail().getByRole('button', { name: '打开会话去回答', exact: true }).waitFor();
     assert.equal(await agent.getAttribute('aria-expanded'), 'true');
     await page.keyboard.press('Escape');
     await organization().waitFor();
     assert.equal(await agent.evaluate(e => e === document.activeElement), true);
+  });
+  await setup({ twoWaitingAgents: true, width: 1070 });
+  await test('waiting agent opens the right target, stays selected when resized and offers the full board separately', async () => {
+    const detail = rightDetail();
+    const open = scope => scope.getByRole('button', { name: '打开会话去回答', exact: true });
+    const terminal = inboxRow('等批准'), chat = inboxRow('等待设计决定');
+    await terminal.click();
+    assert.equal(await detail.locator('.aitem').count(), 1);
+    await detail.getByText('等批准', { exact: true }).waitFor();
+    assert.equal(await detail.getByText('等待设计决定', { exact: true }).count(), 0);
+    assert.equal(await detail.getByText('正在工作', { exact: true }).count(), 0);
+    assert.equal(await detail.locator('.cols3').count(), 0);
+    await detail.getByText('Codex', { exact: true }).waitFor();
+    await detail.getByText('worker · 示例项目', { exact: true }).waitFor();
+    await detail.getByText('关联任务 · 页面交付', { exact: true }).waitFor();
+    await detail.getByText(/^等你 · .+开始$/).waitFor();
+    await detail.getByText('这里暂不能查看或回答聊天问题，请在打开的会话里回答。', { exact: true }).waitFor();
+    assert.match(await open(detail).getAttribute('class'), /\bprimary\b/);
+    if (process.env.PANEL_EVIDENCE_DIR) await page.locator('.home').screenshot({ path: path.join(process.env.PANEL_EVIDENCE_DIR, 'agent-need-wide.png') });
+    await open(detail).click();
+    await page.getByRole('status').getByText('已打开会话', { exact: true }).waitFor();
+    await chat.click();
+    await detail.getByText('等待设计决定', { exact: true }).waitFor();
+    await open(detail).click();
+    await page.getByRole('status').getByText('已打开工作区，请选择会话后回答', { exact: true }).waitFor();
+    assert.deepEqual(await page.evaluate(() => fixture.hostCalls), [{ method: 'terminal.focus', terminalId: 'term-need' }, { method: 'workspace.open', workspaceId: 'identity:chat-workspace' }]);
+    assert.deepEqual(await page.evaluate(() => fixture.calls.filter(c => c.name === 'workspace.agent.open').map(c => c.input)), [{ id: 'agent-need' }, { id: 'agent-chat' }]);
+    await page.setViewportSize({ width: 400, height: 900 });
+    await page.getByRole('heading', { name: 'Agent', level: 1, exact: true }).waitFor();
+    assert.equal(await detail.count(), 0);
+    await page.getByText('等待设计决定', { exact: true }).waitFor();
+    assert.equal(await page.getByText('等批准', { exact: true }).count(), 0);
+    assert.equal(await open(page).isEnabled(), true);
+    await page.getByRole('button', { name: '全部 agent', exact: true }).click();
+    assert.deepEqual(await page.locator('.cols3 .acol').evaluateAll(nodes => nodes.map(node => node.getAttribute('aria-label'))), ['需要你', '工作中', '已完成']);
+    await page.getByRole('button', { name: '‹ 返回', exact: true }).click();
+    await page.setViewportSize({ width: 1070, height: 900 });
+    await detail.getByText('等待设计决定', { exact: true }).waitFor();
+    await page.evaluate(() => { fixture.live.agents.find(a => a.id === 'agent-chat').state = 'done'; fixture.emit(); });
+    await detail.getByText('已不需要你处理', { exact: true }).waitFor();
+    assert.equal(await open(detail).count(), 0);
+    assert.equal(await detail.getByRole('button', { name: '关闭详情', exact: true }).isVisible(), true);
+    await terminal.click();
+    await page.evaluate(() => { fixture.live.agents = fixture.live.agents.filter(a => a.id !== 'agent-need'); fixture.emit(); });
+    await detail.getByText('已不需要你处理', { exact: true }).waitFor();
+    await detail.getByRole('button', { name: '关闭详情', exact: true }).click();
+    assert.equal(await page.locator('#inbox-title').evaluate(e => e === document.activeElement), true);
   });
   await setup({ inboxBatch: true, width: 950 });
   await test('a delayed task read cannot replace the latest row, and resizing preserves the detail and its home return', async () => {
