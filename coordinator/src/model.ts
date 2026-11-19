@@ -10,11 +10,12 @@ export interface Artifact { id: string; label: string; url: string; version: str
 interface UserFeedback { at: string; revision: number; result: string; note: string; source?: string }
 export interface Acceptance {
   id: string; title: string; details: string; artifactIds: string[]; revision: number
-  status: 'pending' | 'passed' | 'changes_requested'; history: UserFeedback[]
+  status: 'pending' | 'passed' | 'changes_requested' | 'discarded'; history: UserFeedback[]
   fingerprint: string; archivedHistory?: number
 }
 interface Decision {
-  id: string; question: string; options: string[]; answer?: string; history: UserFeedback[]; archivedHistory?: number
+  // An omitted answer is pending. Null records a discard without inventing an answer.
+  id: string; question: string; options: string[]; answer?: string | null; history: UserFeedback[]; archivedHistory?: number
 }
 export interface Task {
   id: string; title: string; goal: string; progress: string

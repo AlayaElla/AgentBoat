@@ -9,7 +9,7 @@ import path from 'node:path'
 import type { OrcaWorkerApi } from 'orca/worker'
 import type { CoordinatorRuntime } from './runtime'
 import { assertProjectIdle, OrcaRuntime } from './runtime'
-import { groupedAttention } from './model'
+import { attention, groupedAttention, taskState } from './model'
 import { inboxLimit, openRunMail, questionWait, questionMaxAge } from '../scripts/orca-questions.mjs'
 import { escalationWait, projectSubmissions, reportSubmitted, reportWait, workerReport } from '../scripts/worker-reports.mjs'
 const mainSession = { handle: 'orca_session_id:test-main', title: '测试主会话', workspace: 'id:test', workspaceName: '测试工作区', path: '/test', agent: 'claude', online: 'online' as const }
@@ -591,6 +591,62 @@ test('acceptance keeps user conclusions and resets only changed items', () => {
   assert.throws(() => feedback(p, { items: [{ taskId: 'task-1', kind: 'acceptance', itemId: 'page-check', itemRevision: 1, result: 'passed' }] }))
   assert.throws(() => submitTask(p, { ...deliverable, phase: 'completed' }))
   assert.throws(() => submitTask(p, { ...deliverable, artifacts: [{ ...deliverable.artifacts[0], url: 'D:\\Other\\secret.txt' }] }))
+})
+
+test('owner discards and competing passes commit once, with one project summary and no pending items', async () => {
+  const p = fresh(refs[0])
+  submitTask(p, { ...deliverable, decisions: [{ id: 'direction', question: '方向？' }] })
+  const host = mockHost({ storage: { 'project:p1': p as any } })
+  let c!: ReturnType<typeof createCoordinator>
+  const worker = await mountWorker({ default: api => { c = createCoordinator(api, { projects: async () => refs }) } }, { host })
+  try {
+    const review = { taskId: deliverable.id, itemId: 'page-check', kind: 'acceptance' as const, itemRevision: 1, result: 'discarded' }
+    const decision = { taskId: deliverable.id, itemId: 'direction', kind: 'decision' as const, result: 'discarded', note: '主人说方向已改' }
+    const pass = { ...review, result: 'passed' }
+    const write = (items: (typeof review | typeof decision)[]) => worker.request('project.feedback', { projectId: 'p1', items, caller: 'workspace-main' })
+    await assert.rejects(() => write([review, pass]), /同一事项不能重复提交/)
+    const concurrent = await Promise.allSettled([write([review, decision]), write([pass])])
+    assert.equal(concurrent.filter(r => r.status === 'fulfilled').length, 1)
+    const saved = await c.store.get('p1'), [t] = saved.tasks
+    assert.equal(t.acceptance[0].status, 'discarded')
+    assert.equal(t.decisions[0].answer, null)
+    assert.deepEqual(attention(saved), [])
+    assert.equal(taskState(t), 'completed')
+    for (const item of [t.acceptance[0], t.decisions[0]]) {
+      assert.equal(item.history.length, 1)
+      assert.equal(item.history[0].source, '主人')
+      assert.ok(Date.parse(item.history[0].at))
+    }
+    assert.equal(t.decisions[0].history[0].note, decision.note)
+    assert.equal(saved.deliveries.length, 1)
+    assert.match(saved.deliveries[0].body, /首页布局.*\n已丢弃[\s\S]*方向？\n已丢弃\n主人说方向已改/)
+    await assert.rejects(() => worker.request('project.feedback', { projectId: 'p1', items: [{ ...decision, result: undefined, answer: '旧客户端答案' }] }), /已丢弃/)
+  } finally { c.stop(); await worker.deactivate() }
+})
+
+test('project withdraws pending items together, and only changed acceptance reopens with its history', () => {
+  const p = fresh(refs[0])
+  const original = { ...deliverable, decisions: [{ id: 'style', question: '风格？' }] }
+  submitTask(p, original)
+  const marker = { discarded: true, reason: '新版已取代' }
+  const withdrawn = { ...deliverable, phase: 'completed', acceptance: [{ ...marker, id: 'page-check' }], decisions: [{ ...marker, id: 'style' }] }
+  assert.throws(() => submitTask(p, { ...withdrawn, decisions: [] }), /不能标记为完成/)
+  assert.equal(p.tasks[0].acceptance[0].status, 'pending')
+  submitTask(p, withdrawn)
+  submitTask(p, withdrawn)
+  assert.equal(p.deliveries.length, 0)
+  submitTask(p, original)
+  assert.equal(taskState(p.tasks[0]), 'completed')
+  assert.deepEqual(attention(p), [])
+  for (const item of [p.tasks[0].acceptance[0], p.tasks[0].decisions[0]]) {
+    assert.equal(item.history.length, 1)
+    assert.deepEqual(item.history[0], { at: item.history[0].at, revision: 1, source: '项目主会话', result: 'discarded', note: marker.reason })
+  }
+  submitTask(p, { ...original, acceptance: [{ ...original.acceptance[0], details: '核对第二版' }] })
+  assert.equal(taskState(p.tasks[0]), 'review')
+  assert.deepEqual(attention(p).map(i => i.itemId), ['page-check'])
+  assert.equal(p.tasks[0].acceptance[0].revision, 2)
+  assert.equal(p.tasks[0].acceptance[0].history[0].result, 'discarded')
 })
 
 test('restart preserves an in-flight notification without resending', async () => {

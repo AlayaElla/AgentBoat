@@ -38,7 +38,8 @@ if (operation === 'main-bind' || leadBind || leadSwitch) {
   if (leadBind && !input.token) throw new Error('接管项目主会话需要本次接管凭据');
   if (argument === '--check') input.checkOnly = true;
 }
-if (['bind', 'submit', 'feedback', 'hide', 'restore', 'delete'].includes(operation)) {
+const delegatedFeedback = operation === 'feedback' && Object.hasOwn(input, 'id');
+if (!delegatedFeedback && ['bind', 'submit', 'feedback', 'hide', 'restore', 'delete'].includes(operation)) {
   delete input.caller;
   if (caller) {
     input.caller = caller;
@@ -46,7 +47,7 @@ if (['bind', 'submit', 'feedback', 'hide', 'restore', 'delete'].includes(operati
   }
 }
 const name = operation === 'connections' || operation.startsWith('connection-') ? 'workspace.connections' : operation.startsWith('links-') ? 'workspace.links' : operation === 'projects' ? 'projects.list' : operation === 'overview' ? 'workspace.overview'
-  : operation === 'feishu-reply' ? 'workspace.reply' : operation.startsWith('main-') ? 'workspace.agent' : operation === 'message' ? 'workspace.message' : operation === 'feedback' ? 'project.feedback' : operation === 'project-lead' ? 'project.lead' : leadSwitch ? 'workspace.projectLead' : 'project.agent';
+  : operation === 'feishu-reply' ? 'workspace.reply' : operation.startsWith('main-') ? 'workspace.agent' : operation === 'message' ? 'workspace.message' : delegatedFeedback ? 'workspace.linkFeedback' : operation === 'feedback' ? 'project.feedback' : operation === 'project-lead' ? 'project.lead' : leadSwitch ? 'workspace.projectLead' : 'project.agent';
 const maintenance = ['hide', 'restore', 'delete'].includes(operation);
 const args = ['plugin', 'dev', 'request', target, operation === 'main-targets' ? 'workspace.agent.targets' : maintenance ? operation === 'delete' ? 'project.delete' : 'project.visibility' : name, '--json'];
 if (maintenance) { delete input.operation; if (operation !== 'delete') input.hidden = operation === 'hide'; }

@@ -119,6 +119,24 @@ test('quoted reminders record decisions, changes and acceptance on their exact p
   await f.worker.deactivate()
 })
 
+test('old Feishu reminders cannot pass a discarded review or answer a discarded decision', async () => {
+  const f = await fixture(false)
+  try {
+    await f.submit({ ...deliverable, decisions: [{ id: 'style', question: '风格？', options: ['简洁'] }] }, 'original')
+    await f.submit({ ...deliverable, acceptance: [{ id: 'page-check', discarded: true, reason: '已过期' }],
+      decisions: [{ id: 'style', discarded: true, reason: '已过期' }] }, 'withdraw')
+    const reminders = f.sends.filter(d => d.external?.target)
+    assert.equal(reminders.length, 2)
+    for (const d of reminders) {
+      const decision = d.external!.target!.kind === 'decision'
+      await f.ingest(event('late-' + d.id, decision ? '1' : '通过', 'sent_' + (f.sends.indexOf(d) + 1)))
+    }
+    const [t] = (await f.coordinator.store.get('p1')).tasks
+    assert.deepEqual([t.acceptance[0].status, t.decisions[0].answer], ['discarded', null])
+    assert.deepEqual([t.acceptance[0].history.length, t.decisions[0].history.length], [1, 1])
+  } finally { await f.worker.deactivate() }
+})
+
 test('unknown, ambiguous and unquoted feedback asks for clarification; unauthorized user and chat cannot write', async () => {
   const f = await fixture(false)
   await f.submit(deliverable, 'review')

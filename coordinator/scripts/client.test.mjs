@@ -125,6 +125,11 @@ syncBuiltinESMExports();`);
       const value = JSON.parse(execFileSync(process.execPath, ['--import', pathToFileURL(fixture).href, 'scripts/client.mjs', 'links-send'], { encoding: 'utf8', windowsHide: true, input: JSON.stringify(input) }));
       assert.deepEqual(value, { handler: 'workspace.links', input: { ...input, operation: 'send' } });
     }
+    const input = { id:'peer', projectId:'p1', revision:0, requestId:'discard', items:[{taskId:'t',kind:'decision',itemId:'d',result:'discarded'}] };
+    const inputFile = path.join(dir, 'feedback.json');
+    writeFileSync(inputFile, JSON.stringify(input));
+    const value = JSON.parse(execFileSync(process.execPath, ['--import', pathToFileURL(fixture).href, 'scripts/client.mjs', 'feedback', inputFile], {encoding:'utf8',windowsHide:true}));
+    assert.deepEqual(value, {handler:'workspace.linkFeedback', input});
   } finally { rmSync(dir, {recursive:true,force:true}); }
 });
 
@@ -134,11 +139,13 @@ test('project writes attach the local caller and current Run as optional display
 cp.execFileSync=(_exe,args)=>{if(args[0]==='orchestration'){if(args.includes('--from'))throw Error('wrong identity');if(process.env.TEST_NO_RUN)throw Error('Run unavailable');return JSON.stringify({ok:true,result:{run:{id:'run_current'}}});}return JSON.stringify({input:JSON.parse(args[args.indexOf('--data')+1])});};syncBuiltinESMExports();`);
   try {
     for (const operation of ['bind', 'submit', 'feedback', 'hide', 'restore', 'delete']) for (const mode of ['chat', 'terminal', 'none', 'no-run']) {
-      const input = {projectId:'p1',revision:0,requestId:'r',caller:'forged',...(operation==='bind'?{runId:'run_bound'}:{})};
+      const input = {projectId:'p1',revision:0,requestId:'r',caller:'forged',...(operation==='bind'?{runId:'run_bound'}:{}),
+        ...(operation==='feedback'?{items:[{taskId:'t',kind:'decision',itemId:'d',result:'discarded',note:'用户原话'}]}:{})};
       writeFileSync(inputFile, JSON.stringify(input));
       const reply = JSON.parse(execFileSync(process.execPath, ['--import', pathToFileURL(fixture).href, 'scripts/client.mjs', operation, inputFile], {encoding:'utf8',windowsHide:true,env:{...process.env,ORCA_AGENT_SESSION_ID:mode==='chat'||mode==='no-run'?'claude_self':'',ORCA_TERMINAL_HANDLE:mode==='terminal'?'terminal-self':'',TEST_NO_RUN:mode==='no-run'?'1':''}}));
       assert.equal(reply.input.caller, mode==='none'?undefined:mode==='terminal'?'terminal-self':'orca_session_id:claude_self');
       assert.equal(reply.input.runId, operation==='bind'?'run_bound':mode==='none'||mode==='no-run'?undefined:'run_current');
+      if (operation === 'feedback') assert.deepEqual(reply.input.items, input.items);
     }
   } finally { rmSync(dir, {recursive:true,force:true}); }
 });

@@ -229,7 +229,22 @@ export function submitTask(project: Project, raw: unknown): void {
     if (previous && fingerprint(previous) !== fingerprint(artifact)) fail('成果编号已存在；新版本请登记新的成果编号')
     if (!previous) task.artifacts.push(artifact)
   }
-  for (const a of list(input.acceptance ?? [], '验收项', 50)) {
+  const withdrawals: FeedbackItem[] = []
+  function submittedItems(kind: FeedbackItem['kind'], entries: Record<string, any>[]) {
+    for (const entry of entries) {
+      if (entry.discarded !== undefined && typeof entry.discarded !== 'boolean') fail('discarded 必须是布尔值')
+      if (!entry.discarded) continue
+      const itemId = text(entry.id, '撤下事项编号', 200)
+      if (entries.filter(x => text(x.id, '事项编号', 200) === itemId).length !== 1) fail('同一次提交不能重复撤下或更新同一事项')
+      const previous = (kind === 'decision' ? task.decisions : task.acceptance).find(x => x.id === itemId)
+      if (!previous) fail('要撤下的事项不存在')
+      const note = text(entry.reason, '撤下原因')
+      if ('status' in previous ? previous.status === 'discarded' : previous.answer === null) continue
+      withdrawals.push({ taskId: id, kind, itemId, itemRevision: 'revision' in previous ? previous.revision : undefined, result: 'discarded', note })
+    }
+    return entries.filter(entry => !entry.discarded)
+  }
+  for (const a of submittedItems('acceptance', list(input.acceptance ?? [], '验收项', 50))) {
     const artifactIds = strings(a.artifactIds, '关联成果')
     if (!artifactIds.length || artifactIds.some(id => !task.artifacts.some(x => x.id === id))) fail('验收项必须关联本任务已交付的成果')
     const fields = { title: text(a.title, '验收标题', 200), details: text(a.details, '核对方式与预期', 8000), artifactIds }
@@ -241,7 +256,7 @@ export function submitTask(project: Project, raw: unknown): void {
     if (previous) task.acceptance[task.acceptance.indexOf(previous)] = item
     else task.acceptance.push(item)
   }
-  for (const d of list(input.decisions ?? [], '待决定事项', 30)) {
+  for (const d of submittedItems('decision', list(input.decisions ?? [], '待决定事项', 30))) {
     const did = text(d.id, '决定编号', 200)
     const previous = task.decisions.find(x => x.id === did)
     const question = text(d.question, '问题', 4000)
@@ -260,8 +275,9 @@ export function submitTask(project: Project, raw: unknown): void {
     event.taskId = task.id
     if (!task.sourceIds.includes(sourceId)) task.sourceIds.push(sourceId)
   }
-  if (phase === 'completed' && task.acceptance.some(x => x.status !== 'passed')) fail('待验收或需修改的结果不能标记为完成')
-  if (phase === 'completed' && task.decisions.some(x => x.answer === undefined)) fail('尚有未回答的决定，不能标记为完成')
+  // The lead withdrew these itself, so its own notice is not queued back to it.
+  if (withdrawals.length) applyFeedback(project.ref.id, [task], withdrawals, '项目主会话', true)
+  if (phase === 'completed' && taskState({ ...task, phase: 'ready' }) !== 'completed') fail('仍有待决定、待验收或需修改的事项，不能标记为完成')
   task.updatedAt = new Date().toISOString()
   task.submittedAt = task.updatedAt
   if (old) project.tasks[project.tasks.indexOf(old)] = task
@@ -270,7 +286,9 @@ export function submitTask(project: Project, raw: unknown): void {
 
 export interface FeedbackItem { taskId: string; kind: 'acceptance' | 'decision'; itemId: string; itemRevision?: number; reviewTotal?: number; fingerprint?: string; result?: string; answer?: string; note?: string }
 export function feedback(project: Project, raw: unknown, source?: string): void {
-  const items = object(raw).items
+  project.deliveries.push(applyFeedback(project.ref.id, project.tasks, object(raw).items, source))
+}
+function applyFeedback(projectId: string, tasks: Task[], items: unknown, source?: string, withdrawal = false): Project['deliveries'][number] {
   if (!Array.isArray(items) || items.length > 100) fail('反馈条目格式不正确')
   if (!items.length) fail('请至少提交一条反馈')
   const seen = new Set<string>()
@@ -281,35 +299,39 @@ export function feedback(project: Project, raw: unknown, source?: string): void 
       const key = fingerprint([input.taskId, input.kind, input.itemId])
       if (seen.has(key)) fail('同一事项不能重复提交')
       seen.add(key)
-      const task = project.tasks.find(x => x.id === input.taskId)
+      const task = tasks.find(x => x.id === input.taskId)
       if (!task) fail('任务不属于当前项目')
-      if (task.phase === 'paused') fail('任务已暂停')
+      if (!withdrawal && task.phase === 'paused') fail('任务已暂停')
       const note = typeof input.note === 'string' ? input.note.trim().slice(0, 8000) : ''
+      const discarded = input.result === 'discarded'
       if (input.kind === 'acceptance') {
         const item = task.acceptance.find(x => x.id === input.itemId)
-        if (!item || item.revision !== input.itemRevision || task.phase !== 'ready' || item.status !== 'pending') fail('验收项已更新或不在待验收状态，请刷新后确认')
+        if (!item || item.revision !== input.itemRevision || (!withdrawal && task.phase !== 'ready') || item.status !== 'pending') fail('验收项已更新或不在待验收状态，请刷新后确认')
         if (input.reviewTotal !== undefined && input.reviewTotal !== task.acceptance.filter(a => a.status === 'pending').length) fail('待验收项已更新，请刷新后确认')
         if (input.fingerprint !== undefined && input.fingerprint !== item.fingerprint) fail('验收内容已更新')
-        if (!['passed', 'changes_requested'].includes(input.result)) fail('验收结论不正确')
+        if (!['passed', 'changes_requested', 'discarded'].includes(input.result)) fail('验收结论不正确')
         if (input.result === 'changes_requested' && !note) fail('请填写需要修改的内容')
-        return { task, item, note, result: input.result as string, subject: input.result === 'passed' ? '验收通过' : '需要修改', title: `${item.title} · 第 ${item.revision} 版`, revision: item.revision }
+        return { task, item, note, discarded, result: input.result as string, subject: input.result === 'passed' ? '验收通过' : '需要修改', title: `${item.title} · 第 ${item.revision} 版`, revision: item.revision }
       }
       if (input.kind !== 'decision') fail('反馈类型不正确')
       const item = task.decisions.find(x => x.id === input.itemId)
-      if (!item || item.answer !== undefined) fail('问题已回答或不存在，请刷新')
+      if (!item || item.answer !== undefined) fail('问题已回答、已丢弃或不存在，请刷新')
       if (input.fingerprint !== undefined && input.fingerprint !== fingerprint([item.question, item.options])) fail('问题内容已更新')
-      return { task, item, note, result: text(input.answer, '决定', 8000), subject: '决定已提交', title: item.question, revision: 1 }
+      if (discarded && input.answer !== undefined) fail('丢弃的决定不能同时填写答案')
+      if (input.result && !discarded) fail('决定结论不正确')
+      return { task, item, note, discarded, result: discarded ? 'discarded' : text(input.answer, '决定', 8000), subject: '决定已提交', title: item.question, revision: 1 }
     } catch (e) { return fail(`第 ${index + 1} 条（${input.taskId || '?'} / ${input.itemId || '?'}）：${e instanceof Error ? e.message : '反馈不正确'}`) }
   })
   const at = new Date().toISOString()
   for (const v of validated) {
     if ('status' in v.item) v.item.status = v.result as Acceptance['status']
-    else v.item.answer = v.result
-    v.item.history.push({ at, revision: v.revision, result: v.result, note: v.note, ...(source ? { source } : {}) })
+    else v.item.answer = v.discarded ? null : v.result
+    const actor = source ?? (v.discarded ? '主人' : undefined)
+    v.item.history.push({ at, revision: v.revision, result: v.result, note: v.note, ...(actor ? { source: actor } : {}) })
     v.task.updatedAt = at
   }
-  const body = validated.map(v => `[项目 ${project.ref.id} / 任务 ${v.task.id}]\n${v.task.title}\n${v.title}\n${v.subject}：${v.result}\n${v.note}`).join('\n\n')
-  project.deliveries.push({ id: randomUUID(), subject: `用户反馈 · ${validated.length} 条`, body: source ? `${source}\n\n${body}` : body, state: 'pending' })
+  const body = validated.map(v => `[项目 ${projectId} / 任务 ${v.task.id}]\n${v.task.title}\n${v.title}\n${v.discarded ? '已丢弃' : v.subject + '：' + v.result}\n${v.note}`).join('\n\n')
+  return { id: randomUUID(), subject: `${withdrawal ? '项目主会话撤下' : '用户反馈'} · ${validated.length} 条`, body: source ? `${source}\n\n${body}` : body, state: 'pending' }
 }
 
 export function receiveEvent(project: Project, event: SourceEvent): void {

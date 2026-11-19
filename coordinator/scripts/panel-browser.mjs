@@ -210,7 +210,11 @@ async function setup(options = {}, hub) {
           if (!a || i.kind === 'acceptance' && (t.phase !== 'ready' || (i.reviewTotal !== undefined && i.reviewTotal !== t.acceptance.filter(a => a.status === 'pending').length) || a.status !== 'pending' || a.revision !== i.itemRevision || a.fingerprint !== i.fingerprint)) throw Error('stale');
           return [i, a];
         });
-        for (const [i, a] of updates) { if (i.kind === 'acceptance') a.status = i.result; else a.answer = i.answer; }
+        for (const [i, a] of updates) {
+          if (i.kind === 'acceptance') a.status = i.result;
+          else a.answer = i.result === 'discarded' ? null : i.answer;
+          a.history.push({ result:i.result ?? i.answer, revision:i.itemRevision ?? 1, note:i.note, source:'主人', at:new Date().toISOString() });
+        }
         target.deliveries.push({ id: 'summary', subject: '用户反馈', body: '', state: 'pending' }); target.revision++;
         target.requests.push({ id: input.requestId, fingerprint: await digest(input) });
         if (window.fixture.loseFeedbackReceipt) { window.fixture.loseFeedbackReceipt = false; throw Error('提交回执丢失'); }
@@ -524,6 +528,28 @@ try {
     assert.equal(sent[0].input.items.filter(i => i.kind === 'acceptance').length, 2);
     assert.equal(sent[0].input.items.find(i => i.kind === 'decision').answer, '自定义方案');
     await page.getByRole('status').filter({ hasText: '已提交 3 条' }).waitFor({ state: 'hidden' });
+  });
+  await setup({ width: 1040, inboxBatch: true });
+  await test('owner can discard reviews and decisions together with an optional reason and read the task history', async () => {
+    const body = await openReview();
+    await body.getByRole('button', {name:'丢弃', exact:true}).first().click();
+    await body.getByRole('textbox', {name:'丢弃原因（选填）'}).fill('改用新版');
+    await body.getByRole('button', {name:'通过', exact:true}).last().click();
+    await row('设计决定').click();
+    await currentLayer().getByRole('button', {name:'丢弃', exact:true}).click();
+    await dock().getByRole('button', {name:'提交 3 条'}).click();
+    await page.getByRole('status').filter({hasText:'已提交 3 条'}).waitFor();
+    await row('设计决定').waitFor({state:'hidden'});
+    await row('页面交付').waitFor({state:'hidden'});
+    const sent = await page.evaluate(() => fixture.calls.filter(c => c.name === 'project.feedback'));
+    assert.equal(sent.length, 1);
+    assert.deepEqual(sent[0].input.items.map(i => [i.kind, i.result, i.note ?? '']), [
+      ['acceptance','discarded','改用新版'], ['acceptance','passed',''], ['decision','discarded','']]);
+    await project();
+    await currentLayer().getByRole('tab', {name:'任务', exact:true}).click();
+    await currentLayer().getByRole('button', {name:'页面交付', exact:true}).click();
+    await currentLayer().getByRole('button', {name:/^记录/}).click();
+    await currentLayer().getByText(/成果 a1.*第 1 版.*已丢弃.*主人.*改用新版/).waitFor();
   });
   await setup();
   await test('expanded narrow row follows the same task into the wide detail', async () => {
@@ -980,8 +1006,8 @@ try {
     await currentLayer().getByRole('button', { name: '全选验收' }).click();
     assert.equal(await check.isChecked(), true);
     await currentLayer().getByRole('button', { name: '对方页面交付', exact: true }).click();
-    await currentLayer().getByRole('button', { name: '需要修改' }).click();
-    await currentLayer().getByRole('textbox').fill('请调整间距');
+    await currentLayer().getByRole('button', { name: '丢弃', exact: true }).click();
+    await currentLayer().getByRole('textbox', { name:'丢弃原因（选填）' }).fill('已换新版');
     await shot('delegated');
     await page.evaluate(() => {
       const peer = fixture.links.peers[0]; fixture.connectedReport = peer.report;
@@ -1001,7 +1027,7 @@ try {
     await page.getByRole('status').filter({ hasText: '已提交 2 条' }).waitFor();
     const writes = await page.evaluate(() => fixture.calls.filter(c => ['workspace.linkFeedback', 'project.feedback'].includes(c.name)));
     assert.deepEqual(writes.map(c => [c.name, c.input.id, c.input.projectId]), [['workspace.linkFeedback', 'up', 'p1']]);
-    assert.deepEqual(writes[0].input.items.map(i => [i.taskId, i.result]), [['t1', 'changes_requested'], ['second', 'passed']]);
+    assert.deepEqual(writes[0].input.items.map(i => [i.taskId, i.result]), [['t1', 'discarded'], ['second', 'passed']]);
   });
   await setup({ width: 1040, delegatedFeedback: true, laggingReport: true });
   await test('delegated feedback uses the home inbox, one submit bar, and the original retry request', async () => {

@@ -37,6 +37,7 @@
 - phase：working、blocked、paused、ready、completed。
 - 数组按 id 合并，省略的保留。任务、验收和来源的编号保持不变。成果 id 不能改写，每个新的成果版本用新 id；问题变了用新的决定 id。登记执行者成果时，在对应任务的 executions 保留 Orca Run、任务和派工编号。
 - 验收的 revision、status、history 由插件维护；核对内容或关联成果变了，自动出新版本。
+- 在 acceptance 或 decisions 中用 `{"id":"旧项编号","discarded":true,"reason":"已由新版取代"}` 撤下已有待处理项。沿用同一验收编号提交有变化的核对内容或成果，会开启新一版并保留旧版历史。
 - sourceIds 用本项目 events 的 id，一个来源只关联一个任务。
 - 一次 submit 带出多条新事项时，插件只给工作间主 agent 发一条汇总通知。未绑定时不发，之后绑定也不补发。
 
@@ -51,8 +52,9 @@
 ```
 
 - 整批先校验。任务不在等验收、版本不符、已处理或重复的条目，只要有一条，整批拒绝并标出序号。
-- result 是 `passed` 或 `changes_requested`；`changes_requested` 必须写修改意见。
+- 验收用 `passed` 或 `changes_requested`，需要修改时必须写意见。丢弃验收或决定用 `"result":"discarded"`，原因选填在 `note`，决定省略 `answer`。
 - requestId 可省略。带上时，原样重放不会重复写入。
+- 代处理已开放的对方项目，在顶层加连接编号 `id`，并提供对方的 projectId、revision 和唯一 requestId。离线或回执未确认时保留原请求编号核对。
 - 只给项目主 agent 发一条消息，后续由它跟进。
 
 ## 工作间主 agent

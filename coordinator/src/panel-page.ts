@@ -210,7 +210,8 @@ function input(label: string, initial: any = '', type = 'text', change?: (value:
   if (!(name in fields)) fields[name] = initial
   const e = el(type === 'textarea' ? 'textarea' : 'input', { class: 'in', type: type === 'textarea' ? undefined : type, value: fields[name], placeholder, 'data-focus': name, maxlength: type === 'password' ? 4096 : 8000,
     oninput: (e: Event) => { const value = (e.target as HTMLInputElement).value; fields[name] = value; if (fields === active.form && !feedback) markDirty(); change?.(value) } })
-  return el('label', { class: 'field' }, el('span', { class: 'lb' }, label.startsWith('修改意见 ') ? '修改意见' : label.startsWith('决定 ') ? '你的决定' : label), e)
+  const caption = label.startsWith('决定 ') ? '你的决定' : feedback ? label.split(' ')[0] : label
+  return el('label', { class: 'field' }, el('span', { class: 'lb' }, caption), e)
 }
 function select(label: string, options: Record<string, string>, initial: string, change?: (v: string) => void) {
   if (!(label in form)) form[label] = initial
@@ -593,7 +594,10 @@ function renderInboxRow(r: DisplayRow, scope: string) {
   action.setAttribute('aria-expanded', String(open || picked))
   action.setAttribute('aria-controls', inRail ? 'detail-pane' : `detail-${k}`)
   if (selected.length && r.kind !== 'agent' && r.kind !== 'blocked') action.querySelector('.body')?.append(
-    small(awaiting ? '待核对' : review ? `已选 ${passed ? `通过 ${passed}` : ''}${passed && passed < selected.length ? ' · ' : ''}${passed < selected.length ? `${selected.length - passed} 需修改` : ''}` : '已选'))
+    small(awaiting ? '待核对' : review ? '已选 ' + Object.entries(feedbackActions).flatMap(([result, label]) => {
+      const count = selected.filter(d => d.result === result).length
+      return count ? [`${label} ${count}`] : []
+    }).join(' · ') : '已选'))
   return el('article', { class: `irow${open ? ' open' : ''}${picked ? ' picked' : ''}`, 'data-key': k },
     el('div', { class: 'irow-h' }, review ? el('input', { type: 'checkbox', 'aria-label': `选择验收 · ${r.title} · ${inboxProjectName(r.projectId!)}`,
       checked, indeterminate: !checked && selected.length > 0, disabled: busy || !!r.details || !!unavailable,
@@ -659,7 +663,21 @@ function openArtifact(projectId: string, taskId: string, artifact: Artifact, arc
     }
   }, false)
 }
+const feedbackActions: Record<string, string> = { passed: '通过', changes_requested: '需要修改', discarded: '丢弃' }
+const acceptanceStatuses: Record<string, string> = { pending: '待验收', passed: '已通过', changes_requested: '需要修改', discarded: '已丢弃' }
 function feedbackCards(projectId: string, tasks: FeedbackTask[], title = '要你处理', only?: Attention['kind']) {
+  function resultButton(base: Draft, draft: Draft | undefined, result: string) {
+    const b = button(feedbackActions[result], () => {
+      choose(projectId, { ...base, result, note: draft?.result === result ? draft.note : '' }); render()
+    }, 'sm')
+    b.setAttribute('aria-pressed', String(draft?.result === result))
+    return b
+  }
+  function noteField(k: string, draft?: Draft) {
+    if (draft?.result !== 'changes_requested' && draft?.result !== 'discarded') return null
+    const label = draft.result === 'discarded' ? '丢弃原因（选填）' : '修改意见'
+    return input(`${label} ${k}`, draft.note ?? '', 'textarea', note => { choose(projectId, { ...draft, note }); render() }, undefined, {}, true)
+  }
   return tasks.map(t => {
     const acceptance = !only || only === 'review' ? pendingAcceptances(t) : []
     const decisions = !only || only === 'decision' ? t.decisions.filter(d => d.answer === undefined) : []
@@ -674,25 +692,22 @@ function feedbackCards(projectId: string, tasks: FeedbackTask[], title = '要你
       // Controls can also be mounted in an inline row of the same task.
       const group = `${active.key}-${projectId}-${k}-${only ?? 'full'}`
       return keyed(card(el('h3', { class: 'h2 any' }, d.question),
-        [...d.options, '其他'].map(option => check(option, option === '其他' ? !!draft && !d.options.includes(draft.answer ?? '') : draft?.answer === option, () => {
+        [...d.options, '其他'].map(option => check(option, option === '其他' ? draft?.answer !== undefined && !d.options.includes(draft.answer) : draft?.answer === option, () => {
           choose(projectId, { ...base, answer: option === '其他' ? '' : option }); render()
         }, { type: 'radio', name: group, value: option })),
-        draft && !d.options.includes(draft.answer ?? '') ? input(field, draft.answer ?? '', 'textarea', value => {
+        draft?.answer !== undefined && !d.options.includes(draft.answer) ? input(field, draft.answer, 'textarea', value => {
           choose(projectId, { ...base, answer: value }); render()
-        }, undefined, {}, true) : null, draft ? button('撤销', () => removeChoice(projectId, k), 'text sm') : null), k)
+        }, undefined, {}, true) : null, row(resultButton(base, draft, 'discarded'), draft ? button('撤销', () => removeChoice(projectId, k), 'text sm') : null), noteField(k, draft)), k)
     }), acceptance.map(a => {
       const k = key(t.id, 'acceptance', a.id), draft = choices(projectId)[k], base = acceptanceDraft(t.id, a)
       return keyed(card(row(el('h3', { class: 'h2 any grow' }, a.title), tag(`第 ${a.revision} 版`)), el('p', { class: 'any' }, a.details),
         t.artifacts.filter(ar => a.artifactIds.includes(ar.id)).map(ar => ar.url ? button(`打开成果 · ${ar.label}`, () => openArtifact(projectId, t.id, ar), 'sm') : small(`${ar.label} · 在对方机器上`)),
-        row(...['passed', 'changes_requested'].map(result => {
-          const b = button(result === 'passed' ? '通过' : '需要修改', () => { choose(projectId, { ...base, result, note: draft?.note ?? '' }); render() }, 'sm')
-          b.setAttribute('aria-pressed', String(draft?.result === result)); return b
-        }), draft ? button('撤销', () => removeChoice(projectId, k), 'text sm') : null),
-        draft?.result === 'changes_requested' ? input(`修改意见 ${k}`, draft.note ?? '', 'textarea', note => { choose(projectId, { ...draft, note }); render() }, undefined, {}, true) : null), k)
+        row(...Object.keys(feedbackActions).map(result => resultButton(base, draft, result)),
+          draft ? button('撤销', () => removeChoice(projectId, k), 'text sm') : null), noteField(k, draft)), k)
     }), blocked ? callout(t.progress || t.goal || '任务受阻', 'danger') : null)
   })
 }
-const invalidDraft = (d: Draft) => d.kind === 'decision' ? !d.answer?.trim() : d.result === 'changes_requested' && !d.note?.trim()
+const invalidDraft = (d: Draft) => d.result === 'discarded' ? false : d.kind === 'decision' ? !d.answer?.trim() : d.result === 'changes_requested' && !d.note?.trim()
 function dock() {
   const groups = Object.entries(drafts).filter(([, group]) => Object.keys(group).length)
   const items = groups.flatMap(([projectId, group]) => Object.entries(group).map(([id, d]) => ({ projectId, id, d })))
@@ -720,7 +735,7 @@ function dock() {
       button('', closeToast, 'text sm icon', false, '关闭提示', 'close')) : null),
     expansion(count > 0, el('section', { class: 'sheet', 'aria-label': '待提交', 'data-sheet': '' },
       expansion(trayOpen && count > 0, el('div', { class: 'tray-list' }, items.map(({ projectId, id, d }) => keyed(el('div', { class: 'tray-row' },
-        tag(d.kind === 'decision' ? '决定' : d.result === 'passed' ? '通过' : '需要修改'), el('span', { class: 'grow any' }, `${d.title} · ${inboxProjectName(projectId)}`), invalidDraft(d) ? small('还没写内容') : null,
+        tag(d.result ? feedbackActions[d.result] : '决定'), el('span', { class: 'grow any' }, `${d.title} · ${inboxProjectName(projectId)}`), invalidDraft(d) ? small('还没写内容') : null,
         button('', () => removeChoice(projectId, id), 'text icon sm', false, `移除 ${d.title}`, 'close')), projectId + id)))),
       offline ? small(offline) : null,
       el('div', { class: 'row g2' }, el('button', { class: 'btn text grow trunc tray-toggle', type: 'button', disabled: busy, 'aria-expanded': String(trayOpen), onclick: () => { trayOpen = !trayOpen; render() } }, label),
@@ -898,8 +913,10 @@ function projectPage() {
     const artifacts = t.artifacts.map(a => button(a.label + ' · ' + a.version, () => openArtifact(p.ref.id, t.id, a, archive?.end), 'sm'))
     const workers = projectAgents(p.ref.id).filter(a => a.taskId === t.id && a.state !== 'done')
     const messages = archive ? [] : p.events.filter(e => t.sourceIds.includes(e.id) || e.taskId === t.id)
-    const records = archive ? [] : [...t.decisions.filter(d => d.answer !== undefined).map(d => small([`${d.question}：${d.answer}`, d.history.at(-1)?.source].filter(Boolean).join(' · '))),
-      ...t.acceptance.filter(a => a.status !== 'pending').map(a => small([`${a.title}：${a.status === 'passed' ? '已通过' : '需要修改'}`, a.history.at(-1)?.note, a.history.at(-1)?.source].filter(Boolean).join(' · ')))]
+    const historyRow = (title: string, h: Acceptance['history'][number], result: string) =>
+      small([title, result, h.source, h.at && new Date(h.at).toLocaleString(), h.note].filter(Boolean).join(' · '))
+    const records = [...t.decisions.flatMap(d => d.history.map(h => historyRow(d.question, h, d.answer === null ? '已丢弃' : h.result))),
+      ...t.acceptance.flatMap(a => a.history.map(h => historyRow(`${a.title} · 第 ${h.revision} 版`, h, acceptanceStatuses[h.result])))]
     return [row(tag(labels[taskState(t)]), small(`${p.ref.name} · ${relative(t.updatedAt)}更新`)),
       archive ? null : feedbackCards(p.ref.id, [t]),
       section('进展', el('p', { class: 'any' }, t.progress), archive ? null : [small('现在谁在做'),
@@ -907,8 +924,8 @@ function projectPage() {
       fold(active.key + '-goal', '目标', () => el('p', { class: 'any' }, t.goal), undefined, true),
       artifacts.length ? fold(active.key + '-artifacts', '成果', () => artifacts, artifacts.length) : null,
       messages.length ? fold(active.key + '-sources', '来源消息', () => messages.map(e => card(e.text)), messages.length) : null,
-      archive && t.acceptance.length ? section('验收', t.acceptance.map(a => card(a.title, small(a.status === 'passed' ? '已通过' : a.status === 'pending' ? '待验收' : '需要修改'), small(a.details)))) : null,
-      archive && t.decisions.length ? section('决定', t.decisions.map(d => card(d.question, small(d.answer ?? '待决定')))) : null,
+      archive && t.acceptance.length ? section('验收', t.acceptance.map(a => card(a.title, small(acceptanceStatuses[a.status]), small(a.details)))) : null,
+      archive && t.decisions.length ? section('决定', t.decisions.map(d => card(d.question, small(d.answer === null ? '已丢弃' : d.answer ?? '待决定')))) : null,
       records.length ? fold(active.key + '-records', '记录', () => records, records.length) : null]
   }
   const manage = (sectionName: '在线会话' | '新会话') => async () => {
