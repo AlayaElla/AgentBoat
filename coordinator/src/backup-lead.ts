@@ -1,7 +1,7 @@
 import { randomBytes, randomUUID } from 'node:crypto'
 import { backupDefaults } from '../../workspace/agent-launch.mjs'
 import { promptClientPath } from '../scripts/orca-cli.mjs'
-import { backupInCharge, type AgentSession, type BackupLead, type ContactRoutes, type Delivery, type LeadAction, type Project, type Workspace } from './model'
+import { awaitingLeadControl, expectedPhases, backupInCharge, type AgentSession, type BackupLead, type ContactRoutes, type Delivery, type LeadAction, type Project, type Workspace } from './model'
 import type { CoordinatorRuntime } from './runtime'
 import { fail, fingerprint, ProjectStore, takeoverActive, text } from './store'
 
@@ -12,9 +12,6 @@ const key = (r: Binding) => 'ref' in r ? r.ref.id : ''
 const queue = (r: Binding) => 'ref' in r ? r.deliveries : r.retired ??= []
 const label = (r: Binding) => 'ref' in r ? r.ref.name : '工作间'
 const available = (r: Binding) => !('ref' in r && r.hidden) && !takeoverActive(r.takeover)
-const expectedPhases: Record<LeadAction, BackupLead['phase'][]> = {
-  take: ['taking'], ready: ['probing', 'active'], handoff: ['handoff'], resume: ['returning']
-}
 const chat = (handle?: string) => !!handle?.startsWith('orca_session_id:')
 const unopened = (b?: BackupLead) => !b || b.phase === 'unavailable' || b.phase === 'single'
 const offline = (s?: AgentSession) => !s || s.online === 'offline'
@@ -61,7 +58,7 @@ export class BackupLeads {
   }
 
   private controlTarget(b: BackupLead | undefined, c: NonNullable<Delivery['control']>) {
-    if (b?.cycle === c.cycle && expectedPhases[c.action].includes(b.phase)) {
+    if (b && awaitingLeadControl(b, c)) {
       if (backupInCharge(b) && c.handle === b.primary) {
         const dispatch = b.contact && this.routes[b.contact.id]?.dispatch
         return dispatch && 'dispatch:' + dispatch
@@ -178,7 +175,7 @@ export class BackupLeads {
       const waitingForStandby = b.phase === 'taking' || b.phase === 'handoff' ? b.since : oldest && Math.max(oldest, b.since)
       const primaryInCharge = b.phase === 'standby' || b.phase === 'probing'
       const backupReason = stopped(standby, primaryInCharge ? undefined : waitingForStandby, now)
-      const uncertain = queue(r).some(d => d.control?.cycle === b.cycle && d.state === 'uncertain' && expectedPhases[d.control.action].includes(b.phase))
+      const uncertain = queue(r).some(d => d.control && awaitingLeadControl(b, d.control) && d.state === 'uncertain')
       const route = b.contact && this.routes[b.contact.id]
       const problem = route?.error ? '主用联络未就绪：' + route.error : reason && backupReason ? '主用和备用均停住，请主人核对会话' : uncertain ? '接管通知送达待核对，请查看目标会话' : undefined
       const missing = offline(live)
@@ -196,7 +193,7 @@ export class BackupLeads {
         await this.updateBinding(r, row => {
           const b = row.backup!
           b.phase = 'taking'; b.since = now; b.cycle = randomUUID(); delete b.problem
-          control(row, 'take', `${cause}。先用 ${id ? 'read ' + id : 'overview --brief'} 读插件记录，接管后核对原 Run 收件箱。待处理：${pending.slice(0, 12).map(p => p.title).join('、') || '暂无'}。进行中的任务和执行者：${context || '暂无已登记任务'}。`)
+          control(row, 'take', `${cause}。先用 ${id ? 'read ' + id : 'overview --brief'} 读插件记录，接管后核对原 Run 收件箱。待处理：${pending.slice(0, 12).map(p => p.title.slice(0, 120)).join('、') || '暂无'}。进行中的任务和执行者：${context || '暂无已登记任务'}。`)
           b.history.push({ at: now, text: `请求 ${b.handle} 接管：${cause}` })
         })
       } else if (expired && !missing && !stillWaiting) {
@@ -240,7 +237,7 @@ export class BackupLeads {
     let body: string | undefined, probing = false, target = c.handle
     await this.mutate(id, r => {
       const b = r.backup
-      if (!available(r) || !b || b.cycle !== c.cycle || !expectedPhases[c.action].includes(b.phase) || r.runId !== d.targetRunId) return
+      if (!available(r) || !b || !awaitingLeadControl(b, c) || r.runId !== d.targetRunId) return
       target = this.controlTarget(b, c) || fail('主用的联络 Dispatch 尚未就绪')
       b.credential = fingerprint(token)
       probing = b.phase === 'probing'

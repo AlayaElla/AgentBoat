@@ -1,14 +1,15 @@
 import { randomUUID } from 'node:crypto'
 import { mkdir, open, stat } from 'node:fs/promises'
 import path from 'node:path'
-import { taskState, type Project, type Task, type SourceEvent } from './model'
+import { awaitingLeadControl, taskState, type Project, type Task, type Workspace, type BackupLead, type SourceEvent } from './model'
 import { projectSubmissions, reportSubmitted, type WorkerReport } from '../scripts/worker-reports.mjs'
 
 type Submissions = Map<string, ReturnType<typeof projectSubmissions>[number]>
 type Cursor = NonNullable<Project['archive']>
 type Position = Pick<Cursor, 'id' | 'start' | 'end'>
 type History = { taskId: string; kind: 'acceptance' | 'decisions'; itemId: string; start: number; rows: Task['acceptance'][number]['history'] }
-type Batch = { projectId: string; previous?: Position; deliveries: Project['deliveries']; requests: Project['requests']; tasks?: Task[]; events?: SourceEvent[]; history?: History[] }
+type Owner = Project | Workspace
+type Batch = { projectId?: string; leadHistory?: BackupLead['history']; previous?: Position; deliveries: Project['deliveries']; requests: Project['requests']; tasks?: Task[]; events?: SourceEvent[]; history?: History[] }
 const limit = 200_000
 const bytes = (value: unknown) => Buffer.byteLength(JSON.stringify(value))
 function requireFit(p: Project, error?: unknown) {
@@ -18,10 +19,22 @@ function requireFit(p: Project, error?: unknown) {
     : '剩余记录用于当前工作或最近一次核对，请先处理待办或确认通知状态，缩短本次任务正文并将长文放在成果文件中'
   throw Object.assign(Error(`项目记录 ${bytes(p)} 字节，超过 ${limit} 字节上限（${parts}）。${advice}。原记录已保留`), { code: 'invalid_request' })
 }
-function fileName(id: string) {
+function fileName(p: Owner, id: string) {
   if (!/^[0-9a-f-]{36}$/.test(id)) throw Error('项目归档编号无效')
-  return `project-${id}.jsonl`
+  return `${'ref' in p ? 'project' : 'workspace'}-${id}.jsonl`
 }
+
+const recentLeadHistory = 50
+function outstandingControl(p: Owner, deliveries: Project['deliveries']) {
+  return deliveries.filter(d => d.state === 'sent' && d.control && awaitingLeadControl(p.backup, d.control)).at(-1)
+}
+function oldProbes(p: Owner) {
+  if ('ref' in p) return []
+  const sent = (p.retired ?? []).filter(d => d.state === 'sent' && d.control?.action === 'ready')
+  const awaiting = outstandingControl(p, sent)
+  return sent.slice(0, -1).filter(d => d !== awaiting)
+}
+export const needsLeadCompaction = (p: Owner) => (p.backup?.history.length ?? 0) > recentLeadHistory || oldProbes(p).length > 0
 
 export class ProjectArchive {
   private indexes = new Map<string, { end: number; proofs: Map<string, string>; taskIds: Set<string>; sourceOwners: Set<string> }>()
@@ -33,10 +46,10 @@ export class ProjectArchive {
   }
 
   // Only committed cursors are followed. Failed writes may leave unused bytes at EOF.
-  private async *batches(p: Project, stop = 0) {
+  private async *batches(p: Owner, stop = 0) {
     if (!p.archive) return
     const head = p.archive
-    const file = await open(path.join(this.directory, fileName(head.id)), 'r')
+    const file = await open(path.join(this.directory, fileName(p, head.id)), 'r')
     try {
       const { size } = await file.stat()
       let cursor: Position | undefined = head
@@ -51,7 +64,7 @@ export class ProjectArchive {
           offset += bytesRead
         }
         const batch: Batch = JSON.parse(data.toString())
-        if (batch.projectId !== p.ref.id || (batch.previous && batch.previous.end > start)) throw Error('项目归档记录不匹配')
+        if (batch.projectId !== ('ref' in p ? p.ref.id : undefined) || (batch.previous && batch.previous.end > start)) throw Error('项目归档记录不匹配')
         yield { end, batch }
         cursor = batch.previous
       }
@@ -120,7 +133,7 @@ export class ProjectArchive {
     return submitted
   }
 
-  private async storedTask(p: Project, id: string) {
+  async storedTask(p: Project, id: string) {
     let task = p.tasks.find(t => t.id === id)
     if (!task && p.archive?.taskCount) {
       for await (const { batch } of this.batches(p)) {
@@ -176,9 +189,59 @@ export class ProjectArchive {
     }
   }
 
+  private async appendTarget(p: Owner) {
+    const head = p.archive, id = head?.id ?? randomUUID()
+    const previous = head && { id, start: head.start, end: head.end }
+    const filename = path.join(this.directory, fileName(p, id))
+    const size = previous ? (await stat(filename)).size : 0
+    if (size < (previous?.end ?? 0)) throw Error('归档不完整，请恢复备份')
+    const gap = size > (previous?.end ?? 0) ? '\n' : ''
+    const start = size + gap.length
+    return { previous, position: (batch: Batch) => ({ id, start, end: start + bytes(batch) + 1 }),
+      write: async (batch: Batch) => {
+        await mkdir(this.directory, { recursive: true })
+        const file = await open(filename, previous ? 'a' : 'ax')
+        try {
+          if ((await file.stat()).size !== size) throw Error('归档已变化，请重试')
+          await file.appendFile(gap + JSON.stringify(batch) + '\n')
+          await file.sync()
+        } finally { await file.close() }
+      } }
+  }
+
+  async leadHistory(p: Owner, end?: number) {
+    if (end === undefined) return { history: p.backup?.history ?? [], ...(p.archive && { previousEnd: p.archive.end }) }
+    let found = false
+    for await (const row of this.batches(p)) {
+      if (row.end === end) found = true
+      if (found && row.batch.leadHistory?.length) return { history: row.batch.leadHistory, ...(row.batch.previous && { previousEnd: row.batch.previous.end }) }
+    }
+    if (!found) throw Error('归档批次不存在，请重新读取接管记录')
+    return { history: [] }
+  }
+
+  async compactLead(p: Owner) {
+    if (!('ref' in p) && p.retired) {
+      const old = new Set(oldProbes(p))
+      if (old.size) p.retired = p.retired.filter(d => !old.has(d))
+    }
+    const history = p.backup?.history
+    const rows = history?.slice(0, -recentLeadHistory)
+    if (!rows?.length || !history) return
+    try {
+      const target = await this.appendTarget(p)
+      const batch = { projectId: 'ref' in p ? p.ref.id : undefined, previous: target.previous,
+        deliveries: [], requests: [], leadHistory: rows }
+      await target.write(batch)
+      p.archive = { ...p.archive, ...target.position(batch) }
+      history.splice(0, rows.length)
+    } catch { /* Keep the history in storage and retry on the next write. */ }
+  }
+
   async compact(p: Project) {
+    const awaiting = outstandingControl(p, p.deliveries)
     const finished = p.deliveries.filter(d => {
-      if (d.state !== 'sent') return false
+      if (d.state !== 'sent' || d === awaiting) return false
       const target = d.external?.target
       if (!target) return true
       const task = p.tasks.find(t => t.id === target.taskId)
@@ -188,10 +251,8 @@ export class ProjectArchive {
     })
     const completed = p.tasks.filter(t => taskState(t) === 'completed').sort((a, b) => b.updatedAt.localeCompare(a.updatedAt) || a.id.localeCompare(b.id))
     const previous = p.archive
-    const id = previous?.id ?? randomUUID()
-    const filename = path.join(this.directory, fileName(id))
-    const batch: Required<Omit<Batch, 'previous'>> & Pick<Batch, 'previous'> = { projectId: p.ref.id,
-      previous: previous && { id, start: previous.start, end: previous.end }, deliveries: [], requests: [], tasks: [], events: [], history: [] }
+    const batch: Required<Omit<Batch, 'previous' | 'leadHistory'>> & Pick<Batch, 'previous'> = { projectId: p.ref.id,
+      deliveries: [], requests: [], tasks: [], events: [], history: [] }
     const next = { ...p }
     const collectTasks = (keep: number, pressure: boolean) => {
       batch.tasks = completed.slice(keep)
@@ -229,15 +290,11 @@ export class ProjectArchive {
       deliveries: batch.deliveries.length, requests: batch.requests.length, history: batch.history.reduce((sum, h) => sum + h.rows.length, 0) })
     if (!batch.tasks.length && !batch.events.length && !batch.deliveries.length && !batch.requests.length && bytes(p) <= limit) return
 
-    let size = 0
-    try {
-      if (previous) size = (await stat(filename)).size
-      if (size < (previous?.end ?? 0)) throw Error('项目归档不完整，请恢复备份')
-    } catch (error) { requireFit(p, error); return }
-    const gap = size > (previous?.end ?? 0) ? '\n' : ''
+    let target: Awaited<ReturnType<ProjectArchive['appendTarget']>>
+    try { target = await this.appendTarget(p) } catch (error) { requireFit(p, error); return }
+    batch.previous = target.previous
     const measure = () => {
-      const start = size + gap.length
-      next.archive = { id, start, end: start + bytes(batch) + 1, taskCount: (previous?.taskCount ?? 0) + batch.tasks.length, last: summary() }
+      next.archive = { ...target.position(batch), taskCount: (previous?.taskCount ?? 0) + batch.tasks.length, last: summary() }
       return bytes(next)
     }
     const collectHistory = () => {
@@ -259,15 +316,7 @@ export class ProjectArchive {
       if (bytes(p) <= limit) return
       requireFit(next)
     }
-    try {
-      await mkdir(this.directory, { recursive: true })
-      const file = await open(filename, previous ? 'a' : 'ax')
-      try {
-        if ((await file.stat()).size !== size) throw Error('项目归档已变化，请重试')
-        await file.appendFile(gap + JSON.stringify(batch) + '\n')
-        await file.sync()
-      } finally { await file.close() }
-    } catch (error) { requireFit(p, error); return }
+    try { await target.write(batch) } catch (error) { requireFit(p, error); return }
     Object.assign(p, next)
   }
 }

@@ -1,3 +1,4 @@
+import { needsLeadCompaction } from './project-archive'
 import { BackupLeads, backupView } from './backup-lead'
 import os from 'node:os'
 import path from 'node:path'
@@ -7,11 +8,11 @@ import type { OrcaWorkerApi } from 'orca/worker'
 import { actingMain, agents, type AgentSession, type LeadSwitch, type Project, type ProjectLead, type ProjectRef, type Snapshot, type SourceEvent, type Delivery, type MessagingSnapshot } from './model'
 import { FeishuSources, notifyFeishu, type MessageTransport } from './feishu'
 import { OrcaRuntime, defaultExecutable, type CoordinatorRuntime } from './runtime'
-import { ProjectStore, artifactUrl, fail, feedback, fingerprint, fresh, maxMessageLength, notifyWorkspace, object, overview, receiveEvent, submitTask, strings, text, revision, mergeProjects, feishuConfig, takeoverActive, verifyTakeover } from './store'
+import { ProjectStore, artifactUrl, fail, feedback, fingerprint, fresh, maxMessageLength, notifyWorkspace, object, overview, resetBackup, receiveEvent, submitTask, strings, text, revision, mergeProjects, feishuConfig, takeoverActive, verifyTakeover } from './store'
 import { WorkspaceLinks } from './links'
 import { fileErrorText, incomingHash, linkMessageHistory } from './link-messages'
 import { LinkFiles } from './link-files'
-import { groupedAttention, isProjectShared, isRunNotice, type OwnerQuestion } from './model'
+import { taskState, groupedAttention, isProjectShared, isRunNotice, type OwnerQuestion } from './model'
 import { mainAgent, roleReminder, switchLead, takeoverView, recoverTakeover } from './main-agent'
 import { projectLeadDefaults } from '../../workspace/agent-launch.mjs'
 import { promptClientPath, installationRoot, release, roleRegistryPath } from '../scripts/orca-cli.mjs'
@@ -598,11 +599,12 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
     })
     await flushMailbox(); return messagingSnapshot()
   })
-  orca.panels.handle('workspace.overview', async () => {
+  orca.panels.handle('workspace.overview', async input => {
     const { list, error } = await availableProjectRecords()
     // Orca registration defines membership. A project can be registered without a workspace.
     const inbox = await unsubmitted(questions, list)
-    return { ...overview(list, await store.workspace(), error), questions: inbox.filter(item => !item.report), reports: inbox.filter(item => item.report), workspace: await main.read(live), links: await links.snapshot(), connections: await connections.list(), machines: [{ id: 'local', name: os.hostname(), role: 'host' as const, online: true }] }
+    const records = input?.agent ? list.map(p => ({ ...p, archive: undefined })) : list
+    return { ...overview(records, await store.workspace(), error), questions: inbox.filter(item => !item.report), reports: inbox.filter(item => item.report), workspace: await main.read(live), links: await links.snapshot(), connections: await connections.list(), machines: [{ id: 'local', name: os.hostname(), role: 'host' as const, online: true }] }
   })
   orca.panels.handle('workspace.message', async input => {
     const id = text(input.projectId, '项目编号', 200)
@@ -658,12 +660,16 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
     const project = await store.get(id)
     return project.hidden ? null : project.tasks.find(t => t.id === taskId) ?? null
   })
+  orca.panels.handle('lead.history', async input => {
+    const owner = input.projectId === undefined ? await store.workspace() : await ensure(text(input.projectId, '项目编号', 200))
+    return store.archive.leadHistory(owner, input.end)
+  })
   orca.panels.handle('project.archive', async input => {
     const p = await ensure(input.projectId)
     const batch = await store.archive.page(p, input.end)
     return { end: input.end ?? p.archive!.end, ...(batch.previous && { previousEnd: batch.previous.end }), tasks: batch.tasks ?? [],
       deliveries: batch.deliveries.length, events: batch.events?.length ?? 0, requests: batch.requests.length,
-      history: batch.history?.reduce((count, part) => count + part.rows.length, 0) ?? 0 }
+      history: (batch.history?.reduce((count, part) => count + part.rows.length, 0) ?? 0) + (batch.leadHistory?.length ?? 0) }
   })
   orca.panels.handle('project.lead', input => {
     const id = text(input.projectId, '项目编号', 200)
@@ -714,7 +720,11 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
     const id = text(input.projectId, '项目编号', 200)
     if (input.operation === 'read') {
       const result = await snapshot(id)
-      if (input.taskId === undefined || !result.project) return result
+      if (!result.project) return result
+      if (input.taskId === undefined) {
+        if (input.agent) result.project.tasks = result.project.tasks.map(t => ({ ...t, state: taskState(t) }))
+        return result
+      }
       const taskId = text(input.taskId, '任务编号', 200)
       const task = await store.archive.task(result.project, taskId)
       return { ...result, task, ...(task && !result.project.tasks.some(t => t.id === taskId) ? { archiveStatus: '已归档' as const } : {}) }
@@ -740,12 +750,12 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
           if (!('workspaceId' in workspace) || workspace.workspaceId !== workspaceId(takeoverSession.workspace)) fail('目标会话已经离开项目工作区')
           if (p.runId) p.deliveries.push({ id: `retired:${t.id}`, targetRunId: p.runId, subject: '项目主会话已切换',
             body: `项目「${p.ref.name}」的主会话已换成「${takeoverSession.title || takeoverSession.handle}」。你不再是主会话。请停止派活，把进行中的情况交给新主会话。`, state: 'pending' })
-          delete p.backup
+          resetBackup(p, takeoverSession.handle)
           p.mainSession = takeoverSession
           delete p.takeover
         } else if (p.runId !== input.runId) {
           if (takeoverActive(p.takeover)) fail('项目正在等待接管，请使用本次接管凭据')
-          delete p.backup
+          resetBackup(p, '')
           delete p.mainAgentHandle
           delete p.mainSession
           delete p.takeover
@@ -766,7 +776,11 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
     if (input.operation === 'bind') deferBackupCheck()
     if (input.operation === 'submit') {
       const taskId = text(object(input.task).id, '任务编号', 200)
-      if (!written.tasks.some(t => t.id === taskId)) return { ...result, task: await store.archive.task(written, taskId), archiveStatus: '已归档' as const }
+      if (!written.tasks.some(t => t.id === taskId)) {
+        const task = await store.archive.storedTask(written, taskId)
+        if (task) return { ...result, submitted: { id: task.id, phase: task.phase, submittedAt: task.submittedAt,
+          pendingAcceptance: task.acceptance.some(a => a.status === 'pending'), pendingDecision: task.decisions.some(d => d.answer === undefined) } }
+      }
     }
     return result
   })
@@ -851,7 +865,7 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
           ['pending', 'uncertain'].includes(d.state)) pending.push({ at: d.createdAt ?? r.backup.confirmedAt ?? r.backup.since, title: d.subject })
       }
       const context = (project ? [project] : projects).flatMap(p => p.tasks.filter(t => t.phase === 'working').map(t =>
-        [t.title, ...t.executions.map(e => e.agent + ' ' + e.dispatchId)].join(' · '))).slice(0, 12).join('；')
+        [t.title, ...t.executions.slice(-3).map(e => e.agent + ' ' + e.dispatchId)].join(' · ').slice(0, 300))).slice(0, 12).join('；')
       if (r.backup && ('ref' in r ? r.deliveries : r.retired)?.some(d => d.control && d.state === 'pending')) {
         if (project) defer(project.ref.id)
         else void main.flushRetired().catch(() => {})
@@ -874,7 +888,7 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
     await refreshAgents(true)
     const { refs, error } = await availableProjects(), current = error ? [] : (await store.all()).filter(p => refs.some(ref => ref.id === p.ref.id))
     for (const p of current) {
-      if (p.takeover?.state === 'sending' || p.deliveries.some(x => x.state === 'sending')) await store.mutate(p.ref.id, undefined, p => {
+      if (needsLeadCompaction(p) || p.takeover?.state === 'sending' || p.deliveries.some(x => x.state === 'sending')) await store.mutate(p.ref.id, undefined, p => {
         recoverTakeover(p.takeover)
         for (const d of p.deliveries.filter(x => x.state === 'sending')) { d.state = 'uncertain'; d.error = '插件重启前通知结果待核对' }
       })

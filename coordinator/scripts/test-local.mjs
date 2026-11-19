@@ -1,9 +1,12 @@
-import { build } from 'esbuild';
 import { mkdir } from 'node:fs/promises';
 import { realpathSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { executable } from './orca-cli.mjs';
+
+process.chdir(fileURLToPath(new URL('../', import.meta.url)));
+const { build } = await import('esbuild');
 
 // shortcut: Orca 1.4.256's Windows test loader refuses its own runtime import; remove when that runner works.
 const cliPath = realpathSync(path.isAbsolute(executable) ? executable : execFileSync('which', [executable], { encoding: 'utf8' }).trim());

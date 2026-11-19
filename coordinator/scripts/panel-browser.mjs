@@ -1,16 +1,22 @@
-import { build } from 'esbuild';
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import http from 'node:http';
-import { pathToFileURL } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
+process.chdir(fileURLToPath(new URL('../', import.meta.url)));
+
+const { build } = await import('esbuild');
 const { chromium } = await import(process.env.PLAYWRIGHT_MODULE ? pathToFileURL(process.env.PLAYWRIGHT_MODULE).href : 'playwright-core');
 await fs.mkdir('.orca/local-test', { recursive: true });
 await build({ entryPoints: ['src/panel-page.ts'], outfile: '.orca/local-test/panel.js', bundle: true, platform: 'browser', format: 'esm' });
 const draftModel = (await build({ entryPoints: ['src/feedback-drafts.ts'], bundle: true, format: 'iife', globalName: 'draftModel', write: false })).outputFiles[0].text;
-const mockup = await fs.readFile('../docs/design/workspace-mockup-v8.html', 'utf8');
-const tokens = mockup.slice(mockup.indexOf(':root{--orca-background'), mockup.indexOf('/* ②'));
+const mockup = path.resolve('../docs/design/workspace-mockup-v8.html');
+const hasMockup = await fs.access(mockup).then(() => true, error => {
+  if (error.code === 'ENOENT') return false;
+  throw error;
+});
+const tokens = await fs.readFile(new URL('./panel-theme-fixture.css', import.meta.url), 'utf8');
 const server = http.createServer(async (req, res) => {
   try {
     const url = new URL(req.url, 'http://localhost');
@@ -865,13 +871,14 @@ try {
       assert.equal(await privateRows.count(), 0);
     }
   });
-  await test('v8 mockup pages open in a headless browser', async () => {
+  if (hasMockup) await test('v8 mockup pages open in a headless browser', async () => {
     page = await browser.newPage(); page.on('pageerror', e => errors.push(e.message));
     for (const kind of ['home', 'project', 'task', 'project-settings', 'settings', 'main', 'connections', 'connection', 'add-connection', 'links', 'machines', 'agents', 'peer', 'peer-project', 'relation']) {
       const params = new URLSearchParams({ page: kind, id: ['connection'].includes(kind) ? 'hermes' : ['task'].includes(kind) ? 't1' : ['relation'].includes(kind) ? 'out' : 'ops', project: 'web', pid: 'ox0' });
-      await page.goto(pathToFileURL(path.resolve('../docs/design/workspace-mockup-v8.html')).href + '#' + params); await page.locator('#panel').waitFor();
+      await page.goto(pathToFileURL(mockup).href + '#' + params); await page.locator('#panel').waitFor();
     }
   });
+  else console.log('SKIP v8 mockup pages: private docs/design/workspace-mockup-v8.html is absent');
   await test('主会话卡片区分单 agent 和故障，只有确认后才能重开备用', async () => {
     await setup({ width: 400 });
     await page.evaluate(() => { fixture.workspace.backup = { phase: 'single', history: [], cycle: 'c', agent: 'codex' }; fixture.emit(); });

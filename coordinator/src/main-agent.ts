@@ -1,3 +1,4 @@
+import { needsLeadCompaction } from './project-archive'
 import { backupView, type BackupLeads } from './backup-lead'
 import { randomBytes, randomUUID } from 'node:crypto'
 import { existsSync } from 'node:fs'
@@ -143,7 +144,7 @@ export function mainAgent(orca: OrcaWorkerApi, store: ProjectStore, runtime: Coo
   })
   async function recover() {
     const w = await store.workspace()
-    if (w.takeover?.state === 'sending' || w.retired?.some(d => d.state === 'sending')) await store.mutateWorkspace(w => {
+    if (needsLeadCompaction(w) || w.takeover?.state === 'sending' || w.retired?.some(d => d.state === 'sending')) await store.mutateWorkspace(w => {
       recoverTakeover(w.takeover)
       for (const d of w.retired ?? []) if (d.state === 'sending') d.state = 'uncertain'
     })

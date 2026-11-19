@@ -24,8 +24,8 @@ export function roleRegistry(file: string, read: () => Promise<{
         const summary = visible && [
           `工作间待处理 ${groupedAttention(visible.flatMap(attention)).length} 组`,
           ...visible.slice(0, 30).map(p => {
-            const counts = Object.entries(projectCounts(p)).flatMap(([key, count]) => count ? [`${labels[key as keyof typeof labels]} ${count}`] : [])
-            return `- ${line(p.ref.name)}：${counts.join('，') || '暂无任务'}`
+            const counts = Object.entries(projectCounts(p)).flatMap(([key, count]) => count && key !== 'completed' ? [`${labels[key as keyof typeof labels]} ${count}`] : [])
+            return `- ${line(p.ref.name)}：${counts.join('，') || '暂无待办'}`
           }),
           ...(visible.length > 30 ? [`另有 ${visible.length - 30} 个项目，读 overview 查看`] : []),
           ...(mailbox ? [`工作间消息待交付 ${mailbox.inbox.filter(m => m.state === 'pending').length + mailbox.deliveries.filter(m => !m.external && m.state === 'pending').length} 条，送达待核对 ${mailbox.deliveries.filter(m => !m.external && m.state === 'uncertain').length} 条`] : [])

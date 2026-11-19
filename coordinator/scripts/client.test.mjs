@@ -158,7 +158,7 @@ test('submit emits the hook receipt only for the exact saved write and preserves
       const raw=args[args.indexOf('--data')+1], input=JSON.parse(raw);
       const fingerprint=process.env.TEST_UNMATCHED?'wrong':createHash('sha256').update(raw).digest('hex');
       const archived=!!process.env.TEST_ARCHIVED, task={...input.task,acceptance:archived?[]:[{status:'pending'}]};
-      return JSON.stringify({ok:true,result:{result:{task:archived?task:undefined,project:{
+      return JSON.stringify({ok:true,result:{result:{submitted:archived?{id:task.id,phase:task.phase,pendingAcceptance:false,pendingDecision:false}:undefined,project:{
         ref:{id:input.projectId},revision:2,archive:archived?{last:{revision:2,tasks:1}}:undefined,
         tasks:archived?[]:[task],requests:[{id:input.requestId,fingerprint}]
       }}}});
@@ -172,7 +172,10 @@ test('submit emits the hook receipt only for the exact saved write and preserves
     assert.deepEqual(reply.submission, { projectId: 'p1', requestId: 'one', taskId: 't1', phase: 'ready', pendingAcceptance: true, pendingDecision: false });
     assert.equal(reply.result.result.project.ref.id, 'p1');
     assert.equal(call(true).submission, undefined);
-    assert.deepEqual(call(false, true).submission, { ...reply.submission, pendingAcceptance: false, archived: { revision: 2, tasks: 1 } });
+    const archived = call(false, true);
+    assert.deepEqual(archived.submission, { ...reply.submission, pendingAcceptance: false });
+    assert.equal(archived.result.result.submitted, undefined);
+    assert.equal(archived.result.result.project.archive, undefined);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -180,10 +183,12 @@ test('brief and single-task reads preserve the bridge envelope and omit unrelate
   const dir = mkdtempSync(path.join(os.tmpdir(), 'compact-client-')), fixture = path.join(dir, 'orca-fixture.mjs');
   writeFileSync(fixture, `import cp from 'node:child_process'; import {syncBuiltinESMExports} from 'node:module';
 const ref={id:'p1',name:'示例',path:'/private/path'}, counts={working:2};
-const project={ref, revision:3, tasks:[{id:'t1',title:'一'},{id:'t2',title:'二'}], events:['private']};
-const overview={workspace:{runId:'main'},links:['private'],attention:[{title:'待决定'}],questions:[{id:'msg_1'}],projects:[{ref,counts}]};
+const hidden='history-marker', backup={phase:'taking',history:[hidden.repeat(4096)]};
+const project={ref, revision:3, archive:{id:hidden}, backup, requests:[{id:hidden}], deliveries:[{state:'sent',body:hidden},{state:'uncertain',body:'check'}],
+  tasks:[{id:'t1',title:'一',decisions:[{id:'d',history:[hidden,'current'],archivedHistory:12}]},{id:'t2',title:'二'}, {id:'closed',state:'completed',goal:hidden}], events:[{taskId:'closed',text:hidden}]};
+const overview={workspace:{runId:'main',backup},links:['private'],attention:[{title:'待决定'}],questions:[{id:'msg_1'}],projects:[{ref,counts}]};
 cp.execFileSync=(_exe,args)=>{const archived=args.includes('--data')&&JSON.parse(args[args.indexOf('--data')+1]).taskId==='old';
-return JSON.stringify({ok:true,id:'fixture',result:{result:args[4]==='workspace.overview'?overview:args[4]==='project.agent'?{project,lead:{private:true},...(archived?{task:{id:'old'},archiveStatus:'已归档'}:{})}:null}});};
+return JSON.stringify({ok:true,id:'fixture',result:{result:args[4]==='workspace.overview'?overview:args[4]==='lead.history'?{history:[hidden]}:args[4]==='workspace.agent'?overview.workspace:args[4]==='project.lead'?{binding:{backup}}:{project,lead:{backup},...(archived?{task:{id:'old',goal:'archived-body'},archiveStatus:'已归档'}:{})}}});};
 syncBuiltinESMExports();`);
   const call = (...args) => JSON.parse(execFileSync(process.execPath, ['--import', pathToFileURL(fixture).href, 'scripts/client.mjs', ...args],
     { encoding: 'utf8', windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] }));
@@ -193,10 +198,37 @@ syncBuiltinESMExports();`);
     } } });
     assert.equal(call('overview').result.result.workspace.runId, 'main');
     assert.deepEqual(call('read', 'p1', '--task', 't2').result.result, { projectId: 'p1', revision: 3, task: { id: 't2', title: '二' } });
-    assert.equal(call('read', 'p1').result.result.project.tasks.length, 2);
-    assert.deepEqual(call('read', 'p1', '--task', 'old').result.result, { projectId: 'p1', revision: 3, task: { id: 'old' }, archiveStatus: '已归档' });
+    assert.equal(call('read', 'p1').result.result.project.tasks.length, 3);
+    assert.deepEqual(call('read', 'p1', '--task', 'old').result.result, { projectId: 'p1', revision: 3, task: { id: 'old', goal: 'archived-body' }, archiveStatus: '已归档' });
+    for (const args of [['overview'], ['overview','--brief'], ['read','p1'], ['main-read'], ['project-lead','p1']]) {
+      const output = JSON.stringify(call(...args));
+      assert.doesNotMatch(output, /history-marker|archived-body|archivedHistory/);
+    }
+    assert.deepEqual(call('read','p1').result.result.project.deliveries, [{state:'uncertain',body:'check'}]);
+    assert.deepEqual(call('lead-history','p1','--end','42').result.result.history, ['history-marker']);
     assert.throws(() => call('read', 'p1', '--task', 'absent'), /找不到任务 absent/);
   } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('connection reads keep unresolved messages and replies match the requested receipt', () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'agentboat-connection-view-')), fixture = path.join(dir,'orca-fixture.mjs');
+  writeFileSync(fixture, `import cp from 'node:child_process'; import {syncBuiltinESMExports} from 'node:module';
+const mailbox={inbox:['done','open'].map(id=>({event:{id,sourceId:'app/'+id}})),deliveries:[
+  {id:'agent-reply:one',state:'sent',external:{appId:'app',replyTo:'done'}},{id:'pending',state:'uncertain'}]};
+const a2a={entries:['old','open','latest'].map(id=>({id,notification:'sent',task:{id,status:{state:id==='open'?'TASK_STATE_WORKING':'TASK_STATE_COMPLETED'}}}))};
+cp.execFileSync=(_exe,args)=>{const input=JSON.parse(args[args.indexOf('--data')+1]);
+return JSON.stringify({ok:true,result:{result:args[4]==='workspace.reply'?mailbox:input.name==='A2A'?{a2a}:{feishu:mailbox}}});};
+syncBuiltinESMExports();`);
+  const call = (...args) => JSON.parse(execFileSync(process.execPath,['--import',pathToFileURL(fixture).href,'scripts/client.mjs',...args],{encoding:'utf8'})).result.result;
+  try {
+    const m = call('connection-read','Feishu').feishu;
+    assert.deepEqual(m.inbox.map(e=>e.event.id), ['open']);
+    assert.deepEqual(m.deliveries.map(d=>d.id), ['pending']);
+    assert.deepEqual(call('connection-read','A2A').a2a.entries.map(e=>e.id), ['open','latest']);
+    const file=path.join(dir,'reply.json');
+    writeFileSync(file,JSON.stringify({eventId:'done',requestId:'one'}));
+    assert.deepEqual(call('feishu-reply',file).deliveries.map(d=>d.id), ['agent-reply:one']);
+  } finally { rmSync(dir,{recursive:true,force:true}); }
 });
 
 test('the bridge explains approval and reload errors while keeping unrelated validation errors', () => {

@@ -85,6 +85,11 @@ export interface BackupLead {
   history: { at: number; text: string }[]
   credential?: string; consumed?: string
 }
+export const expectedPhases: Record<LeadAction, BackupLead['phase'][]> = {
+  take: ['taking'], ready: ['probing', 'active'], handoff: ['handoff'], resume: ['returning']
+}
+export const awaitingLeadControl = (b: BackupLead | undefined, c: NonNullable<Delivery['control']>) =>
+  b?.cycle === c.cycle && expectedPhases[c.action].includes(b.phase)
 export const backupInCharge = (b?: BackupLead) => !!b && ['active', 'handoff', 'returning'].includes(b.phase)
 export interface AgentSession {
   handle: string; title: string; workspace: string; workspaceName: string; path: string; agent: string
@@ -118,6 +123,7 @@ export interface WorkspaceBinding {
 export interface Workspace extends WorkspaceBinding {
   version: 1; requests: { id: string; fingerprint: string }[]
   takeover?: StoredTakeover
+  archive?: Pick<NonNullable<Project['archive']>, 'id' | 'start' | 'end'>
   retired?: Delivery[]
 }
 type TaskState = ReturnType<typeof taskState>

@@ -571,6 +571,63 @@ test('uncommitted task versions are invisible after a failed storage write and a
   } finally { await rm(dir, { recursive: true, force: true }) }
 })
 
+test('lead history retains fifty per role, one sent workspace probe, and all outstanding control messages', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'agentboat-lead-history-'))
+  const storage = projectStorage(fresh(refs[0])), store = new ProjectStore(storage, dir)
+  const rows = (role: string) => Array.from({ length: 52 }, (_, at) => ({ at, text: role + at }))
+  const backup = (role: string) => ({ primary: role, agent: 'codex', phase: 'taking' as const, since: 0, cycle: 'pending', history: rows(role) })
+  try {
+    const w = await store.mutateWorkspace(w => {
+      w.backup = backup('workspace')
+      const states = ['sent', 'pending', 'sending', 'uncertain', 'sent'] as const
+      w.retired = states.map((state, i) => ({ id: String(i), state, subject: 'probe', body: '', control: { action: 'ready', cycle: String(i), handle: 'main' } }))
+      w.retired.push({ ...w.retired[0], id: 'take', control: { action: 'take', cycle: 'pending', handle: 'spare' } })
+    })
+    assert.deepEqual(w.retired?.map(d => d.id), ['1','2','3','4','take'])
+    assert.deepEqual(w.backup?.history, rows('workspace').slice(2))
+    assert.equal(w.backup?.phase, 'taking')
+    const waiting = await store.mutateWorkspace(w => {
+      w.backup!.phase = 'probing'
+      w.backup!.cycle = '4'
+      w.retired!.push({ ...w.retired!.find(d => d.id === '4')!, id: 'stale', control: { action: 'ready', cycle: 'other', handle: 'main' } })
+    })
+    assert.ok(waiting.retired?.some(d => d.id === '4'))
+    await store.mutate('p1', 0, p => { p.backup = backup('project') })
+    await Promise.all([52, 53].map(at => store.mutateWorkspace(w => { w.backup!.history.push({ at, text: 'workspace' + at }) })))
+    const restarted = new ProjectStore(storage, dir)
+    for (const [owner, role, count] of [[await restarted.workspace(), 'workspace', 54], [await restarted.get('p1'), 'project', 52]] as const) {
+      let page = await restarted.archive.leadHistory(owner)
+      assert.equal(page.history.length, 50)
+      const all = [...page.history]
+      while (page.previousEnd) {
+        page = await restarted.archive.leadHistory(owner, page.previousEnd)
+        all.unshift(...page.history)
+      }
+      assert.deepEqual(all, Array.from({ length: count }, (_, at) => ({ at, text: role + at })))
+    }
+    assert.deepEqual((await readdir(dir)).map(f => f.split('-')[0]).sort(), ['project', 'workspace'])
+    const append = (w: import('./model').Workspace) => { w.backup!.history.push({ at: 54, text: 'workspace54' }) }
+    const interrupted = new ProjectStore({ ...storage, set: async () => { throw Error('interrupted') } }, dir)
+    await assert.rejects(() => interrupted.mutateWorkspace(append), /interrupted/)
+    const retry = await new ProjectStore(storage, dir).mutateWorkspace(append)
+    const committed = await store.archive.leadHistory(retry, retry.archive!.end)
+    assert.deepEqual(committed.history, [{ at: 4, text: 'workspace4' }])
+    assert.deepEqual((await store.archive.leadHistory(retry, committed.previousEnd)).history, [{ at: 3, text: 'workspace3' }])
+    const blocked = path.join(dir, 'blocked')
+    await writeFile(blocked, '')
+    const failing = new ProjectStore(storage, blocked)
+    const saved = await failing.mutateWorkspace(w => { w.backup!.history = rows('retry') })
+    assert.deepEqual(saved.backup?.history, rows('retry'))
+    const rebound = await failing.bindWorkspace(saved.revision, 'new-run', { id: 'bind', input: {} }, mainSession)
+    assert.equal(rebound.backup?.phase, 'unavailable')
+    assert.equal(rebound.backup?.cycle === saved.backup?.cycle, false)
+    assert.deepEqual(rebound.backup?.history, rows('retry'))
+    assert.deepEqual((await failing.workspace()).backup?.history, rows('retry'))
+    const project = await failing.mutate('p1', undefined, p => { p.backup!.history = rows('retry-project') })
+    assert.deepEqual(project.backup?.history, rows('retry-project'))
+  } finally { await rm(dir, { recursive: true, force: true }) }
+})
+
 test('archive failure retains history, permits writes that fit and describes an oversized write', async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'agentboat-project-archive-failure-'))
   const blocked = path.join(dir, 'file'), project = fresh(refs[0])

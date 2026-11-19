@@ -33,6 +33,11 @@ export function verifyTakeover(t: StoredTakeover | undefined, token: unknown, se
   return t
 }
 export const projectKey = (hostId: string, repoId: string) => fingerprint([hostId, repoId]).slice(0, 24)
+export function resetBackup(p: Project | Workspace, primary: string) {
+  const history = p.backup?.history
+  if (history?.length) p.backup = { primary, agent: '', phase: 'unavailable', cycle: randomUUID(), since: Date.now(), history }
+  else delete p.backup
+}
 export function fresh(ref: ProjectRef): Project {
   return { version: 1, ref, revision: 0, runId: '', roles: { design: 'claude', code: 'codex', review: 'codex' },
     tasks: [], events: [], deliveries: [], requests: [] }
@@ -132,6 +137,7 @@ export class ProjectStore {
       const w = await this.workspace()
       if (expected !== undefined && w.revision !== expected) fail('工作间已更新，请刷新后再提交')
       fn(w); w.revision++
+      await this.archive.compactLead(w)
       await this.storage.set('workspace', w as any)
       await this.updateRoles?.()
       return w
@@ -152,7 +158,8 @@ export class ProjectStore {
           body: `你已不再是工作间主 agent。新的主 agent：${session.title || session.handle}\n工作区：${session.workspaceName || session.workspace}\n目录：${session.path}\nAgent：${session.agent}\nRun：${runId}\n请停止承担工作间主 agent。已发送的通知不会补发；新的主 agent 会读取总览补齐事项。`, state: 'pending' })
       }
       if (checkOnly) return w
-      delete w.backup
+      resetBackup(w, session.handle)
+      await this.archive.compactLead(w)
       w.session = session; w.boundAt = new Date().toISOString(); delete w.takeover
       w.runId = runId; w.revision++; w.requests.push({ id: request.id, fingerprint: hash })
       await this.storage.set('workspace', w as any)
@@ -203,6 +210,7 @@ export class ProjectStore {
       project.revision++
       project.updatedAt = new Date().toISOString()
       if (request) project.requests.push({ id: request.id, fingerprint: hash! })
+      await this.archive.compactLead(project)
       await this.archive.compact(project)
       await this.storage.set(`project:${id}`, project as any)
       if (backgroundRoles) setImmediate(() => { void this.updateRoles?.().catch(() => {}) })
