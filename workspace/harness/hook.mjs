@@ -106,8 +106,13 @@ const nameOf = value => value?.toLowerCase().replace(/\.exe$/, '');
 function nodeAllowed(args, cwd, bash) {
   const [script, operation] = args;
   if (!script) return false;
-  const file = shellPath(cwd, script, bash);
-  if (same(file, clientPath)) return !!operation && !operation.startsWith('-');
+  const requested = shellPath(cwd, script, bash);
+  // Resolve only the published entry; arbitrary user-created script aliases stay outside the allowlist.
+  const entryRoot = path.resolve(path.dirname(clientPath), '../..');
+  const relative = path.relative(entryRoot, requested);
+  const file = inside(entryRoot, requested) ? path.resolve(workspaceDir, '..', relative) : requested;
+  if (!same(file, requested) && !same(file, canonical(requested))) return false;
+  if (same(file, path.resolve(workspaceDir, '../coordinator/scripts/client.mjs'))) return !!operation && !operation.startsWith('-');
   return [...rules.scripts].some(([entry, operations]) => same(file, entry) && operations.has(operation));
 }
 function readAllowed(name, args) {
