@@ -1119,7 +1119,7 @@ function connectionPage() {
 }
 function backupDescription(binding: WorkspaceBinding) {
   const b = binding.backup!
-  const phase = { opening: '启动中', failed: '启动待核对', standby: '待命', taking: '正在接管', active: '处理中', handoff: '正在交接', returning: '等待主用接回' }[b.phase]
+  const phase = { opening: '启动中', failed: '启动待核对', standby: '待命', probing: '等待主用确认', taking: '正在接管', active: '处理中', handoff: '正在交接', returning: '等待主用接回' }[b.phase]
   return `备用 ${agentName(b.agent)} · ${phase} · 当前${backupInCharge(b) ? '备用' : '主用'}负责`
 }
 function backupHistory(w: WorkspaceBinding) {

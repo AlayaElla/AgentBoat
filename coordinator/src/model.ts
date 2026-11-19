@@ -78,8 +78,8 @@ export type ProjectWorkspace = { workspaceId: string; multipleConversations?: bo
 export type LeadAction = 'take' | 'ready' | 'handoff' | 'resume'
 export interface BackupLead {
   primary: string; agent: string; handle?: string
-  phase: 'opening' | 'failed' | 'standby' | 'taking' | 'active' | 'handoff' | 'returning'
-  since: number; cycle: string; lastProbe?: number; problem?: string
+  phase: 'opening' | 'failed' | 'standby' | 'probing' | 'taking' | 'active' | 'handoff' | 'returning'
+  since: number; cycle: string; lastProbe?: number; confirmedAt?: number; problem?: string
   history: { at: number; text: string }[]
   credential?: string; consumed?: string
 }

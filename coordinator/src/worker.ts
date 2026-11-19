@@ -823,7 +823,7 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
         }
         const deliveries = project ? project.deliveries : [...mailbox.deliveries, ...projects.flatMap(p => p.deliveries.filter(d => d.targetRunId === w.runId))]
         for (const d of deliveries) if (!d.control && !d.external && !d.id.startsWith('retired:') && (!d.targetRunId || d.targetRunId === r.runId) &&
-          ['pending', 'uncertain'].includes(d.state)) pending.push({ at: d.createdAt ?? r.backup.since, title: d.subject })
+          ['pending', 'uncertain'].includes(d.state)) pending.push({ at: d.createdAt ?? r.backup.confirmedAt ?? r.backup.since, title: d.subject })
       }
       const context = (project ? [project] : projects).flatMap(p => p.tasks.filter(t => t.phase === 'working').map(t =>
         [t.title, ...t.executions.map(e => e.agent + ' ' + e.dispatchId)].join(' · '))).slice(0, 12).join('；')

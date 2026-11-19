@@ -8,7 +8,7 @@ import { stopped } from './backup-lead'
 const now = Date.now(), minute = 60_000
 const primary: AgentSession = { handle: 'orca_session_id:claude_lead', workspace: refs[0].workspace, workspaceName: '项目', path: refs[0].path, title: '主用', online: 'online', agent: 'claude', state: 'done' }
 
-test('停住判断只用完整清单和已知非工作状态，超过十五分钟才接管', () => {
+test('在线主用存在超过十五分钟的待办且已知不在工作时才需要探测', () => {
   assert.ok(stopped(undefined, undefined, now))
   assert.ok(stopped({ ...primary, online: 'offline' }, undefined, now))
   assert.equal(stopped(primary, undefined, now), undefined)
@@ -49,8 +49,11 @@ async function fixture(project: Project, workspace?: Workspace) {
   return { c, worker, env, poll, command, close: async () => { c.stop(); await worker.deactivate() } }
 }
 const bound = () => ({ ...fresh(refs[0]), runId: 'run_project', mainAgentHandle: primary.handle, mainSession: primary })
-test('补开项目备用、接管原 Run、接收执行者回报、恢复探测和交接均可重入', async () => {
+test('在线主用探测满十分钟未确认才接管原 Run，随后可恢复交回', async () => {
   const p = bound(), { env, poll, command, c, close } = await fixture(p)
+  const realNow = Date.now
+  let clock = now
+  Date.now = () => clock
   try {
     await Promise.all([poll(), poll()])
     assert.equal(env.launches.length, 1)
@@ -60,9 +63,17 @@ test('补开项目备用、接管原 Run、接收执行者回报、恢复探测�
     await c.refreshQuestions()
     await poll()
     assert.equal(env.controls.length, 1)
-    assert.ok(env.controls[0].prompt.includes('执行者已完成'))
+    assert.equal(env.controls[0].handle, primary.handle)
+    assert.ok(env.controls[0].prompt.includes('lead-ready'))
+    clock += 10 * minute - 1
+    await poll()
+    assert.equal(env.controls.length, 1)
+    clock++
+    await poll(); await poll()
+    assert.equal(env.controls.length, 2)
+    assert.ok(env.controls[1].prompt.includes('执行者已完成'))
     assert.deepEqual(await command('take'), { useRun: p.runId })
-    env.owner = env.controls[0].handle
+    env.owner = env.controls[1].handle
     // Orca changed its owner just before the plugin restarted; recover from run-show.
     const interrupted = await c.store.get(p.ref.id)
     const reboot = await fixture(interrupted)
@@ -80,11 +91,11 @@ test('补开项目备用、接管原 Run、接收执行者回报、恢复探测�
     assert.ok(env.deliveries.includes(p.runId + '|' + env.owner + '|新任务'))
     assert.equal((await c.store.get(p.ref.id)).backup?.phase, 'active')
     await poll()
-    assert.equal(env.controls.length, 1)
+    assert.equal(env.controls.length, 2)
     await c.store.mutate(p.ref.id, undefined, p => { p.backup!.since -= 61 * minute })
     await poll(); await poll()
-    assert.equal(env.controls.length, 2)
-    assert.equal(env.controls[1].handle, primary.handle)
+    assert.equal(env.controls.length, 3)
+    assert.equal(env.controls[2].handle, primary.handle)
     await command('ready'); await c.flush(p.ref.id)
     await command('ready')
     await command('handoff', '已验收 A，剩 B'); await c.flush(p.ref.id)
@@ -93,7 +104,52 @@ test('补开项目备用、接管原 Run、接收执行者回报、恢复探测�
     env.owner = primary.handle
     await command('resume'); await command('resume')
     assert.equal((await c.store.get(p.ref.id)).backup?.phase, 'standby')
-    assert.equal(env.controls.length, 4)
+    assert.equal(env.controls.length, 5)
+  } finally { Date.now = realNow; await close() }
+})
+
+test('未关联任务的旧消息只探测一次，主用确认后只对新积压再探测', async () => {
+  const p = bound()
+  const event = { id: 'old', source: 'owner', sourceId: 'old', threadId: '', chatId: '', senderId: 'owner', text: '项目状态如何？', receivedAt: new Date(now - 24 * 60 * minute).toISOString() }
+  p.events.push(event)
+  // An old notification with unknown delivery can remain in the queue indefinitely.
+  p.deliveries.push({ id: 'old-notice', subject: '进展', body: '', state: 'uncertain', createdAt: now - 60 * minute })
+  const { c, env, poll, command, close } = await fixture(p)
+  const realNow = Date.now
+  let clock = now
+  Date.now = () => clock
+  try {
+    await poll(); await poll(); await poll()
+    assert.deepEqual(env.controls.map(m => m.handle), [primary.handle])
+    clock += 9 * minute
+    await command('ready'); await command('ready')
+    const saved = await c.store.get(p.ref.id)
+    assert.equal(saved.backup?.phase, 'standby')
+    assert.equal(saved.backup?.confirmedAt, clock)
+    assert.equal(saved.events[0].taskId, undefined)
+    clock += 24 * 60 * minute
+    const reboot = await fixture(saved)
+    try {
+      reboot.env.sessions = env.sessions
+      await reboot.poll(); await reboot.poll()
+      assert.equal(reboot.env.controls.length, 0)
+      await reboot.c.store.mutate(p.ref.id, undefined, r => { r.events.push({ ...event, id: 'new', sourceId: 'new', receivedAt: new Date(clock).toISOString() }) })
+      clock += 16 * minute
+      await reboot.poll()
+      assert.deepEqual(reboot.env.controls.map(m => m.handle), [primary.handle])
+      assert.equal((await reboot.c.store.get(p.ref.id)).backup?.phase, 'probing')
+    } finally { await reboot.close() }
+  } finally { Date.now = realNow; await close() }
+})
+
+test('完整清单中找不到主用时直接通知备用接管', async () => {
+  const p = bound(), { env, poll, close } = await fixture(p)
+  try {
+    await poll()
+    env.sessions = env.sessions.filter(s => s.handle !== primary.handle)
+    await poll()
+    assert.deepEqual(env.controls.map(m => m.handle), ['orca_session_id:backup'])
+    assert.ok(env.controls[0].prompt.includes('lead-take'))
   } finally { await close() }
 })
 
