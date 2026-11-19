@@ -5,7 +5,7 @@ import { lookup } from 'node:dns'
 import { hostname, networkInterfaces } from 'node:os'
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto'
 import type { OrcaWorkerApi } from 'orca/worker'
-import { attention, agents, compareAgentActivity, groupedAttention, isProjectShared, isRecentAgent, mainStatus, mainAgentStates, taskState, type AgentActivity, type AgentsSnapshot, type MainAgentActivity, type Project, type Task, type WorkspaceBinding } from './model'
+import { attention, agents, compareAgentActivity, groupedAttention, isProjectShared, isRecentAgent, labels, mainStatus, mainAgentStates, taskState, type AgentActivity, type AgentsSnapshot, type MainAgentActivity, type Project, type Task, type WorkspaceBinding } from './model'
 import { fail, fingerprint, object, revision, strings, text, type FeedbackItem } from './store'
 import { LinkMessages, type IncomingMessage, type MessageExchange, type WireMessage } from './link-messages'
 import { LinkFiles } from './link-files'
@@ -28,7 +28,7 @@ export interface SharedReport {
   mainAgent?: MainAgentActivity | null
   feedbackTruncated?: true
   projects: { id: string; name: string; updatedAt: string; counts: Record<string, number>; pending: number
-    tasks?: { title: string; phase: string; decisions: string[]; acceptance: string[] }[]
+    tasks?: { title: string; phase: Task['phase']; state: ReturnType<typeof taskState>; decisions: string[]; acceptance: string[] }[]
     activity?: { agents: AgentActivity[]; truncated: boolean } | null; feedback?: DelegatedProject }[]
 }
 type LocalActivity = { workspace: WorkspaceBinding; live: AgentsSnapshot }
@@ -125,7 +125,7 @@ export function report(projects: Project[], peer: Sharing, workspaceId: string, 
       for (const t of tasks) { const state = taskState(t); counts[state] = (counts[state] || 0) + 1 }
       return { id: p.ref.id, name: p.ref.name, updatedAt: p.updatedAt || '', counts,
         pending: details ? groupedAttention(attention(p)).length : tasks.reduce((n, t) => n + t.decisions.filter(d => d.answer === undefined).length + (t.phase === 'ready' ? t.acceptance.filter(a => a.status === 'pending').length : 0), 0),
-        ...(details ? { activity: null, tasks: tasks.map(t => ({ title: t.title, phase: t.phase,
+        ...(details ? { activity: null, tasks: tasks.map(t => ({ title: t.title, phase: t.phase, state: taskState(t),
           decisions: t.decisions.filter(d => d.answer === undefined).map(d => d.question),
           acceptance: t.phase === 'ready' ? t.acceptance.filter(a => a.status === 'pending').map(a => a.title) : [] })) } : {}) }
     }) }
@@ -186,14 +186,20 @@ function received(raw: unknown, peer: Peer): SharedReport {
   if (!details && 'mainAgent' in r || r.feedbackTruncated !== undefined && (!details || r.feedbackTruncated !== true)) fail('对端上报格式不正确')
   return { workspaceId: peer.workspaceId, name: text(r.name, '工作间名称', 200), scope: r.scope, updatedAt: str(r.updatedAt, 100), ...(details ? { mainAgent } : {}), ...(r.feedbackTruncated ? { feedbackTruncated: true } : {}), projects: r.projects.map((raw: unknown) => {
     const p = object(raw), c = object(p.counts), counts: Record<string, number> = {}
-    for (const k of ['working', 'decision', 'review', 'rework', 'completed', 'blocked', 'paused']) if (c[k] !== undefined) {
+    for (const k of Object.keys(labels)) if (c[k] !== undefined) {
       if (!Number.isSafeInteger(c[k]) || c[k] < 0) fail('对端计数不正确'); counts[k] = c[k]
     }
     if (!Number.isSafeInteger(p.pending) || p.pending < 0) fail('对端待处理计数不正确')
     const out: SharedReport['projects'][number] = { id: id(p.id), name: str(p.name, 200), updatedAt: str(p.updatedAt, 100), counts, pending: p.pending }
     if (details) {
       if (!Array.isArray(p.tasks) || p.tasks.length > 1000) fail('对端任务格式不正确')
-      out.tasks = p.tasks.map((v: unknown) => { const t = object(v); if (!['working', 'ready', 'completed', 'blocked', 'paused'].includes(t.phase)) fail('对端任务阶段不正确'); return { title: str(t.title, 200), phase: t.phase, decisions: titles(t.decisions), acceptance: titles(t.acceptance) } })
+      out.tasks = p.tasks.map((v: unknown) => {
+        const t = object(v), decisions = titles(t.decisions), acceptance = titles(t.acceptance)
+        if (!['working', 'ready', 'completed', 'blocked', 'paused'].includes(t.phase) ||
+          t.state !== undefined && (typeof t.state !== 'string' || !Object.hasOwn(labels, t.state))) fail('对端任务阶段不正确')
+        const state = t.state ?? taskState({ phase: t.phase, decisions: decisions.map(() => ({})), acceptance: acceptance.map(() => ({ status: 'pending' })) })
+        return { title: str(t.title, 200), phase: t.phase, state, decisions, acceptance }
+      })
       out.activity = null
       if (p.activity !== null) {
         const activity = object(p.activity)
