@@ -132,8 +132,8 @@ test('project lead new uses the shared template and an unavailable workspace blo
       const argv = launches.at(-1)!, agent = choice ?? projectLeadDefaults.agent
       const flag = (k: string) => argv.includes('--' + k) ? argv[argv.indexOf('--' + k) + 1] : undefined
       assert.equal(flag('agent'), agent)
-      assert.equal(flag('model'), choice ? undefined : 'claude-opus-5-5')
-      assert.equal(flag('effort'), choice ? undefined : 'xhigh')
+      assert.equal(flag('model'), undefined)
+      assert.equal(flag('effort'), undefined)
       assert.equal(flag('surface'), 'chat')
       assert.equal(flag('worktree'), projectWorkspaceId)
       await assert.rejects(() => launch(choice), /已发起/)

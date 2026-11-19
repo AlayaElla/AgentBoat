@@ -2,7 +2,7 @@ import http from 'node:http'
 import https from 'node:https'
 import { BlockList, isIP, type AddressInfo, type LookupFunction } from 'node:net'
 import { lookup } from 'node:dns'
-import { hostname, networkInterfaces } from 'node:os'
+import { networkInterfaces } from 'node:os'
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto'
 import type { OrcaWorkerApi } from 'orca/worker'
 import { attention, agents, compareAgentActivity, groupedAttention, isProjectShared, isRecentAgent, mainStatus, mainAgentStates, taskState, type AgentActivity, type AgentsSnapshot, type MainAgentActivity, type Project, type Task, type WorkspaceBinding } from './model'
@@ -70,9 +70,6 @@ function httpNetwork(host: string): 'loopback' | 'tailscale' | undefined {
 export function invitationHost(interfaces = networkInterfaces()): string {
   const addresses = Object.values(interfaces).flat().filter(info => info && !info.internal && httpNetwork(info.address) === 'tailscale')
   return (addresses.find(info => info?.family === 'IPv4') ?? addresses[0])?.address ?? '127.0.0.1'
-}
-export function defaultWorkspaceName(host = hostname()): string {
-  return host.split('.')[0] || '我的工作间'
 }
 export function endpoint(value: unknown): string {
   let u: URL
@@ -292,7 +289,7 @@ export class WorkspaceLinks {
   private running = false
   private signaling = false
   private recentActivity?: { at: number; result: Promise<LocalActivity> }
-  private initial: LinkData = { version: 1, revision: 0, workspaceId: randomUUID(), name: defaultWorkspaceName(), enabled: false, host: '127.0.0.1', port: 0, publicUrl: '', tls: false, peers: [] }
+  private initial: LinkData = { version: 1, revision: 0, workspaceId: randomUUID(), name: '我的工作间', enabled: false, host: '127.0.0.1', port: 0, publicUrl: '', tls: false, peers: [] }
   private server?: http.Server | https.Server
   private timer?: ReturnType<typeof setInterval>
   private catalogTimer?: ReturnType<typeof setInterval>

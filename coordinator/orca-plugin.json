@@ -1,7 +1,7 @@
 {
   "manifestVersion": 2,
-  "id": "project-coordinator",
-  "name": "项目协作",
+  "id": "agentboat",
+  "name": "AgentBoat",
   "version": "0.1.0",
   "description": "分项目处理决定与成果验收，保存任务记录并接收飞书消息。",
   "engines": {

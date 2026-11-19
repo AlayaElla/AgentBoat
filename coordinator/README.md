@@ -14,7 +14,7 @@ Orca 右侧的工作间是 HTML 面板，首页只有「等你处理」和「组
 
 主 agent 页直接列出在线会话，点「设为主 agent」或「换成它」即发出接管；也可直接新开主 agent，默认 Claude，可改 Codex。等待时可取消或改选其他会话，旧凭据随即失效；10 分钟内未绑定会显示原因。目标会话仍须核对身份、创建自己的 Run、先 `main-bind --check` 再正式绑定，一次性凭据不会写入 skill。
 
-## macOS 安装和更新
+## 开发版安装和更新
 
 需要 Node.js 22+、Git、正在运行的 Orca >=1.4.261，并确认终端能运行 `orca status --json`。先将下面的仓库地址换成自己的 AgentBoat Git 地址：
 
@@ -25,7 +25,7 @@ npm install
 npm run build
 orca plugin dev load plugin --json
 node ../workspace/install.mjs
-orca plugin open local.project-coordinator --panel project-coordinator --json
+orca plugin open local.agentboat --panel project-coordinator --json
 ```
 
 首次加载按 Orca 回执核对权限并批准；需要指纹时使用回执给出的命令和 fingerprint。`plugin/` 不进 Git，拉代码后必须在本机构建，再加载此目录。安装器会同时安装工作间主 agent 和项目协作两份 skill 到 `~/.agents/skills/`，并在 `~/.claude/skills/` 建立链接；命令中的仓库路径会替换为本机绝对路径。移动仓库后重新运行安装器，开启新会话加载更新后的 skill。
@@ -57,7 +57,7 @@ node ../workspace/install.mjs
 
 检查失败时停止，先修复再构建。每次 `orca plugin dev reload` 都可能返回 `approval_required`，这是 Orca 对开发插件的审批流程。先与上一版核对回执里的插件身份、清单和权限，完全相同才按回执批准，有差异就停下问主人；批准后再拍快照比较。保留终端打印的备份位置；如有可解释的正常项目更新，核实后另存基线重比；解释不了的差异或数据丢失应立即恢复旧构建并回报，保留当前数据，不自行修记录。没有修改清单和权限的更新不应增加授权。
 
-macOS 默认插件数据目录为 `~/Library/Application Support/orca/plugins-data/local.project-coordinator`；Windows 默认位于用户的 `AppData/Roaming/orca/plugins-data/local.project-coordinator`（使用系统 APPDATA）。两者均优先使用 `ORCA_USER_DATA_PATH` 指定的 Orca 用户数据目录。备份脚本与项目导出共用这条规则；开发版或自定义 profile 应在当前 Orca 终端内执行，或显式设置该环境变量。
+macOS 默认插件数据目录为 `~/Library/Application Support/orca/plugins-data/local.agentboat`；Windows 默认位于用户的 `AppData/Roaming/orca/plugins-data/local.agentboat`（使用系统 APPDATA）。两者均优先使用 `ORCA_USER_DATA_PATH` 指定的 Orca 用户数据目录。备份脚本与项目导出共用这条规则；开发版或自定义 profile 应在当前 Orca 终端内执行，或显式设置该环境变量。
 
 ## 本地开发
 
@@ -73,10 +73,10 @@ node scripts/panel-browser.mjs
 npm run build
 orca plugin validate plugin --json
 orca plugin dev load plugin --json
-orca plugin open local.project-coordinator --panel project-coordinator --json
+orca plugin open local.agentboat --panel project-coordinator --json
 ```
 
-`plugin/` 是自包含运行目录，包含打包后的官方飞书 SDK；不要直接加载有 node_modules 的源码根目录，以免超出 Orca 文件大小限制。修改后重新 build 与 dev reload。清单变更必须逐项核对用户授权后才按回执指纹批准。开发加载会保留，插件的 CLI 桥接使用 Orca 目前仅向开发插件开放的 dev request。
+`plugin/` 是自包含运行目录，包含打包后的官方飞书 SDK；不要直接加载有 node_modules 的源码根目录，以免超出 Orca 文件大小限制。修改后重新 build 与 dev reload。清单变更必须逐项核对用户授权后才按回执指纹批准。开发加载会保留，开发版 CLI 使用 Orca 的 dev request。正式版的安装和升级见 [AgentBoat](../README.md)。
 
 用户正在使用的插件构建会自动重新加载。构建前先将插件数据整个备份到仓库外，并用 client 读取全部项目快照；测试与类型检查、无头检查全部通过后才能构建。每次重新加载后比对全部项目；差异若来自快照后的正常写入，核实后取新快照再比；解释不了的差异或丢失立即回退旧构建并回报，不自行修数据。使用 mockHost 隔离数据测试通知，不向真实项目写测试记录或发送消息。`node scripts/release-evidence.mjs backup <仓库外目录>` 备份数据、旧构建并取全项目快照；用 snapshot 与 compare 保存并比对重载结果。修改 skill 后执行 `node ../workspace/install.mjs`，一次同步两份 skill 和 Claude 链接。Hermes 的 `workspace/install-hermes.ps1` 仅用于 Windows，其 skill 和系统提示由该安装流程管理。
 

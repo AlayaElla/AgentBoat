@@ -139,11 +139,11 @@ syncBuiltinESMExports();`);
 
 test('first message initializes only its own home, opens a chat and reuses the pending launch until expiry', t => {
   const f = fakeWorkspace(t);
-  const options = ['--model', 'claude-opus-5-5', '--effort', 'xhigh', '--surface', 'chat'];
+  const options = ['--agent', 'claude', '--surface', 'chat'];
   const first = f.message('message-1');
   assert.equal(first.queued, '项目还没有主会话，已排队');
   assert.deepEqual(first.autoLaunch, { status: 'awaiting-project-binding', projectName: '现有项目', handle: 'orca_session_id:fake-project-lead',
-    agent: 'claude', model: 'claude-opus-5-5', effort: 'xhigh', surface: 'chat', reused: false });
+    agent: 'claude', surface: 'chat', reused: false });
   assert.equal(existsSync(path.join(f.home, 'templates/code.json')), true);
   assert.equal(existsSync(path.join(f.projectDir, '.git')), false);
   assert.equal(f.message('message-2').autoLaunch.reused, true);
@@ -151,7 +151,7 @@ test('first message initializes only its own home, opens a chat and reuses the p
   const profile = path.join(f.home, 'projects/auto/p1/1.json');
   const pending = JSON.parse(readFileSync(profile)); pending.at = new Date(Date.now() - 11 * 60_000).toISOString(); writeFileSync(profile, JSON.stringify(pending));
   assert.equal(f.message('message-3').autoLaunch.reused, false);
-  assert.deepEqual(f.calls().filter(args => args[0] === 'agent').map(args => args.slice(args.indexOf('--model'), args.indexOf('--prompt'))), [options, options]);
+  assert.deepEqual(f.calls().filter(args => args[0] === 'agent').map(args => args.slice(args.indexOf('--agent'), args.indexOf('--prompt'))), [options, options]);
   assert.deepEqual(f.read().project.messages.map(m => m.requestId), ['message-1', 'message-2', 'message-3']);
   assert.deepEqual(f.read().project.roles, f.state.project.roles);
   assert.equal(f.calls().some(args => ['repo add', 'project setup-update'].includes(args.slice(0,2).join(' ')) || args[4] === 'project.settings'), false);
@@ -195,7 +195,7 @@ test('an uncertain launch preserves the queued message and waits for inspection'
 test('manual create shares launch defaults and the same pending-project guard', t => {
   const f = fakeWorkspace(t);
   const lead = f.workspace('create', { requestId: 'manual-create', path: f.projectDir, name: 'agentboat-demo-existing', source: { kind: 'existing' } });
-  assert.equal(lead.surface, 'chat'); assert.equal(lead.model, 'claude-opus-5-5'); assert.equal(lead.effort, 'xhigh');
+  assert.equal(lead.surface, 'chat'); assert.equal(lead.model, undefined); assert.equal(lead.effort, undefined);
   assert.equal(lead.launched.outcome.sessionId, 'fake-project-lead');
   assert.equal(f.message('after-manual').autoLaunch.reused, true);
   assert.equal(f.calls().filter(args => args[0] === 'agent').length, 1);

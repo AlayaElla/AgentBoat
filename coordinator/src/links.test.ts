@@ -1,8 +1,7 @@
 import { assert, test, mockHost, mountWorker } from 'orca/testing'
-import { hostname } from 'node:os'
 import path from 'node:path'
 import type { OrcaWorkerApi } from 'orca/worker'
-import { WorkspaceLinks, defaultWorkspaceName, endpoint, invitationHost, report } from './links'
+import { WorkspaceLinks, endpoint, invitationHost, report } from './links'
 import { refs, sample } from './fixtures'
 import { fingerprint, fresh } from './store'
 import type { LiveAgent } from './model'
@@ -143,9 +142,7 @@ test('one-click invite binds the selected address and keeps the assigned port af
   const restarted = a.create()
   try {
     const initial = await a.links.snapshot()
-    assert.equal(initial.name, defaultWorkspaceName(hostname()))
-    assert.equal(defaultWorkspaceName('Studio-Mac-mini.local'), 'Studio-Mac-mini')
-    assert.equal(defaultWorkspaceName(''), '我的工作间')
+    assert.equal(initial.name, '我的工作间')
     assert.equal(initial.enabled, false)
     assert.equal(a.storage.has('workspace.links'), false)
     const s = await a.links.invite()

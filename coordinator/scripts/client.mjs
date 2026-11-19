@@ -1,4 +1,5 @@
-import { executable } from './orca-cli.mjs';
+import { executable, release } from './orca-cli.mjs';
+import { installedRequest } from './cli-bridge.mjs';
 import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -52,7 +53,12 @@ if (maintenance) { delete input.operation; if (operation !== 'delete') input.hid
 if (operation === 'message') args.push('--environment', 'local');
 if (input) args.push('--data', JSON.stringify(input));
 try {
-  const stdout = execFileSync(executable, args, { encoding: 'utf8', windowsHide: true, timeout: 40000, maxBuffer: 1024 * 1024 });
+  const stdout = release ? JSON.stringify(await installedRequest(args[4], input)) + '\n'
+    : execFileSync(executable, args, { encoding: 'utf8', windowsHide: true, timeout: 40000, maxBuffer: 1024 * 1024 });
+  if (release) {
+    const reply = JSON.parse(stdout);
+    if (!reply.ok) throw new Error(reply.error.message);
+  }
   if (operation === 'main-bind' && !input.checkOnly) {
     const reply = JSON.parse(stdout), binding = reply.result?.result;
     if (reply.ok && binding?.runId === input.runId && binding.session?.handle === caller) {
@@ -103,6 +109,6 @@ try {
   }
 } catch (e) {
   if (e.stdout) process.stderr.write(e.stdout);
-  else process.stderr.write('Orca 请求未取得回执，请先读项目记录核对，勿直接重复写入。\n');
+  else process.stderr.write(release ? e.message + '\n' : 'Orca 请求未取得回执，请先读项目记录核对，勿直接重复写入。\n');
   process.exitCode = 1;
 }

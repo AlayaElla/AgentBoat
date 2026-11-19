@@ -4,6 +4,6 @@ export interface AgentLaunch {
   effort?: string;
   surface?: 'chat' | 'terminal';
 }
-export const projectLeadDefaults: Required<AgentLaunch>;
+export const projectLeadDefaults: AgentLaunch;
 export function agentFlags(role: AgentLaunch): string[];
 export function launchReceipt(result: unknown): string;

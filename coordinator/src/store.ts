@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto'
 import path from 'node:path'
-import { userDataPath } from '../scripts/orca-cli.mjs'
+import { pluginDataPath } from '../scripts/orca-cli.mjs'
 import { mkdir, writeFile } from 'node:fs/promises'
 import type { StorageApi } from 'orca'
 import { attention, projectSummary, taskState, type Acceptance, type Artifact, type Project, type ProjectRef, type SourceEvent, type Task, type Workspace, type Overview, type Messaging, type AgentSession, type StoredTakeover } from './model'
@@ -72,7 +72,7 @@ export function notifyWorkspace(before: Project, after: Project, runId: string):
 export class ProjectStore {
   private chain: Promise<unknown> = Promise.resolve()
   constructor(private storage: Pick<StorageApi, 'get' | 'set' | 'keys' | 'delete'>,
-    private exportDirectory = path.join(userDataPath(), 'plugins-data', 'local.project-coordinator', 'exports'),
+    private exportDirectory = path.join(pluginDataPath(), 'exports'),
     private updateRoles?: () => Promise<void>) {}
   async remove(id: string, expected: number, absent: () => Promise<void>): Promise<string> {
     return this.serial(async () => {
