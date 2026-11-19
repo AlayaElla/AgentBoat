@@ -76,6 +76,7 @@ async function setup(options = {}, hub) {
       project.tasks.push({ ...clone(task), id: 't3', title: '动效交付', acceptance: [acceptance('a3')] },
         { ...clone(task), id: 'd1', title: '设计决定', phase: 'working', acceptance: [], decisions: [{ id: 'd1', question: '选择方案', options: ['方案一'], history: [] }] });
     }
+    if (options.blocked) project.tasks.push({ ...clone(task), id: 'blocked', title: '等待补建', phase: 'blocked', blockedRevision: 2, acceptance: [] });
     const p = (id, relation, status = 'connected') => ({ id, name: '工作间 ' + id, workspaceId: 'ws-' + id, state: status === 'pending' ? 'pending' : 'active', relation, sharingSet: false, status, scope: 'none', projectIds: [], lastSyncAt: new Date(now - 100000).toISOString(), receivedAt: new Date(now).toISOString(),
       ...(status === 'connected' ? { report: { scope: 'details', mainAgent: { agent: 'codex', title: '对方统筹会话', online: 'online', activity: {state:'work', since:now-300000} }, projects: [{ id: 'remote-p', name: '开放的项目', updatedAt: new Date().toISOString(), pending: 0, counts: { blocked: 1 },
         tasks: [{ title: '受阻任务', phase: 'blocked', state: 'blocked', decisions: [], acceptance: [] }], activity: { truncated: true, agents: [
@@ -114,6 +115,7 @@ async function setup(options = {}, hub) {
     const attention = () => registered().flatMap(p => p.tasks.flatMap(t => {
       const base = { projectId: p.ref.id, taskId: t.id, title: t.title };
       return [
+        ...(t.phase === 'blocked' && t.blockedStatus !== 'discarded' ? [{ ...base, kind:'blocked', itemId:t.id, summary:t.progress, replied:t.blockedStatus === 'replied' }] : []),
         ...t.decisions.filter(d => d.answer === undefined).map(d => ({ ...base, kind: 'decision', itemId: d.id, summary: d.question })),
         ...t.acceptance.filter(a => t.phase === 'ready' && a.status === 'pending').map(a => ({ ...base, kind: 'review', itemId: a.id, summary: a.title, itemRevision: a.revision, fingerprint: a.fingerprint }))
       ];
@@ -206,11 +208,13 @@ async function setup(options = {}, hub) {
         if (window.fixture.noWrite) return clone({project:target});
         const updates = input.items.map(i => {
           const t = target.tasks.find(t => t.id === i.taskId);
+          if (i.kind === 'blocked' && t.blockedRevision === i.itemRevision) return [i, t];
           const a = i.kind === 'acceptance' ? t?.acceptance.find(a => a.id === i.itemId) : t?.decisions.find(d => d.id === i.itemId);
           if (!a || i.kind === 'acceptance' && (t.phase !== 'ready' || (i.reviewTotal !== undefined && i.reviewTotal !== t.acceptance.filter(a => a.status === 'pending').length) || a.status !== 'pending' || a.revision !== i.itemRevision || a.fingerprint !== i.fingerprint)) throw Error('stale');
           return [i, a];
         });
         for (const [i, a] of updates) {
+          if (i.kind === 'blocked') { a.blockedStatus = i.result === 'discarded' ? 'discarded' : 'replied'; continue; }
           if (i.kind === 'acceptance') a.status = i.result;
           else a.answer = i.result === 'discarded' ? null : i.answer;
           a.history.push({ result:i.result ?? i.answer, revision:i.itemRevision ?? 1, note:i.note, source:'主人', at:new Date().toISOString() });
@@ -528,6 +532,24 @@ try {
     assert.equal(sent[0].input.items.filter(i => i.kind === 'acceptance').length, 2);
     assert.equal(sent[0].input.items.find(i => i.kind === 'decision').answer, '自定义方案');
     await page.getByRole('status').filter({ hasText: '已提交 3 条' }).waitFor({ state: 'hidden' });
+  });
+  await setup({ width:1040, inboxBatch:true, blocked:true });
+  await test('blocked note shares one submission with acceptance and decision and permits a follow-up', async () => {
+    await row('等待补建').click();
+    await currentLayer().getByRole('textbox', {name:'受阻备注'}).fill('补建完成');
+    await row('设计决定').click();
+    await currentLayer().getByRole('radio', {name:'方案一'}).check();
+    await (await openReview()).getByRole('button', {name:'通过',exact:true}).first().click();
+    await dock().getByRole('button', {name:'提交 3 条'}).click();
+    await row('等待补建').getByText(/已答复，等项目处理/).waitFor();
+    const sent = await page.evaluate(() => fixture.calls.filter(c => c.name === 'project.feedback'));
+    assert.equal(sent.length, 1);
+    assert.deepEqual(sent[0].input.items.map(i => i.kind), ['blocked', 'decision', 'acceptance']);
+    assert.equal(sent[0].input.items[0].note, '补建完成');
+    await row('等待补建').click();
+    await currentLayer().getByRole('button', {name:'丢弃',exact:true}).click();
+    await dock().getByRole('button', {name:'提交 1 条'}).click();
+    await row('等待补建').waitFor({state:'hidden'});
   });
   await setup({ width: 1040, inboxBatch: true });
   await test('owner can discard reviews and decisions together with an optional reason and read the task history', async () => {
@@ -1038,7 +1060,7 @@ try {
     assert.equal(await permission.isEnabled(), false);
     await scope.selectOption('details');
     await permission.check();
-    await currentLayer().getByText('对方能直接替你决定和验收，提交后立即在本机生效。').waitFor();
+    await currentLayer().getByText('对方能替你决定、验收和答复受阻项，提交后立即在本机生效。').waitFor();
     await currentLayer().getByRole('button', { name: '保存', exact: true }).click();
     await page.getByRole('status').filter({ hasText: '已保存' }).waitFor();
     assert.equal(await page.evaluate(() => fixture.calls.find(c => c.input?.operation === 'share').input.delegateFeedback), true);
@@ -1046,8 +1068,20 @@ try {
     assert.equal(await permission.isEnabled(), false);
     assert.equal(await permission.isChecked(), false);
     await home();
+    await page.evaluate(() => {
+      const remote = fixture.links.peers[0].report.projects[0].feedback;
+      remote.tasks.push({ id:'b', title:'对方等待补建', phase:'blocked', acceptance:[], decisions:[], artifacts:[] });
+      fixture.emit();
+    });
     await row('对方设计决定').click();
+    assert.equal(await row('对方等待补建').count(), 0); // Older peers do not advertise a blocked revision.
     await currentLayer().getByRole('radio', { name: '浅色', exact: true }).check();
+    await page.evaluate(() => {
+      Object.assign(fixture.links.peers[0].report.projects[0].feedback.tasks.at(-1), {blockedRevision:3, progress:'请补建'});
+      fixture.emit();
+    });
+    await row('对方等待补建').click();
+    await currentLayer().getByRole('textbox', { name:'受阻备注' }).fill('已补建');
     await row('对方页面交付').click();
     await currentLayer().getByText('设计原稿 · 在对方机器上').waitFor();
     assert.equal(await currentLayer().getByRole('button', { name: /设计原稿/ }).count(), 0);
@@ -1062,17 +1096,18 @@ try {
       peer.offlineFeedback = peer.report.projects; delete peer.report; peer.status = 'offline'; fixture.emit();
     });
     await dock().getByText('「工作间 up」离线，暂不能提交').waitFor();
-    assert.equal(await dock().getByRole('button', { name: '提交 4 条' }).isEnabled(), false);
+    assert.equal(await dock().getByRole('button', { name: '提交 5 条' }).isEnabled(), false);
     assert.equal(await row('对方页面交付').isVisible(), true);
     await page.evaluate(() => {
       const peer = fixture.links.peers[0]; peer.report = fixture.remoteReport; delete peer.offlineFeedback; peer.status = 'connected'; fixture.emit();
     });
-    await dock().getByRole('button', { name: '提交 4 条' }).click();
-    await page.getByRole('status').filter({ hasText: '已提交 2 条' }).waitFor();
+    await dock().getByRole('button', { name: '提交 5 条' }).click();
+    await page.getByRole('status').filter({ hasText: '已提交 3 条' }).waitFor();
     const calls = await page.evaluate(() => fixture.calls.filter(c => ['project.feedback', 'workspace.linkFeedback'].includes(c.name)));
     const local = calls.filter(c => c.name === 'project.feedback'), remote = calls.filter(c => c.name === 'workspace.linkFeedback');
     assert.deepEqual(local.map(c => [c.input.projectId, c.input.items.length]), [['p1', 2]]);
-    assert.deepEqual(remote.map(c => [c.input.projectId, c.input.items.length]), [['p1', 2], ['p1', 2]]);
+    assert.deepEqual(remote.map(c => [c.input.projectId, c.input.items.length]), [['p1', 3], ['p1', 3]]);
+    assert.deepEqual(remote[0].input.items.find(i => i.kind === 'blocked'), {taskId:'b', kind:'blocked', itemId:'b', itemRevision:3, note:'已补建'});
     assert.deepEqual(remote[0], remote[1]);
     assert.deepEqual(await page.evaluate(() => fixture.calls.find(c => c.name === 'shell.openExternal').input), 'https://example.com/preview');
   });

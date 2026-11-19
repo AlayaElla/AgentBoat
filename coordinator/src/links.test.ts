@@ -3,7 +3,7 @@ import path from 'node:path'
 import type { OrcaWorkerApi } from 'orca/worker'
 import { WorkspaceLinks, endpoint, invitationHost, report } from './links'
 import { refs, sample } from './fixtures'
-import { fingerprint, fresh } from './store'
+import { fingerprint, fresh, type FeedbackItem } from './store'
 import type { LiveAgent } from './model'
 import { testCoordinator as createCoordinator, testFiles } from './test-runtime'
 
@@ -44,8 +44,9 @@ test('delegated feedback applies once in both directions and rechecks sharing on
   }
   const a = await open('甲工作间'), b = await open('乙工作间')
   const { project } = a, [review, decision] = project.tasks, check = review.acceptance[0], d = decision.decisions[0]
-  const items = [{ taskId: review.id, kind: 'acceptance' as const, itemId: check.id, itemRevision: check.revision, fingerprint: check.fingerprint, result: 'passed' },
-    { taskId: decision.id, kind: 'decision' as const, itemId: d.id, fingerprint: fingerprint([d.question, d.options]), answer: d.options[0] }]
+  const items: FeedbackItem[] = [{ taskId: review.id, kind: 'acceptance', itemId: check.id, itemRevision: check.revision, fingerprint: check.fingerprint, result: 'passed' },
+    { taskId: decision.id, kind: 'decision', itemId: d.id, fingerprint: fingerprint([d.question, d.options]), answer: d.options[0] },
+    { taskId: decision.id, kind: 'blocked', itemId: decision.id, itemRevision: decision.blockedRevision, note: '已经做好了' }]
   try {
     const invitation = await a.c.links.invite(), { id } = (await b.c.links.join(invitation.invitation!.code)).peers[0]
     const share = async (side: typeof a, delegateFeedback: boolean, scope = 'details', projectIds = ['p1', 'hidden']) =>
@@ -60,6 +61,8 @@ test('delegated feedback applies once in both directions and rechecks sharing on
     const shared = (await b.c.links.refresh()).peers[0].report!.projects
     assert.deepEqual(shared.map(p => p.id), ['p1'])
     assert.deepEqual(shared[0].feedback?.tasks[1].decisions[0].options, d.options)
+    assert.equal(shared[0].feedback?.tasks[1].blockedRevision, decision.blockedRevision)
+    assert.equal(shared[0].feedback?.tasks[1].progress, decision.goal)
     assert.equal(shared[0].feedback?.tasks[0].acceptance[0].fingerprint, check.fingerprint)
     assert.equal(shared[0].feedback?.tasks[0].acceptance[0].revision, check.revision)
     assert.deepEqual(shared[0].feedback?.tasks[0].artifacts.map(x => [x.label, x.url]), [['首页预览', 'https://example.com/preview'], ['本机设计稿', '']])
@@ -81,6 +84,8 @@ test('delegated feedback applies once in both directions and rechecks sharing on
     }
     assert.equal((await send(b)).state, 'uncertain')
     assert.equal((await a.c.store.get('p1')).tasks[0].acceptance[0].status, 'passed')
+    const updated = (await b.c.links.refresh()).peers[0].report!.projects[0].feedback!.tasks[0]
+    assert.equal(updated.blockedStatus, 'replied')
     const joinerStarted = performance.now()
     const receipt = await send(b)
     assert.deepEqual(receipt, { state:'submitted', requestId: request.requestId, fingerprint: fingerprint(request) })
@@ -89,6 +94,8 @@ test('delegated feedback applies once in both directions and rechecks sharing on
     await a.c.flush('p1')
     assert.equal((await a.c.store.get('p1')).tasks[0].acceptance[0].history.length, 1)
     assert.equal((await a.c.store.get('p1')).tasks[1].decisions[0].history[0].source, '主人在工作间 乙工作间 提交')
+    const replies = (await a.c.store.get('p1')).events
+    assert.deepEqual(replies.map(e => [e.text, e.taskId, e.senderId]), [['已经做好了', decision.id, '主人在工作间 乙工作间 提交']])
     assert.deepEqual(a.notices.map(([run]) => run).sort(), ['run_example', 'workspace-甲工作间'])
     assert.ok(a.notices.every(([, body]) => body.includes('主人在工作间 乙工作间 提交')))
     assert.ok(a.notices.find(([run]) => run === 'run_example')![1].endsWith('提醒：实现交给执行者，成果用 submit 登记待验收。'))
@@ -103,6 +110,7 @@ test('delegated feedback applies once in both directions and rechecks sharing on
     assert.equal((await a.worker.request('workspace.linkFeedback', { id, ...request, requestId: 'reverse', items: discarded })).state, 'submitted')
     console.log('T48 loopback feedback receipt ms', JSON.stringify({ joiner: +joinerMs.toFixed(1), inviter: +(performance.now() - inviterStarted).toFixed(1) }))
     const received = await b.c.store.get('p1')
+    assert.equal(received.tasks[1].blockedStatus, 'discarded')
     assert.equal(received.tasks[0].acceptance[0].status, 'discarded')
     assert.equal(received.tasks[1].decisions[0].answer, null)
     assert.equal(received.tasks[1].decisions[0].history[0].source, '主人在工作间 甲工作间 提交')

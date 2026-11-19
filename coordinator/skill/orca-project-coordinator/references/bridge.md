@@ -53,6 +53,7 @@
 
 - 整批先校验。任务不在等验收、版本不符、已处理或重复的条目，只要有一条，整批拒绝并标出序号。
 - 验收用 `passed` 或 `changes_requested`，需要修改时必须写意见。丢弃验收或决定用 `"result":"discarded"`，原因选填在 `note`，决定省略 `answer`。
+- 答复受阻项用 `{"taskId":"任务编号","kind":"blocked","itemId":"任务编号","itemRevision":1,"note":"主人原话"}`。itemRevision 取任务的 blockedRevision，旧记录省略该字段时取 0。可以继续补充；丢弃时加 `"result":"discarded"`，原因选填在 `note`。项目主会话重新提交任务后，按新状态和版本处理。
 - requestId 可省略。带上时，原样重放不会重复写入。
 - 代处理已开放的对方项目，在顶层加连接编号 `id`，并提供对方的 projectId、revision 和唯一 requestId。离线或回执未确认时保留原请求编号核对。
 - 只给项目主 agent 发一条消息，后续由它跟进。

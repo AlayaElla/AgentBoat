@@ -1,8 +1,9 @@
 import type { Attention, LiveAgent } from './model'
+import type { FeedbackItem } from './store'
 import type { DelegatedFeedback } from './links'
 
-export type Draft = { reviewTotal?: number; taskId: string; kind: 'acceptance' | 'decision'; itemId: string; itemRevision?: number; fingerprint?: string; signature: string; title: string; result?: string; answer?: string; note?: string }
-export type InboxRow = { id: string; title: string; projectId?: string; taskId?: string; kind: Attention['kind'] | 'agent'; count?: number; agent?: LiveAgent }
+export type Draft = FeedbackItem & { signature: string; title: string }
+export type InboxRow = { id: string; title: string; projectId?: string; taskId?: string; kind: Attention['kind'] | 'agent'; count?: number; replied?: boolean; agent?: LiveAgent }
 export type Attempt = { signature: string; input?: DelegatedFeedback; rows?: InboxRow[]; reason?: string; rejected?: boolean; checkingUntil?: number; autoChecked?: boolean }
 export const feedbackFailure = (a?: Attempt) => a?.reason && JSON.stringify([a.input?.requestId ?? a.signature, !!a.rejected, a.rejected ? a.reason : ''])
 type Sheet = { entries: Record<string, Draft>; attempt?: Attempt; dismissed?: string; versions: Record<string, number>; floor: number }

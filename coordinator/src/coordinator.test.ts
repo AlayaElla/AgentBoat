@@ -1,6 +1,6 @@
 import { assert, mockHost, mountWorker, test } from 'orca/testing'
 import { testCoordinator as createCoordinator } from './test-runtime'
-import { refs, deliverable } from './fixtures'
+import { refs, deliverable, sample } from './fixtures'
 import { fresh, feedback, fingerprint, submitTask, ProjectStore, overview, notifyWorkspace } from './store'
 import { report } from './links'
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
@@ -591,6 +591,41 @@ test('acceptance keeps user conclusions and resets only changed items', () => {
   assert.throws(() => feedback(p, { items: [{ taskId: 'task-1', kind: 'acceptance', itemId: 'page-check', itemRevision: 1, result: 'passed' }] }))
   assert.throws(() => submitTask(p, { ...deliverable, phase: 'completed' }))
   assert.throws(() => submitTask(p, { ...deliverable, artifacts: [{ ...deliverable.artifacts[0], url: 'D:\\Other\\secret.txt' }] }))
+})
+
+test('blocked replies record owner words, allow supplements and discard, and expire on task submission', () => {
+  const p = sample().project!, task = p.tasks[1], id = task.id
+  delete task.blockedRevision // Existing blocked task from before reply support.
+  const reply = { taskId: id, itemId: id, itemRevision: 0, kind: 'blocked', note: '  补建完成\n请再试  ' }
+  const decision = { taskId: id, itemId: 'style', kind: 'decision', answer: '简洁明亮' }
+  const review = { taskId: deliverable.id, itemId: 'page-check', kind: 'acceptance', itemRevision: 1, result: 'passed' }
+  const write = (...items: object[]) => feedback(p, { items })
+  for (const invalid of [{ ...reply, note: ' ' }, { ...reply, itemRevision: 1 }, { ...reply, itemId: 'other' }]) {
+    assert.throws(() => write(decision, invalid), /第 2 条/)
+    assert.equal(task.decisions[0].answer, undefined)
+  }
+  write(reply, decision, review)
+  assert.equal(task.phase, 'blocked')
+  assert.equal(task.blockedStatus, 'replied')
+  assert.equal(attention(p).some(i => i.kind === 'blocked' && i.replied), true)
+  assert.equal(p.deliveries.length, 1)
+  assert.ok(p.deliveries[0].body.includes(reply.note))
+  write({ ...reply, note: '先放着' })
+  assert.deepEqual(p.events.map(e => [e.text, e.taskId, e.senderId]), [[reply.note, id, '主人'], ['先放着', id, '主人']])
+  assert.deepEqual(task.sourceIds, p.events.map(e => e.id))
+  const update = { id, title: task.title, goal: task.goal, phase: 'blocked' }
+  submitTask(p, update)
+  assert.equal(p.tasks[1].blockedStatus, undefined)
+  assert.throws(() => write(reply), /受阻项已更新/)
+  const current = { ...reply, itemRevision: p.tasks[1].blockedRevision }
+  write({ ...current, result: 'discarded', note: '移到下周' })
+  assert.equal(p.tasks[1].phase, 'blocked')
+  assert.equal(attention(p).some(i => i.kind === 'blocked'), false)
+  assert.match(p.deliveries.at(-1)!.body, /主人丢弃了这项受阻\n移到下周/)
+  assert.throws(() => write(current), /受阻项已更新/)
+  submitTask(p, { ...update, phase: 'working' })
+  assert.equal(p.tasks[1].blockedStatus, undefined)
+  assert.throws(() => write(current), /受阻项已更新/)
 })
 
 test('owner discards and competing passes commit once, with one project summary and no pending items', async () => {

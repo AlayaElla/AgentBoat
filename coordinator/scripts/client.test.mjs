@@ -140,7 +140,7 @@ cp.execFileSync=(_exe,args)=>{if(args[0]==='orchestration'){if(args.includes('--
   try {
     for (const operation of ['bind', 'submit', 'feedback', 'hide', 'restore', 'delete']) for (const mode of ['chat', 'terminal', 'none', 'no-run']) {
       const input = {projectId:'p1',revision:0,requestId:'r',caller:'forged',...(operation==='bind'?{runId:'run_bound'}:{}),
-        ...(operation==='feedback'?{items:[{taskId:'t',kind:'decision',itemId:'d',result:'discarded',note:'用户原话'}]}:{})};
+        ...(operation==='feedback'?{items:[{taskId:'t',kind:'decision',itemId:'d',result:'discarded',note:'用户原话'},{taskId:'t',kind:'blocked',itemId:'t',itemRevision:0,note:'已经做好了'}]}:{})};
       writeFileSync(inputFile, JSON.stringify(input));
       const reply = JSON.parse(execFileSync(process.execPath, ['--import', pathToFileURL(fixture).href, 'scripts/client.mjs', operation, inputFile], {encoding:'utf8',windowsHide:true,env:{...process.env,ORCA_AGENT_SESSION_ID:mode==='chat'||mode==='no-run'?'claude_self':'',ORCA_TERMINAL_HANDLE:mode==='terminal'?'terminal-self':'',TEST_NO_RUN:mode==='no-run'?'1':''}}));
       assert.equal(reply.input.caller, mode==='none'?undefined:mode==='terminal'?'terminal-self':'orca_session_id:claude_self');
