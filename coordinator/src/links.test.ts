@@ -432,7 +432,7 @@ test('Orca catalog controls project visibility, pending counts, writes, notices 
   const host = mockHost({ storage: { 'project:p1': p as any }, results: { 'workspace.list': { workspaces: [], truncated: false } } })
   const worker = await mountWorker({ default: api => { coordinator = createCoordinator(api, {
     projects: async () => { if (unavailable) throw Error('offline'); return catalog },
-    send: async () => { sends++; return {} },
+    send: async (_, d) => { if (!d.id.startsWith('lead-notice:')) sends++; return {} },
     agents: async () => ({ ok: true, at: Date.now(), agents: [{ id: 'test', projectId: 'p1', agent: 'codex', role: 'session', state: 'need', rawState: 'waiting', title: '待处理', since: Date.now() }] })
   }) } }, { host })
   const overview = () => worker.request('workspace.overview')
@@ -508,7 +508,7 @@ test('the bound main directory leaves the project list, inbox, agents, notices a
     projects: async () => [p.ref, other, nested],
     targets: async () => ({ workspaces: [], sessions: [session] }),
     identify: async () => session,
-    send: async () => { sends++; return {} },
+    send: async (_, d) => { if (!d.id.startsWith('lead-notice:')) sends++; return {} },
     agents: async projects => ({ ok: true, at: Date.now(), agents: projects.filter(pr => pr.ref.id === p.ref.id).map(pr => ({ id: 'main', projectId: pr.ref.id,
       agent: 'codex', role: 'session', state: 'need', rawState: 'waiting', title: session.title, since: Date.now() })) })
   }) } }, { host })

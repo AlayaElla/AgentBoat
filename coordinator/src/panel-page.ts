@@ -1128,19 +1128,28 @@ function connectionPage() {
 }
 function backupDescription(binding: WorkspaceBinding) {
   const b = binding.backup!
-  const phase = { opening: '启动中', failed: '启动待核对', standby: '待命', probing: '等待主用确认', taking: '正在接管', active: '处理中', handoff: '正在交接', returning: '等待主用接回' }[b.phase]
+  if (b.phase === 'single') return '只有一种 agent，不配备用'
+  if (b.phase === 'unavailable' || b.phase === 'failed') return '没有备用' + (b.problem ? '：' + b.problem : '')
+  const phase = { opening: '启动中', standby: '待命', probing: '等待主用确认', taking: '正在接管', active: '处理中', handoff: '正在交接', returning: '等待主用接回' }[b.phase]
   return `备用 ${agentName(b.agent)} · ${phase} · 当前${backupInCharge(b) ? '备用' : '主用'}负责`
 }
-function backupHistory(w: WorkspaceBinding) {
+function backupHistory(w: WorkspaceBinding, projectId?: string) {
   const b = w.backup
   if (!b) return null
-  return [b.problem ? callout(b.problem, 'danger') : null, b.handle ? small('备用会话 ' + b.handle) : null,
+  const retry = b.phase === 'failed' ? [
+    check('已核对工作区会话，确认重新开备用', !!form['retry-' + b.cycle], v => { form['retry-' + b.cycle] = v; render() }),
+    button('重新开备用', () => act(async () => {
+      await req('lead.retry', { projectId, revision: w.revision, confirm: true })
+      delete form['retry-' + b.cycle]; await refresh(); await loadPage()
+    }, false), '', !form['retry-' + b.cycle])
+  ] : null
+  return [retry, b.problem && b.phase !== 'unavailable' && b.phase !== 'failed' ? callout(b.problem, 'danger') : null, b.handle ? small('备用会话 ' + b.handle) : null,
     b.history.length ? fold(active.key + '-lead-history', '接管记录', () => b.history.slice().reverse().map(e => card(new Date(e.at).toLocaleString(), e.text))) : null]
 }
 function leadDescription(binding: WorkspaceBinding | undefined, label: string) {
   const s = binding?.session
   return s ? [binding?.backup ? '主用 ' + agentName(s.agent) : agentName(s.agent), s.title, label === '主 agent' ? activityStyle(mainStatus(s, live)).label : mainAgentStates[s.online], binding?.backup ? backupDescription(binding) : ''].filter(Boolean).join(' · ')
-    : binding?.runId ? `已绑定${label}` : `还没有${label}`
+    : binding?.runId ? ['已绑定' + label, binding.backup && backupDescription(binding)].filter(Boolean).join(' · ') : `还没有${label}`
 }
 type SwitchChoice = Omit<LeadSwitch, 'revision'>
 function pendingLead(t: MainTakeover | undefined, cancel?: () => unknown) {
@@ -1165,7 +1174,7 @@ function projectLeadSettings(id: string) {
     await req('project.lead', { projectId: id, revision: w.revision, ...input })
     markSaved(); await loadPage()
   }, false)
-  return section('主会话', el('p', { class: 'any' }, leadDescription(w, '主会话')), backupHistory(w), leadChoices(w, data.sessions, choose, true),
+  return section('主会话', el('p', { class: 'any' }, leadDescription(w, '主会话')), backupHistory(w, id), leadChoices(w, data.sessions, choose, true),
     section('新会话', select('Agent', agents, data.defaultAgent),
       button('新开一个主会话', () => choose({ mode: 'new', agent: form.Agent }), 'primary', !!data.workspaceError),
       data.workspaceError ? callout(data.workspaceError) : null))

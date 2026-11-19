@@ -17,7 +17,8 @@ declare module 'orca' {
     'workspace.reply': { input: { runId: string; eventId: string; requestId: string; text: string }; output: MessagingSnapshot }
     'workspace.overview': { output: Overview }
     'workspace.agent': { input: { operation: 'read' | 'bind'; revision?: number; requestId?: string; runId?: string; caller?: string; currentRunId?: string; token?: string; checkOnly?: boolean }; output: WorkspaceBinding }
-    'lead.control': { input: { runId: string; action: import('./model').LeadAction; caller: string; token: string; confirm?: boolean; note?: string }; output: { useRun?: string; done?: boolean } }
+    'lead.retry': { input: { projectId?: string; revision: number; confirm: boolean }; output: { accepted: boolean } }
+    'lead.control': { input: { runId: string; action: import('./model').LeadAction; caller: string; token: string; confirm?: boolean; currentRunId?: string; generation?: number; standbyRunId?: string; note?: string }; output: { useRun?: string; checkRun?: string; park?: string; done?: boolean } }
     'workspace.agent.targets': { output: { sessions: import('./model').AgentSession[]; workspaces: { workspace: string; name: string; path: string }[] } }
     'workspace.agent.switch': { input: LeadSwitch; output: WorkspaceBinding }
     'workspace.projectLead': { input: LeadSwitch & { projectId: string; runId: string }; output: ProjectLead }

@@ -53,7 +53,16 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
     if (id) defer(id)
     else void main.flushRetired().catch(() => {})
   })
-  orca.panels.handle('lead.control', input => backups.command(input))
+  orca.panels.handle('lead.retry', async input => {
+    await backups.retry(input.projectId ?? '', input.revision, input.confirm)
+    await checkBackups()
+    return { accepted: true }
+  })
+  orca.panels.handle('lead.control', async input => {
+    const result = await backups.command(input)
+    if (result.done && (input.action === 'take' || input.action === 'resume')) deferBackupCheck()
+    return result
+  })
   const main = mainAgent(orca, store, runtime, changed, () => { deferMailbox(); deferBackupCheck() }, async () => (await availableProjectRecords()).list, d => backups.send('', d))
   let statusUpdates: Promise<unknown> = Promise.resolve()
   let live: import('./agents').AgentsSnapshot = { ok: false, at: 0, agents: [] }
@@ -625,8 +634,8 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
     const id = text(input.projectId, '项目编号', 200)
     if (typeof input.hidden !== 'boolean') fail('隐藏状态不正确')
     await ensure(id)
-    await store.mutate(id, revision(input.revision), p => { p.hidden = input.hidden; rememberProjectCaller(p, input) })
-    changed(id); if (!input.hidden) defer(id)
+    await store.mutate(id, revision(input.revision), p => { p.hidden = input.hidden; if (p.hidden && p.backup) delete p.backup.contact; rememberProjectCaller(p, input) })
+    changed(id); deferBackupCheck(); if (!input.hidden) defer(id)
     return snapshot(id)
   })
   orca.panels.handle('project.delete', async input => {
@@ -635,6 +644,12 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
     await busy.get(id)
     await requireProject(id)
     const exportPath = await store.remove(id, revision(input.revision), async () => {
+      const wanted = [await store.workspace(), ...(await store.all()).filter(row => row.ref.id !== id)]
+      const until = Date.now() + 25_000
+      while (Object.values(await backups.syncContacts(wanted)).some(r => r.projectId === id && r.closing)) {
+        if (Date.now() >= until) fail('正在结束主会话联络任务，请稍后重试删除')
+        await new Promise(resolve => setTimeout(resolve, 250))
+      }
       await runtime.removeProject(await requireProject(id), orca.host)
       const { refs, error } = await readCatalog()
       if (error || refs?.some(p => p.id === id)) fail('Orca 未确认移除，工作间记录保留')
@@ -794,20 +809,33 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
   }
   async function inspectBindings() {
     const { list, error } = await availableProjectRecords()
-    if (error || stoppedChecks) return
+    if (stoppedChecks) return
     const w = await store.workspace(), projects = list.filter(p => !p.hidden && p.runId && p.ref.hostId === 'local')
-    if (!w.runId && !projects.length) return
-    const inventory = await runtime.targets(), mailbox = await store.messaging()
+    const inventory = (w.runId || projects.length) && !error ? await runtime.targets().catch(() => undefined) : undefined
+    const known = error ? await store.all() : list
+    await backups.syncContacts([w, ...known], inventory?.sessions, inventory?.workspaces.map(s => s.workspace) ?? list.map(p => p.ref.workspace).filter(Boolean))
+    if (error || (!w.runId && !projects.length)) return
+    const mailbox = await store.messaging()
     for (const r of [w, ...projects]) {
       if (stoppedChecks || !r.runId || takeoverActive(r.takeover)) continue
       const project = 'ref' in r ? r : undefined
-      const handle = project ? project.mainAgentHandle || await runtime.runOwner(r.runId).catch(() => undefined) : w.session?.handle || await runtime.runOwner(r.runId).catch(() => undefined)
-      if (!handle) continue
+      if (!inventory) {
+        await backups.missing(r, '无法读取 Orca 工作区和会话列表', w.runId).catch(() => {})
+        continue
+      }
+      const handle = (project ? project.mainAgentHandle : w.session?.handle) || await runtime.runBinding(r.runId).then(run => run.owner).catch(() => undefined)
+      if (!handle) {
+        await backups.missing(r, '找不到已绑定 Run 的主会话', w.runId).catch(() => {})
+        continue
+      }
       const session = inventory.sessions.find(s => s.handle === handle) ?? (project ? projectBinding({ ...project, mainAgentHandle: handle }).session : w.session)
       if (!session || project && !inventory.workspaces.some(s => s.workspace === session.workspace && path.relative(s.path, project.ref.path) === '') ||
-        !project && w.session && w.session.workspace !== session.workspace) continue
+        !project && w.session && w.session.workspace !== session.workspace) {
+        await backups.missing(r, '找不到已绑定主会话的工作区', w.runId).catch(() => {})
+        continue
+      }
       const pending: { at: number; title: string }[] = []
-      if (r.backup) {
+      if (r.backup?.handle) {
         const mail = project ? waitingByRun.get(r.runId) ?? [] : await runtime.mail(r.runId).then(m => [...m.waiting ?? [], ...m.questions.map(q => ({ at: q.at, title: q.subject }))] as Waiting).catch(() => [])
         const reports = mail.flatMap(m => m.report ? [m.report] : [])
         const proofs = project ? projectSubmissions(project) : []

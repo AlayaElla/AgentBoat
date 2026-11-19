@@ -1,3 +1,5 @@
+import { LeadContacts } from '../scripts/lead-contact.mjs'
+import type { LeadContact, ContactRoutes } from './model'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import path from 'node:path'
@@ -15,7 +17,9 @@ import { activeUserDataPath, pluginKey, release } from '../scripts/orca-cli.mjs'
 const execute = promisify(execFile)
 export interface CoordinatorRuntime {
   projects(host: HostApi<'worker'>): Promise<ProjectRef[]>
-  runOwner(id: string): Promise<string | undefined>
+  runBinding(id: string): Promise<{ owner: string | null; generation: number; objective?: string }>
+  syncContacts(wanted: LeadContact[], workspaces?: string[]): Promise<ContactRoutes>
+  installedAgents(workspace: string): Promise<string[]>
   verifyRun(id: string, caller?: string): Promise<void>
   targets(): Promise<{ sessions: AgentSession[]; workspaces: { workspace: string; name: string; path: string }[] }>
   identify(handle: string, runId: string, currentRunId?: string): Promise<AgentSession>
@@ -60,14 +64,24 @@ export class OrcaRuntime implements CoordinatorRuntime {
         path: w?.path ?? p.path, workspace: w ? w.id.startsWith('identity:') ? w.id : `id:${w.id}` : '' }
     })
   }
-  async runOwner(id: string) {
+  async runBinding(id: string) {
     if (!/^run_[\w-]+$/.test(id)) fail('Run 编号格式不正确')
     const { run } = await this.call(['orchestration', 'run-show', '--id', id])
     if (run?.id !== id) fail('Orca 未返回对应 Run')
-    return run.coordinator_handle as string | undefined
+    if (run.coordinator_handle !== null && typeof run.coordinator_handle !== 'string') fail('Orca 未返回协调者类型')
+    return { owner: run.coordinator_handle as string | null, generation: run.consumer_generation as number, objective: run.objective as string | undefined }
+  }
+  private contacts = new LeadContacts()
+  async syncContacts(wanted: LeadContact[], workspaces?: string[]): Promise<ContactRoutes> {
+    return this.contacts.sync(wanted, await this.executable(), (args: string[]) => this.call(args), workspaces)
+  }
+  async installedAgents(workspace: string): Promise<string[]> {
+    const { agents } = await this.call(['agent', 'installed', '--worktree', workspace])
+    if (!Array.isArray(agents) || agents.some(a => typeof a?.id !== 'string')) fail('Orca 的可启动 agent 列表无效')
+    return agents.map(a => a.id)
   }
   async verifyRun(id: string, caller?: string): Promise<void> {
-    const owner = await this.runOwner(id)
+    const { owner } = await this.runBinding(id)
     if (caller && owner && owner !== caller) fail('Orca 返回的 Run 协调者与当前会话不符；请在目标会话创建自己的新 Run')
   }
   async targets() {

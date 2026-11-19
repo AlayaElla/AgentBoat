@@ -76,10 +76,12 @@ export interface Snapshot {
 }
 export type ProjectWorkspace = { workspaceId: string; multipleConversations?: boolean } | { error: string }
 export type LeadAction = 'take' | 'ready' | 'handoff' | 'resume'
+export interface LeadContact { id: string; projectId?: string; online?: boolean; workspace: string; primary: string }
+export type ContactRoutes = Record<string, { dispatch?: string; error?: string; closing?: boolean; closed?: boolean; projectId?: string }>
 export interface BackupLead {
   primary: string; agent: string; handle?: string
-  phase: 'opening' | 'failed' | 'standby' | 'probing' | 'taking' | 'active' | 'handoff' | 'returning'
-  since: number; cycle: string; lastProbe?: number; confirmedAt?: number; problem?: string
+  phase: 'unavailable' | 'single' | 'opening' | 'failed' | 'standby' | 'probing' | 'taking' | 'active' | 'handoff' | 'returning'
+  since: number; cycle: string; generation?: number; receiptGeneration?: number; contact?: LeadContact; standbyRunId?: string; notified?: string[]; lastProbe?: number; confirmedAt?: number; problem?: string
   history: { at: number; text: string }[]
   credential?: string; consumed?: string
 }

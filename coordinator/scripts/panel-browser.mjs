@@ -171,6 +171,13 @@ async function setup(options = {}, hub) {
       if (name === 'project.archive' && input.projectId === 'p1') return input.end === 25 ?
         { end: 25, tasks: [], deliveries: 5, events: 0, requests: 4, history: 0 } :
         { end: 50, previousEnd: 25, tasks: [archivedTask], deliveries: 2, events: 1, requests: 3, history: 4 };
+      if (name === 'lead.retry') {
+        const target = input.projectId ? projects.find(p => p.ref.id === input.projectId) : workspace;
+        if (!input.confirm || target.revision !== input.revision || target.backup?.phase !== 'failed') throw Error('无法重新开备用');
+        target.backup = { ...target.backup, phase: 'standby', problem: undefined, handle: 'backup' };
+        target.revision++;
+        return { accepted: true };
+      }
       if (name === 'project.lead') {
         const p = projects.find(p => p.ref.id === input.projectId);
         if (input.mode) {
@@ -864,6 +871,23 @@ try {
       const params = new URLSearchParams({ page: kind, id: ['connection'].includes(kind) ? 'hermes' : ['task'].includes(kind) ? 't1' : ['relation'].includes(kind) ? 'out' : 'ops', project: 'web', pid: 'ox0' });
       await page.goto(pathToFileURL(path.resolve('../docs/design/workspace-mockup-v8.html')).href + '#' + params); await page.locator('#panel').waitFor();
     }
+  });
+  await test('主会话卡片区分单 agent 和故障，只有确认后才能重开备用', async () => {
+    await setup({ width: 400 });
+    await page.evaluate(() => { fixture.workspace.backup = { phase: 'single', history: [], cycle: 'c', agent: 'codex' }; fixture.emit(); });
+    await page.getByRole('button', { name: '设置', exact: true }).click();
+    await page.getByRole('button', { name: '管理主 agent', exact: true }).click();
+    await currentLayer().getByText(/只有一种 agent，不配备用/).waitFor();
+    assert.equal(await currentLayer().getByRole('button', { name: '重新开备用' }).count(), 0);
+    await page.evaluate(() => { Object.assign(fixture.workspace.backup, { phase: 'failed', problem: '启动回执待核对' }); fixture.emit(); });
+    await currentLayer().getByText(/没有备用：启动回执待核对/).waitFor();
+    const retry = currentLayer().getByRole('button', { name: '重新开备用' });
+    assert.equal(await retry.isDisabled(), true);
+    await currentLayer().getByRole('checkbox', { name: /确认重新开备用/ }).check();
+    await retry.click();
+    await currentLayer().getByText(/备用 Codex · 待命/).waitFor();
+    assert.equal(await currentLayer().getByText(/没有备用/).count(), 0);
+    assert.equal(await page.evaluate(() => fixture.calls.filter(c => c.name === 'lead.retry').length), 1);
   });
   for (const unbound of [true, false]) {
     await setup({ unbound, width: 300 });

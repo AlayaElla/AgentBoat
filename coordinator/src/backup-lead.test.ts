@@ -1,3 +1,6 @@
+import { mkdtempSync, rmSync } from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
 import { assert, mockHost, mountWorker, test } from 'orca/testing'
 import { testCoordinator } from './test-runtime'
 import { fresh } from './store'
@@ -18,18 +21,20 @@ test('在线主用存在超过十五分钟的待办且已知不在工作时才�
   assert.equal(stopped({ ...primary, online: 'unknown' }, 1, now), undefined)
 })
 
-async function fixture(project: Project, workspace?: Workspace) {
+async function fixture(project: Project, workspace?: Workspace, exports?: string) {
   const host = mockHost({ storage: { ['project:' + project.ref.id]: project as any, ...(workspace ? { workspace: workspace as any } : {}) } })
-  const env = { sessions: [primary], available: true, failLaunch: false, owner: primary.handle, launches: [] as { agent: string; options: unknown; prompt: string }[],
-    controls: [] as { handle: string; prompt: string }[], deliveries: [] as string[], reports: [] as any[] }
+  const env = { sessions: [primary], available: true, failLaunch: false, owner: primary.handle as string | null, generation: 1, installed: ['claude', 'codex'], spaces: [{ workspace: primary.workspace, name: '项目', path: primary.path }], launches: [] as { agent: string; options: unknown; prompt: string }[],
+    contacts: [] as string[], mailRuns: [] as string[], controls: [] as { handle: string; prompt: string }[], deliveries: [] as string[], reports: [] as any[] }
   let c!: ReturnType<typeof testCoordinator>
   const worker = await mountWorker({ default: api => {
     c = testCoordinator(api, {
       projects: async () => env.available ? [project.ref] : [],
-      targets: async () => ({ sessions: env.sessions, workspaces: [{ workspace: primary.workspace, name: '项目', path: primary.path }] }),
-      runOwner: async () => env.owner,
+      targets: async () => ({ sessions: env.sessions, workspaces: env.spaces }),
+      runBinding: async id => ({ owner: env.owner, generation: id === 'run_park' ? 1 : env.generation, objective: id === 'run_park' ? 'AgentBoat 备用待命 ' + (await c.store.get(project.ref.id)).backup?.cycle : undefined }),
+      syncContacts: async jobs => { env.contacts = jobs.map(j => j.id); return Object.fromEntries(jobs.map(j => [j.id, { dispatch: 'ctx_contact' }])) },
+      installedAgents: async () => env.installed,
       identify: async (handle, run, own) => { assert.equal(run, own); return env.sessions.find(s => s.handle === handle)! },
-      mail: async () => ({ reports: [], questions: [], waiting: env.reports }),
+      mail: async runId => { env.mailRuns.push(runId); return { reports: [], questions: [], waiting: env.reports } },
       launchMain: async (_, agent, prompt, options) => {
         env.launches.push({ agent, prompt, options })
         if (env.failLaunch) throw Error('模拟启动回执丢失')
@@ -38,13 +43,13 @@ async function fixture(project: Project, workspace?: Workspace) {
       },
       requestTakeover: async (handle, prompt) => { env.controls.push({ handle, prompt }) },
       send: async (run, d) => { env.deliveries.push([run, env.owner, d.subject].join('|')); return {} }
-    })
+    }, undefined, exports)
   } }, { host })
   const poll = async () => { await c.checkBackups(); await c.flush(project.ref.id) }
-  const command = (action: LeadAction, note?: string) => {
+  const command = (action: LeadAction, note?: string, receipt: { confirm?: boolean; currentRunId?: string; generation?: number; standbyRunId?: string } = {}) => {
     const msg = [...env.controls].reverse().find(m => m.prompt.includes(' lead-' + action + ' '))!
     const token = msg.prompt.split(' lead-' + action + ' ')[1].split(' ')[1]
-    return worker.request('lead.control', { action, runId: project.runId, caller: msg.handle, token, note })
+    return worker.request('lead.control', { action, runId: project.runId, caller: msg.handle === 'dispatch:ctx_contact' ? primary.handle : msg.handle, token, note, ...receipt })
   }
   return { c, worker, env, poll, command, close: async () => { c.stop(); await worker.deactivate() } }
 }
@@ -95,7 +100,7 @@ test('在线主用探测满十分钟未确认才接管原 Run，随后可恢复�
     await c.store.mutate(p.ref.id, undefined, p => { p.backup!.since -= 61 * minute })
     await poll(); await poll()
     assert.equal(env.controls.length, 3)
-    assert.equal(env.controls[2].handle, primary.handle)
+    assert.equal(env.controls[2].handle, 'dispatch:ctx_contact')
     await command('ready'); await c.flush(p.ref.id)
     await command('ready')
     await command('handoff', '已验收 A，剩 B'); await c.flush(p.ref.id)
@@ -140,6 +145,130 @@ test('未关联任务的旧消息只探测一次，主用确认后只对新积�
       assert.equal((await reboot.c.store.get(p.ref.id)).backup?.phase, 'probing')
     } finally { await reboot.close() }
   } finally { Date.now = realNow; await close() }
+})
+
+test('聊天 Run 的空 handle 使用已有绑定，接管和交回都核对本会话回执与最新代次', async () => {
+  const p = bound(), { c, env, poll, command, close } = await fixture(p)
+  try {
+    env.owner = null
+    await poll()
+    assert.deepEqual(env.contacts, [])
+    assert.equal(env.launches.length, 1)
+    env.sessions = env.sessions.filter(s => s.handle !== primary.handle)
+    await poll()
+    assert.deepEqual(await command('take'), { useRun: p.runId })
+    const confirm = (action: LeadAction, generation: number, currentRunId = p.runId) =>
+      command(action, undefined, { confirm: true, generation, currentRunId })
+    await assert.rejects(() => confirm('take', 1), /回执/)
+    env.generation = 2
+    await poll()
+    assert.equal((await c.store.get(p.ref.id)).backup?.phase, 'taking')
+    assert.deepEqual(env.contacts, [])
+    assert.deepEqual(await command('take'), { checkRun: p.runId })
+    await assert.rejects(() => confirm('take', 1), /回执/)
+    await assert.rejects(() => confirm('take', 2, 'run_other'), /回执/)
+    await confirm('take', 2)
+    env.sessions.push(primary)
+    await c.store.mutate(p.ref.id, undefined, row => { row.backup!.since -= 61 * minute })
+    await poll()
+    await command('ready'); await c.flush(p.ref.id)
+    await command('handoff', '剩余工作已登记', { standbyRunId: 'run_park' }); await c.flush(p.ref.id)
+    assert.deepEqual(await command('resume'), { useRun: p.runId })
+    env.generation++
+    await confirm('resume', 3)
+    await poll(); assert.deepEqual(env.contacts, [])
+    env.sessions = env.sessions.filter(s => s.handle !== primary.handle)
+    await poll(); assert.equal(env.controls.at(-1)?.handle, 'run:run_park')
+    assert.equal((await c.store.get(p.ref.id)).backup?.phase, 'taking')
+  } finally { await close() }
+})
+
+test('联络只在接管成功后建立，重启延用原编号，取消、切换、隐藏和删除时撤销', async () => {
+  const p = bound()
+  const b = { primary: primary.handle, agent: 'codex', handle: 'orca_session_id:backup', phase: 'active' as const,
+    since: now, cycle: 'take-cycle', history: [], contact: { id: 'f15efee8-33d0-4655-b50f-2c427d2c5c10', workspace: primary.workspace, primary: primary.handle } }
+  const exports = mkdtempSync(path.join(os.tmpdir(), 'agentboat-contact-'))
+  const { c, env, poll, close } = await fixture({ ...p, backup: b }, undefined, exports)
+  try {
+    await poll(); await poll()
+    assert.deepEqual(env.contacts, [b.contact.id])
+    env.available = false; await poll(); assert.deepEqual(env.contacts, [])
+    env.available = true; await poll()
+    const saved = await c.store.get(p.ref.id)
+    const reboot = await fixture(saved)
+    try { await reboot.poll(); assert.deepEqual(reboot.env.contacts, [b.contact.id]) } finally { await reboot.close() }
+    for (const phase of ['taking', 'failed', 'standby'] as const) {
+      await c.store.mutate(p.ref.id, undefined, r => { r.backup!.phase = phase })
+      await poll(); assert.deepEqual(env.contacts, [])
+    }
+    await c.store.mutate(p.ref.id, undefined, r => { r.hidden = true; r.backup!.phase = 'active' })
+    await poll(); assert.deepEqual(env.contacts, [])
+    await c.store.mutate(p.ref.id, undefined, r => { r.hidden = false; r.runId = 'run_replaced'; delete r.backup })
+    await poll(); assert.deepEqual(env.contacts, [])
+    await c.store.remove(p.ref.id, (await c.store.get(p.ref.id)).revision, async () => { env.available = false })
+    await c.checkBackups(); assert.deepEqual(env.contacts, [])
+    assert.ok(env.mailRuns.every(id => [p.runId, 'run_replaced'].includes(id)))
+  } finally { await close(); rmSync(exports, { recursive: true, force: true }) }
+})
+
+test('没有备用的原因按角色通知一次，原因修复后自动清除', async () => {
+  const p = bound(), w = { version: 1, revision: 1, requests: [], runId: 'run_workspace', session: { ...primary, workspace: 'id:workspace', path: '/workspace', handle: 'orca_session_id:workspace' } } as Workspace
+  const { c, env, poll, close } = await fixture(p, w)
+  try {
+    env.owner = 'term_other'
+    await poll(); await poll()
+    let row = await c.store.get(p.ref.id)
+    assert.ok(row.backup?.problem?.includes('归属'))
+    assert.equal(row.deliveries.filter(d => d.subject.includes('主会话') && d.targetRunId === w.runId).length, 1)
+    env.spaces = []; await poll(); await poll()
+    row = await c.store.get(p.ref.id)
+    assert.ok(row.backup?.problem?.includes('工作区'))
+    assert.equal(row.deliveries.filter(d => d.targetRunId === w.runId).length, 2)
+    env.spaces = [{ workspace: primary.workspace, name: '项目', path: primary.path }]
+    await poll()
+    assert.equal((await c.store.get(p.ref.id)).deliveries.filter(d => d.targetRunId === w.runId).length, 2)
+    env.owner = primary.handle; await poll()
+    row = await c.store.get(p.ref.id)
+    assert.equal(row.backup?.phase, 'standby')
+    assert.equal(row.backup?.problem, undefined)
+  } finally { await close() }
+})
+
+for (const agent of ['claude', 'codex']) test('仅有 ' + agent + ' 时静默，装上另一家后自动补开', async () => {
+  const p = bound(), { c, env, poll, close } = await fixture(p)
+  try {
+    env.installed = [agent]
+    env.sessions = [{ ...primary, agent }]
+    await poll(); await poll()
+    const row = await c.store.get(p.ref.id)
+    assert.equal(row.backup?.phase, 'single')
+    assert.equal(row.backup?.problem, undefined)
+    assert.deepEqual(row.backup?.history, [])
+    assert.equal(row.deliveries.length, 0)
+    assert.equal(env.launches.length, 0)
+    const other = agent === 'codex' ? 'claude' : 'codex'
+    env.installed.push(other)
+    await poll(); await poll()
+    assert.deepEqual(env.launches.map(l => l.agent), [other])
+    assert.equal((await c.store.get(p.ref.id)).backup?.phase, 'standby')
+  } finally { await close() }
+})
+
+test('失败后仅在主人确认当前版本时重新开一次', async () => {
+  const p = bound(), { c, env, worker, poll, close } = await fixture(p)
+  try {
+    env.failLaunch = true; await poll(); await poll()
+    const row = await c.store.get(p.ref.id)
+    const retry = (confirm: boolean, revision = row.revision) => worker.request('lead.retry', { projectId: p.ref.id, revision, confirm })
+    await assert.rejects(() => retry(false), /确认/)
+    assert.equal(env.launches.length, 1)
+    env.failLaunch = false
+    await retry(true)
+    await assert.rejects(() => retry(true))
+    await poll()
+    assert.equal(env.launches.length, 2)
+    assert.equal((await c.store.get(p.ref.id)).backup?.phase, 'standby')
+  } finally { await close() }
 })
 
 test('完整清单中找不到主用时直接通知备用接管', async () => {

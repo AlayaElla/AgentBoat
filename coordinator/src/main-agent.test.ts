@@ -282,7 +282,7 @@ test('chatNotDeclarable: plugin independently reads Run and sessions, never quer
   ;(runtime as any).call = async (args: string[]) => {
     calls.push(args)
     if (args[1] === 'run-current') throw Error('chatNotDeclarable: cannot declare another chat')
-    if (args[1] === 'run-show') return { run: { id: args[3] } }
+    if (args[1] === 'run-show') return { run: { id: args[3], coordinator_handle: null, consumer_generation: 1 } }
     if (args[0] === 'terminal') return { terminals: [] }
     return { worktrees: [{ address: { environment: 'local', worktree: session.workspace }, path: session.path, agents: [{ paneKey: 'structured-agent-session-test-next:pane', agentType: 'claude', subagentObservation: observation }] }] }
   }

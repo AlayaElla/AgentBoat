@@ -26,7 +26,7 @@ async function workspace(name: string, bound: boolean, savedDeliveries: Delivery
   const worker = await mountWorker({ default: (api: OrcaWorkerApi) => {
     coordinator = createCoordinator(api, {
       identify: async handle => ({ handle, title: name, workspace: name, workspaceName: name, path: '/', agent: 'codex', online: 'online' }),
-      send: async (runId, delivery) => { sends.push({ runId, delivery }); return {} },
+      send: async (runId, delivery) => { if (!delivery.id.startsWith('lead-notice:')) sends.push({ runId, delivery }); return {} },
       ...extra
     }, undefined, undefined, files)
   } }, { host })

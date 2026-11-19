@@ -19,7 +19,7 @@ if (!allowed.includes(operation)) throw new Error('用法：node client.mjs proj
 const target = fileURLToPath(new URL('../plugin/', import.meta.url));
 const caller = process.env.ORCA_AGENT_SESSION_ID ? `orca_session_id:${process.env.ORCA_AGENT_SESSION_ID}` : process.env.ORCA_TERMINAL_HANDLE;
 const profileEnv = release ? { ...process.env, ORCA_USER_DATA_PATH: activeUserDataPath() } : process.env;
-const currentRun = () => JSON.parse(execFileSync(executable, ['orchestration', 'run-current', '--json', '--full'], { encoding: 'utf8', windowsHide: true, env: profileEnv, timeout: 25000, maxBuffer: 1024 * 1024 }));
+const currentRun = () => JSON.parse(execFileSync(executable, ['orchestration', 'run-current', '--environment', 'local', '--json', '--full'], { encoding: 'utf8', windowsHide: true, env: profileEnv, timeout: 25000, maxBuffer: 1024 * 1024 }));
 
 let stdin;
 function readInput(file) {
@@ -67,9 +67,30 @@ try {
   let stdout = await request();
   if (leadAction) {
     const first = JSON.parse(stdout);
-    if (first.result?.result?.useRun === argument && first.ok) {
-      const used = JSON.parse(execFileSync(executable, ['orchestration', 'run-use', '--id', argument, '--environment', 'local', '--json', '--full'], { encoding: 'utf8', windowsHide: true, env: profileEnv, timeout: 25000 }));
-      if (!used.ok || used.result?.run?.id !== argument || used.result.run.coordinator_handle !== caller) throw new Error('Run 接管回执待核对');
+    const next = first.result?.result;
+    if (first.ok && typeof next?.park === 'string' && operation === 'lead-handoff') {
+      const own = currentRun().result?.run;
+      const parked = own?.objective === next.park ? own : own?.id === argument ? JSON.parse(execFileSync(executable,
+        ['orchestration', 'run-create', '--objective', next.park, '--environment', 'local', '--json', '--full'],
+        { encoding: 'utf8', windowsHide: true, env: profileEnv, timeout: 25000 })).result?.run : undefined;
+      if (!parked?.id || parked.objective !== next.park) throw new Error('未确认备用会话的待命 Run');
+      input.standbyRunId = parked.id;
+      args[args.indexOf('--data') + 1] = JSON.stringify(input);
+      stdout = await request();
+    }
+    if (argument && first.ok && (next?.useRun === argument || next?.checkRun === argument)) {
+      let used;
+      if (next.useRun) {
+        const reply = JSON.parse(execFileSync(executable, ['orchestration', 'run-use', '--id', argument, '--environment', 'local', '--json', '--full'], { encoding: 'utf8', windowsHide: true, env: profileEnv, timeout: 25000 }));
+        used = reply.result?.run;
+        if (!reply.ok || used?.id !== argument) throw new Error('Run 接管回执待核对');
+      }
+      const current = currentRun(), run = current.result?.run;
+      if (!current.ok || run?.id !== argument || !Number.isSafeInteger(run.consumer_generation) ||
+        (run.coordinator_handle !== caller && !(process.env.ORCA_AGENT_SESSION_ID && run.coordinator_handle === null)) ||
+        (used && (used.consumer_generation !== run.consumer_generation || used.coordinator_handle !== run.coordinator_handle))) throw new Error('当前会话的 Run 接管回执不符');
+      input.currentRunId = run.id;
+      input.generation = run.consumer_generation;
       input.confirm = true;
       args[args.indexOf('--data') + 1] = JSON.stringify(input);
       stdout = await request();
