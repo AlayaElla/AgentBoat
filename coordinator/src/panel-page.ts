@@ -1,6 +1,6 @@
 import type {} from 'orca/frame'
 import type { ArchivePage } from './protocol'
-import { blockedRevision, attention, projectSummary, agents, agentName, compareAgentActivity, groupedAttention, isProjectShared, isRecentAgent, labels, taskState, scopes, statuses, connectionStates, roles, mainStatus, mainAgentStates } from './model'
+import { backupInCharge, blockedRevision, attention, projectSummary, agents, agentName, compareAgentActivity, groupedAttention, isProjectShared, isRecentAgent, labels, taskState, scopes, statuses, connectionStates, roles, mainStatus, mainAgentStates } from './model'
 import type { Acceptance, AgentSession, Artifact, Attention, LeadSwitch, MainTakeover, Overview, Project, ProjectLead, ProjectWorkspace, WorkspaceBinding } from './model'
 import type { FeedbackItem } from './store'
 import type { AgentActivity, AgentsSnapshot, MainAgentActivity } from './model'
@@ -459,7 +459,8 @@ function mainAgentInfo(agent: MainAgentActivity | null | undefined, bound = !!ag
   return { title, tone }
 }
 function mainAgentLine(agent: MainAgentActivity | null | undefined, open?: () => void, bound = !!agent, showLabel = true) {
-  const { title, tone } = mainAgentInfo(agent, bound, open ? mainStatus(all.workspace.session, live) : agent?.activity)
+  const { title: primary, tone } = mainAgentInfo(agent, bound, open ? mainStatus(all.workspace.session, live) : agent?.activity)
+  const title = open && all.workspace.backup ? primary + ' · ' + backupDescription(all.workspace) : primary
   return el(open ? 'button' : 'div', { class: 'lead', type: open ? 'button' : undefined, 'aria-label': open ? showLabel ? '主 agent' : '管理主 agent' : undefined, onclick: open }, dot(tone), showLabel ? el('span', { class: 't' }, '主 agent') : null, el('span', { class: 'grow trunc xs muted', title }, title), open ? icon('chevron') : null)
 }
 const activityNote = (activity: SharedReport['projects'][number]['activity']) => activity === null ? 'agent 状态读不到' : activity?.truncated ? 'agent 未全部列出' : undefined
@@ -1125,9 +1126,20 @@ function connectionPage() {
     a ? section('最近往来', a.entries.map((e: any) => card(`${e.direction === 'incoming' ? '收到' : '发出'} · ${e.task.status.state}`, small(e.task.status.timestamp)))) : null,
     c ? [check('确认删除这个连接的设置、凭据和往来记录', !!form.delete, v => { form.delete = v; render() }), button('删除连接', () => act(async () => { await req('workspace.connections', { operation: 'delete', connectionId: c.id, confirm: true }); back(false, true); await refresh() }), 'danger', !form.delete)] : null]
 }
+function backupDescription(binding: WorkspaceBinding) {
+  const b = binding.backup!
+  const phase = { opening: '启动中', failed: '启动待核对', standby: '待命', probing: '等待主用确认', taking: '正在接管', active: '处理中', handoff: '正在交接', returning: '等待主用接回' }[b.phase]
+  return `备用 ${agentName(b.agent)} · ${phase} · 当前${backupInCharge(b) ? '备用' : '主用'}负责`
+}
+function backupHistory(w: WorkspaceBinding) {
+  const b = w.backup
+  if (!b) return null
+  return [b.problem ? callout(b.problem, 'danger') : null, b.handle ? small('备用会话 ' + b.handle) : null,
+    b.history.length ? fold(active.key + '-lead-history', '接管记录', () => b.history.slice().reverse().map(e => card(new Date(e.at).toLocaleString(), e.text))) : null]
+}
 function leadDescription(binding: WorkspaceBinding | undefined, label: string) {
   const s = binding?.session
-  return s ? [agentName(s.agent), s.title, label === '主 agent' ? activityStyle(mainStatus(s, live)).label : mainAgentStates[s.online]].filter(Boolean).join(' · ')
+  return s ? [binding?.backup ? '主用 ' + agentName(s.agent) : agentName(s.agent), s.title, label === '主 agent' ? activityStyle(mainStatus(s, live)).label : mainAgentStates[s.online], binding?.backup ? backupDescription(binding) : ''].filter(Boolean).join(' · ')
     : binding?.runId ? `已绑定${label}` : `还没有${label}`
 }
 type SwitchChoice = Omit<LeadSwitch, 'revision'>
@@ -1153,7 +1165,7 @@ function projectLeadSettings(id: string) {
     await req('project.lead', { projectId: id, revision: w.revision, ...input })
     markSaved(); await loadPage()
   }, false)
-  return section('主会话', el('p', { class: 'any' }, leadDescription(w, '主会话')), leadChoices(w, data.sessions, choose, true),
+  return section('主会话', el('p', { class: 'any' }, leadDescription(w, '主会话')), backupHistory(w), leadChoices(w, data.sessions, choose, true),
     section('新会话', select('Agent', agents, data.defaultAgent),
       button('新开一个主会话', () => choose({ mode: 'new', agent: form.Agent }), 'primary', !!data.workspaceError),
       data.workspaceError ? callout(data.workspaceError) : null))
@@ -1166,7 +1178,7 @@ function mainPage() {
     catch (e) { error = (e as Error).message }
     await refresh()
   }
-  return [el('p', { class: 'any' }, leadDescription(w, '主 agent')), leadChoices(w, targets?.sessions ?? [], switchMain),
+  return [el('p', { class: 'any' }, leadDescription(w, '主 agent')), backupHistory(w), leadChoices(w, targets?.sessions ?? [], switchMain),
     section('新会话', select('工作区', Object.fromEntries(workspaces.map((s: any) => [s.workspace, `${s.name} · ${s.path}`])), workspaces[0]?.workspace ?? ''), select('Agent', { claude: 'Claude', codex: 'Codex' }, 'claude'), button('新开一个主 agent', () => switchMain({ mode: 'new', workspace: form['工作区'], agent: form.Agent }), 'primary', !workspaces.length)),
     fold(active.key + '-binding', '绑定详情', () => el('dl', { class: 'kv' }, Object.entries({ Run: w.runId || '未绑定', 会话: w.session?.handle || '未知', 目录: w.session?.path || '未知', 绑定时间: w.boundAt || '未知', 授权边界: w.securityBoundary || '未知' }).map(([k, v]) => [el('dt', {}, k), el('dd', {}, v)])))]
 }

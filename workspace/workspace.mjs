@@ -134,6 +134,7 @@ function launchProjectLead(j, t, project, goal) {
 function currentWorkspaceMain(runId) {
   const caller = process.env.ORCA_AGENT_SESSION_ID ? `orca_session_id:${process.env.ORCA_AGENT_SESSION_ID}` : process.env.ORCA_TERMINAL_HANDLE;
   const main = bridge('main-read');
+  if (main.backup && ['active', 'handoff', 'returning'].includes(main.backup.phase)) main.session = { ...main.session, handle: main.backup.handle };
   if (!caller || !main.runId || main.session?.handle !== caller || (runId !== undefined && runId !== main.runId)) throw new Error('请在已绑定的工作间主 agent 会话中执行');
   return main;
 }

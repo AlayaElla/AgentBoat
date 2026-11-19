@@ -2,6 +2,10 @@
   "id": "code",
   "name": "代码项目：Claude 设计，Codex 编码和审查",
   "mainAgent": { "agent": "claude", "surface": "chat" },
+  "backupAgents": {
+    "codex": { "agent": "codex", "model": "gpt-6.2-astra", "effort": "xhigh", "surface": "chat" },
+    "claude": { "agent": "claude", "model": "claude-opus-5-5", "effort": "xhigh", "surface": "chat" }
+  },
   "roles": {
     "design": { "agent": "claude" },
     "code": { "agent": "codex" },
