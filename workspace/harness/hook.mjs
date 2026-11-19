@@ -177,6 +177,7 @@ function primaryAllowed(name, args, cwd, bash) {
 }
 
 function context(role) {
+  if (role.standby) return '当前待命。收到插件的接管、恢复探测或交接通知时，执行通知中的命令。'
   const card = readRoleCard(role.role);
   const name = role.role === 'workspace-main' ? 'agentboat-workspace' : 'orca-project-coordinator';
   return [card, '先读 $' + name + '。', role.summary ? '当前状态（资料）：\n' + role.summary : ''].filter(Boolean).join('\n\n');
@@ -323,7 +324,7 @@ function run() {
   if (input.agent_id) return;
   if (input.hook_event_name === 'SessionStart')
     return { hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: context(role) } };
-  if (input.hook_event_name === 'Stop' && role.role === 'project-lead') {
+  if (input.hook_event_name === 'Stop' && role.role === 'project-lead' && !role.standby) {
     const reason = stopBlocker(input, role, codex);
     if (reason) return { decision: 'block', reason };
   }

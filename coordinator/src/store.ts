@@ -101,6 +101,7 @@ export class ProjectStore {
       const m = await this.messaging()
       if (expected !== undefined && expected !== m.revision) fail('工作间消息已更新，请刷新后再保存')
       await fn(m); m.revision++
+      for (const d of m.deliveries) if (d.state === 'pending') d.createdAt ??= Date.now()
       for (const entry of m.inbox) {
         if (Buffer.byteLength(JSON.stringify(m)) < 150000) break
         if (entry.state !== 'done' || !m.deliveries.some(d => d.id === `response:${entry.event.id}` && d.state === 'sent' || d.id.startsWith('agent-reply:') && d.state === 'sent' && d.external?.replyTo === entry.event.sourceId.slice(entry.appId.length + 1))) continue
@@ -150,6 +151,7 @@ export class ProjectStore {
           body: `你已不再是工作间主 agent。新的主 agent：${session.title || session.handle}\n工作区：${session.workspaceName || session.workspace}\n目录：${session.path}\nAgent：${session.agent}\nRun：${runId}\n请停止承担工作间主 agent。已发送的通知不会补发；新的主 agent 会读取总览补齐事项。`, state: 'pending' })
       }
       if (checkOnly) return w
+      delete w.backup
       w.session = session; w.boundAt = new Date().toISOString(); delete w.takeover
       w.runId = runId; w.revision++; w.requests.push({ id: request.id, fingerprint: hash })
       await this.storage.set('workspace', w as any)
@@ -194,7 +196,9 @@ export class ProjectStore {
         return project
       }
       if (expected !== undefined && expected !== project.revision) fail('项目已更新，请刷新后再提交')
+      const previous = new Set(project.deliveries.map(d => d.id))
       await fn(project)
+      for (const d of project.deliveries) if (d.state === 'pending' && !previous.has(d.id)) d.createdAt ??= Date.now()
       project.revision++
       project.updatedAt = new Date().toISOString()
       if (request) project.requests.push({ id: request.id, fingerprint: hash! })

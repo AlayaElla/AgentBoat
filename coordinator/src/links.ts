@@ -5,7 +5,7 @@ import { lookup } from 'node:dns'
 import { networkInterfaces } from 'node:os'
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto'
 import type { OrcaWorkerApi } from 'orca/worker'
-import { attention, agents, compareAgentActivity, groupedAttention, isProjectShared, isRecentAgent, labels, mainStatus, mainAgentStates, taskState, type AgentActivity, type AgentsSnapshot, type MainAgentActivity, type Project, type Task, type WorkspaceBinding } from './model'
+import { backupInCharge, attention, agents, compareAgentActivity, groupedAttention, isProjectShared, isRecentAgent, labels, mainStatus, mainAgentStates, taskState, type AgentActivity, type AgentsSnapshot, type MainAgentActivity, type Project, type Task, type WorkspaceBinding } from './model'
 import { fail, fingerprint, object, revision, strings, text, type FeedbackItem } from './store'
 import { LinkMessages, type IncomingMessage, type MessageExchange, type WireMessage } from './link-messages'
 import { LinkFiles } from './link-files'
@@ -127,7 +127,8 @@ export function report(projects: Project[], peer: Sharing, workspaceId: string, 
           acceptance: t.phase === 'ready' ? t.acceptance.filter(a => a.status === 'pending').map(a => a.title) : [] })) } : {}) }
     }) }
   if (!details) return result
-  const workspace = activity?.workspace, session = workspace?.session
+  const workspace = activity?.workspace, primary = workspace?.session, b = workspace?.backup
+  const session = primary && b && backupInCharge(b) ? { ...primary, handle: b.handle!, agent: b.agent, title: '备用主会话', online: 'unknown' as const } : primary
   result.mainAgent = workspace?.runId ? { agent: publicAgent(session?.agent ?? ''), title: (session?.title ?? '').slice(0, maxActivityTitle), online: session?.online ?? 'unknown', activity: mainStatus(session, activity?.live) } : null
   if (canDelegate(peer)) {
     let remaining = LIMIT - 2048 - Buffer.byteLength(JSON.stringify(result))

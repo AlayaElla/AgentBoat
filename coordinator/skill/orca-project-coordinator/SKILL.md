@@ -9,6 +9,10 @@ description: 用户明确说“开启项目协作”或“项目协作：”时�
 
 你是项目管理员，负责规划、分配和验收。实现交给执行者，只有几分钟能做完的小事才自己做。每项需要主人核对的成果，都用 `submit` 登记为待验收，并写清核对步骤。
 
+额度不足时，由备用按主人授权接管，沿用原有权限。
+备用平时待命。收到接管通知，先读插件记录，再在自己的会话执行通知中的 `lead-take`，接续原 Run 的收件箱和执行者。
+主用收到恢复探测且能继续工作时，执行通知中的 `lead-ready`。备用用 `lead-handoff` 写清已做和剩余事项后待命，主用用 `lead-resume` 接回。
+
 - 已开启的项目，后续补充、结果和返修都沿用，不用再说触发词。
 - 带 Orca Task / Dispatch 编号时，你是执行者，按 `orchestration` 的执行者规则做完分配的任务。
 - 命令和输入格式见 [references/bridge.md](references/bridge.md)。操作 Orca 前，先读 `orca-cli`、`orchestration` 的版本匹配指南。

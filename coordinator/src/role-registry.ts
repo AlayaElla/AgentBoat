@@ -1,9 +1,9 @@
 import { randomUUID } from 'node:crypto'
 import path from 'node:path'
 import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
-import { attention, groupedAttention, labels, projectCounts, type Messaging, type Project, type Workspace } from './model'
+import { backupInCharge, attention, groupedAttention, labels, projectCounts, type Messaging, type Project, type Workspace } from './model'
 
-type Role = { role: 'workspace-main'; directory: string; summary?: string } | { role: 'project-lead'; projectId: string; runId: string; summary?: string }
+type Role = { standby?: boolean; role: 'workspace-main'; directory: string; summary?: string } | { standby?: boolean; role: 'project-lead'; projectId: string; runId: string; summary?: string }
 const chat = (value?: string, agent?: string) => /^orca_session_id:(?:claude|codex)_[\w-]+$/.test(value ?? '') ||
   agent === 'codex' && /^orca_session_id:[\da-f]{8}(?:-[\da-f]{4}){3}-[\da-f]{12}$/i.test(value ?? '')
 const line = (value: string) => value.replace(/\s+/g, ' ').slice(0, 200)
@@ -17,7 +17,9 @@ export function roleRegistry(file: string, read: () => Promise<{
       const { workspace, projects, current, mailbox } = await read()
       const visible = current?.filter(p => !p.hidden)
       const sessions: Record<string, Role> = {}
-      const main = workspace.session
+      const spare = workspace.backup
+      if (spare?.handle && workspace.session && chat(spare.handle, spare.agent)) sessions[spare.handle] = { role: 'workspace-main', directory: workspace.session.path, standby: true }
+      const main = workspace.session && backupInCharge(workspace.backup) ? { ...workspace.session, handle: workspace.backup!.handle!, agent: workspace.backup!.agent } : workspace.session
       if (workspace.runId && main && chat(main.handle, main.agent)) {
         const summary = visible && [
           `工作间待处理 ${groupedAttention(visible.flatMap(attention)).length} 组`,
@@ -28,11 +30,13 @@ export function roleRegistry(file: string, read: () => Promise<{
           ...(visible.length > 30 ? [`另有 ${visible.length - 30} 个项目，读 overview 查看`] : []),
           ...(mailbox ? [`工作间消息待交付 ${mailbox.inbox.filter(m => m.state === 'pending').length + mailbox.deliveries.filter(m => !m.external && m.state === 'pending').length} 条，送达待核对 ${mailbox.deliveries.filter(m => !m.external && m.state === 'uncertain').length} 条`] : [])
         ].join('\n')
+        if (workspace.session && workspace.session.handle !== main.handle) sessions[workspace.session.handle] = { role: 'workspace-main', directory: main.path, standby: true }
         sessions[main.handle] = { role: 'workspace-main', directory: main.path, ...(summary ? { summary } : {}) }
       }
       for (const p of projects) {
-        const handle = p.mainSession?.handle ?? p.mainAgentHandle
-        if (!p.runId || !handle || !chat(handle, p.mainSession?.agent) || sessions[handle]?.role === 'workspace-main') continue
+        if (p.runId && p.backup?.handle && chat(p.backup.handle, p.backup.agent) && !sessions[p.backup.handle]) sessions[p.backup.handle] = { role: 'project-lead', projectId: p.ref.id, runId: p.runId, standby: true }
+        const handle = backupInCharge(p.backup) ? p.backup!.handle : p.mainSession?.handle ?? p.mainAgentHandle
+        if (!p.runId || !handle || !chat(handle, backupInCharge(p.backup) ? p.backup!.agent : p.mainSession?.agent) || sessions[handle]?.role === 'workspace-main') continue
         const active = p.tasks.filter(t => t.phase === 'working'), pending = attention({ ...p, hidden: false }).filter(i => i.kind === 'decision' || i.kind === 'review')
         const summary = [
           `项目 ${line(p.ref.name)}，进行中 ${active.length} 项，待决定 ${pending.filter(i => i.kind === 'decision').length} 项，待验收 ${pending.filter(i => i.kind === 'review').length} 项`,

@@ -1,3 +1,4 @@
+import { BackupLeads, backupView } from './backup-lead'
 import os from 'node:os'
 import path from 'node:path'
 import { realpath, stat } from 'node:fs/promises'
@@ -47,7 +48,13 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
   let readingCatalog: Promise<{ refs?: ProjectRef[]; error?: string }> | undefined
   const busy = new Map<string, Promise<void>>()
   const changed = (projectId = '') => { agentsDirty = true; links.localChanged(); orca.panels.post('project.changed', { projectId }); void updateStatus().catch(() => {}) }
-  const main = mainAgent(orca, store, runtime, changed, deferMailbox, async () => (await availableProjectRecords()).list)
+  const backups = new BackupLeads(store, runtime, requireProject, id => {
+    changed(id)
+    if (id) defer(id)
+    else void main.flushRetired().catch(() => {})
+  })
+  orca.panels.handle('lead.control', input => backups.command(input))
+  const main = mainAgent(orca, store, runtime, changed, () => { deferMailbox(); deferBackupCheck() }, async () => (await availableProjectRecords()).list, d => backups.send('', d))
   let statusUpdates: Promise<unknown> = Promise.resolve()
   let live: import('./agents').AgentsSnapshot = { ok: false, at: 0, agents: [] }
   let agentsDirty = true, refreshingAgents: Promise<typeof live> | undefined
@@ -112,16 +119,20 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
     return remaining.filter(q => !archived.has(q))
   }
   const visibleQuestions = (list: Project[]) => unsubmitted(questions, list)
+  type Waiting = NonNullable<Awaited<ReturnType<CoordinatorRuntime['mail']>>['waiting']>
+  let waitingByRun = new Map<string, Waiting>()
   function refreshQuestions() {
     pollingQuestions ??= (async () => {
       const { list, error } = await availableProjectRecords()
       if (error) return
       const bound = list.filter(p => !p.hidden && p.runId)
       const now = Date.now()
+      const waiting = new Map<string, Waiting>()
       const updated = new Map<string, { runId: string; questions: OwnerQuestion[] }>()
       for (let i = 0; i < bound.length; i += 4) await Promise.all(bound.slice(i, i + 4).map(async p => {
         const inbox = await runtime.mail(p.runId).catch(() => undefined)
         if (!inbox) return
+        waiting.set(p.runId, inbox.waiting ?? [])
         const row = (q: { id: string; from: string; body: string; at: number }): OwnerQuestion => ({
           id: q.id, from: q.from, at: q.at, title: (q.body.trim().split(/\r?\n/, 1)[0] || '执行者回报').slice(0, 120),
           body: q.body.slice(0, maxMessageLength), runId: p.runId, projectId: p.ref.id
@@ -134,6 +145,7 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
       if (current.error) return
       const currentRuns = new Map(current.list.filter(p => !p.hidden).map(p => [p.ref.id, p]))
       const verified = await unsubmitted([...updated.values()].flatMap(result => result.questions), current.list)
+      waitingByRun = waiting
       questions = verified.sort((a, b) => a.at - b.at || a.id.localeCompare(b.id))
       actionableRunMail = new Set(verified.map(mailKey))
       const w = await store.workspace()
@@ -312,6 +324,7 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
     const sessions = project.mainAgentHandle && !runtimeError ? await runtime.targets().then(t => t.sessions).catch(() => undefined) : undefined
     const lead = projectBinding(project, sessions), agent = projectAgentKind(project)
     const { takeover, ...visible } = project
+    if (visible.backup) visible.backup = backupView(visible.backup)
     return { projects: refs, project: visible, lead,
       ...(agent && Object.hasOwn(agents, agent) ? { mainAgent: agent as Snapshot['mainAgent'] } : {}), workspaceTarget: runtimeError ? { error: runtimeError } : await projectWorkspace(ref, lead.session),
       ...(runtimeError ? { runtimeError } : {}) }
@@ -323,7 +336,7 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
     const handle = p.mainAgentHandle, takeover = takeoverView(p.takeover)
     const saved = p.mainSession?.handle === handle ? p.mainSession : undefined
     const live = sessions?.find(s => s.handle === handle)
-    return { revision: p.revision, runId: p.runId, ...(p.runId && handle ? { session: live ?? {
+    return { revision: p.revision, runId: p.runId, ...(p.backup ? { backup: backupView(p.backup) } : {}), ...(p.runId && handle ? { session: live ?? {
       handle, title: saved?.title ?? '', workspace: saved?.workspace ?? p.ref.workspace, workspaceName: saved?.workspaceName ?? p.ref.name,
       path: saved?.path ?? p.ref.path, agent: projectAgentKind(p) ?? '', online: sessions ? 'offline' as const : 'unknown' as const
     } } : {}), ...(takeover ? { takeover } : {}) }
@@ -376,11 +389,12 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
       subject: '【项目协作】请接管项目主会话',
       prompt: (token, expiresAt) => `主人请当前会话接管项目「${ref.name}」（projectId: ${id}）。开启项目协作，先读 $orca-project-coordinator 和桥接说明，自己创建新的协调 Run。接管脚本绝对路径：${JSON.stringify(clientPath)}\n用 node 调用此脚本的 read ${id} 取得最新 revision，再调用 project-lead-bind，从标准输入传入 {projectId,revision,requestId,runId,token}。启动回执未确认时稍后重读再试。一次性接管凭据：${token}\n有效至：${expiresAt}\n凭据仅用于本次接管，不保存或转发。绑定成功后读该项目记录，接手任务、执行记录和待处理项；保留已有分工和用户决定。`
     })
+    defer(id)
     return readProjectLead(id)
   }
   function rememberProjectCaller(project: Project, input: { runId?: string; caller?: string }) {
     // Self-reported identity is display/navigation metadata, never authorization evidence.
-    if (project.runId && input.runId === project.runId && input.caller) project.mainAgentHandle = text(input.caller, '调用会话', 500)
+    if (project.runId && input.runId === project.runId && input.caller && (!project.backup || project.backup.primary === input.caller)) project.mainAgentHandle = text(input.caller, '调用会话', 500)
   }
   async function ingest(appId: string, event: SourceEvent): Promise<void> {
     const work = inbound.then(() => ingestOne(appId, event))
@@ -501,7 +515,8 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
         while (true) {
           const p = await store.get(id)
           const f = (await store.messaging()).feishu
-          const allowed = (d: Delivery, p: Project) => (!p.hidden || !d.external && (!d.targetRunId || d.id.startsWith('retired:'))) &&
+          const allowed = (d: Delivery, p: Project) => (!d.control || !takeoverActive(p.takeover)) &&
+            (!p.hidden || !d.control && !d.external && (!d.targetRunId || d.id.startsWith('retired:'))) &&
             (d.external ? f.enabled && d.external.appId === f.appId && f.chatIds.includes(d.external.chatId) : d.targetRunId || p.runId)
           const delivery = p.deliveries.find(x => x.state === 'pending' && allowed(x, p))
           if (!delivery) break
@@ -516,7 +531,7 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
           if (!claimed) continue
           attempted = true
           try {
-            const receipt = await sendDelivery(delivery, delivery.targetRunId ? 'workspace' : 'project', runId)
+            const receipt = delivery.control ? await backups.send(id, delivery) : await sendDelivery(delivery, delivery.targetRunId ? 'workspace' : 'project', runId)
             await store.mutate(id, undefined, p => {
               const d = p.deliveries.find(x => x.id === delivery.id)!
               d.state = 'sent'; if ('requestId' in receipt && receipt.requestId) d.requestId = receipt.requestId
@@ -712,10 +727,12 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
           if (!('workspaceId' in workspace) || workspace.workspaceId !== workspaceId(takeoverSession.workspace)) fail('目标会话已经离开项目工作区')
           if (p.runId) p.deliveries.push({ id: `retired:${t.id}`, targetRunId: p.runId, subject: '项目主会话已切换',
             body: `项目「${p.ref.name}」的主会话已换成「${takeoverSession.title || takeoverSession.handle}」。你不再是主会话。请停止派活，把进行中的情况交给新主会话。`, state: 'pending' })
+          delete p.backup
           p.mainSession = takeoverSession
           delete p.takeover
         } else if (p.runId !== input.runId) {
           if (takeoverActive(p.takeover)) fail('项目正在等待接管，请使用本次接管凭据')
+          delete p.backup
           delete p.mainAgentHandle
           delete p.mainSession
           delete p.takeover
@@ -733,6 +750,7 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
     changed(id)
     defer(id)
     const result = await snapshot(id, written)
+    if (input.operation === 'bind') deferBackupCheck()
     if (input.operation === 'submit') {
       const taskId = text(object(input.task).id, '任务编号', 200)
       if (!written.tasks.some(t => t.id === taskId)) return { ...result, task: await store.archive.task(written, taskId), archiveStatus: '已归档' as const }
@@ -763,14 +781,71 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
     return orca.host.call('workspace.open', { workspaceId: target })
   })
 
+  let checking: Promise<void> | undefined, stoppedChecks = false
+  function deferBackupCheck() { setImmediate(() => { if (!stoppedChecks) void checkBackups().catch(() => {}) }) }
+  function checkBackups() {
+    return checking ??= inspectBindings().finally(() => { checking = undefined })
+  }
+  async function inspectBindings() {
+    const { list, error } = await availableProjectRecords()
+    if (error || stoppedChecks) return
+    const w = await store.workspace(), projects = list.filter(p => !p.hidden && p.runId && p.ref.hostId === 'local')
+    if (!w.runId && !projects.length) return
+    const inventory = await runtime.targets(), mailbox = await store.messaging()
+    for (const r of [w, ...projects]) {
+      if (stoppedChecks || !r.runId || takeoverActive(r.takeover)) continue
+      const project = 'ref' in r ? r : undefined
+      const handle = project ? project.mainAgentHandle || await runtime.runOwner(r.runId).catch(() => undefined) : w.session?.handle || await runtime.runOwner(r.runId).catch(() => undefined)
+      if (!handle) continue
+      const session = inventory.sessions.find(s => s.handle === handle) ?? (project ? projectBinding({ ...project, mainAgentHandle: handle }).session : w.session)
+      if (!session || project && !inventory.workspaces.some(s => s.workspace === session.workspace && path.relative(s.path, project.ref.path) === '') ||
+        !project && w.session && w.session.workspace !== session.workspace) continue
+      const pending: { at: number; title: string }[] = []
+      if (r.backup) {
+        const mail = project ? waitingByRun.get(r.runId) ?? [] : await runtime.mail(r.runId).then(m => [...m.waiting ?? [], ...m.questions.map(q => ({ at: q.at, title: q.subject }))] as Waiting).catch(() => [])
+        const reports = mail.flatMap(m => m.report ? [m.report] : [])
+        const proofs = project ? projectSubmissions(project) : []
+        const archived = project && reports.length ? await store.archive.submittedReports(project, reports) : new Set<string>()
+        pending.push(...mail.filter(m => !m.report || (project ? !archived.has(m.report.id) && !proofs.some(p => reportSubmitted(m.report!, p)) : !m.read)))
+        if (project) {
+          pending.push(...questions.filter(q => q.runId === r.runId))
+          const submitted = new Map(project.tasks.map(t => [t.id, Date.parse(t.submittedAt ?? t.updatedAt)]))
+          for (const e of project.events) {
+            const at = Date.parse(e.receivedAt)
+            if (!e.taskId || (submitted.get(e.taskId) ?? Infinity) < at) pending.push({ at, title: e.text.slice(0, 120) })
+          }
+        } else {
+          for (const entry of mailbox.inbox) {
+            if (mailbox.deliveries.some(d => d.id === entry.event.id && d.targetRunId === w.runId) &&
+              !mailbox.deliveries.some(d => d.external?.appId === entry.appId && d.external.replyTo === entry.event.sourceId.slice(entry.appId.length + 1) && d.state === 'sent'))
+              pending.push({ at: Date.parse(entry.event.receivedAt), title: entry.event.text.slice(0, 120) })
+          }
+        }
+        const deliveries = project ? project.deliveries : [...mailbox.deliveries, ...projects.flatMap(p => p.deliveries.filter(d => d.targetRunId === w.runId))]
+        for (const d of deliveries) if (!d.control && !d.external && !d.id.startsWith('retired:') && (!d.targetRunId || d.targetRunId === r.runId) &&
+          ['pending', 'uncertain'].includes(d.state)) pending.push({ at: d.createdAt ?? r.backup.since, title: d.subject })
+      }
+      const context = (project ? [project] : projects).flatMap(p => p.tasks.filter(t => t.phase === 'working').map(t =>
+        [t.title, ...t.executions.map(e => e.agent + ' ' + e.dispatchId)].join(' · '))).slice(0, 12).join('；')
+      if (project && !await requireProject(project.ref.id).catch(() => undefined)) continue
+      if (r.backup && ('ref' in r ? r.deliveries : r.retired)?.some(d => d.control && d.state === 'pending')) {
+        if (project) defer(project.ref.id)
+        else void main.flushRetired().catch(() => {})
+      }
+      await backups.inspect(r, session, inventory, pending.filter(p => Number.isFinite(p.at)), context, w.runId).catch(() => {
+        // Binding revisions can change during a sample. Re-read this role on the next tick.
+      })
+    }
+  }
+
   let refreshMain: ReturnType<typeof setInterval> | undefined
-  return { store, links, connections, ingest, flush, flushMailbox, updateStatus, refreshQuestions, stop: () => { clearInterval(refreshMain); activityEvent.dispose(); connections.stop(); links.stop(); sources.stop() }, async start() {
+  return { store, links, connections, ingest, flush, flushMailbox, updateStatus, refreshQuestions, checkBackups, stop: () => { stoppedChecks = true; clearInterval(refreshMain); activityEvent.dispose(); connections.stop(); links.stop(); sources.stop() }, async start() {
     if (refreshRoles) { await readCatalog(); await refreshRoles() }
     await links.start()
     await connections.start()
     await main.recover()
     clearInterval(refreshMain)
-    refreshMain = setInterval(() => { void refreshActivity().catch(() => {}); void refreshQuestions().catch(() => {}) }, activityInterval)
+    refreshMain = setInterval(() => { void refreshActivity().catch(() => {}); void refreshQuestions().then(checkBackups).catch(() => {}) }, activityInterval)
     refreshMain.unref()
     await refreshAgents(true)
     const { refs, error } = await availableProjects(), current = error ? [] : (await store.all()).filter(p => refs.some(ref => ref.id === p.ref.id))
@@ -785,6 +860,7 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
     for (const entry of (await store.messaging()).inbox.filter(x => x.state === 'pending')) await processMessage(entry.event.id)
     for (const p of current) defer(p.ref.id)
     await flushMailbox()
+    deferBackupCheck()
   } }
 }
 

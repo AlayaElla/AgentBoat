@@ -2,6 +2,8 @@ import code from './templates/code.json' with { type: 'json' };
 
 export const projectLeadDefaults = code.mainAgent;
 
+export const backupDefaults = primary => code.backupAgents[primary === 'codex' ? 'claude' : 'codex'];
+
 export function agentFlags(role) {
   return ['--agent', role.agent, ...(role.model ? ['--model', role.model] : []), ...(role.effort ? ['--effort', role.effort] : []), ...(role.surface ? ['--surface', role.surface] : [])];
 }

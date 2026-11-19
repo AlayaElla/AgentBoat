@@ -108,7 +108,7 @@ async function setup(options = {}, hub) {
     const projectSessions = [{ ...sessions[0], handle: 'project-session-0', title: '当前设计会话' },
       { ...sessions[1], handle: 'project-session-1', title: '编码会话' },
       { ...sessions[1], handle: 'project-session-2', title: '审查会话', agent: 'opencode' }];
-    const binding = p => ({ revision: p.revision, runId: p.runId, ...(p.runId && p.activeSession ? { session: p.activeSession } : {}), ...(p.takeover ? { takeover: p.takeover } : {}) });
+    const binding = p => ({ ...(p.backup ? { backup: p.backup } : {}), revision: p.revision, runId: p.runId, ...(p.runId && p.activeSession ? { session: p.activeSession } : {}), ...(p.takeover ? { takeover: p.takeover } : {}) });
     if (options.projectLead) project.activeSession = projectSessions[0];
     const registered = () => projects.filter(p => !window.fixture.removedProjects?.includes(p.ref.id));
     const attention = () => registered().flatMap(p => p.tasks.flatMap(t => {
@@ -767,6 +767,15 @@ try {
     await currentLayer().getByRole('button', { name: '取消', exact: true }).click();
     await currentLayer().getByText(/正在等 编码会话/).waitFor({ state: 'hidden' });
     assert.equal(await page.evaluate(() => fixture.calls.filter(c => c.name === 'project.openMain').length), 1);
+  });
+  await setup({ projectLead: true });
+  await test('backup lead and dated handover are visible in the project card and settings', async () => {
+    await page.evaluate(() => { fixture.project.backup = { primary: fixture.project.activeSession.handle, handle: 'backup-test', agent: 'codex', phase: 'active', history: [{ at: Date.now(), text: '备用已接管原 Run' }] }; fixture.emit(); });
+    await project();
+    await currentLayer().getByText(/备用 Codex · 处理中 · 当前备用负责/).waitFor();
+    await page.getByRole('button', { name: '项目设置', exact: true }).click();
+    await currentLayer().getByRole('button', { name: /接管记录/ }).click();
+    await currentLayer().getByText('备用已接管原 Run', { exact: false }).waitFor();
   });
   await setup({ projectUnbound: true });
   await test('unbound project keeps create and bind in the header and empty inbox', async () => {

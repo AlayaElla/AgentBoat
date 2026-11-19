@@ -39,6 +39,8 @@ export interface Delivery {
   runNotice?: { stage: 'project' | 'workspace'; projectId: string; runId: string; attemptedAt?: number }
   receiptHash?: string
   linkMessageHash?: string
+  control?: { action: LeadAction; cycle: string; handle: string }
+  createdAt?: number
   targetRunId?: string
   state: 'pending' | 'sending' | 'sent' | 'uncertain'
   error?: string; requestId?: string
@@ -53,6 +55,7 @@ export interface Messaging {
 export interface MessagingSnapshot extends Messaging { secretSaved: boolean; connection: ConnectionState }
 export interface Project {
   version: 1; ref: ProjectRef; revision: number; runId: string
+  backup?: BackupLead
   mainAgentHandle?: string
   mainSession?: AgentSession
   takeover?: StoredTakeover
@@ -70,8 +73,18 @@ export interface Snapshot {
   projects: ProjectRef[]; project: Project | null; runtimeError?: string
 }
 export type ProjectWorkspace = { workspaceId: string; multipleConversations?: boolean } | { error: string }
+export type LeadAction = 'take' | 'ready' | 'handoff' | 'resume'
+export interface BackupLead {
+  primary: string; agent: string; handle?: string
+  phase: 'opening' | 'failed' | 'standby' | 'taking' | 'active' | 'handoff' | 'returning'
+  since: number; cycle: string; lastProbe?: number; problem?: string
+  history: { at: number; text: string }[]
+  credential?: string; consumed?: string
+}
+export const backupInCharge = (b?: BackupLead) => !!b && ['active', 'handoff', 'returning'].includes(b.phase)
 export interface AgentSession {
   handle: string; title: string; workspace: string; workspaceName: string; path: string; agent: string
+  state?: string; stateStartedAt?: number
   online: 'online' | 'offline' | 'unknown'
 }
 export interface MainTakeover {
@@ -88,6 +101,7 @@ export interface ProjectLead {
 }
 export interface WorkspaceBinding {
   revision: number; runId: string; session?: AgentSession; boundAt?: string
+  backup?: BackupLead
   projectNames?: string[]; takeover?: MainTakeover
   previousNotice?: Delivery['state']
   securityBoundary?: string

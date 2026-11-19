@@ -9,12 +9,13 @@ import type { Project } from './model'
 import type { HostApi } from 'orca/host'
 import { agentFlags, launchReceipt, type AgentLaunch } from '../../workspace/agent-launch.mjs'
 import { inboxLimit, openRunMail, type OrcaQuestion, type OrcaWorkerRecord } from '../scripts/orca-questions.mjs'
-import type { WorkerReport } from '../scripts/worker-reports.mjs'
+import { workerReport, type WorkerReport } from '../scripts/worker-reports.mjs'
 import { activeUserDataPath, pluginKey, release } from '../scripts/orca-cli.mjs'
 
 const execute = promisify(execFile)
 export interface CoordinatorRuntime {
   projects(host: HostApi<'worker'>): Promise<ProjectRef[]>
+  runOwner(id: string): Promise<string | undefined>
   verifyRun(id: string, caller?: string): Promise<void>
   targets(): Promise<{ sessions: AgentSession[]; workspaces: { workspace: string; name: string; path: string }[] }>
   identify(handle: string, runId: string, currentRunId?: string): Promise<AgentSession>
@@ -23,7 +24,7 @@ export interface CoordinatorRuntime {
   openOverview(): Promise<void>
   removeProject(ref: ProjectRef, host: HostApi<'worker'>): Promise<void>
   agents(projects: Project[], host: HostApi<'worker'>, main?: AgentSession): Promise<AgentsSnapshot>
-  mail(runId: string): Promise<{ questions: OrcaQuestion[]; reports: WorkerReport[] }>
+  mail(runId: string): Promise<{ questions: OrcaQuestion[]; reports: WorkerReport[]; waiting?: { at: number; title: string; read?: boolean; report?: WorkerReport }[] }>
   hermesApprovalMode(): Promise<string>
   send(runId: string, delivery: Delivery): Promise<{ requestId?: string }>
 }
@@ -59,16 +60,20 @@ export class OrcaRuntime implements CoordinatorRuntime {
         path: w?.path ?? p.path, workspace: w ? w.id.startsWith('identity:') ? w.id : `id:${w.id}` : '' }
     })
   }
-  async verifyRun(id: string, caller?: string): Promise<void> {
+  async runOwner(id: string) {
     if (!/^run_[\w-]+$/.test(id)) fail('Run 编号格式不正确')
-    const result = await this.call(['orchestration', 'run-show', '--id', id])
-    if (result.run?.id !== id) fail('Orca 未返回对应 Run')
-    if (caller && result.run.coordinator_handle && result.run.coordinator_handle !== caller) fail('Orca 返回的 Run 协调者与当前会话不符；请在目标会话创建自己的新 Run')
+    const { run } = await this.call(['orchestration', 'run-show', '--id', id])
+    if (run?.id !== id) fail('Orca 未返回对应 Run')
+    return run.coordinator_handle as string | undefined
+  }
+  async verifyRun(id: string, caller?: string): Promise<void> {
+    const owner = await this.runOwner(id)
+    if (caller && owner && owner !== caller) fail('Orca 返回的 Run 协调者与当前会话不符；请在目标会话创建自己的新 Run')
   }
   async targets() {
     // agents.list has no liveness/parent evidence; takeover still requires these exact CLI identities.
     const [ps, list] = await Promise.all([this.call(['worktree', 'ps', '--limit', '10000', '--agent-wait']), this.call(['terminal', 'list', '--limit', '10000'])])
-    if (ps.truncated || list.truncated || ps.hostScope?.omittedHostIds?.includes('local')) fail('会话列表不完整，请恢复 Orca 后重试')
+    if (!Array.isArray(ps.worktrees) || !Array.isArray(list.terminals) || list.hostScope?.omittedHostIds?.includes('local') || ps.truncated || list.truncated || ps.hostScope?.omittedHostIds?.includes('local')) fail('会话列表不完整，请恢复 Orca 后重试')
     return mainTargets(ps.worktrees ?? [], list.terminals ?? [])
   }
   async identify(handle: string, runId: string, currentRunId?: string) {
@@ -91,7 +96,7 @@ export class OrcaRuntime implements CoordinatorRuntime {
     // shortcut: Orca inbox has no pagination; scan the newest bounded window.
     const result = await this.call(['orchestration', 'inbox', '--run', runId, '--limit', String(inboxLimit)])
     if (!Array.isArray(result.messages) || result.messages.some((m: any) => !m || m.run_id !== runId)) fail('Orca 运行邮件无法核对')
-    return openRunMail(result.messages, runId, async ids => {
+    const actionable = await openRunMail(result.messages, runId, async ids => {
       const [taskList, workers] = await Promise.all([
         this.call(['orchestration', 'task-list', '--run', runId]),
         this.questionWorkers(runId, ids)
@@ -99,6 +104,15 @@ export class OrcaRuntime implements CoordinatorRuntime {
       if (!Array.isArray(taskList.tasks) || taskList.runId !== runId) fail('Orca 项目任务状态无法核对')
       return { tasks: taskList.tasks, workers }
     })
+    const waiting = result.messages.flatMap((m: any) => {
+      if (m.to_handle !== 'run:' + runId || !Number.isFinite(Date.parse(m.created_at))) return []
+      if (m.type === 'worker_done') {
+        const report = workerReport(m)
+        return report?.taskId && report.dispatchId ? [{ at: report.at!, title: m.subject || '执行者回报', read: !!m.read, report }] : []
+      }
+      return !m.read && m.type === 'status' ? [{ at: Date.parse(m.created_at), title: m.subject || '待处理通知' }] : []
+    })
+    return { ...actionable, waiting }
   }
   private async questionWorkers(runId: string, ids: Set<string>) {
     const workers: OrcaWorkerRecord[] = [], visited = new Set<string>()
@@ -162,7 +176,7 @@ export function mainTargets(rows: any[], terminals: any[]) {
       if (!handle) continue
       const live = match ? a.subagentObservation : t?.connected === true && t?.writable === true && !t?.orphaned ? 'live' : t?.connected === false ? 'exited' : undefined
       sessions.push({ handle, title: a.conversationName || a.displayName || t?.paneTitle || t?.title || '', workspace, workspaceName: name, path: w.path,
-        agent: a.agentType || t?.agentType || '', online: live === 'live' ? 'online' : live === 'exited' ? 'offline' : 'unknown' })
+        ...(a.state ? { state: a.state, stateStartedAt: a.stateStartedAt } : {}), agent: a.agentType || t?.agentType || '', online: live === 'live' ? 'online' : live === 'exited' ? 'offline' : 'unknown' })
     }
   }
   return { sessions, workspaces }

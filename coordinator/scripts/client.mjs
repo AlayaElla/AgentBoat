@@ -13,13 +13,15 @@ const singleTask = operation === 'read' && flag === '--task';
 if (operation === 'overview' && (argument && !brief || flag)) throw new Error('用法：node client.mjs overview [--brief]');
 if (operation === 'read' && (!argument || flag && (!singleTask || !taskId || extra))) throw new Error('用法：node client.mjs read <projectId> [--task <taskId>]');
 const leadBind = operation === 'project-lead-bind', leadSwitch = operation === 'project-lead-switch';
-const allowed = ['projects', 'overview', 'main-read', 'main-bind', 'project-lead', 'project-lead-switch', 'project-lead-bind', 'message', 'read', 'bind', 'submit', 'feedback', 'feishu-reply', 'links-read', 'links-refresh', 'links-invite', 'links-cancel-invite', 'links-join', 'links-configure', 'links-rename', 'links-share', 'links-relate', 'links-revoke', 'links-send', 'hide', 'restore', 'delete', 'main-targets', 'connections', 'connection-read', 'connection-check', 'connection-send', 'connection-reply'];
+const leadActions = ['lead-take', 'lead-ready', 'lead-handoff', 'lead-resume'];
+const leadAction = leadActions.includes(operation);
+const allowed = [...leadActions, 'projects', 'overview', 'main-read', 'main-bind', 'project-lead', 'project-lead-switch', 'project-lead-bind', 'message', 'read', 'bind', 'submit', 'feedback', 'feishu-reply', 'links-read', 'links-refresh', 'links-invite', 'links-cancel-invite', 'links-join', 'links-configure', 'links-rename', 'links-share', 'links-relate', 'links-revoke', 'links-send', 'hide', 'restore', 'delete', 'main-targets', 'connections', 'connection-read', 'connection-check', 'connection-send', 'connection-reply'];
 if (!allowed.includes(operation)) throw new Error('用法：node client.mjs projects|overview|main-read|main-targets|connections | connection-read|connection-check <名字> | main-bind|project-lead-switch|project-lead-bind|connection-send|connection-reply|links-send < stdin | read|project-lead <projectId> | bind|submit|message|feedback|feishu-reply|hide|restore|delete <input.json>');
 const target = fileURLToPath(new URL('../plugin/', import.meta.url));
 const caller = process.env.ORCA_AGENT_SESSION_ID ? `orca_session_id:${process.env.ORCA_AGENT_SESSION_ID}` : process.env.ORCA_TERMINAL_HANDLE;
 const currentRun = () => JSON.parse(execFileSync(executable, ['orchestration', 'run-current', '--json', '--full'], { encoding: 'utf8', windowsHide: true, timeout: 25000, maxBuffer: 1024 * 1024 }));
 
-const input = operation === 'connections' ? { operation: 'read' } : operation.startsWith('connection-') ? { ...(['connection-read','connection-check'].includes(operation) ? { name: argument } : JSON.parse(readFileSync(0, 'utf8').replace(/^\uFEFF/, ''))), operation: operation.slice(11) } : operation.startsWith('links-') ? { ...(['links-join', 'links-configure', 'links-rename', 'links-share', 'links-relate', 'links-revoke', 'links-send'].includes(operation) ? JSON.parse(readFileSync(0, 'utf8').replace(/^\uFEFF/, '')) : {}), operation: operation.slice(6) } : ['projects', 'overview'].includes(operation) ? null : operation === 'main-read' ? { operation: 'read' } : operation === 'read'
+const input = leadAction ? { runId: argument, action: operation.slice(5), caller, token: flag, ...(taskId ? { note: taskId } : {}) } : operation === 'connections' ? { operation: 'read' } : operation.startsWith('connection-') ? { ...(['connection-read','connection-check'].includes(operation) ? { name: argument } : JSON.parse(readFileSync(0, 'utf8').replace(/^\uFEFF/, ''))), operation: operation.slice(11) } : operation.startsWith('links-') ? { ...(['links-join', 'links-configure', 'links-rename', 'links-share', 'links-relate', 'links-revoke', 'links-send'].includes(operation) ? JSON.parse(readFileSync(0, 'utf8').replace(/^\uFEFF/, '')) : {}), operation: operation.slice(6) } : ['projects', 'overview'].includes(operation) ? null : operation === 'main-read' ? { operation: 'read' } : operation === 'read'
   ? { operation, projectId: argument, ...(singleTask ? { taskId } : {}) }
   : operation === 'project-lead' ? { projectId: argument }
   : operation === 'main-targets' ? null
@@ -46,7 +48,8 @@ if (!delegatedFeedback && ['bind', 'submit', 'feedback', 'hide', 'restore', 'del
     if (!input.runId) try { const current = currentRun(); if (current.ok && current.result?.run?.id) input.runId = current.result.run.id; } catch { /* Optional display identity must not prevent a project write. */ }
   }
 }
-const name = operation === 'connections' || operation.startsWith('connection-') ? 'workspace.connections' : operation.startsWith('links-') ? 'workspace.links' : operation === 'projects' ? 'projects.list' : operation === 'overview' ? 'workspace.overview'
+if (leadAction && (!caller || !argument || !flag || extra || (operation === 'lead-handoff') !== !!taskId)) throw new Error('请在收到通知的 Orca 会话中执行原命令，交接说明用引号括起');
+const name = leadAction ? 'lead.control' : operation === 'connections' || operation.startsWith('connection-') ? 'workspace.connections' : operation.startsWith('links-') ? 'workspace.links' : operation === 'projects' ? 'projects.list' : operation === 'overview' ? 'workspace.overview'
   : operation === 'feishu-reply' ? 'workspace.reply' : operation.startsWith('main-') ? 'workspace.agent' : operation === 'message' ? 'workspace.message' : delegatedFeedback ? 'workspace.linkFeedback' : operation === 'feedback' ? 'project.feedback' : operation === 'project-lead' ? 'project.lead' : leadSwitch ? 'workspace.projectLead' : 'project.agent';
 const maintenance = ['hide', 'restore', 'delete'].includes(operation);
 const args = ['plugin', 'dev', 'request', target, operation === 'main-targets' ? 'workspace.agent.targets' : maintenance ? operation === 'delete' ? 'project.delete' : 'project.visibility' : name, '--json'];
@@ -54,8 +57,18 @@ if (maintenance) { delete input.operation; if (operation !== 'delete') input.hid
 if (operation === 'message') args.push('--environment', 'local');
 if (input) args.push('--data', JSON.stringify(input));
 try {
-  const stdout = release ? JSON.stringify(await installedRequest(args[4], input)) + '\n'
+  let stdout = release ? JSON.stringify(await installedRequest(args[4], input)) + '\n'
     : execFileSync(executable, args, { encoding: 'utf8', windowsHide: true, timeout: 40000, maxBuffer: 1024 * 1024 });
+  if (leadAction) {
+    const first = JSON.parse(stdout);
+    if (first.result?.result?.useRun === argument && first.ok) {
+      const used = JSON.parse(execFileSync(executable, ['orchestration', 'run-use', '--id', argument, '--environment', 'local', '--json', '--full'], { encoding: 'utf8', windowsHide: true, timeout: 25000 }));
+      if (!used.ok || used.result?.run?.id !== argument || used.result.run.coordinator_handle !== caller) throw new Error('Run 接管回执待核对');
+      input.confirm = true;
+      args[args.indexOf('--data') + 1] = JSON.stringify(input);
+      stdout = release ? JSON.stringify(await installedRequest(name, input)) + '\n' : execFileSync(executable, args, { encoding: 'utf8', windowsHide: true, timeout: 40000 });
+    }
+  }
   if (release) {
     const reply = JSON.parse(stdout);
     if (!reply.ok) throw new Error(reply.error.message);
