@@ -10,7 +10,7 @@ import { ProjectStore, artifactUrl, fail, feedback, fingerprint, fresh, maxMessa
 import { WorkspaceLinks } from './links'
 import { fileErrorText, incomingHash, linkMessageHistory } from './link-messages'
 import { LinkFiles } from './link-files'
-import { groupedAttention } from './model'
+import { groupedAttention, isProjectShared } from './model'
 import { mainAgent, switchLead, takeoverView, recoverTakeover } from './main-agent'
 import { projectLeadDefaults } from '../../workspace/agent-launch.mjs'
 import { clientPath } from '../scripts/orca-cli.mjs'
@@ -111,7 +111,16 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
   }, async () => {
     const [workspace, live] = await Promise.all([main.read(), refreshAgents()])
     return { workspace, live }
-  }, linkFiles, readCatalog)
+  }, linkFiles, readCatalog, async (peer, input) => {
+    const { list, error } = await availableProjects()
+    if (error) fail(error)
+    const ref = list.find(p => p.ref.id === input.projectId)
+    if (!ref || !isProjectShared(ref, peer)) fail('项目未开放或已隐藏')
+    const source = `主人在工作间 ${peer.name.replace(/\s+/g, ' ')} 提交`
+    await recordFeedback(input, { source, connectionId: peer.id, authorize: p => {
+      if (!isProjectShared(p, peer)) fail('项目未开放或已隐藏')
+    } })
+  })
   orca.panels.handle('workspace.links', async input => {
     switch (input.operation) {
       case 'read': return links.snapshot(true)
@@ -132,6 +141,7 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
       default: return fail('不支持的工作间连接操作')
     }
   })
+  orca.panels.handle('workspace.linkFeedback', input => links.submitFeedback(text(input.id, '连接编号', 64), input))
   const secret = (id: string) => orca.secrets.get(`feishu:${id}`)
   const sources = transport ?? new FeishuSources(ingest, () => changed())
   const mailbox = '@workspace'
@@ -511,15 +521,27 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
     changed(id)
     return snapshot(id)
   })
+  async function recordFeedback(input: Record<string, any>, remote?: { source: string; connectionId: string; authorize: (p: Project) => void }) {
+    const request = input.requestId ? text(input.requestId, '请求编号', 200) : undefined
+    await store.mutate(input.projectId, input.revision === undefined ? undefined : revision(input.revision), async p => {
+      const before = remote ? undefined : structuredClone(p)
+      feedback(p, input, remote?.source)
+      if (before) {
+        rememberProjectCaller(p, input)
+        await notify(before, p)
+      } else {
+        const workspaceRun = (await store.workspace()).runId
+        if (workspaceRun && workspaceRun !== p.runId) {
+          const summary = p.deliveries.at(-1)!
+          p.deliveries.push({ ...summary, id: `${summary.id}:workspace`, targetRunId: workspaceRun })
+        }
+      }
+    }, request ? { id: remote ? `link-feedback:${fingerprint([remote.connectionId, request])}` : request, input, authorize: remote?.authorize } : undefined)
+    changed(input.projectId); defer(input.projectId)
+  }
   orca.panels.handle('project.feedback', async input => {
     await ensure(input.projectId)
-    await store.mutate(input.projectId, input.revision === undefined ? undefined : revision(input.revision), async p => {
-      const before = structuredClone(p)
-      feedback(p, input)
-      rememberProjectCaller(p, input)
-      await notify(before, p)
-    }, input.requestId ? { id: text(input.requestId, '请求编号', 200), input } : undefined)
-    changed(input.projectId); defer(input.projectId)
+    await recordFeedback(input)
     return snapshot(input.projectId)
   })
   orca.panels.handle('project.agent', async input => {

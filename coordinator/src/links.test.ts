@@ -3,7 +3,7 @@ import { hostname } from 'node:os'
 import type { OrcaWorkerApi } from 'orca/worker'
 import { WorkspaceLinks, defaultWorkspaceName, endpoint, invitationHost, report } from './links'
 import { refs, sample } from './fixtures'
-import { fresh } from './store'
+import { fingerprint, fresh } from './store'
 import type { LiveAgent } from './model'
 import { testCoordinator as createCoordinator, testFiles } from './test-runtime'
 
@@ -25,6 +25,88 @@ async function post(url: string, route: string, body: any, token = '') {
   const r = await fetch(url + route, { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', Connection: 'close' }, body: JSON.stringify(body) })
   await r.text(); return r.status
 }
+
+test('delegated feedback applies once in both directions and rechecks sharing on every request', async () => {
+  async function open(name: string) {
+    const project = sample().project!
+    project.tasks[0].artifacts.push({ id: 'local', label: '本机设计稿', version: 'v1', url: '/private/design.md' })
+    project.tasks[0].acceptance[0].artifactIds.push('local')
+    const hidden = { ...fresh({ ...refs[1], id: 'hidden' }), hidden: true }
+    const host = mockHost({ storage: { 'project:p1': project as any, 'project:hidden': hidden as any,
+      workspace: { version: 1, revision: 1, runId: `workspace-${name}`, requests: [] } } })
+    const notices: [string, string][] = []
+    let c!: ReturnType<typeof createCoordinator>
+    const worker = await mountWorker({ default: api => { c = createCoordinator(api, { projects: async () => [...refs, hidden.ref],
+      send: async (run, item) => { notices.push([run, item.body]); return {} } }) } }, { host })
+    await c.links.rename({ revision: (await c.links.snapshot()).revision, name })
+    await c.links.start()
+    return { c, worker, notices, project }
+  }
+  const a = await open('甲工作间'), b = await open('乙工作间')
+  const { project } = a, [review, decision] = project.tasks, check = review.acceptance[0], d = decision.decisions[0]
+  const items = [{ taskId: review.id, kind: 'acceptance' as const, itemId: check.id, itemRevision: check.revision, fingerprint: check.fingerprint, result: 'passed' },
+    { taskId: decision.id, kind: 'decision' as const, itemId: d.id, fingerprint: fingerprint([d.question, d.options]), answer: d.options[0] }]
+  try {
+    const invitation = await a.c.links.invite(), { id } = (await b.c.links.join(invitation.invitation!.code)).peers[0]
+    const share = async (side: typeof a, delegateFeedback: boolean, scope = 'details', projectIds = ['p1', 'hidden']) =>
+      side.c.links.share({ id, revision: (await side.c.links.snapshot()).revision, scope, projectIds, delegateFeedback })
+    const request = { projectId: 'p1', revision: project.revision, requestId: 'one', items }
+    const send = (side: typeof a, input = request) => side.worker.request('workspace.linkFeedback', { id, ...input })
+    await share(a, false)
+    assert.equal((await b.c.links.refresh()).peers[0].report?.projects[0].feedback, undefined)
+    assert.match((await send(b)).reason!, /未允许/)
+    await assert.rejects(() => share(a, true, 'summary'), /含任务详情/)
+    await share(a, true)
+    const shared = (await b.c.links.refresh()).peers[0].report!.projects
+    assert.deepEqual(shared.map(p => p.id), ['p1'])
+    assert.deepEqual(shared[0].feedback?.tasks[1].decisions[0].options, d.options)
+    assert.equal(shared[0].feedback?.tasks[0].acceptance[0].fingerprint, check.fingerprint)
+    assert.equal(shared[0].feedback?.tasks[0].acceptance[0].revision, check.revision)
+    assert.deepEqual(shared[0].feedback?.tasks[0].artifacts.map(x => [x.label, x.url]), [['首页预览', 'https://example.com/preview'], ['本机设计稿', '']])
+    a.c.links.stop()
+    const offline = (await b.c.links.refresh()).peers[0]
+    assert.equal(offline.status, 'offline')
+    assert.equal(offline.offlineFeedback?.[0].feedback?.tasks.length, 2)
+    await assert.rejects(() => send(b), /离线/)
+    await a.c.links.start()
+    await b.c.links.refresh()
+    for (const projectId of ['hidden', 'p2']) assert.match((await send(b, { ...request, projectId })).reason!, /未开放或已隐藏/)
+    assert.match((await send(b, { ...request, items: [items[0], { ...items[1], fingerprint: 'stale' }] })).reason!, /问题内容已更新/)
+    assert.equal((await a.c.store.get('p1')).tasks[0].acceptance[0].status, 'pending')
+    const mutate = a.c.store.mutate.bind(a.c.store)
+    a.c.store.mutate = async (...args) => {
+      const saved = await mutate(...args)
+      a.c.store.mutate = mutate
+      throw Error(`lost receipt for revision ${saved.revision}`)
+    }
+    assert.equal((await send(b)).state, 'uncertain')
+    assert.equal((await a.c.store.get('p1')).tasks[0].acceptance[0].status, 'passed')
+    const joinerStarted = performance.now()
+    assert.equal((await send(b)).state, 'submitted')
+    const joinerMs = performance.now() - joinerStarted
+    assert.equal((await send(b)).state, 'submitted')
+    await a.c.flush('p1')
+    assert.equal((await a.c.store.get('p1')).tasks[0].acceptance[0].history.length, 1)
+    assert.equal((await a.c.store.get('p1')).tasks[1].decisions[0].history[0].source, '主人在工作间 乙工作间 提交')
+    assert.deepEqual(a.notices.map(([run]) => run).sort(), ['run_example', 'workspace-甲工作间'])
+    assert.ok(a.notices.every(([, body]) => body.includes('主人在工作间 乙工作间 提交')))
+
+    // The inviter has no endpoint for the joiner; its request rides the existing long poll.
+    await share(b, true)
+    assert.equal((await a.c.links.snapshot()).peers[0].endpoint, '')
+    const inviterStarted = performance.now()
+    assert.equal((await send(a, { ...request, requestId: 'reverse' })).state, 'submitted')
+    console.log('T48 loopback feedback receipt ms', JSON.stringify({ joiner: +joinerMs.toFixed(1), inviter: +(performance.now() - inviterStarted).toFixed(1) }))
+    assert.equal((await b.c.store.get('p1')).tasks[1].decisions[0].answer, d.options[0])
+    await share(a, false, 'summary')
+    assert.match((await send(b)).reason!, /未允许/)
+    await share(a, false)
+    assert.match((await send(b)).reason!, /未允许/)
+    await a.c.links.revoke(id)
+    await b.c.links.refresh()
+    await assert.rejects(() => send(b), /断开/)
+  } finally { a.c.stop(); b.c.stop(); await a.worker.deactivate(); await b.worker.deactivate() }
+})
 
 test('unexpected peer fields cannot enter panel snapshots or be rewritten', async () => {
   const { links, storage } = await instance('shape', false)

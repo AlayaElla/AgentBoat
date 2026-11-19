@@ -190,9 +190,10 @@ export class ProjectStore {
     this.chain = result.catch(() => {})
     return result
   }
-  async mutate(id: string, expected: number | undefined, fn: (project: Project) => void | Promise<void>, request?: { id: string; input: unknown }): Promise<Project> {
+  async mutate(id: string, expected: number | undefined, fn: (project: Project) => void | Promise<void>, request?: { id: string; input: unknown; authorize?: (project: Project) => void }): Promise<Project> {
     return this.serial(async () => {
       const project = await this.get(id)
+      request?.authorize?.(project)
       const hash = request && fingerprint(request.input)
       const prior = request && project.requests.find(x => x.id === request.id)
       if (prior) {
@@ -273,7 +274,7 @@ export function submitTask(project: Project, raw: unknown): void {
 }
 
 export interface FeedbackItem { taskId: string; kind: 'acceptance' | 'decision'; itemId: string; itemRevision?: number; fingerprint?: string; result?: string; answer?: string; note?: string }
-export function feedback(project: Project, raw: unknown): void {
+export function feedback(project: Project, raw: unknown, source?: string): void {
   const items = object(raw).items
   if (!Array.isArray(items) || items.length > 100) fail('反馈条目格式不正确')
   if (!items.length) fail('请至少提交一条反馈')
@@ -308,10 +309,11 @@ export function feedback(project: Project, raw: unknown): void {
   for (const v of validated) {
     if ('status' in v.item) v.item.status = v.result as Acceptance['status']
     else v.item.answer = v.result
-    v.item.history.push({ at, revision: v.revision, result: v.result, note: v.note })
+    v.item.history.push({ at, revision: v.revision, result: v.result, note: v.note, ...(source ? { source } : {}) })
     v.task.updatedAt = at
   }
-  project.deliveries.push({ id: randomUUID(), subject: `用户反馈 · ${validated.length} 条`, body: validated.map(v => `[项目 ${project.ref.id} / 任务 ${v.task.id}]\n${v.task.title}\n${v.title}\n${v.subject}：${v.result}\n${v.note}`).join('\n\n'), state: 'pending' })
+  const body = validated.map(v => `[项目 ${project.ref.id} / 任务 ${v.task.id}]\n${v.task.title}\n${v.title}\n${v.subject}：${v.result}\n${v.note}`).join('\n\n')
+  project.deliveries.push({ id: randomUUID(), subject: `用户反馈 · ${validated.length} 条`, body: source ? `${source}\n\n${body}` : body, state: 'pending' })
 }
 
 export function receiveEvent(project: Project, event: SourceEvent): void {

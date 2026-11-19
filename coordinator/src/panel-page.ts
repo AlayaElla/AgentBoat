@@ -4,7 +4,7 @@ import { agents, agentName, compareAgentActivity, groupedAttention, isProjectSha
 import type { Acceptance, AgentSession, Artifact, Attention, LeadSwitch, MainTakeover, Overview, Project, ProjectLead, Task, ProjectWorkspace, WorkspaceBinding } from './model'
 import type { FeedbackItem } from './store'
 import type { AgentActivity, AgentsSnapshot, MainAgentActivity } from './model'
-import type { LinksSnapshot, SharedReport, Sharing } from './links'
+import type { DelegatedFeedback, FeedbackTask, LinksSnapshot, SharedReport, Sharing } from './links'
 
 type Page = { kind: string; projectId?: string; id?: string; pid?: string; inboxRow?: string }
 type Draft = { reviewTotal?: number; taskId: string; kind: 'acceptance' | 'decision'; itemId: string; itemRevision?: number; fingerprint?: string; signature: string; title: string; result?: string; answer?: string; note?: string }
@@ -25,7 +25,7 @@ let detail: any, targets: any
 let opened: Record<string, boolean> = { self: true }, wideInbox = false
 const tabsOf: Record<string, string> = {}
 let drafts: Record<string, Record<string, Draft>> = {}
-let feedbackRequests: Record<string, { signature: string; id: string }> = {}
+let feedbackRequests: Record<string, { signature: string; id: string; remote?: DelegatedFeedback; rows?: InboxRow[] }> = {}
 const inlineRows = new Map<string, Frame>()
 const expandedRows = new Set<string>(), folded = new Map<string, boolean>()
 let error = '', notice = '', busy = false, more = false, nav = 0, refreshing = false, refreshSeq = 0
@@ -45,11 +45,21 @@ const key = (t: string, k: string, id: string) => JSON.stringify([t, k, id])
 const choices = (id: string) => drafts[id] ?? {}
 const peers = () => all.links?.peers ?? []
 const peer = () => peers().find(p => p.id === page.id)
+const remoteKey = (peerId: string, projectId: string) => JSON.stringify([peerId, projectId])
+const isRemote = (projectId?: string) => projectId?.startsWith('[') === true
+const remoteProjects = () => peers().flatMap(peer => (peer.report?.projects ?? peer.offlineFeedback ?? [])
+  .flatMap(project => project.feedback ? [{ ...project, feedback: project.feedback, peer, key: remoteKey(peer.id, project.id) }] : []))
+const remoteProject = (key: string) => remoteProjects().find(p => p.key === key)
+const remoteOffline = (key: string) => {
+  const [id] = JSON.parse(key)
+  const p = peers().find(p => p.id === id)
+  return !p ? '连接已断开' : p.status !== 'connected' ? `「${p.name}」离线，暂不能提交` : ''
+}
 const sharesAllProjects = (p: LinksSnapshot['peers'][number]) => p.state === 'active' && p.scope !== 'none' && p.allProjects
 const pending = (p?: string) => groupedAttention(all.attention).filter(a => !p || a.projectId === p)
 const needs = () => live.ok ? live.agents.filter(a => a.state === 'need') : []
 const agentInboxKey = (id: string) => JSON.stringify(['agent', id])
-const total = () => pending().length + needs().length
+const total = () => inboxRows().length
 const projectCount = (id: string) => pending(id).length + needs().filter(a => a.projectId === id).length
 const projectAgents = (id?: string) => live.ok ? live.agents.filter(a => (!id || a.projectId === id) && isRecentAgent(a)) : []
 const relative = (at?: number | string) => {
@@ -214,7 +224,7 @@ async function loadPage(f = active, projectRead?: Promise<any>) {
   f.load = request
   try {
     const [snapshot, connection, sessions, leadPanel] = await Promise.all([
-      p.projectId ? projectRead ?? req('project.read', { projectId: p.projectId }) : null,
+      p.projectId && !isRemote(p.projectId) ? projectRead ?? req('project.read', { projectId: p.projectId }) : null,
       p.kind === 'connection' && p.id ? req('workspace.connections', { operation: 'read', connectionId: p.id }) : null,
       p.kind === 'main' ? req('workspace.agent.targets') : null,
       p.kind === 'project-settings' && p.projectId ? req('project.lead', { projectId: p.projectId }) : undefined
@@ -302,7 +312,7 @@ async function refresh(forceAgents = false) {
     }
     const visible = active === homeFrame && !wideInbox
     const read = new Map<string, Promise<any>>()
-    const details = visible ? [...inlineRows].filter(([id, f]) => id.startsWith(active.key + '[') && expandedRows.has(id) && f.page.projectId) : []
+    const details = visible ? [...inlineRows].filter(([id, f]) => id.startsWith(active.key + '[') && expandedRows.has(id) && f.page.projectId && !isRemote(f.page.projectId)) : []
     await Promise.all([loadPage(active), ...details.map(([, f]) => {
       const projectId = f.page.projectId!
       if (!read.has(projectId)) read.set(projectId, req('project.read', { projectId }))
@@ -313,7 +323,7 @@ async function refresh(forceAgents = false) {
     if (n === refreshSeq) { refreshing = false; render() }
   }
 }
-function validDraft(task: Task | undefined, draft: Draft) {
+function validDraft(task: FeedbackTask | undefined, draft: Draft) {
   if (!task || task.phase === 'paused') return false
   if (draft.kind === 'acceptance') {
     const item = task.acceptance.find(a => a.id === draft.itemId)
@@ -322,7 +332,13 @@ function validDraft(task: Task | undefined, draft: Draft) {
   const item = task.decisions.find(d => d.id === draft.itemId)
   return !!item && item.answer === undefined && JSON.stringify([item.question, item.options]) === draft.signature
 }
-const pendingAcceptances = (task?: Task) => task?.phase === 'ready' ? task.acceptance.filter(a => a.status === 'pending') : []
+const pendingAcceptances = (task?: FeedbackTask) => task?.phase === 'ready' ? task.acceptance.filter(a => a.status === 'pending') : []
+function validFeedbackDrafts(tasks: FeedbackTask[], entries: Draft[]) {
+  return entries.every(d => {
+    const task = tasks.find(t => t.id === d.taskId)
+    return validDraft(task, d) && (d.reviewTotal === undefined || d.reviewTotal === pendingAcceptances(task).length)
+  })
+}
 const acceptanceDraft = (taskId: string, a: Pick<Acceptance, 'id' | 'revision' | 'fingerprint' | 'title'>): Draft =>
   ({ taskId, kind: 'acceptance', itemId: a.id, itemRevision: a.revision, fingerprint: a.fingerprint, signature: a.fingerprint, title: a.title })
 async function digest(value: string) {
@@ -414,7 +430,10 @@ function workspaceNode(p?: LinksSnapshot['peers'][number]) {
     p && !p.relation ? button('标关系', () => go({ kind: 'relation', id }), 'sm') : null), expansion(open, open || id in opened ? el('div', { class: 'wsr-b', id: `workspace-${id}`, 'data-skip': open ? undefined : '' }, open ? body : null) : null))
 }
 type InboxRow = { id: string; title: string; projectId?: string; taskId?: string; kind: Attention['kind'] | 'agent'; count?: number; agent?: AgentsSnapshot['agents'][number] }
-const inboxProjectName = (id: string) => all.projects.find(p => p.ref.id === id)?.ref.name ?? all.hidden?.find(p => p.id === id)?.name ?? id
+const inboxProjectName = (id: string) => {
+  const remote = isRemote(id) ? remoteProject(id) : undefined
+  return remote ? `${remote.name} · ${remote.peer.name}` : isRemote(id) ? '对方项目' : all.projects.find(p => p.ref.id === id)?.ref.name ?? all.hidden?.find(p => p.id === id)?.name ?? id
+}
 const inboxKey = (projectId: string | undefined, taskId: string | undefined, kind: string) => JSON.stringify([projectId, taskId, kind])
 const finishing = new Map<string, InboxRow>()
 function inboxRows(projectId?: string): InboxRow[] {
@@ -422,10 +441,18 @@ function inboxRows(projectId?: string): InboxRow[] {
     ...needs().filter(a => !projectId || a.projectId === projectId).map(a => ({ id: agentInboxKey(a.id), kind: 'agent' as const, title: a.title, agent: a, projectId: a.projectId })),
     ...pending(projectId).map(a => ({ ...a, id: inboxKey(a.projectId, a.taskId, a.kind) }))
   ]
+  if (!projectId) for (const p of remoteProjects()) for (const t of p.feedback.tasks) for (const [kind, count] of [
+    ['decision', t.decisions.length], ['review', t.acceptance.length]
+  ] as const) if (count) entries.push({ id: inboxKey(p.key, t.id, kind), title: t.title, projectId: p.key, taskId: t.id, kind, count })
+  if (!projectId) for (const [id, receipt] of Object.entries(feedbackRequests)) for (const row of receipt.rows ?? []) {
+    if (!entries.some(r => r.id === row.id) && Object.values(choices(id)).some(d => d.taskId === row.taskId && d.kind === (row.kind === 'review' ? 'acceptance' : 'decision'))) entries.push(row)
+  }
   for (const [id, row] of finishing) if ((!projectId || row.projectId === projectId) && !entries.some(x => x.id === id)) entries.push(row)
   return entries
 }
 function reviewDrafts(r: InboxRow) {
+  if (r.projectId && isRemote(r.projectId)) return pendingAcceptances(remoteProject(r.projectId)?.feedback.tasks.find(t => t.id === r.taskId))
+    .map(a => ({ ...acceptanceDraft(r.taskId!, a), result: 'passed', reviewTotal: r.count }))
   return all.attention.flatMap(i => i.kind === 'review' && i.projectId === r.projectId && i.taskId === r.taskId
     ? [{ ...acceptanceDraft(i.taskId, { id: i.itemId, revision: i.itemRevision, fingerprint: i.fingerprint, title: i.summary }), result: 'passed', reviewTotal: r.count }] : [])
 }
@@ -466,13 +493,17 @@ function fold(id: string, title: string, body: () => any, count?: number, defaul
 function inboxBody(f: Frame) {
   const p = f.page
   if (p.kind === 'agents') return agentNeedContent(p.inboxRow)
+  const rowKind = JSON.parse(p.inboxRow!)[2] as Attention['kind']
+  if (p.projectId && isRemote(p.projectId)) {
+    const task = remoteProject(p.projectId)?.feedback.tasks.find(t => t.id === p.id), reason = remoteOffline(p.projectId)
+    return [reason ? callout(reason) : null, task ? feedbackCards(p.projectId, [task], '要你处理', rowKind) : small(feedbackRequests[p.projectId]?.remote ? '待核对，请从提交栏重试' : '这项已不在待处理清单')]
+  }
   const currentProject = active.data?.current
   const project = currentProject && currentProject.ref.id === p.projectId ? currentProject : f.data?.current
   const task = project?.tasks.find(t => t.id === p.id)
   if (f.error) return loadIssue(f)
   if (!project && !f.data) return skeleton()
   if (!task) return small('这项已不在待处理清单')
-  const rowKind = JSON.parse(p.inboxRow!)[2] as Attention['kind']
   return [feedbackCards(project!.ref.id, [task], '要你处理', rowKind), button('任务详情', () => go({ kind: 'task', projectId: p.projectId, id: p.id }), 'text sm task-details', false, '任务详情', 'chevron')]
 }
 function renderInboxRow(r: InboxRow, scope: string) {
@@ -482,17 +513,18 @@ function renderInboxRow(r: InboxRow, scope: string) {
   const selected = Object.values(choices(r.projectId ?? '')).filter(d => d.taskId === r.taskId && d.kind === (review ? 'acceptance' : 'decision'))
   const passed = selected.filter(d => d.result === 'passed').length
   const checks = review ? reviewDrafts(r) : []
-  const checked = Boolean(checks.length) && checks.every(d => {
+  const awaiting = r.projectId && feedbackRequests[r.projectId]?.remote && selected.length
+  const checked = checks.length ? checks.every(d => {
     const saved = choices(r.projectId!)[key(d.taskId, d.kind, d.itemId)]
     return saved?.result === 'passed' && saved.fingerprint === d.fingerprint && saved.itemRevision === d.itemRevision
-  })
-  const summary = r.agent ? `${agentName(r.agent.agent)} · ${relative(r.agent.since)}开始等待` : `${review ? `${r.count} 项成果` : r.kind === 'decision' ? '待决定' : '受阻'} · ${inboxProjectName(r.projectId!)}`
+  }) : !!awaiting && passed === r.count
+  const summary = r.agent ? `${agentName(r.agent.agent)} · ${relative(r.agent.since)}开始等待` : `${review ? `${r.count} 项成果` : r.kind === 'decision' ? '待决定' : '受阻'} · ${inboxProjectName(r.projectId!)}${r.projectId && isRemote(r.projectId) && remoteOffline(r.projectId) ? ' · 离线' : ''}`
   const action = item(r.title, summary, () => openInbox(r, scope), review ? null : dot(r.kind === 'blocked' ? 'bad' : 'need'))
   action.dataset.inboxRow = r.id
   action.setAttribute('aria-expanded', String(open || picked))
   action.setAttribute('aria-controls', inRail ? 'detail-pane' : `detail-${k}`)
   if (selected.length && r.kind !== 'agent' && r.kind !== 'blocked') action.querySelector('.body')?.append(
-    small(review ? `已选 ${passed ? `通过 ${passed}` : ''}${passed && passed < selected.length ? ' · ' : ''}${passed < selected.length ? `${selected.length - passed} 需修改` : ''}` : '已选'))
+    small(awaiting ? '待核对' : review ? `已选 ${passed ? `通过 ${passed}` : ''}${passed && passed < selected.length ? ' · ' : ''}${passed < selected.length ? `${selected.length - passed} 需修改` : ''}` : '已选'))
   return el('article', { class: `irow${open ? ' open' : ''}${picked ? ' picked' : ''}`, 'data-key': k },
     el('div', { class: 'irow-h' }, review ? el('input', { type: 'checkbox', 'aria-label': `选择验收 · ${r.title} · ${inboxProjectName(r.projectId!)}`,
       checked, indeterminate: !checked && selected.length > 0, disabled: busy,
@@ -520,6 +552,7 @@ function inbox(projectId?: string) {
   return el('section', { class: `inbox${entries.length ? '' : ' none'}`, 'aria-label': '等你处理', 'data-key': 'inbox', onkeydown: move },
     el('div', { class: 'sec-h between' }, row(el('h2', { class: 'h2' }, '等你处理'), pill(projectId ? projectCount(projectId) : total())),
       reviews.length >= 2 ? button('全选验收', () => { for (const r of reviews) selectReview(r, true); render() }, 'text sm') : null),
+    !projectId ? peers().filter(p => p.report?.feedbackTruncated).map(p => small(`「${p.name}」开放的待处理内容超过同步上限，部分项目暂未列出`)) : null,
     el('div', { class: 'irows', 'data-animate': 'row' }, visible.map(r => renderInboxRow(r, scope))),
     !wideInbox && !projectId && entries.length > 3 && (more || visible.length < entries.length) ? button(more ? '收起' : `再看 ${entries.length - visible.length} 条`, () => { more = !more; remember(); render() }, 'text sm inbox-more') : null,
     !entries.length ? small('没有要你处理的事') : null)
@@ -557,7 +590,7 @@ function openArtifact(projectId: string, taskId: string, artifact: Artifact) {
     }
   }, false)
 }
-function feedbackCards(projectId: string, tasks: Task[], title = '要你处理', only?: Attention['kind']) {
+function feedbackCards(projectId: string, tasks: FeedbackTask[], title = '要你处理', only?: Attention['kind']) {
   return tasks.map(t => {
     const acceptance = !only || only === 'review' ? pendingAcceptances(t) : []
     const decisions = !only || only === 'decision' ? t.decisions.filter(d => d.answer === undefined) : []
@@ -581,13 +614,13 @@ function feedbackCards(projectId: string, tasks: Task[], title = '要你处理',
     }), acceptance.map(a => {
       const k = key(t.id, 'acceptance', a.id), draft = choices(projectId)[k], base = acceptanceDraft(t.id, a)
       return keyed(card(row(el('h3', { class: 'h2 any grow' }, a.title), tag(`第 ${a.revision} 版`)), el('p', { class: 'any' }, a.details),
-        t.artifacts.filter(ar => a.artifactIds.includes(ar.id)).map(ar => button(`打开成果 · ${ar.label}`, () => openArtifact(projectId, t.id, ar), 'sm')),
+        t.artifacts.filter(ar => a.artifactIds.includes(ar.id)).map(ar => ar.url ? button(`打开成果 · ${ar.label}`, () => openArtifact(projectId, t.id, ar), 'sm') : small(`${ar.label} · 在对方机器上`)),
         row(...['passed', 'changes_requested'].map(result => {
           const b = button(result === 'passed' ? '通过' : '需要修改', () => { choose(projectId, { ...base, result, note: draft?.note ?? '' }); render() }, 'sm')
           b.setAttribute('aria-pressed', String(draft?.result === result)); return b
         }), draft ? button('撤销', () => removeChoice(projectId, k), 'text sm') : null),
         draft?.result === 'changes_requested' ? input(`修改意见 ${k}`, draft.note ?? '', 'textarea', note => { choose(projectId, { ...draft, note }); render() }, undefined, {}, true) : null), k)
-    }), blocked ? callout(t.progress || t.goal, 'danger') : null)
+    }), blocked ? callout(t.progress || t.goal || '任务受阻', 'danger') : null)
   })
 }
 const invalidDraft = (d: Draft) => d.kind === 'decision' ? !d.answer?.trim() : d.result === 'changes_requested' && !d.note?.trim()
@@ -595,6 +628,7 @@ function dock() {
   const groups = Object.entries(drafts).filter(([, group]) => Object.keys(group).length)
   const items = groups.flatMap(([projectId, group]) => Object.entries(group).map(([id, d]) => ({ projectId, id, d })))
   const count = items.length, incomplete = items.filter(({ d }) => invalidDraft(d)).length
+  const offline = groups.map(([id]) => isRemote(id) ? remoteOffline(id) : '').find(Boolean)
   const label = incomplete ? `有 ${incomplete} 条还没写内容` : `已选 ${count} 条 · ${groups.length} 个项目`
   const message = error || notice
   if (message !== toastText) {
@@ -610,9 +644,30 @@ function dock() {
       expansion(trayOpen && count > 0, el('div', { class: 'tray-list' }, items.map(({ projectId, id, d }) => keyed(el('div', { class: 'tray-row' },
         tag(d.kind === 'decision' ? '决定' : d.result === 'passed' ? '通过' : '需要修改'), el('span', { class: 'grow any' }, `${d.title} · ${inboxProjectName(projectId)}`), invalidDraft(d) ? small('还没写内容') : null,
         button('', () => removeChoice(projectId, id), 'text icon sm', false, `移除 ${d.title}`, 'close')), projectId + id)))),
+      offline ? small(offline) : null,
       el('div', { class: 'row g2' }, el('button', { class: 'btn text grow trunc tray-toggle', type: 'button', disabled: busy, 'aria-expanded': String(trayOpen), onclick: () => { trayOpen = !trayOpen; render() } }, label),
         button('清空', () => { drafts = {}; trayOpen = false; persist('panel.drafts', drafts); render() }, 'sm'),
-        button(`提交 ${count} 条`, submitFeedback, 'primary', !!incomplete)))))
+        button(`提交 ${count} 条`, submitFeedback, 'primary', !!incomplete || !!offline, offline || '')))))
+}
+async function submitRemoteFeedback(key: string, entries: Draft[], signature: string, rows: InboxRow[]) {
+  const offline = remoteOffline(key)
+  if (offline) throw Error(offline)
+  const [id, projectId] = JSON.parse(key), project = remoteProject(key)
+  const previous = feedbackRequests[key], replay = previous?.signature === signature ? previous.remote : undefined
+  if (!replay && (!project || !validFeedbackDrafts(project.feedback.tasks, entries))) throw Error('待处理项已更新，请核对原选择')
+  const input: DelegatedFeedback = replay ?? JSON.parse(JSON.stringify({ projectId, revision: project!.feedback.revision, requestId: crypto.randomUUID(), items: await feedbackItems(entries) }))
+  feedbackRequests[key] = { signature, id: input.requestId, remote: input, rows }
+  persist('panel.feedbackRequests', feedbackRequests)
+  await persistChain
+  let reply
+  try { reply = await req('workspace.linkFeedback', { id, ...input }) }
+  catch { throw Error('待核对：连接未确认提交结果，请重试') }
+  if (reply.state === 'submitted') return
+  if (reply.state === 'rejected') {
+    delete feedbackRequests[key]; persist('panel.feedbackRequests', feedbackRequests)
+    throw Error(reply.reason)
+  }
+  throw Error(`待核对：${reply.reason || '对端未确认，请重试'}`)
 }
 async function submitFeedback() {
   const groups = Object.entries(drafts).filter(([, group]) => Object.keys(group).length)
@@ -625,20 +680,20 @@ async function submitFeedback() {
     for (const [projectId, group] of groups) {
       const entries = Object.values(group), signature = await digest(JSON.stringify(entries))
       try {
-        const { project }: { project: Project | null } = await req('project.read', { projectId })
-        if (!project || project.hidden) throw new Error('项目已隐藏或读不到')
-        const previous = feedbackRequests[projectId]
-        const replay = previous?.signature === signature ? previous.id : undefined
-        if (!replay || !project.requests.some(r => r.id === replay)) {
-          if (entries.some(d => {
-            const t = project.tasks.find(t => d.taskId === t.id)
-            return !validDraft(t, d) || d.reviewTotal !== undefined && d.reviewTotal !== pendingAcceptances(t).length
-          })) throw new Error('待处理项已更新，请核对原选择')
-          const id = replay ?? crypto.randomUUID()
-          feedbackRequests[projectId] = { signature, id }
-          persist('panel.feedbackRequests', feedbackRequests)
-          await persistChain
-          await req('project.feedback', { projectId, revision: project.revision, requestId: id, items: await feedbackItems(entries) })
+        if (isRemote(projectId)) await submitRemoteFeedback(projectId, entries, signature, before.filter(r => r.projectId === projectId && entries.some(d => d.taskId === r.taskId && d.kind === (r.kind === 'review' ? 'acceptance' : 'decision'))))
+        else {
+          const { project }: { project: Project | null } = await req('project.read', { projectId })
+          if (!project || project.hidden) throw new Error('项目已隐藏或读不到')
+          const previous = feedbackRequests[projectId]
+          const replay = previous?.signature === signature ? previous.id : undefined
+          if (!replay || !project.requests.some(r => r.id === replay)) {
+            if (!validFeedbackDrafts(project.tasks, entries)) throw new Error('待处理项已更新，请核对原选择')
+            const id = replay ?? crypto.randomUUID()
+            feedbackRequests[projectId] = { signature, id }
+            persist('panel.feedbackRequests', feedbackRequests)
+            await persistChain
+            await req('project.feedback', { projectId, revision: project.revision, requestId: id, items: await feedbackItems(entries) })
+          }
         }
         delete drafts[projectId]; delete feedbackRequests[projectId]
         persist('panel.drafts', drafts); persist('panel.feedbackRequests', feedbackRequests)
@@ -653,7 +708,8 @@ async function submitFeedback() {
     if (rejected.length) {
       error = rejected.map(r => `「${inboxProjectName(r.projectId)}」未确认提交：${r.reason}`).join('。') + (sent ? `。其余已提交 ${sent} 条` : '')
       const id = rejected[0].projectId
-      toastAction = { label: '去看看', run: () => { void go({ kind: 'project', projectId: id }) } }
+      toastAction = isRemote(id) ? { label: '去核对', run: () => { dismiss(); void refresh(true) } }
+        : { label: '去看看', run: () => { void go({ kind: 'project', projectId: id }) } }
     } else notice = `已提交 ${sent} 条`
     if (finishing.size) setTimeout(() => {
       const closed = origin === active && !!page.inboxRow && finishing.has(page.inboxRow)
@@ -681,8 +737,8 @@ function projectPage() {
     const artifacts = t.artifacts.map(a => button(a.label + ' · ' + a.version, () => openArtifact(p.ref.id, t.id, a), 'sm'))
     const workers = projectAgents(p.ref.id).filter(a => a.taskId === t.id && a.state !== 'done')
     const messages = p.events.filter(e => t.sourceIds.includes(e.id) || e.taskId === t.id)
-    const records = [...t.decisions.filter(d => d.answer !== undefined).map(d => small(`${d.question}：${d.answer}`)),
-      ...t.acceptance.filter(a => a.status !== 'pending').map(a => small(`${a.title}：${a.status === 'passed' ? '已通过' : '需要修改'} · ${a.history.at(-1)?.note || ''}`))]
+    const records = [...t.decisions.filter(d => d.answer !== undefined).map(d => small([`${d.question}：${d.answer}`, d.history.at(-1)?.source].filter(Boolean).join(' · '))),
+      ...t.acceptance.filter(a => a.status !== 'pending').map(a => small([`${a.title}：${a.status === 'passed' ? '已通过' : '需要修改'}`, a.history.at(-1)?.note, a.history.at(-1)?.source].filter(Boolean).join(' · ')))]
     return [row(tag(labels[taskState(t)]), small(`${p.ref.name} · ${relative(t.updatedAt)}更新`)),
       feedbackCards(p.ref.id, [t]),
       section('进展', el('p', { class: 'any' }, t.progress), small('现在谁在做'),
@@ -724,9 +780,11 @@ function projectPage() {
 }
 function sharingFields(p: LinksSnapshot['peers'][number], suggestion?: Sharing) {
   if (!form.sharing) form.sharingRevision = all.links!.revision
-  const draft: Sharing = form.sharing ??= suggestion ?? { scope: p.scope, allProjects: p.allProjects === true, projectIds: [...p.projectIds] }
-  const scope = select('开放范围', scopes, draft.scope, v => { draft.scope = v as Sharing['scope']; markDirty(); form.touched = true; render() })
-  return [scope, draft.scope !== 'none' ? section('开放哪些项目',
+  const draft: Sharing = form.sharing ??= suggestion ?? { scope: p.scope, allProjects: p.allProjects === true, projectIds: [...p.projectIds], delegateFeedback: p.delegateFeedback === true }
+  const scope = select('开放范围', scopes, draft.scope, v => { draft.scope = v as Sharing['scope']; if (v !== 'details') draft.delegateFeedback = false; markDirty(); form.touched = true; render() })
+  return [scope, check('允许对方代为处理', draft.delegateFeedback === true, v => { draft.delegateFeedback = v; markDirty(); form.touched = true; render() }, { disabled: p.state !== 'active' || draft.scope !== 'details' }),
+    draft.delegateFeedback ? small('对方能直接替你决定和验收，提交后立即在本机生效。') : null,
+    draft.scope !== 'none' ? section('开放哪些项目',
     row(check('全部项目', draft.allProjects, v => { markDirty(); form.touched = true; draft.allProjects = v; render() }, { 'data-focus': 'all-projects' }), small('以后新加的项目也会自动开放给对方')),
     all.projects.map(pr => check(pr.ref.name, isProjectShared(pr, draft), v => {
       markDirty(); form.touched = true; draft.projectIds = v ? [...draft.projectIds, pr.ref.id] : draft.projectIds.filter(id => id !== pr.ref.id)
@@ -763,7 +821,7 @@ function peerPage() {
       row(button('保存', () => act(async () => { all.links = await req('workspace.links', { operation: 'relate', revision: all.links!.revision, id: p.id, relation: form.relation === 'none' ? null : form.relation }); if (proposed) await saveSharing(p.id, all.links!.revision); markSaved(); back(false, true); await refresh() }), 'primary', p.state !== 'active'), button('取消', () => back()))]
   }
   const sharing = sharesAllProjects(p) && !form.editingSharing
-    ? row(el('span', {}, '全部项目'), small(scopes[p.scope]), button('编辑开放设置', () => { form.editingSharing = true; render(); root.querySelector<HTMLElement>('[data-focus="开放范围"]')?.focus() }, 'text sm'))
+    ? row(el('span', {}, '全部项目'), small(scopes[p.scope]), p.delegateFeedback ? small('允许对方代为处理') : null, button('编辑开放设置', () => { form.editingSharing = true; render(); root.querySelector<HTMLElement>('[data-focus="开放范围"]')?.focus() }, 'text sm'))
     : [sharingFields(p), button('保存', () => act(async () => { await saveSharing(p.id); form.editingSharing = false; markSaved(); notice = '已保存' }), 'primary', p.state !== 'active')]
   return [small(`${statuses[p.status]} · 最后同步 ${relative(p.lastSyncAt)}`), section('关系', small(p.relation ? { above: '上级', below: '下级', peer: '平级' }[p.relation] : '未标'), button('改关系', () => go({ kind: 'relation', id: p.id }), '', p.state !== 'active')), section('对方向你开放'), section('你向对方开放', sharing),
     check('确认断开这个工作间', !!form.revoke, v => { form.revoke = v; render() }), button('断开连接', () => act(async () => { all.links = await req('workspace.links', { operation: 'revoke', id: p.id }); back(false, true); await refresh() }), 'danger', !form.revoke)]
@@ -902,7 +960,7 @@ function titleOf(f: Frame) {
   const p = f.page, project = f.data?.current, peer = all?.links?.peers.find(x => x.id === p.id)
   switch (p.kind) {
     case 'project': return project?.ref.name ?? all?.projects.find(x => x.ref.id === p.projectId)?.ref.name ?? '项目'
-    case 'task': return project?.tasks.find(x => x.id === p.id)?.title ?? all?.attention.find(x => x.projectId === p.projectId && x.taskId === p.id)?.title ?? '任务'
+    case 'task': return (p.projectId && isRemote(p.projectId) ? remoteProject(p.projectId)?.feedback.tasks.find(t => t.id === p.id)?.title : undefined) ?? project?.tasks.find(x => x.id === p.id)?.title ?? all?.attention.find(x => x.projectId === p.projectId && x.taskId === p.id)?.title ?? '任务'
     case 'peer': return peer?.name ?? '工作间连接'
     case 'peer-project': return peer?.report?.projects.find(x => x.id === p.pid)?.name ?? '项目'
     case 'connection': return f.data?.connection?.connection?.name ?? all?.connections?.find(c => c.id === p.id)?.name ?? '连接'
@@ -914,6 +972,7 @@ const loadIssue = (f: Frame) => el('div', { class: 'card', role: 'alert' }, el('
   button('重试', () => { f.error = undefined; const ready = f === homeFrame ? refresh(true) : loadPage(f); render(); void ready.then(render) }, 'sm'))
 function content(): any {
   if (active.error) return loadIssue(active)
+  if (page.inboxRow && isRemote(page.projectId)) return inboxBody(active)
   if (!active.data) return skeleton()
   if (page.projectId) return current ? projectPage() : callout('项目已被移除或不可用')
   if (['peer', 'relation', 'peer-project'].includes(page.kind)) return peerPage()

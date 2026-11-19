@@ -45,6 +45,14 @@ HTTP 仅允许回环地址、Tailscale 的 `100.64.0.0/10` 和 `fd7a:115c:a1e0::
 
 连接插件请求为 `workspace.links`，operation 分别为 read/configure/rename/invite/cancel-invite/join/share/relate/revoke/refresh/send。网络接口为 POST `/pair`、`/sync`、`/wait` 和 `/revoke`。`/wait` 沿用连接凭据，每条连接保留一个等待请求。
 
+### 允许对方代为处理
+
+在连接的「你向对方开放」里选「含任务详情」，可以打开「允许对方代为处理」。默认关闭，双方各自设置，只对已开放且未隐藏的项目生效。对方可以在自己的「等你处理」里决定或验收，提交后直接写入项目所在工作间。切到「项目摘要」或「不开放」会关闭此权限。`links-share` 对应的可选布尔字段是 `delegateFeedback`。
+
+开启后，已开放项目的报告额外包含 `feedback`，其中有项目修订号、任务及待决定和待验收详情。验收带核对步骤、版本和 fingerprint，关联成果带名称和版本。网页成果保留 HTTP(S) 地址，本机成果只报名称和版本。待处理内容超过同步包上限时，面板会提示部分项目暂未列出。对方离线时，面板保留本次运行中最后收到的待处理列表，并停用提交。
+
+面板按项目通过现有 `/sync` 和长连接提交，项目所在插件用与本机相同的反馈校验整批处理。过期、未开放、隐藏或撤销权限的批次会被拒绝。遇到「待核对」，保留原选择再次提交即可用原请求编号核对。已确认的请求不会重复写入或通知。记录注明「主人在工作间 <名字> 提交」，项目主会话和工作间主 agent 各收到一条汇总。同一个会话只收一次。
+
 自己的对外报告只从本地项目投影。外部资料如需长期保存，用工作间 skill 的 `kind=external` 和独立 `workspaceId` 目录。
 
 ## 主 agent 互发消息
@@ -77,4 +85,4 @@ HTTP 仅允许回环地址、Tailscale 的 `100.64.0.0/10` 和 `fd7a:115c:a1e0::
 
 ## 本机关系
 
-`links-relate` 从 stdin 读取 `{revision,id,relation}`，relation 为 above、below、peer 或 null。关系与 sharingSet 仅存本机，不进入上报或配对数据。首次标为「上级」时，表单建议开放全部项目的摘要，保存后生效。离线后最后同步时间保存在连接记录中，报告仍只在连接新鲜时显示。
+`links-relate` 从 stdin 读取 `{revision,id,relation}`，relation 为 above、below、peer 或 null。关系与 sharingSet 仅存本机，不进入上报或配对数据。首次标为「上级」时，表单建议开放全部项目的摘要，保存后生效。离线后最后同步时间保存在连接记录中，项目报告在连接新鲜时显示。

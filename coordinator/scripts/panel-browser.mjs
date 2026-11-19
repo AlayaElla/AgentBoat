@@ -72,6 +72,14 @@ async function setup(options = {}) {
           { agent: 'codex', role: 'worker', state: 'done', title: '页面检查完成', since: now - 360_000 }
         ] } }] } } : {}) });
     const links = { version: 1, revision: 1, workspaceId: 'self', name: '我的工作间', enabled: false, host: '127.0.0.1', port: 0, publicUrl: '', tls: false, listening: '', error: '', peers: [p('up', 'above'), p('down', 'below'), p('off', 'below', 'offline'), p('side', 'peer'), p('free', undefined), p('pending', undefined, 'pending')] };
+    if (options.delegatedFeedback) {
+      const project = links.peers[0].report.projects[0];
+      Object.assign(project, { id: 'p1', name: '对方示例项目', feedback: { revision: 4, tasks: [
+        { id: 't1', title: '对方页面交付', phase: 'ready', decisions: [], acceptance: [{ ...acceptance('remote-a'), artifactIds: ['local', 'web'] }], artifacts: [
+          { id: 'local', label: '设计原稿', version: 'v1', url: '' }, { id: 'web', label: '网页预览', version: 'v1', url: 'https://example.com/preview' }] },
+        { id: 'remote-d', title: '对方设计决定', phase: 'working', decisions: [{ id: 'option', question: '采用哪个设计？', options: ['浅色'] }], acceptance: [], artifacts: [] },
+      ] } });
+    }
     const live = { ok: true, at: now, agents: [{ id: 'agent-need', projectId: 'p1', agent: 'codex', role: 'worker', state: 'need', rawState: 'waiting', verified: true, title: '等批准', taskTitle: '页面交付', last: '等待用户批准', since: now - 60000, workspaceId: 'identity:project-workspace', terminalId: 'term-need' }, { id: 'agent-work', projectId: 'p1', agent: 'claude', role: 'session', state: 'work', rawState: 'working', verified: false, title: '正在工作', last: '正在处理', since: now - 20000 }] };
     if (options.empty || options.projectUnbound) live.agents = [];
     if (options.twoWaitingAgents) live.agents.push({ id: 'agent-chat', projectId: 'p1', agent: 'claude', role: 'session', state: 'need', title: '等待设计决定', since: now - 120000, workspaceId: 'identity:chat-workspace' });
@@ -163,6 +171,15 @@ async function setup(options = {}) {
         target.requests.push({ id: input.requestId, fingerprint: 'fixture' });
         if (window.fixture.loseFeedbackReceipt) { window.fixture.loseFeedbackReceipt = false; throw Error('提交回执丢失'); }
         return clone({ project: target });
+      }
+      if (name === 'workspace.linkFeedback') {
+        const project = links.peers.find(p => p.id === input.id).report.projects.find(p => p.id === input.projectId);
+        if (window.fixture.lostLinkFeedback === input.requestId) return { state: 'submitted', requestId: input.requestId };
+        if (input.revision !== project.feedback.revision) return { state: 'rejected', reason: '项目已更新' };
+        project.feedback.tasks = [];
+        project.feedback.revision++;
+        window.fixture.lostLinkFeedback = input.requestId;
+        return { state: 'uncertain', reason: '连接超时或断开' };
       }
       if (name === 'workspace.links') {
         if (input.operation === 'invite') {
@@ -700,6 +717,55 @@ try {
     await list.getByRole('button', { name: '工作间 side', exact: true }).waitFor();
     assert.equal(await disconnected.count(), 0);
     assert.deepEqual(await page.evaluate(() => fixture.calls.filter(c => c.name === 'workspace.links').map(c => c.input)), [{ operation: 'revoke', id: 'down' }]);
+  });
+  await setup({ width: 1040, delegatedFeedback: true });
+  await test('delegated feedback uses the home inbox, one submit bar, and the original retry request', async () => {
+    await page.getByRole('button', { name: '设置', exact: true }).click();
+    await currentLayer().getByRole('region', { name: '工作间连接', exact: true }).getByRole('button', { name: '工作间 up', exact: true }).click();
+    const permission = currentLayer().getByRole('checkbox', { name: '允许对方代为处理' });
+    const scope = currentLayer().getByLabel('开放范围', { exact: true });
+    assert.equal(await permission.isEnabled(), false);
+    await scope.selectOption('details');
+    await permission.check();
+    await currentLayer().getByText('对方能直接替你决定和验收，提交后立即在本机生效。').waitFor();
+    await currentLayer().getByRole('button', { name: '保存', exact: true }).click();
+    await page.getByRole('status').filter({ hasText: '已保存' }).waitFor();
+    assert.equal(await page.evaluate(() => fixture.calls.find(c => c.input?.operation === 'share').input.delegateFeedback), true);
+    await scope.selectOption('summary');
+    assert.equal(await permission.isEnabled(), false);
+    assert.equal(await permission.isChecked(), false);
+    await home();
+    await row('对方设计决定').click();
+    await currentLayer().getByRole('radio', { name: '浅色', exact: true }).check();
+    await row('对方页面交付').click();
+    await currentLayer().getByText('设计原稿 · 在对方机器上').waitFor();
+    assert.equal(await currentLayer().getByRole('button', { name: /设计原稿/ }).count(), 0);
+    await currentLayer().getByRole('button', { name: '打开成果 · 网页预览', exact: true }).click();
+    const remoteRow = row('对方页面交付').locator('..');
+    await remoteRow.getByText(/对方示例项目 · 工作间 up/).waitFor();
+    await review('对方页面交付').check();
+    await review('页面交付 · 示例项目').check();
+    if (process.env.PANEL_EVIDENCE_DIR) await page.screenshot({ path: path.join(process.env.PANEL_EVIDENCE_DIR, 'delegated-inbox.png'), animations: 'disabled' });
+    await page.evaluate(() => {
+      const peer = fixture.links.peers[0]; fixture.remoteReport = peer.report;
+      peer.offlineFeedback = peer.report.projects; delete peer.report; peer.status = 'offline'; fixture.emit();
+    });
+    await dock().getByText('「工作间 up」离线，暂不能提交').waitFor();
+    assert.equal(await dock().getByRole('button', { name: '提交 4 条' }).isEnabled(), false);
+    assert.equal(await row('对方页面交付').isVisible(), true);
+    await page.evaluate(() => {
+      const peer = fixture.links.peers[0]; peer.report = fixture.remoteReport; delete peer.offlineFeedback; peer.status = 'connected'; fixture.emit();
+    });
+    await dock().getByRole('button', { name: '提交 4 条' }).click();
+    await page.getByRole('alert').filter({ hasText: '待核对' }).waitFor();
+    assert.equal(await review('对方页面交付').isChecked(), true);
+    await row('对方设计决定').getByText('待核对', { exact: true }).waitFor();
+    await dock().getByRole('button', { name: '提交 2 条' }).click();
+    await page.getByRole('status').filter({ hasText: '已提交 2 条' }).waitFor();
+    const calls = await page.evaluate(() => fixture.calls.filter(c => ['project.feedback', 'workspace.linkFeedback'].includes(c.name)));
+    assert.deepEqual(calls.map(c => [c.name, c.input.projectId, c.input.items.length]), [['workspace.linkFeedback', 'p1', 2], ['project.feedback', 'p1', 2], ['workspace.linkFeedback', 'p1', 2]]);
+    assert.deepEqual(calls[0], calls[2]);
+    assert.deepEqual(await page.evaluate(() => fixture.calls.find(c => c.name === 'shell.openExternal').input), 'https://example.com/preview');
   });
   await setup();
   await test('workspace name saves independently of invalid network draft and updates the organization', async () => {

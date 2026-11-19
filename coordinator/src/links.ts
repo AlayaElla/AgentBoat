@@ -5,20 +5,31 @@ import { lookup } from 'node:dns'
 import { hostname, networkInterfaces } from 'node:os'
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto'
 import type { OrcaWorkerApi } from 'orca/worker'
-import { agents, compareAgentActivity, groupedAttention, isProjectShared, isRecentAgent, mainAgentStates, taskState, type AgentActivity, type AgentsSnapshot, type MainAgentActivity, type Project, type WorkspaceBinding } from './model'
-import { attention, fail, object, strings, text } from './store'
+import { agents, compareAgentActivity, groupedAttention, isProjectShared, isRecentAgent, mainAgentStates, taskState, type AgentActivity, type AgentsSnapshot, type MainAgentActivity, type Project, type Task, type WorkspaceBinding } from './model'
+import { attention, fail, object, revision, strings, text, type FeedbackItem } from './store'
 import { LinkMessages, type IncomingMessage, type MessageExchange, type WireMessage } from './link-messages'
 import { LinkFiles } from './link-files'
 import { setTimeout as delay } from 'node:timers/promises'
 
 export type Scope = 'none' | 'summary' | 'details'
-export interface Sharing { scope: Scope; allProjects: boolean; projectIds: string[] }
+export interface Sharing { scope: Scope; allProjects: boolean; projectIds: string[]; delegateFeedback?: boolean }
+export type FeedbackTask = Pick<Task, 'id' | 'title' | 'phase'> & {
+  decisions: Pick<Task['decisions'][number], 'id' | 'question' | 'options' | 'answer'>[]
+  acceptance: Omit<Task['acceptance'][number], 'history'>[]
+  artifacts: Task['artifacts']
+  goal?: string; progress?: string
+}
+type DelegatedProject = { revision: number; tasks: FeedbackTask[] }
+export interface DelegatedFeedback { projectId: string; revision: number; requestId: string; items: FeedbackItem[] }
+export type FeedbackReply = { requestId: string; state: 'submitted' | 'rejected' | 'uncertain'; reason?: string }
+type FeedbackExchange = { request?: DelegatedFeedback; reply?: FeedbackReply }
 export interface SharedReport {
   workspaceId: string; name: string; scope: Scope; updatedAt: string
   mainAgent?: MainAgentActivity | null
+  feedbackTruncated?: true
   projects: { id: string; name: string; updatedAt: string; counts: Record<string, number>; pending: number
     tasks?: { title: string; phase: string; decisions: string[]; acceptance: string[] }[]
-    activity?: { agents: AgentActivity[]; truncated: boolean } | null }[]
+    activity?: { agents: AgentActivity[]; truncated: boolean } | null; feedback?: DelegatedProject }[]
 }
 type LocalActivity = { workspace: WorkspaceBinding; live: AgentsSnapshot }
 interface Peer extends Sharing { id: string; workspaceId: string; name: string; endpoint: string; state: 'active' | 'pending'; relation?: 'above' | 'below' | 'peer'; sharingSet?: boolean; lastSyncAt?: string }
@@ -28,10 +39,10 @@ interface LinkData {
 }
 export interface LinksSnapshot extends Omit<LinkData, 'peers'> {
   listening: string; error: string
-  peers: (Peer & { status: 'connected' | 'offline' | 'pending'; receivedAt?: string; report?: SharedReport } & Partial<Awaited<ReturnType<LinkMessages['summarize']>>>)[]
+  peers: (Peer & { status: 'connected' | 'offline' | 'pending'; receivedAt?: string; report?: SharedReport; offlineFeedback?: Pick<SharedReport['projects'][number], 'id' | 'name' | 'feedback'>[] } & Partial<Awaited<ReturnType<LinkMessages['summarize']>>>)[]
   invitation?: { code: string; expiresAt: string }
 }
-const peerFields = new Set<keyof Peer>(['id', 'workspaceId', 'name', 'endpoint', 'state', 'scope', 'allProjects', 'projectIds', 'relation', 'sharingSet', 'lastSyncAt'])
+const peerFields = new Set<keyof Peer>(['id', 'workspaceId', 'name', 'endpoint', 'state', 'scope', 'allProjects', 'projectIds', 'delegateFeedback', 'relation', 'sharingSet', 'lastSyncAt'])
 const defaults = (): Sharing => ({ scope: 'none', allProjects: false, projectIds: [] })
 const secretKey = (id: string) => `workspace-link:${id}`
 const id = (v: unknown) => {
@@ -79,7 +90,8 @@ function sharing(raw: unknown): Omit<Sharing, 'projectIds'> & { projectIds?: str
   const r = object(raw)
   if (!['none', 'summary', 'details'].includes(r.scope)) fail('开放范围不正确')
   if (r.allProjects !== undefined && typeof r.allProjects !== 'boolean') fail('全部项目设置不正确')
-  return { scope: r.scope, allProjects: r.allProjects === true, projectIds: r.projectIds === undefined ? undefined : strings(r.projectIds, '开放的项目') }
+  if (r.delegateFeedback !== undefined && typeof r.delegateFeedback !== 'boolean' || r.delegateFeedback && r.scope !== 'details') fail('含任务详情时才能允许对方代为处理')
+  return { scope: r.scope, allProjects: r.allProjects === true, projectIds: r.projectIds === undefined ? undefined : strings(r.projectIds, '开放的项目'), delegateFeedback: r.delegateFeedback === true }
 }
 const LIMIT = 180_000
 const waitTime = 25_000
@@ -89,6 +101,19 @@ const hasReceipts = (r: Receipts) => !!(r.received.length || r.progress?.length 
 const maxPeers = 50, maxProjectAgents = 20, maxReportAgents = 100, maxActivityTitle = 200
 const knownAgent = (value: unknown): value is string => typeof value === 'string' && (value === '' || Object.hasOwn(agents, value))
 const publicAgent = (value: string) => knownAgent(value) ? value : ''
+const canDelegate = (p: Sharing) => p.scope === 'details' && p.delegateFeedback === true
+
+function delegatedProject(p: Project): DelegatedProject {
+  return { revision: p.revision, tasks: p.tasks.flatMap(t => {
+    if (t.phase === 'paused') return []
+    const decisions = t.decisions.filter(d => d.answer === undefined).map(({ id, question, options }) => ({ id, question, options }))
+    const acceptance = t.phase === 'ready' ? t.acceptance.filter(a => a.status === 'pending').map(({ id, title, details, artifactIds, revision, status, fingerprint }) => ({ id, title, details, artifactIds, revision, status, fingerprint })) : []
+    if (!decisions.length && !acceptance.length) return []
+    const ids = new Set(acceptance.flatMap(a => a.artifactIds))
+    const artifacts = t.artifacts.filter(a => ids.has(a.id)).map(({ id, label, version, url }) => ({ id, label, version, url: /^https?:\/\//i.test(url) ? url : '' }))
+    return [{ id: t.id, title: t.title, phase: t.phase, decisions, acceptance, artifacts }]
+  }) }
+}
 
 // The only input is local records and activity, filtered by the same project scope.
 export function report(projects: Project[], peer: Sharing, workspaceId: string, name: string, activity?: LocalActivity): SharedReport {
@@ -107,6 +132,16 @@ export function report(projects: Project[], peer: Sharing, workspaceId: string, 
   if (!details) return result
   const workspace = activity?.workspace, session = workspace?.session
   result.mainAgent = workspace?.runId ? { agent: publicAgent(session?.agent ?? ''), title: (session?.title ?? '').slice(0, maxActivityTitle), online: session?.online ?? 'unknown' } : null
+  if (canDelegate(peer)) {
+    let remaining = LIMIT - 2048 - Buffer.byteLength(JSON.stringify(result))
+    // shortcut: keep each project's actionable report whole within a sync frame; page it if projects exceed the frame.
+    for (const [i, p] of allowed.entries()) {
+      const feedback = delegatedProject(p)
+      const bytes = Buffer.byteLength(JSON.stringify(feedback)) + 12
+      if (bytes > remaining) { result.feedbackTruncated = true; continue }
+      result.projects[i].feedback = feedback; remaining -= bytes
+    }
+  }
   const live = activity?.live
   if (!live?.ok) return result
   for (const p of result.projects) p.activity = { agents: [], truncated: !!live.truncated }
@@ -139,8 +174,8 @@ function received(raw: unknown, peer: Peer): SharedReport {
     if (!knownAgent(m.agent) || typeof m.online !== 'string' || !Object.hasOwn(mainAgentStates, m.online)) fail('对端主 agent 格式不正确')
     mainAgent = { agent: m.agent, online: m.online as MainAgentActivity['online'], title: str(m.title, maxActivityTitle) }
   }
-  if (!details && 'mainAgent' in r) fail('对端上报格式不正确')
-  return { workspaceId: peer.workspaceId, name: text(r.name, '工作间名称', 200), scope: r.scope, updatedAt: str(r.updatedAt, 100), ...(details ? { mainAgent } : {}), projects: r.projects.map((raw: unknown) => {
+  if (!details && 'mainAgent' in r || r.feedbackTruncated !== undefined && (!details || r.feedbackTruncated !== true)) fail('对端上报格式不正确')
+  return { workspaceId: peer.workspaceId, name: text(r.name, '工作间名称', 200), scope: r.scope, updatedAt: str(r.updatedAt, 100), ...(details ? { mainAgent } : {}), ...(r.feedbackTruncated ? { feedbackTruncated: true } : {}), projects: r.projects.map((raw: unknown) => {
     const p = object(raw), c = object(p.counts), counts: Record<string, number> = {}
     for (const k of ['working', 'decision', 'review', 'rework', 'completed', 'blocked', 'paused']) if (c[k] !== undefined) {
       if (!Number.isSafeInteger(c[k]) || c[k] < 0) fail('对端计数不正确'); counts[k] = c[k]
@@ -162,14 +197,42 @@ function received(raw: unknown, peer: Peer): SharedReport {
             ...(a.taskTitle === undefined ? {} : { taskTitle: str(a.taskTitle, maxActivityTitle) }) }
         }) }
       }
-    } else if ('activity' in p) fail('对端上报格式不正确')
+      if (p.feedback !== undefined) out.feedback = receivedFeedback(p.feedback)
+    } else if ('activity' in p || 'feedback' in p) fail('对端上报格式不正确')
     return out
   }) }
 }
-function syncPacket(report: SharedReport, pending: WireMessage[], receipts: Receipts, id?: string, version?: string) {
+
+function receivedFeedback(raw: unknown): DelegatedProject {
+  const r = object(raw)
+  const list = (value: unknown, max: number) => Array.isArray(value) && value.length <= max ? value.map(object) : fail('对端待处理列表格式不正确')
+  return { revision: revision(r.revision), tasks: list(r.tasks, 1000).map(t => {
+    if (!['working', 'ready', 'completed', 'blocked'].includes(t.phase)) fail('对端待处理任务状态不正确')
+    return { id: text(t.id, '任务编号', 200), title: text(t.title, '任务名称', 200), phase: t.phase,
+      decisions: list(t.decisions, 100).map(d => ({ id: text(d.id, '决定编号', 200), question: text(d.question, '问题', 4000), options: strings(d.options, '选项', 10).map(x => text(x, '选项', 200)) })),
+      acceptance: list(t.acceptance, 100).map(a => {
+        if (t.phase !== 'ready' || a.status !== 'pending' || typeof a.fingerprint !== 'string' || !/^[0-9a-f]{64}$/.test(a.fingerprint)) fail('对端验收格式不正确')
+        return { id: text(a.id, '验收编号', 200), title: text(a.title, '验收标题', 200), details: text(a.details, '验收步骤', 8000), artifactIds: strings(a.artifactIds, '成果编号'), revision: revision(a.revision), fingerprint: a.fingerprint, status: 'pending' }
+      }),
+      artifacts: list(t.artifacts, 1000).map(a => {
+        const url = a.url === '' ? '' : text(a.url, '成果链接', 4096)
+        if (url && !/^https?:\/\//i.test(url)) fail('对端成果链接格式不正确')
+        if (url) new URL(url)
+        return { id: text(a.id, '成果编号', 200), label: text(a.label, '成果名称', 200), version: text(a.version, '成果版本', 200), url }
+      }) }
+  }) }
+}
+
+function feedbackRequest(raw: unknown): DelegatedFeedback {
+  const r = object(raw)
+  if (!Array.isArray(r.items) || r.items.length > 100) fail('反馈条目格式不正确')
+  return { projectId: id(r.projectId), revision: revision(r.revision), requestId: id(r.requestId), items: r.items }
+}
+function syncPacket(report: SharedReport, pending: WireMessage[], receipts: Receipts, feedback: FeedbackExchange, id?: string, version?: string) {
   const exchange: MessageExchange = { messages: [], ...receipts }
-  const packet = { id, version, report: report as SharedReport | undefined, exchange }
+  const packet = { id, version, report: report as SharedReport | undefined, exchange, feedback: feedback.request || feedback.reply ? feedback : undefined }
   const fits = () => Buffer.byteLength(JSON.stringify(packet)) <= LIMIT
+  if (packet.feedback && !fits()) packet.report = undefined
   for (const m of pending) {
     exchange.messages.push(m)
     // Let the oldest message through when a large report would crowd it out.
@@ -225,18 +288,20 @@ export class WorkspaceLinks {
   private timer?: ReturnType<typeof setInterval>
   private catalogTimer?: ReturnType<typeof setInterval>
   private invitation?: { token: string; expires: number }
-  private incoming = new Map<string, { report: SharedReport; receivedAt: string }>()
+  private incoming = new Map<string, { report: SharedReport; receivedAt: string; offline?: boolean }>()
+  private feedbackPending = new Map<string, { request: DelegatedFeedback; sent: boolean; finish: (result: FeedbackReply) => void }>()
+  private feedbackReplies = new Map<string, FeedbackReply>()
   private chain: Promise<unknown> = Promise.resolve()
   private syncing = new Map<string, Promise<string | undefined>>()
   private listening = ''
   private error = ''
-  constructor(private orca: Pick<OrcaWorkerApi, 'storage' | 'secrets'>, private projects: () => Promise<Project[]>, private changed: () => void, private chooseHost = invitationHost, private enqueue?: (peer: Peer, messages: IncomingMessage[]) => Promise<void>, private activity?: () => Promise<LocalActivity>, files = new LinkFiles(), private checkCatalog?: () => Promise<unknown>) { this.messages = new LinkMessages(files) }
+  constructor(private orca: Pick<OrcaWorkerApi, 'storage' | 'secrets'>, private projects: () => Promise<Project[]>, private changed: () => void, private chooseHost = invitationHost, private enqueue?: (peer: Peer, messages: IncomingMessage[]) => Promise<void>, private activity?: () => Promise<LocalActivity>, files = new LinkFiles(), private checkCatalog?: () => Promise<unknown>, private applyFeedback?: (peer: Peer, input: DelegatedFeedback) => Promise<void>) { this.messages = new LinkMessages(files) }
   private serial<T>(fn: () => Promise<T>): Promise<T> { const p = this.chain.then(fn); this.chain = p.catch(() => {}); return p }
   private async data(): Promise<LinkData> {
     const raw = await this.orca.storage.get('workspace.links')
     if (raw == null) return structuredClone(this.initial)
     const d = structuredClone(object(raw)) as LinkData
-    if (d.version !== 1 || !Array.isArray(d.peers) || d.peers.some(p => !p || Object.keys(p).some(key => !peerFields.has(key as keyof Peer)) || !['active', 'pending'].includes(p.state) || typeof p.allProjects !== 'boolean' || !Array.isArray(p.projectIds))) fail('工作间连接记录不兼容，请保留数据并检查版本')
+    if (d.version !== 1 || !Array.isArray(d.peers) || d.peers.some(p => !p || Object.keys(p).some(key => !peerFields.has(key as keyof Peer)) || !['active', 'pending'].includes(p.state) || typeof p.allProjects !== 'boolean' || !Array.isArray(p.projectIds) || p.delegateFeedback !== undefined && typeof p.delegateFeedback !== 'boolean')) fail('工作间连接记录不兼容，请保留数据并检查版本')
     return d
   }
   private async save(d: LinkData) { if (Buffer.byteLength(JSON.stringify(d)) > 100_000) fail('连接记录已达上限'); await this.orca.storage.set('workspace.links', d as any) }
@@ -260,9 +325,11 @@ export class WorkspaceLinks {
       return { d, summaries }
     })
     return { ...d, listening: this.listening, error: this.error, peers: d.peers.map((p, i) => {
-      const incoming = this.incoming.get(p.id), fresh = incoming && Date.now() - Date.parse(incoming.receivedAt) < 35_000
+      const incoming = this.incoming.get(p.id), fresh = incoming && !incoming.offline && Date.now() - Date.parse(incoming.receivedAt) < 35_000
+      const offlineFeedback = !fresh && incoming ? incoming.report.projects.filter(p => p.feedback?.tasks.length).map(({ id, name, feedback }) => ({ id, name, feedback })) : []
       return { ...p, status: fresh ? 'connected' : p.state === 'pending' ? 'pending' : 'offline',
         ...(incoming ? { receivedAt: incoming.receivedAt, lastSyncAt: incoming.receivedAt } : {}), ...(p.state === 'active' && fresh ? { report: incoming!.report } : {}),
+        ...(offlineFeedback.length ? { offlineFeedback } : {}),
         ...summaries[i] }
     }) }
   }
@@ -339,6 +406,8 @@ export class WorkspaceLinks {
     clearInterval(this.catalogTimer)
     for (const watcher of this.watchers.values()) watcher.abort()
     this.watchers.clear()
+    for (const { request, finish } of this.feedbackPending.values()) finish({ requestId: request.requestId, state: 'uncertain', reason: '连接已停止，请重试核对' })
+    this.feedbackReplies.clear()
     this.closeListener()
   }
   async invite() {
@@ -437,6 +506,49 @@ export class WorkspaceLinks {
     else await this.sync(connectionId)
     this.changed(); return this.snapshot(true)
   }
+  async submitFeedback(connectionId: string, input: unknown): Promise<FeedbackReply> {
+    const request = feedbackRequest(input)
+    if (Buffer.byteLength(JSON.stringify(request)) > LIMIT - 16_000) return { requestId: request.requestId, state: 'rejected', reason: '反馈内容过长，请减少本次提交内容' }
+    const { endpoint, result } = await this.serial(async () => {
+      const p = (await this.data()).peers.find(p => p.id === connectionId && p.state === 'active')
+      if (!p) fail('连接已断开')
+      if (this.feedbackPending.has(p.id)) fail('正在确认上次提交，请稍候')
+      // A reconnect can carry the original request even if its item is now finished.
+      const incoming = this.incoming.get(p.id)
+      if (!incoming || incoming.offline || Date.now() - Date.parse(incoming.receivedAt) >= 35_000) fail('对方离线，暂不能提交')
+      const offline: FeedbackReply = { requestId: request.requestId, state: 'uncertain', reason: '连接超时或断开，请重试核对' }
+      const result = new Promise<FeedbackReply>(resolve => {
+        const finish = (result: FeedbackReply) => { clearTimeout(timer); this.feedbackPending.delete(p.id); resolve(result) }
+        const timer = setTimeout(() => finish(offline), 6500)
+        this.feedbackPending.set(p.id, { request, sent: false, finish })
+      })
+      this.wake(p.id)
+      return { endpoint: p.endpoint, result }
+    })
+    if (endpoint) void this.sync(connectionId).catch(() => {})
+    return result
+  }
+  private async receiveFeedback(p: Peer, raw: unknown) {
+    if (raw === undefined) return
+    const exchange = object(raw)
+    if (exchange.reply !== undefined) {
+      const r = object(exchange.reply), pending = this.feedbackPending.get(p.id)
+      if (pending && r.requestId === pending.request.requestId && ['submitted', 'rejected', 'uncertain'].includes(r.state))
+        pending.finish({ requestId: r.requestId, state: r.state, ...(typeof r.reason === 'string' ? { reason: r.reason.slice(0, 1000) } : {}) })
+    }
+    if (exchange.request === undefined) return
+    const request = feedbackRequest(exchange.request)
+    const requestId = request.requestId
+    try {
+      if (!canDelegate(p) || !this.applyFeedback) fail('对方未允许代为处理')
+      await this.applyFeedback(p, request)
+      return { requestId, state: 'submitted' } as const
+    } catch (e) {
+      if (e instanceof Error && (e as Error & { code?: string }).code === 'invalid_request')
+        return { requestId, state: 'rejected', reason: e.message.slice(0, 1000) } as const
+      return { requestId, state: 'uncertain', reason: '对端未能确认写入，请重试核对' } as const
+    }
+  }
   private async removePeer(d: LinkData, connectionId: string) {
     await this.orca.secrets.delete(secretKey(connectionId))
     await this.messages.revoke(connectionId)
@@ -444,6 +556,9 @@ export class WorkspaceLinks {
     this.watchers.get(connectionId)?.abort()
     this.versions.delete(connectionId)
     this.receipts.delete(connectionId)
+    this.feedbackReplies.delete(connectionId)
+    const pending = this.feedbackPending.get(connectionId)
+    pending?.finish({ requestId: pending.request.requestId, state: 'uncertain', reason: '连接已断开，请在对方工作间核对' })
     this.incoming.delete(connectionId)
     d.peers = d.peers.filter(p => p.id !== connectionId)
     d.revision++
@@ -507,8 +622,9 @@ export class WorkspaceLinks {
     })().catch(() => {}).finally(() => { if (this.watchers.get(p.id) === state) this.watchers.delete(p.id) })
   }
   async refresh() { const d = await this.serial(() => this.data()); const peers = d.peers.filter(p => p.endpoint); await Promise.all(peers.map(p => this.sync(p.id))); if (peers.length) this.changed(); return this.snapshot() }
-  private async packet(p: Peer, outgoing: SharedReport, receipts: Receipts, request = false) {
-    const packet = syncPacket(outgoing, await this.messages.pending(p.id), receipts, request ? p.id : undefined, request ? undefined : this.version(p.id))
+  private async packet(p: Peer, outgoing: SharedReport, receipts: Receipts, request = false, reply = this.feedbackReplies.get(p.id)) {
+    const pending = this.feedbackPending.get(p.id), sending = pending && !pending.sent ? pending : undefined
+    const packet = syncPacket(outgoing, await this.messages.pending(p.id), receipts, { request: sending?.request, reply }, request ? p.id : undefined, request ? undefined : this.version(p.id))
     const m = packet.exchange.messages.find(m => m.files)
     if (m) {
       const chunk = await this.messages.chunk(p.id, m)
@@ -520,6 +636,7 @@ export class WorkspaceLinks {
         if (tooLarge()) delete m.chunk
       }
     }
+    if (sending) sending.sent = true
     return packet
   }
   private async sync(connectionId: string, signal?: AbortSignal): Promise<string | undefined> {
@@ -557,8 +674,11 @@ export class WorkspaceLinks {
         else this.receipts.delete(p.id)
         if (current.state === 'pending') { current.state = 'active'; now.revision++; await this.save(now) }
         if (incoming) await this.recordIncoming(now, current, incoming)
+        if (this.feedbackReplies.get(p.id) === packet.feedback?.reply) this.feedbackReplies.delete(p.id)
+        const reply = await this.receiveFeedback(current, result.feedback)
+        if (reply) this.feedbackReplies.set(p.id, reply)
         const nextReceipt = hasReceipts(acknowledgements) && JSON.stringify(acknowledgements) !== JSON.stringify(this.exchangeReceipts(packet.exchange))
-        return more || nextReceipt && (this.running || !!acknowledgements.progress?.length)
+        return !!reply || more || nextReceipt && (this.running || !!acknowledgements.progress?.length)
       })
       if (this.running) this.changed()
       return { version, more }
@@ -573,7 +693,8 @@ export class WorkspaceLinks {
       if (!p) return
       if ((e as { status?: number }).status === 401) return this.removePeer(d, connectionId)
       if (last && p.lastSyncAt !== last) { p.lastSyncAt = last; await this.save(d) }
-      this.incoming.delete(connectionId)
+      const incoming = this.incoming.get(connectionId)
+      if (incoming) incoming.offline = true
     })
   }
   private async serve(req: http.IncomingMessage, res: http.ServerResponse) {
@@ -612,9 +733,11 @@ export class WorkspaceLinks {
         if (req.url === '/revoke') {
           await this.removePeer(d, p.id); reply(200, {}); this.changed(); return
         }
-        const incoming = body.report === undefined ? undefined : received(body.report, p), outgoing = await this.localReport(p, d)
+        const incoming = body.report === undefined ? undefined : received(body.report, p)
         const { more: _, ...acknowledgements } = await this.receiveMessages(incoming ? { ...p, name: incoming.name } : p, body.exchange)
-        const response = await this.packet(p, outgoing, acknowledgements)
+        const feedback = await this.receiveFeedback(p, body.feedback)
+        const outgoing = await this.localReport(p, d)
+        const response = await this.packet(p, outgoing, acknowledgements, false, feedback)
         if (Buffer.byteLength(JSON.stringify(response)) > LIMIT) fail('工作间上报过大')
         if (incoming) await this.recordIncoming(d, p, incoming)
         reply(200, response); this.changed()
