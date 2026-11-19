@@ -179,9 +179,9 @@ async function setup(options = {}, hub) {
         return { opened: true, multipleConversations: window.fixture.workspaceTarget.multipleConversations };
       }
       if (name === 'project.feedback') {
-        if (window.fixture.delayFeedback) { window.fixture.delayFeedback = false; await new Promise(r => { window.fixture.finishFeedback = r; }); }
+        if (window.fixture.delayFeedback === true || window.fixture.delayFeedback === input.projectId) { window.fixture.delayFeedback = false; await new Promise(r => { window.fixture.finishFeedback = r; }); }
         if (window.fixture.race) { window.fixture.race = false; window.fixture.prune(); throw Error('成果已更新'); }
-        if (window.fixture.failFeedback) { window.fixture.failFeedback = false; throw Error('回执连接中断'); }
+        if (window.fixture.failFeedback === true || window.fixture.failFeedback === input.projectId) { window.fixture.failFeedback = false; throw Error('回执连接中断'); }
         const target = projects.find(p => p.ref.id === input.projectId);
         if (!target || input.revision !== undefined && target.revision !== input.revision) throw Error('项目已更新');
         if (window.fixture.noWrite) return clone({project:target});
@@ -325,14 +325,19 @@ try {
     });
     await rail().getByRole('button',{name:'全选验收'}).click();
     await dock().getByRole('button',{name:'提交 10 条'}).waitFor();
-    await page.evaluate(()=>{fixture.failFeedback=true;fixture.delayFeedback=true;fixture.delayOverview=true;fixture.calls.length=0;});
+    await page.evaluate(()=>{fixture.failFeedback=fixture.delayFeedback=fixture.projects[0].ref.id;fixture.delayOverview=true;fixture.calls.length=0;});
     await dock().getByRole('button',{name:'提交 10 条'}).click();
-    await page.getByText('正在提交…',{exact:true}).waitFor();await page.waitForFunction(()=>!!fixture.finishFeedback);
+    await page.waitForFunction(()=>!!fixture.finishFeedback && fixture.projects[1].requests.length===1);
+    const busy = dock().getByRole('button',{name:'提交 10 条'});
+    assert.equal(await busy.getAttribute('aria-busy'), 'true');
+    assert.equal(await busy.isDisabled(), true);
+    assert.equal(await busy.innerText(), '提交 10 条');
+    assert.equal(await page.getByText(/正在准备提交|正在保存提交记录|正在提交…|已写入，正在更新选择/).count(), 0);
     const start=Date.now();await page.evaluate(()=>fixture.finishFeedback());
     await page.getByRole('alert').filter({hasText:'其余已提交 1 条'}).waitFor({timeout:1800});
     assert.ok(Date.now()-start<1800);
     const calls=await page.evaluate(()=>fixture.calls);assert.equal(calls.filter(c=>c.name==='project.read').length,0);
-    assert.deepEqual(calls.filter(c=>c.name==='project.feedback').map(c=>c.input.items.length),[9,1]);
+    assert.deepEqual(calls.filter(c=>c.name==='project.feedback').map(c=>c.input.items.length).sort((a,b)=>b-a),[9,1]);
     await dock().getByRole('button',{name:'提交 9 条'}).waitFor();
     assert.equal(await page.evaluate(()=>fixture.calls.some(c=>c.name==='workspace.overview')),false);
   });
@@ -435,7 +440,7 @@ try {
       const alert = page.getByRole('alert').filter({ hasText: '未确认提交' });
       await alert.waitFor();
       await dock().getByRole('button', { name: '已选 3 条 · 1 个项目' }).waitFor();
-      const projects = await page.evaluate(() => fixture.calls.filter(c => c.name === 'project.feedback').map(c => c.input.projectId));
+      const projects = await page.evaluate(() => fixture.calls.filter(c => c.name === 'project.feedback').map(c => c.input.projectId).sort());
       assert.deepEqual(projects, ['p1', 'p2']);
       if (change === 'race') { await page.waitForTimeout(3300); assert.equal(await alert.isVisible(), true); }
     });
@@ -897,8 +902,10 @@ try {
     await dock().getByRole('button', { name: '提交 2 条' }).click();
     await page.getByRole('status').filter({ hasText: '已提交 2 条' }).waitFor();
     const calls = await page.evaluate(() => fixture.calls.filter(c => ['project.feedback', 'workspace.linkFeedback'].includes(c.name)));
-    assert.deepEqual(calls.map(c => [c.name, c.input.projectId, c.input.items.length]), [['workspace.linkFeedback', 'p1', 2], ['project.feedback', 'p1', 2], ['workspace.linkFeedback', 'p1', 2]]);
-    assert.deepEqual(calls[0], calls[2]);
+    const local = calls.filter(c => c.name === 'project.feedback'), remote = calls.filter(c => c.name === 'workspace.linkFeedback');
+    assert.deepEqual(local.map(c => [c.input.projectId, c.input.items.length]), [['p1', 2]]);
+    assert.deepEqual(remote.map(c => [c.input.projectId, c.input.items.length]), [['p1', 2], ['p1', 2]]);
+    assert.deepEqual(remote[0], remote[1]);
     assert.deepEqual(await page.evaluate(() => fixture.calls.find(c => c.name === 'shell.openExternal').input), 'https://example.com/preview');
   });
   await setup();

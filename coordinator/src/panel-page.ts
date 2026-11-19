@@ -55,7 +55,8 @@ function editChoices(id: string, values: [string, Draft | null][]) {
 }
 async function saveSubmission(change: Delta) {
   ++draftGeneration
-  useSheets(await req('panel.feedbackState', { change }))
+  const next = await req('panel.feedbackState', { change })
+  useSheets({ ...sheets, [change.projectId]: next[change.projectId] })
 }
 function clearChoices(id: string) { editChoices(id, Object.keys(choices(id)).map(key => [key, null])) }
 const inlineRows = new Map<string, Frame>()
@@ -63,7 +64,6 @@ const expandedRows = new Set<string>(), folded = new Map<string, boolean>()
 let error = '', notice = '', busy = false, more = false, nav = 0, refreshing = false, refreshSeq = 0
 let direction = '', leaving: Frame | undefined, lastInline = '', organizationScroll = 0, trayOpen = false
 let toastAction: { label: string; run: () => void } | undefined, toastTimer = 0, toastText = ''
-let submitStep = '正在提交…'
 let actionIds: Record<string, number> = {}, clickedAction = '', busyAction = ''
 let persistChain: Promise<unknown> = Promise.resolve()
 const persist = (key: string, value: any) => {
@@ -197,7 +197,7 @@ function button(text: string, action: () => any, cls = '', disabled = false, tit
   const id = `${label}:${actionIds[label] = (actionIds[label] ?? 0) + 1}`, waiting = busy && (id === busyAction || action === submitFeedback && busyAction.startsWith('提交'))
   return el('button', { type: 'button', class: `btn ${cls}`, disabled: disabled || busy, title: title || text, 'data-action': id, 'aria-busy': waiting ? 'true' : undefined,
     'aria-label': !text || cls.includes('icon') || waiting ? label : undefined, onclick: () => { clickedAction = id; void action() } },
-  waiting ? [el('span', { class: 'spinner', 'aria-hidden': 'true' }), text.startsWith('提交') ? submitStep : '处理中…'] : [glyph ? icon(glyph) : null, text ? el('span', { class: 't trunc' }, text) : null])
+  waiting ? [el('span', { class: 'spinner', 'aria-hidden': 'true' }), action === submitFeedback ? text : '处理中…'] : [glyph ? icon(glyph) : null, text ? el('span', { class: 't trunc' }, text) : null])
 }
 const item = (title: string, summary: string, action: () => any, extra?: any) => el('button', { type: 'button', class: 'item', 'aria-label': title, 'aria-description': summary, onclick: () => { void action() }, title }, extra?.classList?.contains('dot') ? extra : null, el('span', { class: 'body' }, el('span', { class: 'trunc' }, title), small(summary)), !extra?.classList?.contains('dot') ? extra : null, icon('chevron'))
 function input(label: string, initial: any = '', type = 'text', change?: (value: string) => void, placeholder?: string, fields = form, feedback = false) {
@@ -726,11 +726,9 @@ async function submitGroup(projectId: string, entries: Draft[], rows: InboxRow[]
       input = JSON.parse(JSON.stringify({ projectId: remote ? JSON.parse(projectId)[1] : projectId, revision: project.revision, requestId: crypto.randomUUID(), items: await feedbackItems(entries) })) as DelegatedFeedback
     }
     attempt = { ...attempt, input, reason: '上次提交尚未核实' }
-    submitStep = '正在保存提交记录…'; render()
     saving = true
     await saveSubmission({ ...changeFor(projectId, checked(undefined), attempt), exact: true })
     saving = false
-    submitStep = '正在提交…'; render()
     const expected = await digest(JSON.stringify(input))
     let proof: string | undefined, updated: Project | undefined
     if (remote) {
@@ -753,7 +751,6 @@ async function submitGroup(projectId: string, entries: Draft[], rows: InboxRow[]
     if (local && proof === expected) updated = local
     if (proof !== expected) throw Error('待核对：缺少匹配的写入凭证')
     saving = true
-    submitStep = '已写入，正在更新选择…'; render()
     await saveSubmission(changeFor(projectId, checked(null), null))
     if (updated) updateSubmittedProject(updated)
   } catch (exception) {
@@ -768,23 +765,21 @@ async function submitFeedback() {
   const groups = Object.entries(drafts).filter(([, group]) => Object.keys(group).length)
   if (!groups.length || groups.some(([, group]) => Object.values(group).some(invalidDraft))) return
   const origin = active
-  submitStep = '正在准备提交…'
   await act(async () => {
     await edits
     if (draftFailure) throw Error(draftFailure)
-    let sent = 0
-    const rejected: { projectId: string; reason: string }[] = []
     const before = inboxRows()
-    for (const [projectId, group] of groups) {
+    const results = await Promise.all(groups.map(async ([projectId, group]) => {
       const entries = Object.values(group)
       try {
         await submitGroup(projectId, entries, before.filter(r => r.projectId === projectId && entries.some(d => d.taskId === r.taskId && d.kind === (r.kind === 'review' ? 'acceptance' : 'decision'))))
-        sent += entries.length
         for (const r of before) if (r.projectId === projectId && entries.some(d => d.taskId === r.taskId && (
           r.kind === 'review' && d.kind === 'acceptance' || r.kind === 'decision' && d.kind === 'decision'
         ))) finishing.set(r.id, r)
-      } catch (e) { rejected.push({ projectId, reason: (e as Error).message }) }
-    }
+        return { sent: entries.length }
+      } catch (e) { return { sent: 0, rejected: { projectId, reason: (e as Error).message } } }
+    }))
+    const sent = results.reduce((count, result) => count + result.sent, 0), rejected = results.flatMap(r => r.rejected ? [r.rejected] : [])
     trayOpen = false
     if (groups.some(([id]) => isRemote(id))) void refreshOverview()
     if (rejected.length) {
@@ -803,6 +798,7 @@ async function submitFeedback() {
       else render()
     }, 700)
   }, false)
+  void readSheets().then(render).catch(() => {})
 }
 function projectPage() {
   if (!current) return callout('正在读取项目…')

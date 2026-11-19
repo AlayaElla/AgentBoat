@@ -179,7 +179,7 @@ export class ProjectStore {
     this.chain = result.catch(() => {})
     return result
   }
-  async mutate(id: string, expected: number | undefined, fn: (project: Project) => void | Promise<void>, request?: { id: string; input: unknown; authorize?: (project: Project) => void }): Promise<Project> {
+  async mutate(id: string, expected: number | undefined, fn: (project: Project) => void | Promise<void>, request?: { id: string; input: unknown; authorize?: (project: Project) => void }, backgroundRoles = false): Promise<Project> {
     return this.serial(async () => {
       const project = await this.get(id)
       request?.authorize?.(project)
@@ -197,7 +197,8 @@ export class ProjectStore {
       // shortcut: one project per bridge reply; use paged storage before expanding the 256 KiB bridge limit.
       if (Buffer.byteLength(JSON.stringify(project)) > 200_000) fail('项目记录已接近面板传输上限，请先导出记录；原记录已保留')
       await this.storage.set(`project:${id}`, project as any)
-      await this.updateRoles?.()
+      if (backgroundRoles) setImmediate(() => { void this.updateRoles?.().catch(() => {}) })
+      else await this.updateRoles?.()
       return project
     })
   }

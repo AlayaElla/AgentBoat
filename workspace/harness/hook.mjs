@@ -62,8 +62,8 @@ function writablePath(cwd, file, roots) {
 function words(command, bash) {
   const tokens = [];
   const word = bash
-    ? /(?:'([^'\r\n]*)'|"((?:\$(?:AGENTBOAT_HOME|TMPDIR|TEMP|TMP)(?=\/)|\\["\\$\x60]|[^"\\\r\n$\x60])*)"|([\p{L}\p{N}_\-./:@+=%,]+))/uy
-    : /(?:'((?:''|[^'‘’\r\n])*)'|"((?:\$env:(?:AGENTBOAT_HOME|TMPDIR|TEMP|TMP)(?=[/\\])|\x60["$\x60]|[^"“”\r\n$\x60])*)"|([\p{L}\p{N}_\-./:\\@+=%,]+))/uy;
+    ? /(?:'([^']*)'|"((?:\$(?:AGENTBOAT_HOME|TMPDIR|TEMP|TMP)(?=\/)|\\[^\r\n]|[^"\\$\x60])*)"|([\p{L}\p{N}_\-./:@+=%,]+))/uy
+    : /(?:'((?:''|[^'‘’])*)'|"((?:\$env:(?:AGENTBOAT_HOME|TMPDIR|TEMP|TMP)(?=[/\\])|\x60["$\x60]|[^"“”$\x60])*)"|([\p{L}\p{N}_\-./:\\@+=%,]+))/uy;
   if (command.includes('\0')) return;
   let i = 0;
   while (i < command.length) {
@@ -79,6 +79,9 @@ function words(command, bash) {
     let value = match[1] ?? match[2] ?? match[3];
     if (match[2] !== undefined) {
       const expand = bash ? /\\(["\\$\x60])|\$(AGENTBOAT_HOME|TMPDIR|TEMP|TMP)(?=\/)/g : /\x60(["$\x60])|\$env:(AGENTBOAT_HOME|TMPDIR|TEMP|TMP)(?=[/\\])/g;
+      const previous = tokens.at(-1);
+      if ([...match[2].matchAll(expand)].some(([, , name]) => name) && previous?.value !== '-C' &&
+        !['>', '>>'].includes(previous?.operator)) return;
       value = match[2].replace(expand, (_, literal, name) => literal ?? (process.env[name] || ''));
     }
     else if (!bash && match[1] !== undefined) value = match[1].replaceAll("''", "'");
@@ -199,34 +202,34 @@ function transcriptTail(file) {
     const length = readSync(fd, buffer, 0, buffer.length, size - buffer.length);
     const lines = buffer.subarray(0, length).toString('utf8').trimEnd().split('\n');
     if (size > buffer.length) lines.shift();
-    return lines.filter(Boolean).map(line => JSON.parse(line)).filter(row => !row.isSidechain && !row.isMeta);
+    return lines.filter(Boolean).map(line => JSON.parse(line)).filter(row => !row.isSidechain);
   } finally { closeSync(fd); }
 }
 function stopBlocker(input, role) {
   if (input.stop_hook_active) return;
   const rows = transcriptTail(input.transcript_path);
-  const submits = new Set(), checks = new Map(), replies = new Map(), questions = new Set();
+  const shells = new Set(), checks = new Map(), replies = new Map(), questions = new Set();
+  const seenDone = new Set();
   let pending = false;
+  const markDone = id => { if (id && !seenDone.has(id)) { seenDone.add(id); pending = true; } };
   for (const row of rows) {
     const content = row.message?.content;
     const blocks = typeof content === 'string' ? [{ type: 'text', text: content }] : Array.isArray(content) ? content : [];
-    if (row.type === 'user') for (const block of blocks) if (block.type === 'text') {
-      if (!isMail.test(block.text)) {
-        pending = false;
-        questions.clear(); submits.clear(); checks.clear(); replies.clear();
-      } else {
-        pending ||= workerDone.test(block.text);
+    if (row.type === 'user' || row.type === 'system') for (const block of blocks) if (block.type === 'text' && typeof block.text === 'string') {
+      const header = block.text.split(/\r?\n/, 1)[0];
+      if (isMail.test(header)) {
+        if (workerDone.test(header)) markDone(row.messageId ?? row.message?.id ?? row.uuid);
         for (const id of receivedQuestions(block.text)) questions.add(id);
-      }
+      } else if (row.type === 'user' && !row.isMeta) questions.clear();
     }
     for (const block of blocks) {
       if (row.type === 'assistant' && block.type === 'tool_use' && rules.shells.has(block.name)) {
+        shells.add(block.id);
         const bash = block.name !== 'PowerShell', tokens = words(block.input?.command?.trim() ?? '', bash);
         if (!tokens) continue;
         if (!bash && tokens[0]?.operator === '&') tokens.shift();
         if (tokens.some(t => t.operator)) continue;
-        const values = tokens.map(t => t.value), cwd = row.cwd ?? input.cwd;
-        if (nameOf(values[0]) === 'node' && isClient(values[1], cwd, bash) && values[2] === 'submit') submits.add(block.id);
+        const values = tokens.map(t => t.value);
         if (nameOf(values[0]) === 'orca' && values[1] === 'orchestration') {
           if (['check', 'inbox'].includes(values[2])) checks.set(block.id, values[2]);
           if (values[2] === 'reply') {
@@ -234,31 +237,36 @@ function stopBlocker(input, role) {
             if (id) replies.set(block.id, id);
           }
         }
-      } else if (row.type === 'user' && block.type === 'tool_result' && !block.is_error) {
+      } else if (block.type === 'tool_result' && shells.has(block.tool_use_id) && (row.type === 'user' || row.type === 'system')) {
         const body = toolText(block);
-        if (checks.has(block.tool_use_id)) {
+        if (!block.is_error && checks.has(block.tool_use_id)) {
           const result = jsonResult(body);
           const messages = result?.result?.messages;
-          if (workerDone.test(body) || result?.ok && Array.isArray(messages) && messages.some(m => m.type === 'worker_done' && !m.readAt)) pending = true;
-          if (checks.get(block.tool_use_id) === 'check') {
+          const check = checks.get(block.tool_use_id) === 'check';
+          if (result?.ok && Array.isArray(messages)) {
+            for (const m of messages) if (m.type === 'worker_done' && (check || (!m.handled && !m.read))) markDone(m.id);
+          } else {
+            for (const [, id, flags] of body.matchAll(/^(msg_[\w-]+) worker_done from ([^\r\n]+)$/gm))
+              if (check || flags.includes('[unhandled]')) markDone(id);
+            if (check && workerDone.test(body)) markDone(row.uuid ?? block.tool_use_id);
+          }
+          if (check) {
             for (const id of receivedQuestions(body, true)) questions.add(id);
             if (result?.ok && Array.isArray(messages)) for (const m of messages)
               if (m.type === 'question' && /^msg_[\w-]+$/.test(m.id ?? '') && typeof m.body === 'string' && ownerAction.test(m.body)) questions.add(m.id);
           }
         }
-        if (replies.has(block.tool_use_id)) {
+        if (!block.is_error && replies.has(block.tool_use_id)) {
           const result = jsonResult(body);
           const id = result?.result?.messageId ?? result?.result?.message?.id;
           if (result?.ok && /^msg_[\w-]+$/.test(id ?? '') || /^(?:Replied msg_[\w-]+\s*$|.*\bmessageId=msg_[\w-]+\s*$)/m.test(body))
             questions.delete(replies.get(block.tool_use_id));
         }
-        if (submits.has(block.tool_use_id)) {
-          const receipt = /^\{"submission":(\{[^\r\n]*?\}),"ok":true[,}]/m.exec(body)?.[1];
-          const submission = receipt && JSON.parse(receipt);
-          if (submission?.projectId === role.projectId) {
-            if (submission.phase === 'completed' || submission.phase === 'ready' && submission.pendingAcceptance) pending = false;
-            if (submission.phase === 'blocked' || submission.pendingDecision) questions.clear();
-          }
+        for (const [, receipt] of body.matchAll(/\{"submission":(\{[^\r\n]*?\}),"ok":true[,}]/g)) {
+          const submission = JSON.parse(receipt);
+          if (submission.projectId !== role.projectId || typeof submission.requestId !== 'string') continue;
+          pending = false;
+          if (submission.phase === 'blocked' || submission.pendingDecision) questions.clear();
         }
       }
     }

@@ -16,7 +16,6 @@ import { projectLeadDefaults } from '../../workspace/agent-launch.mjs'
 import { clientPath, roleRegistryPath } from '../scripts/orca-cli.mjs'
 import { applyDelta, type Sheets } from './feedback-drafts'
 import { roleRegistry } from './role-registry'
-import { questionWait } from '../scripts/orca-questions.mjs'
 
 const activityInterval = 60_000
 
@@ -104,8 +103,8 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
       const bound = list.filter(p => !p.hidden && p.runId)
       const updated = new Map<string, { runId: string; questions: OwnerQuestion[] }>()
       for (let i = 0; i < bound.length; i += 4) await Promise.all(bound.slice(i, i + 4).map(async p => {
-        const inbox = await runtime.questions(p.runId).catch(() => undefined)
-        if (inbox) updated.set(p.ref.id, { runId: p.runId, questions: inbox.filter(q => Date.now() - q.at > questionWait)
+        const inbox = await runtime.questions(p.runId).catch(() => [])
+        updated.set(p.ref.id, { runId: p.runId, questions: inbox
           .map(q => ({ id: q.id, from: q.from, at: q.at, title: q.body.trim().split(/\r?\n/, 1)[0].slice(0, 120),
             body: q.body.slice(0, maxMessageLength), runId: p.runId, projectId: p.ref.id })) })
       }))
@@ -189,7 +188,7 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
     const ref = list.find(p => p.ref.id === input.projectId)
     if (!ref || !isProjectShared(ref, peer)) fail('项目未开放或已隐藏')
     const source = `主人在工作间 ${peer.name.replace(/\s+/g, ' ')} 提交`
-    const project = await recordFeedback(input, { source, connectionId: peer.id, authorize: p => {
+    const project = await recordFeedback(input, revision(input.revision), { source, connectionId: peer.id, authorize: p => {
       if (!isProjectShared(p, peer)) fail('项目未开放或已隐藏')
     } })
     return project.requests.find(r => r.id === `link-feedback:${fingerprint([peer.id, input.requestId])}`)?.fingerprint
@@ -228,8 +227,9 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
     return { ...m, deliveries: m.deliveries.filter(d => !d.linkMessageHash), secretSaved: !!await secret(mailbox), connection: m.feishu.enabled ? sources.state(m.feishu.appId) : { state: 'off', message: '' } }
   }
   async function notify(before: Project, after: Project) {
-    notifyWorkspace(before, after, (await store.workspace()).runId)
-    notifyFeishu(before, after, (await store.messaging()).feishu)
+    const [workspace, messaging] = await Promise.all([store.workspace(), store.messaging()])
+    notifyWorkspace(before, after, workspace.runId)
+    notifyFeishu(before, after, messaging.feishu)
   }
 
   function readCatalog() {
@@ -611,9 +611,9 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
     changed(id)
     return snapshot(id)
   })
-  async function recordFeedback(input: Record<string, any>, remote?: { source: string; connectionId: string; authorize: (p: Project) => void }) {
+  async function recordFeedback(input: Record<string, any>, expected: number | undefined, remote?: { source: string; connectionId: string; authorize: (p: Project) => void }) {
     const request = input.requestId ? text(input.requestId, '请求编号', 200) : undefined
-    const project = await store.mutate(input.projectId, input.revision === undefined ? undefined : revision(input.revision), async p => {
+    const project = await store.mutate(input.projectId, expected, async p => {
       const before = remote ? undefined : structuredClone(p)
       if (p.hidden) fail('项目已隐藏，请先恢复显示')
       feedback(p, input, remote?.source)
@@ -627,14 +627,14 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
           p.deliveries.push({ ...summary, id: `${summary.id}:workspace`, targetRunId: workspaceRun })
         }
       }
-    }, request ? { id: remote ? `link-feedback:${fingerprint([remote.connectionId, request])}` : request, input, authorize: remote?.authorize } : undefined)
+    }, request ? { id: remote ? `link-feedback:${fingerprint([remote.connectionId, request])}` : request, input, authorize: remote?.authorize } : undefined, !input.caller)
     changed(input.projectId); defer(input.projectId)
     return project
   }
   orca.panels.handle('project.feedback', async input => {
-    const { ref, refs } = await projectEntry(input.projectId)
-    await store.register(ref)
-    const { takeover, ...project } = await recordFeedback(input)
+    const expected = input.revision === undefined ? undefined : revision(input.revision)
+    const { refs } = await projectEntry(input.projectId)
+    const { takeover, ...project } = await recordFeedback(input, expected)
     return { projects: refs, project }
   })
   orca.panels.handle('project.agent', async input => {

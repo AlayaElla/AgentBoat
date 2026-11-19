@@ -27,7 +27,8 @@ test('Claude role hooks scope actions by Orca identity and fail open', () => {
   const cmd = (command, tool = 'Bash') => pre(tool, { command });
   const stop = (active = false, id = 'claude_project') => run(id, { hook_event_name: 'Stop', transcript_path: transcript, stop_hook_active: active }).decision?.decision;
   const user = text => ({ type: 'user', message: { role: 'user', content: text } });
-  const done = user('──── From: WORKER (worker_1) (worker_done)\nSubject: fixture');
+  const done = { ...user('──── From: WORKER (worker_1) (worker_done) ────\nSubject: fixture'),
+    uuid: 'fixture-message-uuid', turnOrigin: 'sdk', promptSource: 'sdk', turnPosition: { promptIndex: 0, turnIndex: 18 } };
   const client = clientPath.replaceAll('\\', '/');
   const assistant = (id, command) => ({ type: 'assistant', cwd: main, message: { role: 'assistant', content: [{ type: 'tool_use', name: 'Bash', id, input: { command } }] } });
   const result = (id, content, is_error = false) => ({ type: 'user', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: id, is_error, content }] } });
@@ -91,6 +92,22 @@ test('Claude role hooks scope actions by Orca identity and fail open', () => {
     assert.equal(cmd(overview + ' | Select-Object @{Expression={Set-Content . write}}', 'PowerShell'), 'deny');
     assert.equal(cmd(overview + ' > "C:/a/*/elsewhere.txt"', 'PowerShell'), 'deny');
     assert.equal(pre('Bash', { command: overview + ' > "' + path.join(scratch, 'out.txt').replaceAll('\\', '/') + '"' }, 'claude_workspace', { scratchpad_dir: scratch }), undefined);
+    const send = 'orca orchestration send --subject "hook fixture" --body ';
+    for (const tool of ['Bash', 'PowerShell']) {
+      for (const quote of ["'", '"']) for (const body of [
+        '请核对示例任务\n见 orca orchestration reply、node -e 和 overview --brief。',
+        '示例反馈\r\nnode client.mjs main-read | node -e ...\n2>&1 | head -2；重定向 > D:/Example/x.json',
+        'client.mjs main-read 的输出交给 node -e 解析\norca orchestration reply 后面接 head'
+      ]) assert.equal(cmd(send + quote + body + quote, tool), undefined);
+      assert.equal(cmd(send + '"正文\n没有封口', tool), 'deny');
+      assert.equal(cmd(send + "'正文\n没有封口", tool), 'deny');
+      assert.equal(cmd(send + '"正文\n$(echo outside)"', tool), 'deny');
+      assert.equal(cmd(send + '"正文"\nnode -e "42"', tool), 'deny');
+    }
+    assert.equal(cmd(send + '"正文\n`echo outside`"'), 'deny');
+    assert.equal(cmd(send + '"正文\n$AGENTBOAT_HOME/memory"'), 'deny');
+    assert.equal(cmd(send + '"路径 D:\\Example\n正文"'), undefined);
+    assert.equal(cmd('for id in msg_example; do orca orchestration reply --id $id --body "回复"; done'), 'deny');
     symlinkSync(outside, path.join(main, 'outside'), process.platform === 'win32' ? 'junction' : 'dir');
     assert.equal(cmd(overview + ' > outside/out.txt'), 'deny');
     assert.equal(cmd('npm run build', 'Monitor'), 'deny');
@@ -103,22 +120,35 @@ test('Claude role hooks scope actions by Orca identity and fail open', () => {
     assert.equal(stop(false, 'claude_workspace'), undefined);
     assert.equal(stop(false, 'claude_worker'), undefined);
     const submit = assistant('call', 'node "' + client + '" submit input.json');
-    for (const reply of [receipt('working'), receipt('ready', 'p2'), receipt('ready', 'p1', false), '{"ok":false}']) {
+    for (const reply of [receipt('ready', 'p2'), '{"ok":false}']) {
       setTranscript(done, submit, result('call', reply));
       assert.equal(stop(), 'block');
     }
     setTranscript(done, submit, result('call', receipt('ready'), true));
-    assert.equal(stop(), 'block');
+    assert.equal(stop(), undefined);
     setTranscript(done, submit, result('call', receipt('ready')));
     assert.equal(stop(), undefined);
     setTranscript(done, submit, result('call', 'Exit code 0\n' + receipt('completed').slice(0, -1) + ',"result":{... truncated ...'));
     assert.equal(stop(), undefined);
-    setTranscript(done, submit, result('call', receipt('ready')), done);
+    setTranscript(done, submit, result('call', receipt('ready')), { ...done, uuid: 'new-message-uuid' });
     assert.equal(stop(), 'block');
     setTranscript(done, user('new turn'));
-    assert.equal(stop(), undefined);
-    setTranscript(user('check'), assistant('check', 'orca orchestration check --json'), result('check', '{"ok":true,"result":{"messages":[{"type":"worker_done"}]}}'));
     assert.equal(stop(), 'block');
+    const check = assistant('check', 'orca orchestration check --json');
+    const checked = (id = 'msg_done') => result('check', JSON.stringify({ ok: true, result: { messages: [{ id, type: 'worker_done' }] } }));
+    setTranscript(user('check'), check, checked());
+    assert.equal(stop(), 'block');
+    const composite = { ...assistant('compound', `receipt=receipt.json; node "${client}" submit "$receipt" | head -1`), uuid: 'assistant-message-uuid' };
+    const compoundOutput = { ...result('compound', 'summary: ' + receipt('working') + '\nfinished'), uuid: 'tool-message-uuid', sourceToolAssistantUUID: composite.uuid, toolUseResult: { stdout: receipt('working'), stderr: '', interrupted: false } };
+    const injected = { ...done, type: 'system', isMeta: true, messageId: 'msg_done' };
+    setTranscript(injected, composite, compoundOutput, { type: 'api-request-blob', message: done.message, hash: 'cached mirror' }, check, checked());
+    assert.equal(stop(), undefined);
+    setTranscript(injected, composite, compoundOutput, check, checked('msg_new_done'));
+    assert.equal(stop(), 'block');
+    setTranscript(done, composite, compoundOutput, done);
+    assert.equal(stop(), undefined);
+    setTranscript(user('──── From: Worker (dispatch:fixture) (status) ────\n引用之前的消息：\n' + done.message.content));
+    assert.equal(stop(), undefined);
     const question = (id = 'msg_owner', body = '请主人在浏览器登录面板。') => user(
       `──── From: Worker (dispatch:fixture) (question) ────\nSubject: Question\n\n${body}\n\n[Reply: orca orchestration reply --id ${id} --body "..."]`);
     setTranscript(question('msg_code', '测试文件放在哪？'));
@@ -141,7 +171,7 @@ test('Claude role hooks scope actions by Orca identity and fail open', () => {
     setTranscript(question(), question('msg_second'), reply(), result('reply', accepted));
     assert.equal(stop(), 'block');
     setTranscript(question(), done, submit, result('call', receipt('blocked')));
-    assert.match(run('claude_project', { hook_event_name: 'Stop', transcript_path: transcript }).decision.reason, /执行者已回报/);
+    assert.equal(stop(), undefined);
     setTranscript(user('查看收件箱'), assistant('q', 'orca orchestration check --json'), result('q',
       '{"ok":true,"result":{"messages":[{"id":"msg_owner","type":"question","body":"请主人扫码"}]}}'));
     assert.equal(stop(), 'block');

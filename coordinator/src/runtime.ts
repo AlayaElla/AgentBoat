@@ -8,7 +8,7 @@ import { readAgents, type AgentsSnapshot } from './agents'
 import type { Project } from './model'
 import type { HostApi } from 'orca/host'
 import { agentFlags, launchReceipt, type AgentLaunch } from '../../workspace/agent-launch.mjs'
-import { inboxLimit, openQuestions, type OrcaQuestion } from '../scripts/orca-questions.mjs'
+import { inboxLimit, openQuestions, type OrcaQuestion, type OrcaWorkerRecord } from '../scripts/orca-questions.mjs'
 
 const execute = promisify(execFile)
 export interface CoordinatorRuntime {
@@ -89,7 +89,28 @@ export class OrcaRuntime implements CoordinatorRuntime {
     // shortcut: Orca inbox has no pagination; scan the newest bounded window.
     const result = await this.call(['orchestration', 'inbox', '--run', runId, '--limit', String(inboxLimit)])
     if (!Array.isArray(result.messages) || result.messages.some((m: any) => !m || m.run_id !== runId)) fail('Orca 运行邮件无法核对')
-    return openQuestions(result.messages, runId)
+    return openQuestions(result.messages, runId, async ids => {
+      const [taskList, workers] = await Promise.all([
+        this.call(['orchestration', 'task-list', '--run', runId]),
+        this.questionWorkers(runId, ids)
+      ])
+      if (!Array.isArray(taskList.tasks) || taskList.runId !== runId) fail('Orca 项目任务状态无法核对')
+      return { tasks: taskList.tasks, workers }
+    })
+  }
+  private async questionWorkers(runId: string, ids: Set<string>) {
+    const workers: OrcaWorkerRecord[] = [], visited = new Set<string>()
+    let cursor: string | undefined
+    do {
+      const page = await this.call(['orchestration', 'worker-list', '--run', runId, ...(cursor ? ['--cursor', cursor] : [])])
+      if (!Array.isArray(page.workers) || !page.page) fail('Orca 执行者状态无法核对')
+      for (const worker of page.workers) if (worker?.runId === runId && ids.delete(worker.dispatchId)) workers.push(worker)
+      if (!page.page.hasMore || !ids.size) break
+      cursor = page.page.nextCursor
+      if (!cursor || visited.has(cursor)) fail('Orca 执行者分页无法核对')
+      visited.add(cursor)
+    } while (true)
+    return workers
   }
   async hermesApprovalMode() {
     const home = process.env.HERMES_HOME || path.join(process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local'), 'hermes')
