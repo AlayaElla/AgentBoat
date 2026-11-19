@@ -420,7 +420,14 @@ try {
     await rail().getByRole('button', { name: /^再看 / }).click();
     await rail().getByRole('button', { name: '全选验收' }).click();
     const layer = page.locator('.home-layer');
-    await layer.evaluate(e => { e.scrollTop = 360; });
+    await page.evaluate(() => document.fonts.ready);
+    await page.waitForFunction(() => !document.querySelector('.home-layer .irows')
+      .getAnimations({ subtree: true }).some(a => a.pending || a.playState === 'running'));
+    const scroll = await layer.evaluate(e => { e.scrollTop = 360; return e.scrollTop; });
+    assert.equal(scroll, 360);
+    // Removing 全选验收 changes the header height, so compare the visible row, not scrollTop.
+    const rowTop = () => row('待回复 5').evaluate(e => e.getBoundingClientRect().top - e.closest('.home-layer').getBoundingClientRect().top);
+    const before = await rowTop();
     await page.evaluate(() => { fixture.delayFeedback = true; });
     await dock().getByRole('button', { name: '提交 14 条' }).click();
     await dock().getByRole('button', { name: '提交 14 条' }).waitFor({ state: 'visible' });
@@ -428,9 +435,10 @@ try {
     await page.waitForFunction(() => !!fixture.finishFeedback);
     await page.evaluate(() => fixture.finishFeedback());
     await rail().getByText('页面交付 · ✓ 已提交', { exact: true }).waitFor();
-    assert.ok(Math.abs(await layer.evaluate(e => e.scrollTop) - 360) < 12);
+    assert.ok(Math.abs(await rowTop() - before) < 12);
     await rail().getByText('页面交付 · ✓ 已提交', { exact: true }).waitFor({ state: 'detached' });
     await dock().waitFor({ state: 'hidden' });
+    assert.ok(Math.abs(await rowTop() - before) < 12);
     const sent = await page.evaluate(() => fixture.calls.filter(c => c.name === 'project.feedback').map(c => c.input));
     assert.deepEqual(sent.map(s => [s.projectId, s.items.length]).sort(), [['p1', 13], ['p2', 1]]);
     assert.equal(await rail().locator('.pill').innerText(), '32');
