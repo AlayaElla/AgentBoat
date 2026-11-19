@@ -6,7 +6,11 @@ import path from 'node:path';
 import { createHash } from 'node:crypto';
 import { writeMainRoleCards } from './main-role-card.mjs';
 
-const [operation, argument] = process.argv.slice(2);
+const [operation, argument, flag, taskId, extra] = process.argv.slice(2);
+const brief = operation === 'overview' && argument === '--brief';
+const singleTask = operation === 'read' && flag === '--task';
+if (operation === 'overview' && (argument && !brief || flag)) throw new Error('用法：node client.mjs overview [--brief]');
+if (operation === 'read' && (!argument || flag && (!singleTask || !taskId || extra))) throw new Error('用法：node client.mjs read <projectId> [--task <taskId>]');
 const leadBind = operation === 'project-lead-bind', leadSwitch = operation === 'project-lead-switch';
 const allowed = ['projects', 'overview', 'main-read', 'main-bind', 'project-lead', 'project-lead-switch', 'project-lead-bind', 'message', 'read', 'bind', 'submit', 'feedback', 'feishu-reply', 'links-read', 'links-refresh', 'links-invite', 'links-cancel-invite', 'links-join', 'links-configure', 'links-rename', 'links-share', 'links-relate', 'links-revoke', 'links-send', 'hide', 'restore', 'delete', 'main-targets', 'connections', 'connection-read', 'connection-check', 'connection-send', 'connection-reply'];
 if (!allowed.includes(operation)) throw new Error('用法：node client.mjs projects|overview|main-read|main-targets|connections | connection-read|connection-check <名字> | main-bind|project-lead-switch|project-lead-bind|connection-send|connection-reply|links-send < stdin | read|project-lead <projectId> | bind|submit|message|feedback|feishu-reply|hide|restore|delete <input.json>');
@@ -61,11 +65,27 @@ try {
     const task = project?.tasks?.find(t => t.id === input.task?.id);
     const fingerprint = createHash('sha256').update(JSON.stringify(input)).digest('hex');
     if (reply.ok && project?.ref?.id === input.projectId && task && project.requests?.some(r => r.id === input.requestId && r.fingerprint === fingerprint)) {
-      const submission = { projectId: project.ref.id, requestId: input.requestId, taskId: task.id, phase: task.phase, pendingAcceptance: task.acceptance?.some(a => a.status === 'pending') ?? false };
+      const submission = { projectId: project.ref.id, requestId: input.requestId, taskId: task.id, phase: task.phase, pendingAcceptance: task.acceptance?.some(a => a.status === 'pending') ?? false, pendingDecision: task.decisions?.some(d => d.answer === undefined) ?? false };
       process.stdout.write(JSON.stringify({ submission, ...reply }) + '\n');
     } else {
       process.stdout.write(stdout);
     }
+  } else if (brief || singleTask) {
+    const reply = JSON.parse(stdout), result = reply.result?.result;
+    if (reply.ok && reply.result?.ok !== false && result) {
+      if (brief) {
+        const { attention, questions, projects, error } = result;
+        reply.result.result = { attention, questions, projects: projects.map(({ ref, counts }) => ({ id: ref.id, name: ref.name, counts })), error };
+      } else {
+        const { project } = result, task = project.tasks.find(task => task.id === taskId);
+        if (!task) {
+          process.stderr.write(`项目 ${project.ref.id} 中找不到任务 ${taskId}。\n`);
+          process.exit(1);
+        }
+        reply.result.result = { projectId: project.ref.id, revision: project.revision, task };
+      }
+    }
+    process.stdout.write(JSON.stringify(reply) + '\n');
   } else if (operation !== 'message') process.stdout.write(stdout);
   else {
     const reply = JSON.parse(stdout), result = reply.result?.result;

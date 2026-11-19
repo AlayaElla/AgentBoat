@@ -99,6 +99,8 @@ export type Attention = {
   projectId: string; taskId: string
   itemId: string; title: string; summary: string
 } & ({ kind: 'review'; itemRevision: number; fingerprint: string } | { kind: 'decision' | 'blocked' | 'rework' })
+export interface OwnerQuestion { id: string; projectId: string; runId: string; from: string; title: string; body: string; at: number }
+export const isQuestionDelivery = (id: string) => id.startsWith('orca-question:')
 export interface Overview {
   connections?: import('./connections').Connection[]
   machines?: { id: string; name: string; role: 'host' | 'client'; online?: boolean }[]
@@ -106,6 +108,7 @@ export interface Overview {
   links?: import('./links').LinksSnapshot
   workspace: WorkspaceBinding
   attention: Attention[]
+  questions?: OwnerQuestion[]
   projects: {
     ref: ProjectRef; revision: number; counts: Record<TaskState, number>; updatedAt: string; bound: boolean
     agents: (Task['executions'][number] & { projectTaskId: string; state: TaskState })[]

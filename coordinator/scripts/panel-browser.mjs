@@ -112,6 +112,8 @@ async function setup(options = {}, hub) {
     }
     const calls = [];
     window.fixture = { project, projects, links, live, workspace, calls, hostCalls: [], stored, workspaceTarget: { workspaceId: 'identity:project-workspace', multipleConversations: true }, emit: () => events['project.changed']?.({}), race: false, prune: () => { task.acceptance[0].revision++; task.acceptance[0].fingerprint = 'new-version'; project.revision++; } };
+    if (options.ownerQuestion) window.fixture.questions = [{ id: 'msg_owner', projectId: 'p1', runId: project.runId, from: 'dispatch:worker-example',
+      title: '请登录测试面板', body: '请登录测试面板\n在测试浏览器打开示例页面', at: now - 11 * 60_000 }];
     if (options.boundMainFolder) {
       project.ref.name = '主会话目录';
       workspace.session.title = '工作间主会话';
@@ -130,7 +132,7 @@ async function setup(options = {}, hub) {
         return clone(sheets);
       }
       if (name === 'workspace.overview' && window.fixture.delayOverview) await new Promise(resolve => { window.fixture.finishOverview = resolve; });
-      if (name === 'workspace.overview') return clone({ workspace, projects: [...registered().map(p => ({ ref: p.ref, revision:p.revision, counts: { review: p.tasks.filter(t => t.phase === 'ready' && t.acceptance.some(a => a.status === 'pending')).length }, agents: [], bound: true, updatedAt: '' })), ...(options.manyProjects ? Array.from({ length: 13 }, (_, i) => ({ ref: { ...project.ref, id: 'p' + (i + 2), name: '项目 ' + (i + 2) }, counts: { working: options.idleProjects ? 0 : 1 }, agents: [], bound: true, updatedAt: '' })) : [])], hidden: [], attention: attention(), links, connections: [], machines: [{ id: 'local', name: '主机', role: 'host' }] });
+      if (name === 'workspace.overview') return clone({ workspace, projects: [...registered().map(p => ({ ref: p.ref, revision:p.revision, counts: { review: p.tasks.filter(t => t.phase === 'ready' && t.acceptance.some(a => a.status === 'pending')).length }, agents: [], bound: true, updatedAt: '' })), ...(options.manyProjects ? Array.from({ length: 13 }, (_, i) => ({ ref: { ...project.ref, id: 'p' + (i + 2), name: '项目 ' + (i + 2) }, counts: { working: options.idleProjects ? 0 : 1 }, agents: [], bound: true, updatedAt: '' })) : [])], hidden: [], attention: attention(), questions: window.fixture.questions ?? [], links, connections: [], machines: [{ id: 'local', name: '主机', role: 'host' }] });
       if (name === 'workspace.agents') return clone({ ...live, agents: live.agents.filter(a => !window.fixture.removedProjects?.includes(a.projectId)) });
       if (name === 'workspace.agent.open') {
         const agent = live.agents.find(a => a.id === input.id && a.state === 'need');
@@ -685,6 +687,25 @@ try {
     await page.getByRole('button', { name: '任务详情', exact: true }).click();
     await currentLayer().getByRole('heading', { name: '要你处理' }).waitFor();
     assert.equal(await page.locator('#panel').evaluate(e => e.getAnimations({ subtree: true }).length), 0);
+  });
+  await test('overdue worker questions appear in the home and project inbox and clear on refresh', async () => {
+    for (const width of [400, 1160]) {
+      await setup({ width, ownerQuestion: true });
+      const question = () => page.locator('.irow').filter({ hasText: '待回复 · 示例项目 · dispatch:worker-example' });
+      await question().getByRole('button', { name: /请登录测试面板/ }).click();
+      await page.getByText('在测试浏览器打开示例页面', { exact: false }).waitFor();
+      if (width > 400) await page.keyboard.press('Escape');
+      else await question().getByRole('button', { name: /请登录测试面板/ }).click();
+      const workspace = page.getByRole('button', { name: /我的工作间/ }).first();
+      if (await workspace.getAttribute('aria-expanded') === 'false') await workspace.click();
+      await page.getByRole('button', { name: /示例项目/ }).filter({ hasNotText: '待回复' }).first().click();
+      const projectQuestion = page.locator('.pane .irow').filter({ hasText: '待回复 · 示例项目 · dispatch:worker-example' });
+      await projectQuestion.waitFor();
+      await page.evaluate(() => { window.fixture.questions = []; window.fixture.emit(); });
+      await projectQuestion.waitFor({ state: 'detached' });
+      await page.keyboard.press('Escape');
+      await question().first().waitFor({ state: 'detached' });
+    }
   });
   await test('v8 mockup pages open in a headless browser', async () => {
     page = await browser.newPage(); page.on('pageerror', e => errors.push(e.message));

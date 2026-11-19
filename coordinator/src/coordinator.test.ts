@@ -10,7 +10,59 @@ import type { OrcaWorkerApi } from 'orca/worker'
 import type { CoordinatorRuntime } from './runtime'
 import { assertProjectIdle, OrcaRuntime } from './runtime'
 import { groupedAttention } from './model'
+import { inboxLimit, openQuestions, questionWait } from '../scripts/orca-questions.mjs'
 const mainSession = { handle: 'orca_session_id:test-main', title: '测试主会话', workspace: 'id:test', workspaceName: '测试工作区', path: '/test', agent: 'claude', online: 'online' as const }
+
+test('overdue Run questions join the inbox until the matching reply and notify the main agent once', async () => {
+  const p = fresh(refs[0]); p.runId = 'run_fake'
+  const host = mockHost({ storage: { 'project:p1': p as any, workspace: { version: 1, revision: 0, runId: 'run_main', session: mainSession, requests: [] } } })
+  const ask = { id: 'msg_question', from_handle: 'dispatch:fake', to_handle: 'run:run_fake', run_id: 'run_fake', thread_id: 'msg_question',
+    type: 'question', subject: 'Question', sequence: 10, created_at: new Date().toISOString(), body: '请登录\n从这台机器打开浏览器', read: 1 }
+  const noise = Array.from({ length: inboxLimit - 3 }, (_, i) => ({ ...ask, id: 'msg_noise' + i, type: 'status', sequence: i + 20 }))
+  const reply = { ...ask, id: 'msg_reply', from_handle: 'run:run_fake', to_handle: ask.from_handle, type: 'status', subject: 'Re: Question', sequence: 11 }
+  let rows = [...noise, ask, { ...reply, to_handle: 'dispatch:wrong' }, { ...reply, thread_id: 'msg_other' }], failure = true
+  const sent: string[] = [], runs: string[] = []
+  let c!: ReturnType<typeof createCoordinator>
+  const worker = await mountWorker({ default: api => { c = createCoordinator(api, { projects: async () => refs,
+    questions: async run => { runs.push(run); if (failure) throw Error('fixture failure'); return openQuestions(rows, run) },
+    send: async (run, { body }) => { assert.equal(run, 'run_main'); sent.push(body); return {} } }) } }, { host })
+  const pending = async () => (await worker.request('workspace.overview')).questions
+  try {
+    await c.refreshQuestions()
+    assert.deepEqual(await pending(), []); assert.equal(sent.length, 0)
+    failure = false
+    await c.refreshQuestions()
+    assert.deepEqual(await pending(), [])
+    ask.created_at = new Date(Date.now() - questionWait - 1000).toISOString()
+    await Promise.all([c.refreshQuestions(), c.refreshQuestions()])
+    assert.deepEqual(await pending(), [{ id: ask.id, projectId: 'p1', runId: p.runId, from: ask.from_handle, title: '请登录', body: ask.body, at: Date.parse(ask.created_at) }])
+    await c.flushMailbox()
+    assert.equal(sent.length, 1)
+    assert.ok(sent[0].includes(ask.body))
+    await c.updateStatus()
+    assert.ok((host.callsOf('statusBar.update').at(-1) as any).text.endsWith('待处理 1'))
+    await c.refreshQuestions(); await c.flushMailbox()
+    assert.equal(sent.length, 1)
+    failure = true
+    await c.refreshQuestions()
+    assert.equal((await pending())?.length, 1)
+    failure = false
+    rows = [{ ...reply, sequence: 9 }, ...rows]
+    await c.refreshQuestions()
+    assert.equal((await pending())?.length, 1)
+    rows = [reply, ...rows]
+    await c.refreshQuestions()
+    assert.deepEqual(await pending(), [])
+    rows = [ask]
+    await c.refreshQuestions(); await c.flushMailbox()
+    assert.equal(sent.length, 1)
+    await c.store.mutate('p1', undefined, changed => { changed.runId = 'run_replaced' })
+    assert.deepEqual(await pending(), [])
+    await c.refreshQuestions()
+    assert.equal(runs.at(-1), 'run_replaced')
+    assert.deepEqual(await pending(), [])
+  } finally { c.stop(); await worker.deactivate() }
+})
 
 test('feedback returns the committed snapshot without waiting for delivery or session inventory', async () => {
   const project = fresh(refs[0]); project.runId = 'run_fake'; project.mainAgentHandle = 'test-session'; submitTask(project, deliverable)

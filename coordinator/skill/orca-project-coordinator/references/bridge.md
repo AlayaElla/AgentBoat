@@ -10,8 +10,10 @@
 ## 读
 
 - `projects`：项目列表，不含工作间主 agent 自己所在的目录。
-- `overview`：`{workspace,attention,projects,hidden,links,connections,machines}`。attention 是待决定、待验收、受阻、返修；执行记录不代表 agent 在线。
+- `overview`：读取绑定、待处理、项目和连接全量。attention 是待决定、待验收、受阻、返修；questions 是超过 10 分钟未回复的项目 Run 问题。执行记录不代表 agent 在线。
+- `overview --brief`：日常核对待办，返回 `{attention,questions,projects:[{id,name,counts}]}`。项目目录和连接设置在全量总览里。
 - `read <projectId>`：`{project,lead}`，project 含 revision、runId、roles、tasks、events、deliveries。
+- `read <projectId> --task <taskId>`：只核对一项任务时使用，返回 `{projectId,revision,task}`。任务不存在时返回错误。
 - `project-lead <projectId>`：项目的主会话（`binding`）、待接管状态和在线目标会话。
 - `main-read`：工作间主 agent 的绑定；`main-targets`：可接管的在线会话。
 - `connections`、`connection-read <名字>`、`connection-check <名字>`（只做无害查询）。

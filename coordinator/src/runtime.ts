@@ -8,6 +8,7 @@ import { readAgents, type AgentsSnapshot } from './agents'
 import type { Project } from './model'
 import type { HostApi } from 'orca/host'
 import { agentFlags, launchReceipt, type AgentLaunch } from '../../workspace/agent-launch.mjs'
+import { inboxLimit, openQuestions, type OrcaQuestion } from '../scripts/orca-questions.mjs'
 
 const execute = promisify(execFile)
 export interface CoordinatorRuntime {
@@ -20,6 +21,7 @@ export interface CoordinatorRuntime {
   openOverview(): Promise<void>
   removeProject(ref: ProjectRef, host: HostApi<'worker'>): Promise<void>
   agents(projects: Project[], host: HostApi<'worker'>, main?: AgentSession): Promise<AgentsSnapshot>
+  questions(runId: string): Promise<OrcaQuestion[]>
   hermesApprovalMode(): Promise<string>
   send(runId: string, delivery: Delivery): Promise<{ requestId?: string }>
 }
@@ -83,6 +85,12 @@ export class OrcaRuntime implements CoordinatorRuntime {
   }
   async openOverview() { await this.call(['plugin', 'open', 'local.project-coordinator', '--panel', 'project-coordinator']) }
   async agents(projects: Project[], host: HostApi<'worker'>, main?: AgentSession) { return readAgents(host, args => this.call(args), projects, main) }
+  async questions(runId: string) {
+    // shortcut: Orca inbox has no pagination; scan the newest bounded window.
+    const result = await this.call(['orchestration', 'inbox', '--run', runId, '--limit', String(inboxLimit)])
+    if (!Array.isArray(result.messages) || result.messages.some((m: any) => !m || m.run_id !== runId)) fail('Orca 运行邮件无法核对')
+    return openQuestions(result.messages, runId)
+  }
   async hermesApprovalMode() {
     const home = process.env.HERMES_HOME || path.join(process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local'), 'hermes')
     const { stdout } = await execute(process.platform === 'win32' ? path.join(home, 'bin', 'hermes.exe') : 'hermes', ['config', 'get', 'approvals.mode', '--json'], { timeout: 15000, windowsHide: true, maxBuffer: 65536 })

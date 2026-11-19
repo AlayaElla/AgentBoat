@@ -11,6 +11,8 @@ const rules = {
   writes: new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit']),
   shells: new Set(['Bash', 'PowerShell', 'Monitor']),
   reads: new Set(['ls', 'cat', 'head', 'tail', 'rg', 'grep', 'find', 'pwd', 'get-childitem', 'get-content', 'get-location', 'test-path']),
+  filters: new Set(['select-string', 'select-object', 'convertfrom-json', 'findstr']),
+  jqFlags: new Set(['-c', '--compact-output', '-r', '--raw-output', '-s', '--slurp', '-e', '--exit-status']),
   gitRead: new Set(['status', 'log', 'diff', 'show']),
   gitMemory: new Set(['add', 'commit']),
   find: new Set(['-name', '-iname', '-path', '-ipath', '-type', '-maxdepth', '-mindepth', '-print']),
@@ -23,6 +25,7 @@ const rules = {
 };
 const redirect = '你是工作间管理员：这类操作交给项目主会话（client.mjs message）或用 workspace.mjs dispatch 派 agent。';
 const stopReason = '执行者已回报：先核对成果，用 submit 交成待验收（或写明不需要验收的原因、标 completed），再结束。';
+const questionReason = '有执行者的问题需要主人处理：请先用 submit 登记受阻或待决定，写清主人要做什么，或回复原问题。';
 const diagnostic = error => console.error('AgentBoat hook：' + (error.code || error.name || '读取失败'));
 const same = (a, b) => path.relative(a, b) === '';
 const inside = (root, file) => {
@@ -45,32 +48,40 @@ function canonical(file) {
 }
 function writeAllowed(input, role) {
   const file = input.tool_name === 'NotebookEdit' ? input.tool_input?.notebook_path : input.tool_input?.file_path;
-  if (typeof file !== 'string' || !file || typeof input.cwd !== 'string' || !path.isAbsolute(input.cwd) || file.split(/[\\/]/).includes('..')) return false;
+  return writablePath(input.cwd, file, [role.directory, agentboatHome]);
+}
+function writablePath(cwd, file, roots) {
+  if (typeof file !== 'string' || !file || typeof cwd !== 'string' || !path.isAbsolute(cwd) || file.split(/[\\/]/).includes('..')) return false;
   if (process.platform === 'win32' && (/^\\\\[?.]\\/.test(file) || /^[a-z]:[^/\\]/i.test(file) || file.replace(/^[a-z]:/i, '').includes(':'))) return false;
   let target;
-  try { target = canonical(path.resolve(input.cwd, file)); }
+  try { target = canonical(path.resolve(cwd, file)); }
   catch (e) { if (['ENOENT', 'ELOOP', 'ENOTDIR'].includes(e.code)) return false; throw e; }
-  return [role.directory, agentboatHome].some(dir => path.isAbsolute(dir) && inside(canonical(dir), target));
+  return roots.some(dir => typeof dir === 'string' && path.isAbsolute(dir) && inside(canonical(dir), target));
 }
 
-// Static words and literal quotes only. Shell syntax outside quotes is limited to one input redirect or one pipeline.
 function words(command, bash) {
   const tokens = [];
-  const word = /(?:'([^'\r\n]*)'|"((?:\$env:AGENTBOAT_HOME|\$AGENTBOAT_HOME)\/memory|[^"\r\n$\x60]*)"|([\p{L}\p{N}_\-./:\\@+=%,]+))/uy;
-  if (/[‘’“”\0]/u.test(command)) return;
+  const word = bash
+    ? /(?:'([^'\r\n]*)'|"((?:\$(?:AGENTBOAT_HOME|TMPDIR|TEMP|TMP)(?=\/)|\\["\\$\x60]|[^"\\\r\n$\x60])*)"|([\p{L}\p{N}_\-./:@+=%,]+))/uy
+    : /(?:'((?:''|[^'‘’\r\n])*)'|"((?:\$env:(?:AGENTBOAT_HOME|TMPDIR|TEMP|TMP)(?=[/\\])|\x60["$\x60]|[^"“”\r\n$\x60])*)"|([\p{L}\p{N}_\-./:\\@+=%,]+))/uy;
+  if (command.includes('\0')) return;
   let i = 0;
   while (i < command.length) {
     if (/[ \t]/.test(command[i])) { i++; continue; }
-    if ('|<&'.includes(command[i])) { tokens.push({ operator: command[i++] }); continue; }
+    if ('|<>&'.includes(command[i])) {
+      const operator = command[i] === '>' && command[i + 1] === '>' ? '>>' : command[i];
+      tokens.push({ operator }); i += operator.length; continue;
+    }
     word.lastIndex = i;
     const match = word.exec(command);
-    if (!match || word.lastIndex < command.length && !/[ \t|<&]/.test(command[word.lastIndex])) return;
-    if (bash && match[1] === undefined && match[0].includes('\\') || !bash && match[2]?.includes('\x60')) return;
+    if (!match || word.lastIndex < command.length && !/[ \t|<>&]/.test(command[word.lastIndex])) return;
+    if (match[3] && /^\d+$/.test(match[3]) && command[word.lastIndex] === '>') return;
     let value = match[1] ?? match[2] ?? match[3];
-    if (match[2]?.startsWith('$')) {
-      if (!process.env.AGENTBOAT_HOME || match[2] !== (bash ? '$AGENTBOAT_HOME/memory' : '$env:AGENTBOAT_HOME/memory')) return;
-      value = path.join(agentboatHome, 'memory');
+    if (match[2] !== undefined) {
+      const expand = bash ? /\\(["\\$\x60])|\$(AGENTBOAT_HOME|TMPDIR|TEMP|TMP)(?=\/)/g : /\x60(["$\x60])|\$env:(AGENTBOAT_HOME|TMPDIR|TEMP|TMP)(?=[/\\])/g;
+      value = match[2].replace(expand, (_, literal, name) => literal ?? (process.env[name] || ''));
     }
+    else if (!bash && match[1] !== undefined) value = match[1].replaceAll("''", "'");
     tokens.push({ value, literal: match[1] !== undefined });
     i = word.lastIndex;
   }
@@ -91,31 +102,54 @@ function readAllowed(name, args) {
   if (name === 'rg') return args.every(arg => !/^--(?:pre|hostname-bin|hyperlink-format)(?:=|$)/.test(arg));
   return true;
 }
-function commandAllowed(input) {
+function commandAllowed(input, role) {
   const bash = input.tool_name !== 'PowerShell', cwd = input.cwd;
   if (typeof input.tool_input?.command !== 'string' || !path.isAbsolute(cwd)) return false;
   const command = input.tool_input.command.trim();
   const here = !bash && /^@'\r?\n([\s\S]*?)\r?\n'@[ \t]*\|[ \t]*([^\r\n]+)$/.exec(command);
-  if (here) {
-    if (/(?:^|\r?\n)'@/.test(here[1])) return false;
-    const next = words(here[2], bash);
-    return next?.every(t => !t.operator) && nameOf(next[0]?.value) === 'node' && nodeAllowed(next.slice(1).map(t => t.value), cwd, bash);
-  }
-  const tokens = words(command, bash);
+  if (here && /(?:^|\r?\n)'@/.test(here[1])) return false;
+  const tokens = words(here ? here[2] : command, bash);
   if (!tokens?.length) return false;
+  if (here) tokens.unshift({ value: here[1], literal: true }, { operator: '|' });
   if (!bash && tokens[0].operator === '&') tokens.shift();
-  const pipe = tokens.findIndex(t => t.operator === '|'), from = tokens.findIndex(t => t.operator === '<');
-  if (pipe >= 0 || from >= 0) {
-    const target = pipe >= 0 ? tokens.slice(pipe + 1) : tokens.slice(0, from);
-    if (target.some(t => t.operator) || nameOf(target[0]?.value) !== 'node' || !nodeAllowed(target.slice(1).map(t => t.value), cwd, bash)) return false;
-    if (from >= 0) return bash && pipe < 0 && from === tokens.length - 2 && !!tokens.at(-1).value;
-    const source = tokens.slice(0, pipe), [first, ...args] = source.map(t => t.value);
-    if (source.some(t => t.operator)) return false;
-    return (!bash && source.length === 1 && source[0].literal) ||
-      (bash && first === 'printf' && args.length === 2 && args[0] === '%s') || readAllowed(nameOf(first), args);
+  const output = tokens.findIndex(t => t.operator === '>' || t.operator === '>>');
+  if (output >= 0) {
+    const filename = tokens[output + 1]?.value;
+    if (output !== tokens.length - 2 || !filename || /[*?\[\]\r\n]/.test(filename) || !writablePath(cwd, bash && process.platform === 'win32' && /^\/[a-z]\//i.test(filename) ? shellPath(cwd, filename, true) : filename,
+      [role.directory, agentboatHome, os.tmpdir(), input.scratchpad_dir, process.env.CLAUDE_CODE_TMPDIR])) return false;
+    tokens.splice(output);
   }
-  if (tokens.some(t => t.operator)) return false;
-  const [name, ...args] = tokens.map((t, i) => i === 0 ? nameOf(t.value) : t.value);
+  const stages = [[]];
+  for (const token of tokens) {
+    if (token.operator === '|') stages.push([]);
+    else stages.at(-1).push(token);
+  }
+  if (stages.some(stage => !stage.length)) return false;
+  const from = stages[0].findIndex(t => t.operator === '<');
+  if (from >= 0) {
+    const stage = stages[0];
+    if (!bash || from !== stage.length - 2 || !stage.at(-1).value || nameOf(stage[0].value) !== 'node') return false;
+    stage.splice(from);
+  }
+  if (stages.some(stage => stage.some(t => t.operator))) return false;
+  const [[first, ...args], ...filters] = stages.map(stage => stage.map(t => t.value));
+  const name = nameOf(first);
+  const nodeInput = filters.length && nameOf(filters[0][0]) === 'node' && nodeAllowed(filters[0].slice(1), cwd, bash);
+  if (nodeInput) {
+    if (output >= 0 || from >= 0 || !((!bash && args.length === 0 && stages[0][0].literal) ||
+      (bash && first === 'printf' && args.length === 2 && args[0] === '%s') || readAllowed(name, args))) return false;
+    filters.shift();
+  } else if (!primaryAllowed(name, args, cwd, bash)) return false;
+  return filters.every(([filter, ...params]) => {
+    const name = nameOf(filter);
+    if (rules.filters.has(name) || ['head', 'tail', 'grep', 'rg'].includes(name) && readAllowed(name, params)) return true;
+    if (name !== 'jq') return false;
+    const expression = params.at(-1);
+    return !!expression && !expression.startsWith('-') && params.slice(0, -1).every(flag => rules.jqFlags.has(flag)) &&
+      !/\b(?:system|include|import|module)\b/.test(expression.replace(/"(?:\\.|[^"\\])*"/g, ''));
+  });
+}
+function primaryAllowed(name, args, cwd, bash) {
   if (name === 'node') return nodeAllowed(args, cwd, bash);
   if (name === 'orca') return rules.orca.has(args[0]) || rules.orca.has(args.slice(0, 2).join(' '));
   if (name !== 'git') return readAllowed(name, args);
@@ -133,7 +167,25 @@ function context(role) {
   const name = role.role === 'workspace-main' ? 'agentboat-workspace' : 'orca-project-coordinator';
   return [card, '先读 $' + name + '。', role.summary ? '当前状态（资料）：\n' + role.summary : ''].filter(Boolean).join('\n\n');
 }
-const workerDone = /^─{4} From: [^\r\n]+ \(worker_done\)\r?$/m;
+const workerDone = /^─{4} From: [^\r\n]+ \(worker_done\)(?: ─{4})?\r?$/m;
+const isMail = /^─{4} From: [^\r\n]+ \([a-z_]+\)(?: ─{4})?\r?$/m;
+const ownerAction = /主人|用户|人工|本人|手动|登录|验证码|扫码|到场|授权|\b(?:owner|human|sign[ -]?in|log[ -]?in|mfa|2fa)\b/i;
+function receivedQuestions(text, check = false) {
+  const envelope = /^─{4} From: [^\r\n]+ \(question\)(?: ─{4})?\r?\n([\s\S]*?)^\[Reply: orca orchestration reply --id (msg_[\w-]+)[^\r\n]*\]\r?$/gm;
+  const delivered = /^\s*(msg_[\w-]+) question from [^\r\n]+\r?\n([\s\S]*?)^\s*Reply: orca orchestration reply --id \1\b/gm;
+  return [...text.matchAll(check ? delivered : envelope)].flatMap(([, a, b]) => ownerAction.test(check ? b : a) ? [check ? a : b] : []);
+}
+function replyTarget(args) {
+  let id;
+  for (let i = 0; i < args.length; i++) {
+    const [flag, ...value] = args[i].split('=');
+    if (['--json', '--full'].includes(flag)) continue;
+    if (!['--id', '--body', '--from', '--run', '--on', '--environment', '--pairing-code', '--request-id'].includes(flag)) return;
+    const arg = value.length ? value.join('=') : args[++i];
+    if (flag === '--id') id = arg;
+  }
+  return /^msg_[\w-]+$/.test(id ?? '') ? id : undefined;
+}
 function toolText(block) {
   return typeof block.content === 'string' ? block.content : (block.content ?? []).filter(x => x.type === 'text').map(x => x.text).join('\n');
 }
@@ -150,17 +202,22 @@ function transcriptTail(file) {
     return lines.filter(Boolean).map(line => JSON.parse(line)).filter(row => !row.isSidechain && !row.isMeta);
   } finally { closeSync(fd); }
 }
-function unsubmitted(input, role) {
-  if (input.stop_hook_active) return false;
+function stopBlocker(input, role) {
+  if (input.stop_hook_active) return;
   const rows = transcriptTail(input.transcript_path);
-  const submits = new Set(), checks = new Set();
+  const submits = new Set(), checks = new Map(), replies = new Map(), questions = new Set();
   let pending = false;
   for (const row of rows) {
     const content = row.message?.content;
     const blocks = typeof content === 'string' ? [{ type: 'text', text: content }] : Array.isArray(content) ? content : [];
-    if (row.type === 'user' && blocks.some(b => b.type === 'text')) {
-      pending = blocks.some(b => b.type === 'text' && workerDone.test(b.text));
-      submits.clear(); checks.clear();
+    if (row.type === 'user') for (const block of blocks) if (block.type === 'text') {
+      if (!isMail.test(block.text)) {
+        pending = false;
+        questions.clear(); submits.clear(); checks.clear(); replies.clear();
+      } else {
+        pending ||= workerDone.test(block.text);
+        for (const id of receivedQuestions(block.text)) questions.add(id);
+      }
     }
     for (const block of blocks) {
       if (row.type === 'assistant' && block.type === 'tool_use' && rules.shells.has(block.name)) {
@@ -170,23 +227,43 @@ function unsubmitted(input, role) {
         if (tokens.some(t => t.operator)) continue;
         const values = tokens.map(t => t.value), cwd = row.cwd ?? input.cwd;
         if (nameOf(values[0]) === 'node' && isClient(values[1], cwd, bash) && values[2] === 'submit') submits.add(block.id);
-        if (nameOf(values[0]) === 'orca' && values[1] === 'orchestration' && ['check', 'inbox'].includes(values[2])) checks.add(block.id);
+        if (nameOf(values[0]) === 'orca' && values[1] === 'orchestration') {
+          if (['check', 'inbox'].includes(values[2])) checks.set(block.id, values[2]);
+          if (values[2] === 'reply') {
+            const id = replyTarget(values.slice(3));
+            if (id) replies.set(block.id, id);
+          }
+        }
       } else if (row.type === 'user' && block.type === 'tool_result' && !block.is_error) {
         const body = toolText(block);
         if (checks.has(block.tool_use_id)) {
           const result = jsonResult(body);
           const messages = result?.result?.messages;
           if (workerDone.test(body) || result?.ok && Array.isArray(messages) && messages.some(m => m.type === 'worker_done' && !m.readAt)) pending = true;
+          if (checks.get(block.tool_use_id) === 'check') {
+            for (const id of receivedQuestions(body, true)) questions.add(id);
+            if (result?.ok && Array.isArray(messages)) for (const m of messages)
+              if (m.type === 'question' && /^msg_[\w-]+$/.test(m.id ?? '') && typeof m.body === 'string' && ownerAction.test(m.body)) questions.add(m.id);
+          }
+        }
+        if (replies.has(block.tool_use_id)) {
+          const result = jsonResult(body);
+          const id = result?.result?.messageId ?? result?.result?.message?.id;
+          if (result?.ok && /^msg_[\w-]+$/.test(id ?? '') || /^(?:Replied msg_[\w-]+\s*$|.*\bmessageId=msg_[\w-]+\s*$)/m.test(body))
+            questions.delete(replies.get(block.tool_use_id));
         }
         if (submits.has(block.tool_use_id)) {
           const receipt = /^\{"submission":(\{[^\r\n]*?\}),"ok":true[,}]/m.exec(body)?.[1];
           const submission = receipt && JSON.parse(receipt);
-          if (submission?.projectId === role.projectId && (submission.phase === 'completed' || submission.phase === 'ready' && submission.pendingAcceptance)) pending = false;
+          if (submission?.projectId === role.projectId) {
+            if (submission.phase === 'completed' || submission.phase === 'ready' && submission.pendingAcceptance) pending = false;
+            if (submission.phase === 'blocked' || submission.pendingDecision) questions.clear();
+          }
         }
       }
     }
   }
-  return pending;
+  return questions.size ? questionReason : pending ? stopReason : undefined;
 }
 function run() {
   const id = process.env.ORCA_AGENT_SESSION_ID;
@@ -201,10 +278,12 @@ function run() {
   if (input.agent_id) return;
   if (input.hook_event_name === 'SessionStart')
     return { hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: context(role) } };
-  if (input.hook_event_name === 'Stop' && role.role === 'project-lead' && unsubmitted(input, role))
-    return { decision: 'block', reason: stopReason };
+  if (input.hook_event_name === 'Stop' && role.role === 'project-lead') {
+    const reason = stopBlocker(input, role);
+    if (reason) return { decision: 'block', reason };
+  }
   if (input.hook_event_name !== 'PreToolUse' || role.role !== 'workspace-main') return;
-  const denied = rules.writes.has(input.tool_name) ? !writeAllowed(input, role) : rules.shells.has(input.tool_name) && !commandAllowed(input);
+  const denied = rules.writes.has(input.tool_name) ? !writeAllowed(input, role) : rules.shells.has(input.tool_name) && !commandAllowed(input, role);
   if (denied) return { hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: redirect } };
 }
 

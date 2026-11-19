@@ -154,8 +154,29 @@ test('submit emits the hook receipt only for the exact saved write and preserves
       encoding: 'utf8', windowsHide: true, env: { ...process.env, TEST_UNMATCHED: unmatched ? '1' : '' }
     }));
     const reply = call(false);
-    assert.deepEqual(reply.submission, { projectId: 'p1', requestId: 'one', taskId: 't1', phase: 'ready', pendingAcceptance: true });
+    assert.deepEqual(reply.submission, { projectId: 'p1', requestId: 'one', taskId: 't1', phase: 'ready', pendingAcceptance: true, pendingDecision: false });
     assert.equal(reply.result.result.project.ref.id, 'p1');
     assert.equal(call(true).submission, undefined);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('brief and single-task reads preserve the bridge envelope and omit unrelated state', () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'compact-client-')), fixture = path.join(dir, 'orca-fixture.mjs');
+  writeFileSync(fixture, `import cp from 'node:child_process'; import {syncBuiltinESMExports} from 'node:module';
+const ref={id:'p1',name:'示例',path:'/private/path'}, counts={working:2};
+const project={ref, revision:3, tasks:[{id:'t1',title:'一'},{id:'t2',title:'二'}], events:['private']};
+const overview={workspace:{runId:'main'},links:['private'],attention:[{title:'待决定'}],questions:[{id:'msg_1'}],projects:[{ref,counts}]};
+cp.execFileSync=(_exe,args)=>JSON.stringify({ok:true,id:'fixture',result:{result:args[4]==='workspace.overview'?overview:args[4]==='project.agent'?{project,lead:{private:true}}:null}});
+syncBuiltinESMExports();`);
+  const call = (...args) => JSON.parse(execFileSync(process.execPath, ['--import', pathToFileURL(fixture).href, 'scripts/client.mjs', ...args],
+    { encoding: 'utf8', windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] }));
+  try {
+    assert.deepEqual(call('overview', '--brief'), { ok: true, id: 'fixture', result: { result: {
+      attention: [{ title: '待决定' }], questions: [{ id: 'msg_1' }], projects: [{ id: 'p1', name: '示例', counts: { working: 2 } }]
+    } } });
+    assert.equal(call('overview').result.result.workspace.runId, 'main');
+    assert.deepEqual(call('read', 'p1', '--task', 't2').result.result, { projectId: 'p1', revision: 3, task: { id: 't2', title: '二' } });
+    assert.equal(call('read', 'p1').result.result.project.tasks.length, 2);
+    assert.throws(() => call('read', 'p1', '--task', 'absent'), /找不到任务 absent/);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });

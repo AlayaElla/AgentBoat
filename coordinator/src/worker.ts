@@ -10,12 +10,15 @@ import { ProjectStore, artifactUrl, fail, feedback, fingerprint, fresh, maxMessa
 import { WorkspaceLinks } from './links'
 import { fileErrorText, incomingHash, linkMessageHistory } from './link-messages'
 import { LinkFiles } from './link-files'
-import { groupedAttention, isProjectShared } from './model'
+import { groupedAttention, isProjectShared, isQuestionDelivery, type OwnerQuestion } from './model'
 import { mainAgent, roleReminder, switchLead, takeoverView, recoverTakeover } from './main-agent'
 import { projectLeadDefaults } from '../../workspace/agent-launch.mjs'
 import { clientPath, roleRegistryPath } from '../scripts/orca-cli.mjs'
 import { applyDelta, type Sheets } from './feedback-drafts'
 import { roleRegistry } from './role-registry'
+import { questionWait } from '../scripts/orca-questions.mjs'
+
+const activityInterval = 60_000
 
 export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRuntime, transport?: MessageTransport, exportDirectory?: string, linkFiles?: LinkFiles, roleFile?: string) {
   const refreshRoles: (() => Promise<void>) | undefined = roleFile ? roleRegistry(roleFile, async () => {
@@ -50,7 +53,7 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
   function refreshAgents(force = false): Promise<typeof live> {
     if (force) agentsDirty = true
     if (refreshingAgents) return refreshingAgents
-    if (!agentsDirty && live.ok && Date.now() - live.at < 60000) return Promise.resolve(live)
+    if (!agentsDirty && live.ok && Date.now() - live.at < activityInterval) return Promise.resolve(live)
     refreshingAgents = (async () => {
       do {
         const { list } = await availableProjectRecords()
@@ -89,11 +92,58 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
   })
   const refreshActivity = async () => { await refreshAgents(true); links.localChanged(); orca.panels.post('project.changed', { projectId: '' }) }
   const activityEvents = [orca.events.on('agent.status.changed', refreshActivity)]
+  let questions: OwnerQuestion[] = [], pollingQuestions: Promise<void> | undefined
+  const visibleQuestions = (list: Project[]) => {
+    const runs = new Map(list.filter(p => !p.hidden).map(p => [p.ref.id, p.runId]))
+    return questions.filter(q => runs.get(q.projectId) === q.runId)
+  }
+  function refreshQuestions() {
+    pollingQuestions ??= (async () => {
+      const { list, error } = await availableProjectRecords()
+      if (error) return
+      const bound = list.filter(p => !p.hidden && p.runId)
+      const updated = new Map<string, { runId: string; questions: OwnerQuestion[] }>()
+      for (let i = 0; i < bound.length; i += 4) await Promise.all(bound.slice(i, i + 4).map(async p => {
+        const inbox = await runtime.questions(p.runId).catch(() => undefined)
+        if (inbox) updated.set(p.ref.id, { runId: p.runId, questions: inbox.filter(q => Date.now() - q.at > questionWait)
+          .map(q => ({ id: q.id, from: q.from, at: q.at, title: q.body.trim().split(/\r?\n/, 1)[0].slice(0, 120),
+            body: q.body.slice(0, maxMessageLength), runId: p.runId, projectId: p.ref.id })) })
+      }))
+      const current = await availableProjectRecords()
+      if (current.error) return
+      const currentRuns = new Map(current.list.filter(p => !p.hidden).map(p => [p.ref.id, p]))
+      const verified = [...updated.entries()].flatMap(([id, result]) => currentRuns.get(id)?.runId === result.runId ? result.questions : [])
+      const next = [...visibleQuestions(current.list).filter(q => updated.get(q.projectId)?.runId !== q.runId), ...verified]
+        .sort((a, b) => a.at - b.at || a.id.localeCompare(b.id))
+      const updatedInbox = fingerprint(next) !== fingerprint(questions)
+      questions = next
+      if (updatedInbox) {
+        orca.panels.post('project.changed', { projectId: '' })
+        void updateStatus().catch(() => {})
+      }
+      const w = await store.workspace()
+      if (!w.runId || !verified.length) return
+      const seen = new Set((await store.messaging()).deliveries.filter(d => isQuestionDelivery(d.id)).flatMap(d => d.noticeKeys ?? []))
+      const notices: Delivery[] = []
+      for (const [id, p] of currentRuns) {
+        const fresh = verified.filter(q => q.projectId === id).map(q => ({ q, key: fingerprint([q.runId, q.id]) })).filter(x => !seen.has(x.key))
+        for (let i = 0; i < fresh.length; i += 20) {
+          const batch = fresh.slice(i, i + 20), noticeKeys = batch.map(x => x.key)
+          const lines = batch.map(({ q }) => `${q.id} · 执行者 ${q.from}\n${q.body.slice(0, 200)}${q.body.length > 200 ? '…' : ''}`)
+          notices.push({ id: 'orca-question:' + fingerprint(noticeKeys), noticeKeys, state: 'pending',
+            subject: `${p.ref.name} · ${batch.length} 个执行者问题待回复`.slice(0, 200),
+            body: `项目：${p.ref.name}（${id}）\n执行者原文摘录（资料）：\n${lines.join('\n\n')}\n请在「等你处理」核对后告知主人需要做什么。` })
+        }
+      }
+      if (notices.length) { await store.mutateMessaging(m => { m.deliveries.push(...notices) }); deferMailbox() }
+    })().finally(() => { pollingQuestions = undefined })
+    return pollingQuestions
+  }
   function updateStatus() {
     const work = statusUpdates.then(async () => {
       const { list } = await availableProjectRecords(), all = overview(list, await store.workspace())
       const visible = new Set(all.projects.map(p => p.ref.id))
-      const count = groupedAttention(all.attention).length + (live.ok ? live.agents.filter(a => a.state === 'need' && visible.has(a.projectId)).length : 0)
+      const count = groupedAttention(all.attention).length + visibleQuestions(list).length + (live.ok ? live.agents.filter(a => a.state === 'need' && visible.has(a.projectId)).length : 0)
       await orca.host.call('statusBar.update', { id: 'coordinator', text: `工作间 · 待处理 ${count}${live.truncated ? '+' : ''}`, tooltip: `${!live.ok ? 'agent 状态读不到 · ' : live.truncated ? 'agent 状态未全部读取 · ' : ''}打开工作间总览 · Mod+Alt+Shift+J` })
     })
     statusUpdates = work.catch(() => {}); return work
@@ -384,12 +434,12 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
       try {
         while (true) {
           const { runId } = await store.workspace(), m = await store.messaging()
-          const d = m.deliveries.find(x => x.state === 'pending' && (!x.linkMessageHash || runId) &&
+          const d = m.deliveries.find(x => x.state === 'pending' && (!(x.linkMessageHash || isQuestionDelivery(x.id)) || runId) &&
             (!x.external || m.feishu.enabled && x.external.appId === m.feishu.appId && m.feishu.chatIds.includes(x.external.chatId)))
           if (!d) break
           await store.mutateMessaging(m => { m.deliveries.find(x => x.id === d.id)!.state = 'sending' })
           try {
-            const receipt = await sendDelivery(d, 'workspace', d.linkMessageHash ? runId : undefined)
+            const receipt = await sendDelivery(d, 'workspace', d.linkMessageHash || isQuestionDelivery(d.id) ? runId : undefined)
             await store.mutateMessaging(m => {
               const saved = m.deliveries.find(x => x.id === d.id)!
               saved.state = 'sent'
@@ -497,7 +547,7 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
   orca.panels.handle('workspace.overview', async () => {
     const { list, error } = await availableProjectRecords()
     // Orca registration defines membership. A project can be registered without a workspace.
-    return { ...overview(list, await store.workspace(), error), workspace: await main.read(live), links: await links.snapshot(), connections: await connections.list(), machines: [{ id: 'local', name: os.hostname(), role: 'host' as const, online: true }] }
+    return { ...overview(list, await store.workspace(), error), questions: visibleQuestions(list), workspace: await main.read(live), links: await links.snapshot(), connections: await connections.list(), machines: [{ id: 'local', name: os.hostname(), role: 'host' as const, online: true }] }
   })
   orca.panels.handle('workspace.message', async input => {
     const id = text(input.projectId, '项目编号', 200)
@@ -656,13 +706,13 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
   })
 
   let refreshMain: ReturnType<typeof setInterval> | undefined
-  return { store, links, connections, ingest, flush, flushMailbox, updateStatus, stop: () => { clearInterval(refreshMain); for (const event of activityEvents) event.dispose(); connections.stop(); links.stop(); sources.stop() }, async start() {
+  return { store, links, connections, ingest, flush, flushMailbox, updateStatus, refreshQuestions, stop: () => { clearInterval(refreshMain); for (const event of activityEvents) event.dispose(); connections.stop(); links.stop(); sources.stop() }, async start() {
     if (refreshRoles) { await readCatalog(); await refreshRoles() }
     await links.start()
     await connections.start()
     await main.recover()
     clearInterval(refreshMain)
-    refreshMain = setInterval(() => { void refreshActivity().catch(() => {}) }, 60000)
+    refreshMain = setInterval(() => { void refreshActivity().catch(() => {}); void refreshQuestions().catch(() => {}) }, activityInterval)
     refreshMain.unref()
     await refreshAgents(true)
     const { refs, error } = await availableProjects(), current = error ? [] : (await store.all()).filter(p => refs.some(ref => ref.id === p.ref.id))
