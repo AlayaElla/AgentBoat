@@ -24,6 +24,7 @@ declare module 'orca' {
     'workspace.message': { input: { projectId: string; revision?: number; requestId: string; runId: string; text: string }; output: Snapshot & { queued?: string } }
     'projects.list': { output: { projects: ProjectRef[]; error?: string } }
     'project.read': { input: { projectId: string }; output: Snapshot }
+    'project.task': { input: { projectId: string; taskId: string }; output: Project['tasks'][number] | null }
     'project.archive': { input: { projectId: string; end?: number }; output: ArchivePage }
     'project.lead': { input: { projectId: string } | (LeadSwitch & { projectId: string }); output: ProjectLead }
     'project.openMain': { input: { projectId: string }; output: { opened: boolean; multipleConversations?: boolean } }

@@ -157,7 +157,7 @@ async function setup(options = {}, hub) {
         window.fixture.hostCalls.push(agent.terminalId ? { method: 'terminal.focus', terminalId: agent.terminalId } : { method: 'workspace.open', workspaceId: agent.workspaceId });
         return { opened: true, focusedTerminal: !!agent.terminalId };
       }
-      if (name === 'project.read') {
+      if (name === 'project.read' || name === 'project.task') {
         if (window.fixture.failRead === input.projectId) { delete window.fixture.failRead; throw Error('模拟读取错误'); }
         if (window.fixture.removedProjects?.includes(input.projectId)) throw Error('项目已从 Orca 移除');
         if (window.fixture.delayProject === input.projectId) {
@@ -165,6 +165,7 @@ async function setup(options = {}, hub) {
           await new Promise(r => { window.fixture.finishRead = r; });
         }
         const p = projects.find(p => p.ref.id === input.projectId);
+        if (name === 'project.task') return clone(p?.tasks.find(t => t.id === input.taskId) ?? null);
         return clone({ project: p ?? null, lead: p ? binding(p) : undefined, projects: projects.map(p => p.ref), workspaceTarget: window.fixture.workspaceTarget });
       }
       if (name === 'project.archive' && input.projectId === 'p1') return input.end === 25 ?
@@ -308,6 +309,19 @@ try {
     await rail().getByRole('button', { name: '再看 2 条' }).waitFor();
     await page.waitForFunction(() => document.querySelectorAll('.home-layer .inbox [data-inbox-row]').length === 3);
   });
+  await test('reopening an inline review uses the overview until the current task arrives', async () => {
+    await openReview();
+    await row('页面交付').click();
+    await page.evaluate(() => { fixture.delayProject = 'p1'; fixture.prune(); });
+    await row('页面交付').click();
+    const body = rail().locator('.irow.open .irow-b');
+    await body.getByText('成果 a1', { exact: true }).waitFor();
+    assert.equal(await body.getByRole('button').count(), 0);
+    await page.evaluate(() => fixture.finishRead());
+    await body.getByText('第 2 版', { exact: true }).waitFor();
+    await row('页面交付').click();
+  });
+  await setup({ inboxBatch: true, width: 400 });
   await test('unconfirmed snapshot persists across reopen; mismatched id is never success', async () => {
     await review('页面交付').check();
     await page.evaluate(() => {fixture.noWrite=true;});
@@ -755,14 +769,18 @@ try {
     assert.equal(await currentLayer().getByRole('radio', { name: '上级 · 画在你上面' }).isChecked(), true);
   });
   await setup({ width: 1040, inboxBatch: true });
-  await test('slow navigation shows a skeleton, ignores stale reads, and failed pages retry in place', async () => {
+  await test('inbox shows read-only overview details while loading and ignores an older selection', async () => {
     await page.evaluate(() => { fixture.delayProject = 'p1'; });
     await row('页面交付').click();
-    await currentLayer().getByRole('status', { name: '正在读取' }).waitFor();
+    await currentLayer().getByText('成果 a1', { exact: true }).waitFor();
+    assert.equal(await currentLayer().getByRole('button').count(), 0);
+    assert.ok(await currentLayer().getByRole('status').isVisible());
     await row('移动端交付').click();
     await currentLayer().getByText('成果 b1', { exact: true }).waitFor();
     await page.evaluate(() => fixture.finishRead());
     assert.equal(await page.locator('.pane-top h2').innerText(), '移动端交付');
+    assert.equal(await currentLayer().getByText('成果 a1', { exact: true }).count(), 0);
+    assert.equal(await page.evaluate(() => fixture.calls.filter(c => c.name === 'project.read').length), 0);
     await back(); await page.evaluate(() => { fixture.failRead = 'p1'; });
     await page.locator('[data-project=p1] .pcard-h').click();
     await currentLayer().getByRole('alert').getByText('模拟读取错误').waitFor();

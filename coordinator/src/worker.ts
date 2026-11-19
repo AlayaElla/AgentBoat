@@ -629,6 +629,12 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
     return { deleted: id, exportPath }
   })
   orca.panels.handle('project.read', input => snapshot(text(input.projectId, '项目编号', 200)))
+  orca.panels.handle('project.task', async input => {
+    const id = text(input.projectId, '项目编号', 200), taskId = text(input.taskId, '任务编号', 200)
+    await requireProject(id)
+    const project = await store.get(id)
+    return project.hidden ? null : project.tasks.find(t => t.id === taskId) ?? null
+  })
   orca.panels.handle('project.archive', async input => {
     const p = await ensure(input.projectId)
     const { batch } = await store.archive.page(p, input.end)

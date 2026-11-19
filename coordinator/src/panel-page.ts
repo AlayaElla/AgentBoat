@@ -12,7 +12,7 @@ const root = document.getElementById('panel')!
 const req = (name: string, input?: any, timeoutMs?: number): Promise<any> => input === undefined
   ? orca.plugin.request(name as any)
   : orca.plugin.request(name as any, JSON.parse(JSON.stringify(input)), timeoutMs ? { timeoutMs } : undefined)
-type PageData = { current: Project | null; lead?: WorkspaceBinding; leadPanel?: ProjectLead; workspace?: ProjectWorkspace; connection?: any; targets?: any; archive?: ArchivePage }
+type PageData = { current: Project | null; task?: FeedbackTask | null; lead?: WorkspaceBinding; leadPanel?: ProjectLead; workspace?: ProjectWorkspace; connection?: any; targets?: any; archive?: ArchivePage }
 type Frame = { key: string; page: Page; form: Record<string, any>; data?: PageData; error?: string; load?: number; opener?: HTMLElement; dirty?: boolean; mounted?: boolean }
 let frameId = 0
 const frameFor = (page: Page): Frame => ({ key: 'page-' + ++frameId, page, form: {} })
@@ -262,19 +262,26 @@ function useFrame(f: Frame) {
   current = f.data?.current ?? null; projectLead = f.data?.lead; projectLeadPanel = f.data?.leadPanel
   workspaceTarget = f.data?.workspace; detail = f.data?.connection; targets = f.data?.targets
 }
-async function loadPage(f = active, projectRead?: Promise<any>) {
+async function loadPage(f = active, taskReads?: Map<string, Promise<FeedbackTask | null>>) {
   const p = f.page, request = (f.load ?? 0) + 1
   f.load = request
   try {
-    const [snapshot, connection, sessions, leadPanel, archive] = await Promise.all([
-      p.projectId && !isRemote(p.projectId) ? projectRead ?? req('project.read', { projectId: p.projectId }) : null,
+    const local = p.projectId && !isRemote(p.projectId)
+    let taskRead
+    if (local && p.kind === 'task' && p.inboxRow) {
+      const key = JSON.stringify([p.projectId, p.id])
+      taskRead = taskReads?.get(key) ?? req('project.task', { projectId: p.projectId, taskId: p.id })
+      taskReads?.set(key, taskRead)
+    }
+    const [task, snapshot, connection, sessions, leadPanel, archive] = await Promise.all([
+      taskRead, local && !taskRead ? req('project.read', { projectId: p.projectId }) : null,
       p.kind === 'connection' && p.id ? req('workspace.connections', { operation: 'read', connectionId: p.id }) : null,
       p.kind === 'main' ? req('workspace.agent.targets') : null,
       p.kind === 'project-settings' && p.projectId ? req('project.lead', { projectId: p.projectId }) : undefined,
       p.kind === 'archive' || (p.kind === 'task' && p.end !== undefined) ? req('project.archive', { projectId: p.projectId, end: p.end }) : undefined
     ])
     if (request !== f.load) return
-    f.data = { current: snapshot?.project ?? null, lead: snapshot?.lead, workspace: snapshot?.workspaceTarget, connection, targets: sessions, leadPanel, archive }
+    f.data = { current: snapshot?.project ?? null, task, lead: snapshot?.lead, workspace: snapshot?.workspaceTarget, connection, targets: sessions, leadPanel, archive }
     f.error = undefined
     if (f === active) useFrame(f)
   } catch (e) {
@@ -301,7 +308,7 @@ async function go(next: Page, reset = false, keyboard = false) {
   f.opener = opener ?? undefined
   const ready = loadPage(f)
   opener?.setAttribute('data-navigating', '')
-  await Promise.race([ready, wait(150)])
+  if (!next.inboxRow) await Promise.race([ready, wait(150)])
   opener?.removeAttribute('data-navigating')
   if (n !== nav) return
   const fromHome = Boolean(opener?.closest('.home-layer')) || prior === homeFrame
@@ -361,13 +368,9 @@ async function refresh(forceAgents = false) {
       inlineRows.delete(id); expandedRows.delete(id); if (lastInline === id) lastInline = ''
     }
     const visible = active === homeFrame && !wideInbox
-    const read = new Map<string, Promise<any>>()
+    const read = new Map<string, Promise<FeedbackTask | null>>()
     const details = visible ? [...inlineRows].filter(([id, f]) => id.startsWith(active.key + '[') && expandedRows.has(id) && f.page.projectId && !isRemote(f.page.projectId)) : []
-    await Promise.all([loadPage(active), ...details.map(([, f]) => {
-      const projectId = f.page.projectId!
-      if (!read.has(projectId)) read.set(projectId, req('project.read', { projectId }))
-      return loadPage(f, read.get(projectId))
-    })])
+    await Promise.all([loadPage(active, read), ...details.map(([, f]) => loadPage(f, read))])
   } catch (e) { if (n === refreshSeq) error = `读取失败：${(e as Error).message}` }
   finally {
     if (n === refreshSeq) { refreshing = false; render(); void reconcileFeedback() }
@@ -540,7 +543,7 @@ function openInbox(r: InboxRow, scope: string, keyboard = false) {
   const f = inlineRows.get(k) ?? frameFor(rowPage(r))
   inlineRows.set(k, f)
   if (active.page.projectId && active.page.projectId === r.projectId && active.data) f.data = active.data
-  else void loadPage(f).then(render)
+  else { f.data = undefined; f.error = undefined; void loadPage(f).then(render) }
   render()
   requestAnimationFrame(() => root.querySelector<HTMLElement>(`[data-expansion="${CSS.escape(k)}"]`)?.scrollIntoView({ block: 'nearest', behavior: 'instant' }))
 }
@@ -566,11 +569,13 @@ function inboxBody(f: Frame) {
   }
   const currentProject = active.data?.current
   const project = currentProject && currentProject.ref.id === p.projectId ? currentProject : f.data?.current
-  const task = project?.tasks.find(t => t.id === p.id)
+  const task = project ? project.tasks.find(t => t.id === p.id) : f.data?.task
   if (f.error) return loadIssue(f)
-  if (!project && !f.data) return skeleton()
+  if (!project && !f.data) return section('要你处理',
+    all.attention.filter(a => a.projectId === p.projectId && a.taskId === p.id && a.kind === rowKind).map(a => small(a.summary)),
+    el('span', { class: 'xs muted', role: 'status' }, '正在读取详情…'))
   if (!task) return small('这项已不在待处理清单')
-  return [feedbackCards(project!.ref.id, [task], '要你处理', rowKind), button('任务详情', () => go({ kind: 'task', projectId: p.projectId, id: p.id }), 'text sm task-details', false, '任务详情', 'chevron')]
+  return [feedbackCards(p.projectId!, [task], '要你处理', rowKind), button('任务详情', () => go({ kind: 'task', projectId: p.projectId, id: p.id }), 'text sm task-details', false, '任务详情', 'chevron')]
 }
 type DisplayRow = InboxRow & { details?: string[] }
 function renderInboxRow(r: DisplayRow, scope: string) {
@@ -754,7 +759,12 @@ function dock() {
 }
 function updateSubmittedProject(project: Project) {
   ++refreshSeq; refreshing = false
-  for (const frame of [...stack, ...inlineRows.values()]) if (frame.data?.current?.ref.id === project.ref.id) { frame.data.current = project; frame.load = (frame.load ?? 0) + 1 }
+  for (const frame of [...stack, ...inlineRows.values()]) {
+    if (frame.page.inboxRow && frame.page.projectId === project.ref.id) frame.data = { current: project }
+    else if (frame.data?.current?.ref.id === project.ref.id) frame.data.current = project
+    else continue
+    frame.load = (frame.load ?? 0) + 1
+  }
   if (current?.ref.id === project.ref.id) current = project
   all.projects = all.projects.map(p => p.ref.id === project.ref.id ? projectSummary(project) : p)
   all.attention = [...all.attention.filter(item => item.projectId !== project.ref.id), ...attention(project)]
@@ -919,7 +929,6 @@ function projectPage() {
     const archive = active.data?.archive
     const t = (archive?.tasks ?? p.tasks).find(t => t.id === page.id)
     if (!t) return callout('任务已不存在，请返回项目。')
-    if (page.inboxRow) return inboxBody(active)
     const artifacts = t.artifacts.map(a => button(a.label + ' · ' + a.version, () => openArtifact(p.ref.id, t.id, a, archive?.end), 'sm'))
     const workers = projectAgents(p.ref.id).filter(a => a.taskId === t.id && a.state !== 'done')
     const messages = archive ? [] : p.events.filter(e => t.sourceIds.includes(e.id) || e.taskId === t.id)
@@ -1176,7 +1185,7 @@ function titleOf(f: Frame) {
   switch (p.kind) {
     case 'archive': return '项目归档'
     case 'project': return project?.ref.name ?? all?.projects.find(x => x.ref.id === p.projectId)?.ref.name ?? '项目'
-    case 'task': return (p.projectId && isRemote(p.projectId) ? remoteFeedback(p.projectId)?.tasks.find(t => t.id === p.id)?.title : undefined) ?? (f.data?.archive?.tasks ?? project?.tasks)?.find(x => x.id === p.id)?.title ?? all?.attention.find(x => x.projectId === p.projectId && x.taskId === p.id)?.title ?? '任务'
+    case 'task': return (p.projectId && isRemote(p.projectId) ? remoteFeedback(p.projectId)?.tasks.find(t => t.id === p.id)?.title : undefined) ?? f.data?.task?.title ?? (f.data?.archive?.tasks ?? project?.tasks)?.find(x => x.id === p.id)?.title ?? all?.attention.find(x => x.projectId === p.projectId && x.taskId === p.id)?.title ?? '任务'
     case 'peer': return peer?.name ?? '工作间连接'
     case 'peer-project': return (peer?.report?.projects ?? peer?.offlineFeedback)?.find(x => x.id === p.pid)?.name ?? '项目'
     case 'connection': return f.data?.connection?.connection?.name ?? all?.connections?.find(c => c.id === p.id)?.name ?? '连接'
@@ -1188,13 +1197,13 @@ const loadIssue = (f: Frame) => el('div', { class: 'card', role: 'alert' }, el('
   button('重试', () => { f.error = undefined; const ready = f === homeFrame ? refresh(true) : loadPage(f); render(); void ready.then(render) }, 'sm'))
 function content(): any {
   if (active.error) return loadIssue(active)
-  if (page.inboxRow && isRemote(page.projectId)) return inboxBody(active)
+  if (page.inboxRow) return inboxBody(active)
   if (!active.data) return skeleton()
   if (page.projectId) return current ? projectPage() : callout('项目已被移除或不可用')
   if (['peer', 'relation', 'peer-project'].includes(page.kind)) return peerPage()
   if (page.kind === 'links') return all.links ? linksPage() : callout('没有可用的工作间连接设置')
   if (page.kind === 'connection' || page.kind === 'add-connection') return connectionPage()
-  if (page.kind === 'agents') return page.inboxRow ? agentNeedContent(page.inboxRow) : agentContent()
+  if (page.kind === 'agents') return agentContent()
   if (page.kind === 'settings') return settingsPage()
   if (page.kind === 'main') return mainPage()
   return null

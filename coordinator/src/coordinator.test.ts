@@ -298,6 +298,22 @@ test('attention counts reviews per task and excludes rework consistently', () =>
   p.tasks[0].acceptance.forEach(a => a.status = 'changes_requested')
   assert.equal(groupedAttention(requireOverview(p).attention).length, 0)
 })
+test('inbox task reads only the selected registered project task without a session lookup', async () => {
+  const project = sample().project!
+  project.mainAgentHandle = mainSession.handle
+  const host = mockHost({ storage: { 'project:p1': project as any } })
+  let sessionReads = 0
+  const worker = await mountWorker({ default: api => { createCoordinator(api, {
+    projects: async () => [refs[0]], targets: async () => { sessionReads++; return { sessions: [], workspaces: [] } }
+  }) } }, { host })
+  try {
+    const read = (projectId: string, taskId: string) => worker.request('project.task', { projectId, taskId })
+    assert.deepEqual(await read('p1', 'task-1'), project.tasks[0])
+    assert.equal(await read('p1', 'missing'), null)
+    await assert.rejects(() => read('p2', 'task-1'), /项目已从 Orca 移除/)
+    assert.equal(sessionReads, 0)
+  } finally { await worker.deactivate() }
+})
 function requireOverview(p: import('./model').Project) { return overview(p ? [p] : [], { version: 1, revision: 0, runId: '', requests: [] }) }
 
 test('hide preserves project records and agent writes, excludes all workspace surfaces and pauses queued reminders until restore', async () => {
@@ -315,6 +331,7 @@ test('hide preserves project records and agent writes, excludes all workspace su
   try {
     assert.deepEqual((await worker.request('project.read', { projectId: 'p1' })).project, p)
     const hidden = (await worker.request('project.visibility', { projectId: 'p1', revision: 0, hidden: true })).project!
+    assert.equal(await worker.request('project.task', { projectId: 'p1', taskId: deliverable.id }), null)
     assert.deepEqual(hidden.tasks, p.tasks)
     const all = await worker.request('workspace.overview')
     assert.deepEqual(all.projects.map(p => p.ref.id), ['p2']); assert.deepEqual(all.hidden, [refs[0]])
