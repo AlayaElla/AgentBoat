@@ -33,7 +33,9 @@ function bridge(operation, input) {
     argument = path.join(home, 'requests', `${randomUUID()}.json`);
     save(argument, input);
   }
-  const reply = JSON.parse(run(process.execPath, [client, operation, ...(argument ? [argument] : [])], root, { ...process.env, ORCA_ENVIRONMENT: 'local', ORCA_PAIRING_CODE: '' }));
+  // Orca reads ORCA_ENVIRONMENT as a saved remote's name, so drop it to reach this machine's Orca.
+  const { ORCA_ENVIRONMENT, ORCA_PAIRING_CODE, ...env } = process.env;
+  const reply = JSON.parse(run(process.execPath, [client, operation, ...(argument ? [argument] : [])], root, env));
   if (!reply.ok) throw new Error(JSON.stringify(reply.error));
   return reply.result.result;
 }
