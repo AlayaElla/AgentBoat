@@ -90,6 +90,10 @@ async function setup(options = {}, hub) {
       project.tasks = project.feedback.tasks.map(t => ({ title: t.title, phase: t.phase, state: t.phase === 'ready' ? 'review' : 'decision',
         decisions: t.decisions.map(d => d.question), acceptance: t.acceptance.map(a => a.title) }));
       project.pending = project.tasks.length;
+      if (options.offlinePeer) {
+        const peer = links.peers[0];
+        peer.status = 'offline'; peer.offlineFeedback = peer.report.projects; delete peer.report;
+      }
     }
     const live = { ok: true, at: now, agents: [{ id: 'agent-need', projectId: 'p1', agent: 'codex', role: 'worker', state: 'need', rawState: 'waiting', verified: true, title: '等批准', taskTitle: '页面交付', last: '等待用户批准', since: now - 60000, workspaceId: 'identity:project-workspace', terminalId: 'term-need' }, { id: 'agent-work', projectId: 'p1', agent: 'claude', role: 'session', state: 'work', rawState: 'working', verified: false, title: '正在工作', last: '正在处理', since: now - 20000 }] };
     if (options.empty || options.projectUnbound) live.agents = [];
@@ -205,9 +209,12 @@ async function setup(options = {}, hub) {
       }
       if (name === 'workspace.linkFeedback') {
         const project = links.peers.find(p => p.id === input.id).report.projects.find(p => p.id === input.projectId);
+        if (options.delayLinkReply) await new Promise(resolve => { fixture.finishLinkReply = resolve; });
+        if (window.fixture.linkTimeout) return { state: 'uncertain', requestId: input.requestId, reason: '连接超时' };
+        if (options.rejectLinkFeedback) return { state: 'rejected', requestId: input.requestId, reason: '项目已更新' };
         if (window.fixture.lostLinkFeedback === input.requestId) { const {id,...wire}=input; return { state: 'submitted', requestId: input.requestId, fingerprint:await digest(wire) }; }
-        if (input.revision !== project.feedback.revision) return { state: 'rejected', reason: '项目已更新' };
-        project.feedback.tasks = [];
+        if (input.revision !== project.feedback.revision) return { state: 'rejected', requestId: input.requestId, reason: '项目已更新' };
+        if (!options.laggingReport) project.feedback.tasks = [];
         project.feedback.revision++;
         if (options.peerProjectPage) {
           const { id, ...wire } = input;
@@ -217,6 +224,7 @@ async function setup(options = {}, hub) {
         return { state: 'uncertain', requestId: input.requestId, reason: '待核对：连接超时或断开' };
       }
       if (name === 'workspace.links') {
+        if (input.operation === 'read') return clone(links);
         if (input.operation === 'invite') {
           if (window.fixture.inviteError) throw Error(window.fixture.inviteError);
           Object.assign(links, { enabled: true, host: '100.64.0.42', port: 43123, publicUrl: 'http://100.64.0.42:43123', listening: 'http://100.64.0.42:43123' });
@@ -960,7 +968,7 @@ try {
     assert.deepEqual(writes.map(c => [c.name, c.input.id, c.input.projectId]), [['workspace.linkFeedback', 'up', 'p1']]);
     assert.deepEqual(writes[0].input.items.map(i => [i.taskId, i.result]), [['t1', 'changes_requested'], ['second', 'passed']]);
   });
-  await setup({ width: 1040, delegatedFeedback: true });
+  await setup({ width: 1040, delegatedFeedback: true, laggingReport: true });
   await test('delegated feedback uses the home inbox, one submit bar, and the original retry request', async () => {
     await page.getByRole('button', { name: '设置', exact: true }).click();
     await currentLayer().getByRole('region', { name: '工作间连接', exact: true }).getByRole('button', { name: '工作间 up', exact: true }).click();
@@ -999,10 +1007,6 @@ try {
       const peer = fixture.links.peers[0]; peer.report = fixture.remoteReport; delete peer.offlineFeedback; peer.status = 'connected'; fixture.emit();
     });
     await dock().getByRole('button', { name: '提交 4 条' }).click();
-    await page.getByRole('alert').filter({ hasText: '待核对' }).waitFor();
-    assert.equal(await review('对方页面交付').isChecked(), true);
-    await row('对方设计决定').getByText('待核对', { exact: true }).waitFor();
-    await dock().getByRole('button', { name: '提交 2 条' }).click();
     await page.getByRole('status').filter({ hasText: '已提交 2 条' }).waitFor();
     const calls = await page.evaluate(() => fixture.calls.filter(c => ['project.feedback', 'workspace.linkFeedback'].includes(c.name)));
     const local = calls.filter(c => c.name === 'project.feedback'), remote = calls.filter(c => c.name === 'workspace.linkFeedback');
@@ -1010,6 +1014,61 @@ try {
     assert.deepEqual(remote.map(c => [c.input.projectId, c.input.items.length]), [['p1', 2], ['p1', 2]]);
     assert.deepEqual(remote[0], remote[1]);
     assert.deepEqual(await page.evaluate(() => fixture.calls.find(c => c.name === 'shell.openExternal').input), 'https://example.com/preview');
+  });
+  let uncertainStorage;
+  await setup({ width: 1040, delegatedFeedback: true });
+  await test('dismissed timeout stays closed after refresh and reopen; offline attempts are never retried', async () => {
+    await review('对方页面交付').check();
+    await page.evaluate(() => { fixture.linkTimeout = true; fixture.links.peers[0].report.projects[0].feedback.revision = 7; });
+    await dock().getByRole('button', { name: '提交 1 条' }).click();
+    await page.waitForFunction(() => Object.values(fixture.stored['panel.feedbackState']).some(s => s.attempt?.autoChecked));
+    await page.getByRole('button', { name: '关闭提示' }).click();
+    await page.getByRole('alert').waitFor({ state: 'hidden' });
+    await page.evaluate(() => fixture.emit());
+    const stored = await page.evaluate(() => fixture.stored);
+    const sheet = stored['panel.feedbackState']['["up","p1"]'];
+    assert.equal(sheet.attempt.input.revision, 7);
+    assert.equal(await page.evaluate(() => fixture.calls.filter(c => c.name === 'workspace.linkFeedback').length), 2);
+    delete sheet.attempt.autoChecked; // Reopen with a persisted timeout still due for its first check.
+    uncertainStorage = stored;
+    await setup({ width: 1040, delegatedFeedback: true, stored, offlinePeer: true });
+    await dock().getByText('「工作间 up」离线，暂不能提交').waitFor();
+    assert.equal(await page.getByRole('alert').count(), 0);
+    assert.equal(await page.evaluate(() => fixture.calls.filter(c => c.name === 'workspace.linkFeedback').length), 0);
+  });
+  await test('a newer complete report settles the original items without sending', async () => {
+    await page.evaluate(() => {
+      const peer = fixture.links.peers[0];
+      peer.report = { projects: peer.offlineFeedback };
+      const feedback = peer.report.projects[0].feedback;
+      feedback.revision = 30;
+      feedback.tasks = feedback.tasks.filter(t => t.id !== 't1');
+      peer.status = 'connected'; fixture.emit();
+    });
+    await page.getByRole('status').filter({ hasText: '对方已处理' }).waitFor();
+    assert.equal(await page.evaluate(() => fixture.calls.filter(c => c.name === 'workspace.linkFeedback').length), 0);
+    assert.equal(await page.evaluate(() => fixture.stored['panel.feedbackState']['["up","p1"]'].attempt), undefined);
+  });
+  await setup({ width: 1040, delegatedFeedback: true, stored: uncertainStorage, rejectLinkFeedback: true });
+  await test('definitive rejection on reopen displays its reason after the old timeout was dismissed', async () => {
+    await page.getByRole('alert').filter({ hasText: '项目已更新' }).waitFor();
+    assert.equal(await page.evaluate(() => fixture.stored['panel.feedbackState']['["up","p1"]'].attempt.rejected), true);
+  });
+  await test('two reopened panels share one automatic check of a legacy attempt', async () => {
+    const hub = await browser.newPage();
+    await hub.addScriptTag({ content: draftModel + ';globalThis.fixtureDraftModel=draftModel;' });
+    await hub.evaluate(sheets => { window.sheets = sheets; }, uncertainStorage['panel.feedbackState']);
+    await setup({ delegatedFeedback: true, delayLinkReply: true, rejectLinkFeedback: true }, hub);
+    const first = page;
+    await first.waitForFunction(() => !!fixture.finishLinkReply);
+    page = undefined;
+    await setup({ delegatedFeedback: true }, hub);
+    assert.equal(await dock().getByRole('button', { name: '提交 1 条' }).isDisabled(), true);
+    assert.equal(await page.evaluate(() => fixture.calls.filter(c => c.name === 'workspace.linkFeedback').length), 0);
+    await first.evaluate(() => fixture.finishLinkReply());
+    await first.getByRole('alert').filter({ hasText: '项目已更新' }).waitFor();
+    assert.equal(await first.evaluate(() => fixture.calls.filter(c => c.name === 'workspace.linkFeedback').length), 1);
+    await first.close(); await hub.close();
   });
   await setup();
   await test('workspace name saves independently of invalid network draft and updates the organization', async () => {

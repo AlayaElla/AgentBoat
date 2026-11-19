@@ -3,10 +3,11 @@ import type { DelegatedFeedback } from './links'
 
 export type Draft = { reviewTotal?: number; taskId: string; kind: 'acceptance' | 'decision'; itemId: string; itemRevision?: number; fingerprint?: string; signature: string; title: string; result?: string; answer?: string; note?: string }
 export type InboxRow = { id: string; title: string; projectId?: string; taskId?: string; kind: Attention['kind'] | 'agent'; count?: number; agent?: LiveAgent }
-export type Attempt = { signature: string; input?: DelegatedFeedback; rows?: InboxRow[]; reason?: string; rejected?: boolean }
-type Sheet = { entries: Record<string, Draft>; attempt?: Attempt; versions: Record<string, number>; floor: number }
+export type Attempt = { signature: string; input?: DelegatedFeedback; rows?: InboxRow[]; reason?: string; rejected?: boolean; checkingUntil?: number; autoChecked?: boolean }
+export const feedbackFailure = (a?: Attempt) => a?.reason && JSON.stringify([a.input?.requestId ?? a.signature, !!a.rejected, a.rejected ? a.reason : ''])
+type Sheet = { entries: Record<string, Draft>; attempt?: Attempt; dismissed?: string; versions: Record<string, number>; floor: number }
 export type Sheets = Record<string, Sheet>
-export type Delta = { projectId: string; exact?: boolean; items: { key: string; version: number; value?: Draft | null }[]; attempt?: { version: number; value: Attempt | null } }
+export type Delta = { projectId: string; exact?: boolean; items: { key: string; version: number; value?: Draft | null }[]; attempt?: { version: number; value: Attempt | null }; dismiss?: string }
 export const emptySheet = (): Sheet => ({ entries: {}, versions: {}, floor: 0 })
 export const versionOf = (sheet: Sheet, key: string) => sheet.versions[key] ?? sheet.floor
 export function applyDelta(sheets: Sheets, change: Delta) {
@@ -33,8 +34,10 @@ export function applyDelta(sheets: Sheets, change: Delta) {
   if (attempt) {
     if (attempt.value === null) delete sheet.attempt
     else sheet.attempt = attempt.value
+    if (!sheet.attempt || sheet.dismissed !== feedbackFailure(sheet.attempt)) delete sheet.dismissed
     sheet.versions.attempt = attempt.version + 1
   }
+  if (change.dismiss && change.dismiss === feedbackFailure(sheet.attempt)) sheet.dismissed = change.dismiss
   if (!sheet.attempt && !Object.keys(sheet.entries).length && (attempt || Object.keys(sheet.versions).length > 64)) {
     sheet.floor = Math.max(sheet.floor, ...Object.values(sheet.versions)) + 1
     sheet.versions = {}

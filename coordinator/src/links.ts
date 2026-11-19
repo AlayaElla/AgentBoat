@@ -531,7 +531,8 @@ export class WorkspaceLinks {
       const offline: FeedbackReply = { requestId: request.requestId, state: 'uncertain', reason: '连接超时或断开，请重试核对' }
       const result = new Promise<FeedbackReply>(resolve => {
         const finish = (result: FeedbackReply) => { clearTimeout(timer); this.feedbackPending.delete(p.id); resolve(result) }
-        const timer = setTimeout(() => finish(offline), 6500)
+        // Allow a 10s fallback refresh and two 5s sync legs on a reverse connection.
+        const timer = setTimeout(() => finish(offline), 20_000)
         this.feedbackPending.set(p.id, { request, sent: false, finish })
       })
       this.wake(p.id)
