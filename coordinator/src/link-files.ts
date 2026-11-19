@@ -2,7 +2,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import { createReadStream } from 'node:fs'
 import { lstat, mkdir, open, readFile, readdir, realpath, rename, rm, writeFile } from 'node:fs/promises'
 import path from 'node:path'
-import { userDataPath } from '../scripts/orca-cli.mjs'
+import { pluginDataPath } from '../scripts/orca-cli.mjs'
 import { fail, fingerprint, object } from './store'
 
 export const maxLinkFileBytes = 25 * 1024 ** 2, maxLinkFiles = 10
@@ -67,7 +67,7 @@ export function wireChunk(raw: unknown): FileChunk | undefined {
 }
 
 export class LinkFiles {
-  constructor(private root = path.join(userDataPath(), 'plugins-data', 'local.project-coordinator'),
+  constructor(private root = pluginDataPath(),
     private limits = { outgoing: maxOutgoingFiles, received: maxReceivedFiles }) {}
 
   private async folder(...parts: string[]) {

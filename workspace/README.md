@@ -24,7 +24,7 @@ node workspace/workspace.mjs templates
 
 ## 模板与立项
 
-默认 [templates/code.json](templates/code.json) 使用 Claude Opus 5.5、`xhigh` 和 `chat` 启动项目主 agent。设计由 Claude 负责，代码和审查由 Codex 负责，来源为 `empty`。模板可设置 `agent`、`model`、`effort` 和 `surface`，其中 `effort` 需要 `model`。手动立项和自动开项目主会话共用模板的启动参数。
+默认 [templates/code.json](templates/code.json) 在 Claude 聊天会话中启动项目主 agent，模型和推理强度跟随各自的 Orca 设置。设计由 Claude 负责，代码和审查由 Codex 负责，来源为 `empty`。模板可设置 `agent`、`model`、`effort` 和 `surface`，其中 `effort` 需要 `model`。手动立项和自动开项目主会话共用模板的启动参数。
 
 保存 UTF-8 JSON 后调用（支持 BOM）：
 

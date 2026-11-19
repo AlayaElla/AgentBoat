@@ -51,7 +51,7 @@ export async function switchLead(runtime: CoordinatorRuntime, input: LeadSwitch,
     return { handle: '', title: `新的 ${agents[agent as keyof typeof agents]} 会话`, workspace: w.workspace, workspaceName: w.name, path: w.path, agent, online: 'unknown' as const }
   })()
   if (!target) fail('目标会话或工作区已不可用，请刷新后选择')
-  if (!existsSync(clientPath)) fail('找不到接管脚本，请从 AgentBoat 仓库构建并加载插件')
+  if (!existsSync(clientPath)) fail('找不到接管脚本，请检查 AgentBoat 安装')
   const token = randomBytes(32).toString('base64url'), id = randomUUID(), expiresAt = new Date(Date.now() + 10 * 60_000).toISOString()
   await mutate(w => {
     if (target.handle && (w.session?.handle ?? w.mainAgentHandle) === target.handle) fail('该会话已经是主会话')

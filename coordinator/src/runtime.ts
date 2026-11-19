@@ -10,6 +10,7 @@ import type { HostApi } from 'orca/host'
 import { agentFlags, launchReceipt, type AgentLaunch } from '../../workspace/agent-launch.mjs'
 import { inboxLimit, openRunMail, type OrcaQuestion, type OrcaWorkerRecord } from '../scripts/orca-questions.mjs'
 import type { WorkerReport } from '../scripts/worker-reports.mjs'
+import { activeUserDataPath, pluginKey, release } from '../scripts/orca-cli.mjs'
 
 const execute = promisify(execFile)
 export interface CoordinatorRuntime {
@@ -33,7 +34,7 @@ export class OrcaRuntime implements CoordinatorRuntime {
     try {
       ({ stdout } = await execute(await this.executable(), [...args, '--environment', 'local', '--json', ...(args[0] === 'orchestration' ? ['--full'] : [])], {
         timeout: 25000, maxBuffer: 8 * 1024 * 1024, windowsHide: true,
-        env: { ...process.env, ...(process.platform === 'win32' ? {
+        env: { ...process.env, ...(release ? { ORCA_USER_DATA_PATH: activeUserDataPath() } : {}), ...(process.platform === 'win32' ? {
           APPDATA: process.env.APPDATA || path.join(os.homedir(), 'AppData', 'Roaming'),
           LOCALAPPDATA: process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local')
         } : {}) }
@@ -77,14 +78,14 @@ export class OrcaRuntime implements CoordinatorRuntime {
     return session
   }
   async requestTakeover(handle: string, prompt: string, subject = '【项目协作】请接管工作间主 agent') {
-    await this.call(['orchestration', 'send', '--from', 'plugin:local.project-coordinator', '--to', handle, '--type', 'status', '--subject', subject, '--body', prompt])
+    await this.call(['orchestration', 'send', '--from', `plugin:${pluginKey}`, '--to', handle, '--type', 'status', '--subject', subject, '--body', prompt])
   }
   async launchMain(workspace: string, agent: string, prompt: string, options?: Omit<AgentLaunch, 'agent'>) {
     const launch = await this.call(['agent', 'launch', ...agentFlags({ agent, ...options }), '--worktree', workspace, '--prompt', prompt])
     if (options?.surface === 'chat' && launch.outcome?.kind !== 'structured') fail('聊天会话启动回执待核对，不会自动重启')
     return launchReceipt(launch)
   }
-  async openOverview() { await this.call(['plugin', 'open', 'local.project-coordinator', '--panel', 'project-coordinator']) }
+  async openOverview() { await this.call(['plugin', 'open', pluginKey, '--panel', 'project-coordinator']) }
   async agents(projects: Project[], host: HostApi<'worker'>, main?: AgentSession) { return readAgents(host, args => this.call(args), projects, main) }
   async mail(runId: string) {
     // shortcut: Orca inbox has no pagination; scan the newest bounded window.
@@ -136,7 +137,7 @@ export class OrcaRuntime implements CoordinatorRuntime {
     if ((await this.projects(host)).some(p => p.id === ref.id)) fail('Orca 尚未确认移除，工作间记录保留')
   }
   async send(runId: string, delivery: Delivery): Promise<{ requestId?: string }> {
-    const result = await this.call(['orchestration', 'send', '--from', 'plugin:local.project-coordinator', '--to', `run:${runId}`, '--type', 'status',
+    const result = await this.call(['orchestration', 'send', '--from', `plugin:${pluginKey}`, '--to', `run:${runId}`, '--type', 'status',
       '--subject', delivery.subject.startsWith('【项目协作】') ? delivery.subject : `【项目协作】${delivery.subject}`, '--body', delivery.body])
     return { requestId: result.mutation?.requestId }
   }
