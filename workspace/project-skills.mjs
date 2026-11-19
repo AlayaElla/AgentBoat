@@ -27,7 +27,7 @@ function location(root, relative) {
   }
   return file;
 }
-export function filesAt(directory, prefix = '') {
+function filesAt(directory, prefix = '') {
   ordinary(directory);
   const files = Object.create(null);
   for (const item of fs.readdirSync(directory, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name, 'en'))) {

@@ -10,7 +10,7 @@ import { agentFlags, launchReceipt } from './agent-launch.mjs';
 export { launchReceipt } from './agent-launch.mjs';
 
 export const root = fileURLToPath(new URL('../', import.meta.url));
-export const home = path.resolve(process.env.AGENTBOAT_HOME || path.join(os.homedir(), '.agentboat'));
+const home = path.resolve(process.env.AGENTBOAT_HOME || path.join(os.homedir(), '.agentboat'));
 const client = path.join(root, 'coordinator/scripts/client.mjs');
 
 const json = file => JSON.parse(readFileSync(file, 'utf8').replace(/^\uFEFF/, ''));
@@ -46,7 +46,7 @@ function text(value, label) {
   if (typeof value !== 'string' || !value.trim()) throw new Error(`缺少 ${label}`);
   return value;
 }
-export function key(value) {
+function key(value) {
   if (typeof value !== 'string' || !/^[a-zA-Z0-9_-]{1,100}$/.test(value)) throw new Error('编号只允许字母、数字、下划线和连字符');
   return value;
 }

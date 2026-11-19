@@ -11,7 +11,7 @@ import { LinkMessages, type IncomingMessage, type MessageExchange, type WireMess
 import { LinkFiles } from './link-files'
 import { setTimeout as delay } from 'node:timers/promises'
 
-export type Scope = 'none' | 'summary' | 'details'
+type Scope = 'none' | 'summary' | 'details'
 export interface Sharing { scope: Scope; allProjects: boolean; projectIds: string[]; delegateFeedback?: boolean }
 export type FeedbackTask = Pick<Task, 'id' | 'title' | 'phase'> & {
   decisions: Pick<Task['decisions'][number], 'id' | 'question' | 'options' | 'answer'>[]

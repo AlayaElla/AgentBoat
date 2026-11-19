@@ -207,9 +207,8 @@ for (const mode of ['existing', 'new'] as const) test(`main takeover ${mode}: ta
   const binding = { version: 1, revision: 2, session: { ...session, handle: 'previous-handle' }, runId: 'run_old', requests: [] }
   const host = mockHost({ storage: { workspace: binding, 'project:p1': project as any } })
   const prompts: string[] = [], sends: { run: string; subject: string; body: string }[] = []
-  let c!: ReturnType<typeof createCoordinator>, storage!: OrcaWorkerApi['storage'], launched = 0
+  let c!: ReturnType<typeof createCoordinator>, launched = 0
   const worker = await mountWorker({ default: (api: OrcaWorkerApi) => {
-    storage = api.storage
     c = createCoordinator(api, {
       projects: async () => refs, verifyRun: async () => {},
       identify: async (handle, run) => { if (handle !== session.handle || run !== 'run_next') throw Error('not own Run'); return session },
@@ -268,7 +267,7 @@ for (const mode of ['existing', 'new'] as const) test(`main takeover ${mode}: ta
     await c.store.mutateMessaging(m => { m.feishu = { enabled: true, appId: 'test-app', chatIds: ['chat'], senderIds: ['owner'] } })
     await c.ingest('test-app', { id: 'new-feishu', source: 'feishu', sourceId: 'test-app:event', threadId: '', chatId: 'chat', senderId: 'owner', text: '测试新飞书消息', receivedAt: new Date().toISOString() })
     await c.flushMailbox()
-    assert.ok(sends.some(s => s.run === 'run_next' && s.subject === '飞书工作间消息' && s.body.endsWith(roleReminder.workspace)))
+    assert.ok(sends.some(s => s.run === 'run_next' && s.subject === '飞书工作间消息' && s.body.endsWith('测试新飞书消息\n回复用 feishu-reply，eventId 填来源编号。')))
     assert.equal(sends.filter(s => s.run === 'run_old').length, 1)
     const saved = JSON.stringify(host.data().storage)
     await worker.request('workspace.overview'); await worker.request('project.read', { projectId: 'p1' })

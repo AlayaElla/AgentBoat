@@ -446,6 +446,21 @@ try {
     });
   }
   await setup({ width: 1040 });
+  await test('retry after a missing receipt applies the newly written snapshot immediately', async () => {
+    await review('页面交付').check();
+    await page.evaluate(() => { fixture.noWrite = true; });
+    const submit = dock().getByRole('button', { name: '提交 2 条' });
+    await submit.click();
+    await page.getByRole('alert').filter({ hasText: '缺少匹配的写入凭证' }).waitFor();
+    await page.evaluate(() => { fixture.noWrite = false; fixture.delayOverview = true; });
+    await submit.click();
+    await dock().waitFor({ state: 'hidden' });
+    await rail().locator('.irow.submitted').waitFor({ state: 'detached' });
+    assert.equal(await review('页面交付').count(), 0);
+    const ids = await page.evaluate(() => fixture.calls.filter(c => c.name === 'project.feedback').map(c => c.input.requestId));
+    assert.equal(ids.length, 2); assert.equal(ids[0], ids[1]);
+  });
+  await setup({ width: 1040 });
   await test('lost feedback receipt is recognized and never sent a second time', async () => {
     await review('页面交付').check();
     await page.evaluate(() => { fixture.loseFeedbackReceipt = true; });

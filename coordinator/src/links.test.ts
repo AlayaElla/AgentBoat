@@ -92,10 +92,8 @@ test('delegated feedback applies once in both directions and rechecks sharing on
     assert.equal((await a.c.store.get('p1')).tasks[1].decisions[0].history[0].source, '主人在工作间 乙工作间 提交')
     assert.deepEqual(a.notices.map(([run]) => run).sort(), ['run_example', 'workspace-甲工作间'])
     assert.ok(a.notices.every(([, body]) => body.includes('主人在工作间 乙工作间 提交')))
-    assert.deepEqual(Object.fromEntries(a.notices.map(([run, body]) => [run, body.split('\n').at(-1)])), {
-      run_example: '提醒：你是项目管理员，实现交给执行者，成果要 submit 成待验收。',
-      'workspace-甲工作间': '提醒：你是工作间管理员，项目里的活交给项目主会话。'
-    })
+    assert.ok(a.notices.find(([run]) => run === 'run_example')![1].endsWith('提醒：实现交给执行者，成果用 submit 登记待验收。'))
+    assert.ok(!a.notices.find(([run]) => run === 'workspace-甲工作间')![1].includes('提醒：'))
     assert.ok((await a.c.store.get('p1')).deliveries.every(d => !d.body.includes('你是工作间管理员') && !d.body.includes('你是项目管理员')))
 
     // The inviter has no endpoint for the joiner; its request rides the existing long poll.

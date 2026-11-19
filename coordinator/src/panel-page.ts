@@ -1,7 +1,7 @@
 import type {} from 'orca/frame'
 import './protocol'
 import { attention, projectSummary, agents, agentName, compareAgentActivity, groupedAttention, isProjectShared, isRecentAgent, labels, taskState, scopes, statuses, connectionStates, roles, mainStatus, mainAgentStates } from './model'
-import type { Acceptance, AgentSession, Artifact, Attention, LeadSwitch, MainTakeover, Overview, Project, ProjectLead, Task, ProjectWorkspace, WorkspaceBinding } from './model'
+import type { Acceptance, AgentSession, Artifact, Attention, LeadSwitch, MainTakeover, Overview, Project, ProjectLead, ProjectWorkspace, WorkspaceBinding } from './model'
 import type { FeedbackItem } from './store'
 import type { AgentActivity, AgentsSnapshot, MainAgentActivity } from './model'
 import type { DelegatedFeedback, FeedbackTask, LinksSnapshot, SharedReport, Sharing } from './links'
@@ -721,7 +721,7 @@ async function submitGroup(projectId: string, entries: Draft[], rows: InboxRow[]
     const local: Project | undefined = !remote && input ? (await req('project.read', { projectId })).project : undefined
     if (!input) {
       const project = remote ? remoteProject(projectId)?.feedback : all.projects.find(p => p.ref.id === projectId)
-      if (!project || local?.hidden) throw Error('项目已隐藏或读不到')
+      if (!project) throw Error('项目已隐藏或读不到')
       if ('tasks' in project && !validFeedbackDrafts(project.tasks, entries)) throw Error('待处理项已更新，请核对原选择')
       input = JSON.parse(JSON.stringify({ projectId: remote ? JSON.parse(projectId)[1] : projectId, revision: project.revision, requestId: crypto.randomUUID(), items: await feedbackItems(entries) })) as DelegatedFeedback
     }
@@ -740,7 +740,7 @@ async function submitGroup(projectId: string, entries: Draft[], rows: InboxRow[]
       proof = reply.fingerprint
     } else {
       const prior = local?.requests.find(record => record.id === input!.requestId)
-      if (prior) { proof = prior.fingerprint; rejected = proof !== expected }
+      if (prior) { proof = prior.fingerprint; rejected = proof !== expected; updated = local }
       else {
         if (local && (local.revision !== input.revision || !validFeedbackDrafts(local.tasks, entries))) { rejected = true; throw Error('项目已更新，请核对原选择') }
         const reply = await req('project.feedback', input)
@@ -748,7 +748,6 @@ async function submitGroup(projectId: string, entries: Draft[], rows: InboxRow[]
         if (proof === expected) updated = reply.project
       }
     }
-    if (local && proof === expected) updated = local
     if (proof !== expected) throw Error('待核对：缺少匹配的写入凭证')
     saving = true
     await saveSubmission(changeFor(projectId, checked(null), null))
@@ -772,10 +771,11 @@ async function submitFeedback() {
     const results = await Promise.all(groups.map(async ([projectId, group]) => {
       const entries = Object.values(group)
       try {
-        await submitGroup(projectId, entries, before.filter(r => r.projectId === projectId && entries.some(d => d.taskId === r.taskId && d.kind === (r.kind === 'review' ? 'acceptance' : 'decision'))))
-        for (const r of before) if (r.projectId === projectId && entries.some(d => d.taskId === r.taskId && (
+        const rows = before.filter(r => r.projectId === projectId && entries.some(d => d.taskId === r.taskId && (
           r.kind === 'review' && d.kind === 'acceptance' || r.kind === 'decision' && d.kind === 'decision'
-        ))) finishing.set(r.id, r)
+        )))
+        await submitGroup(projectId, entries, rows)
+        for (const r of rows) finishing.set(r.id, r)
         return { sent: entries.length }
       } catch (e) { return { sent: 0, rejected: { projectId, reason: (e as Error).message } } }
     }))
@@ -979,7 +979,7 @@ function connectionPage() {
 }
 function leadDescription(binding: WorkspaceBinding | undefined, label: string) {
   const s = binding?.session
-  return s ? [agentName(s.agent), s.title, label === '主 agent' ? activityStyle(mainStatus(s, live)).label : s.online === 'unknown' ? '状态未知' : mainAgentStates[s.online].label].filter(Boolean).join(' · ')
+  return s ? [agentName(s.agent), s.title, label === '主 agent' ? activityStyle(mainStatus(s, live)).label : mainAgentStates[s.online]].filter(Boolean).join(' · ')
     : binding?.runId ? `已绑定${label}` : `还没有${label}`
 }
 type SwitchChoice = Omit<LeadSwitch, 'revision'>

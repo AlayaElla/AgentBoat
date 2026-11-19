@@ -7,13 +7,13 @@ export interface ProjectRef {
   workspace: string
 }
 export interface Artifact { id: string; label: string; url: string; version: string }
-export interface UserFeedback { at: string; revision: number; result: string; note: string; source?: string }
+interface UserFeedback { at: string; revision: number; result: string; note: string; source?: string }
 export interface Acceptance {
   id: string; title: string; details: string; artifactIds: string[]; revision: number
   status: 'pending' | 'passed' | 'changes_requested'; history: UserFeedback[]
   fingerprint: string
 }
-export interface Decision {
+interface Decision {
   id: string; question: string; options: string[]; answer?: string; history: UserFeedback[]
 }
 export interface Task {
@@ -28,7 +28,7 @@ export interface SourceEvent {
   senderId: string; text: string; receivedAt: string; taskId?: string
   replyToIds?: string[]
 }
-export interface FeedbackTarget {
+interface FeedbackTarget {
   projectId: string; taskId: string; kind: 'decision' | 'acceptance'; itemId: string; itemRevision: number; fingerprint: string
 }
 export interface Delivery {
@@ -94,7 +94,7 @@ export interface Workspace extends WorkspaceBinding {
   takeover?: StoredTakeover
   retired?: Delivery[]
 }
-export type TaskState = ReturnType<typeof taskState>
+type TaskState = ReturnType<typeof taskState>
 export type Attention = {
   projectId: string; taskId: string
   itemId: string; title: string; summary: string
@@ -136,10 +136,14 @@ export function attention(project: Project): Attention[] {
     return items.map(item => ({ ...item, summary: item.summary.replace(/\s+/g, ' ').slice(0, 300) }))
   })
 }
-export function projectSummary(p: Project): Overview['projects'][number] {
+export function projectCounts(p: Project) {
   const counts: Overview['projects'][number]['counts'] = { working: 0, decision: 0, review: 0, rework: 0, completed: 0, blocked: 0, paused: 0 }
   for (const task of p.tasks) counts[taskState(task)]++
-  return { ref: p.ref, revision: p.revision, counts, bound: !!p.runId, updatedAt: p.updatedAt || '',
+  return counts
+}
+
+export function projectSummary(p: Project): Overview['projects'][number] {
+  return { ref: p.ref, revision: p.revision, counts: projectCounts(p), bound: !!p.runId, updatedAt: p.updatedAt || '',
     agents: p.tasks.flatMap(t => t.executions.map(e => ({ ...e, projectTaskId: t.id, state: taskState(t) }))) }
 }
 
@@ -155,7 +159,6 @@ export function groupedAttention(items: Attention[]) {
 }
 
 export const labels = { working: '进行中', decision: '待决定', review: '待验收', rework: '修改中', completed: '已完成', blocked: '受阻', paused: '已暂停' }
-export const phases: Record<string, string> = { working: labels.working, ready: labels.review, completed: labels.completed, blocked: labels.blocked, paused: labels.paused }
 export const roles = { design: '设计', code: '代码', review: '审查' }
 export const agents = { claude: 'Claude', codex: 'Codex', opencode: 'OpenCode' }
 export const agentName = (v = '') => agents[v as keyof typeof agents] || v || '未知'
@@ -165,15 +168,8 @@ export function isProjectShared(project: Pick<Project, 'ref' | 'hidden'>, sharin
 }
 export const statuses = { connected: '已连接', offline: '离线', pending: '待核对' }
 export const connectionStates = { off: '未启用', connecting: '连接中', connected: '已连接', error: '连接异常', unchecked: '未检查' }
-export const results: Record<string, string> = { passed: '已通过', changes_requested: '已退回修改', pending: '待验收' }
-export const deliveryStates = { pending: '待通知', sending: '正在通知', sent: '已通知', uncertain: '待核对' }
-export const sourceName = (s: string) => ({ 'workspace-agent': '主 agent', feishu: '飞书' }[s] || s)
 
-export const mainAgentStates = {
-  online: { label: '在线', tone: 'success' },
-  unknown: { label: '待命', tone: 'neutral' },
-  offline: { label: '离线', tone: 'warning' }
-} as const
+export const mainAgentStates = { online: '在线', unknown: '状态未知', offline: '离线' } as const
 export interface LiveAgent {
   id: string; projectId: string; agent: string; role: 'worker' | 'session'
   state: 'need' | 'work' | 'done'; rawState: string

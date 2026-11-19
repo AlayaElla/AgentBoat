@@ -9,7 +9,7 @@ export async function openQuestions(messages, runId, readWork, now = Date.now())
   const replies = new Map();
   const key = (thread, subject, recipient) => JSON.stringify([thread, subject, recipient]);
   for (const m of messages) {
-    if (m.run_id !== runId || !m.thread_id || typeof m.subject !== 'string' || !m.subject.startsWith('Re: ') ||
+    if (m.type !== 'status' || m.run_id !== runId || !m.thread_id || typeof m.subject !== 'string' || !m.subject.startsWith('Re: ') ||
       !m.to_handle || !Number.isSafeInteger(m.sequence)) continue;
     const id = key(m.thread_id, m.subject, m.to_handle);
     replies.set(id, Math.max(replies.get(id) ?? -1, m.sequence));

@@ -126,6 +126,8 @@ test('Claude role hooks scope actions by Orca identity and fail open', () => {
     }
     setTranscript(done, submit, result('call', receipt('ready'), true));
     assert.equal(stop(), undefined);
+    setTranscript(done, submit, result('call', '{"submission":{incomplete},"ok":true}'));
+    assert.equal(stop(), 'block');
     setTranscript(done, submit, result('call', receipt('ready')));
     assert.equal(stop(), undefined);
     setTranscript(done, submit, result('call', 'Exit code 0\n' + receipt('completed').slice(0, -1) + ',"result":{... truncated ...'));

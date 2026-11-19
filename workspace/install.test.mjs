@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, cpSync, readFileSync, readdirSync, realpathSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, cpSync, readFileSync, readdirSync, realpathSync, symlinkSync, writeFileSync, rmSync } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { pathToFileURL } from 'node:url';
@@ -8,7 +8,10 @@ import { pathToFileURL } from 'node:url';
 test('installer renders both skills in a moved repository, links Claude and refuses foreign contents before writing', async () => {
   const temp = mkdtempSync(path.join(os.tmpdir(), 'agentboat-install-'));
   try {
-    const repo = path.join(temp, '仓库 with spaces'), home = path.join(temp, 'home');
+    const alias = path.join(temp, 'linked');
+    mkdirSync(path.join(temp, 'original'));
+    symlinkSync(path.join(temp, 'original'), alias, process.platform === 'win32' ? 'junction' : 'dir');
+    const repo = path.join(alias, '仓库 with spaces'), home = path.join(temp, 'home');
     mkdirSync(path.join(repo, 'workspace'), { recursive: true });
     cpSync(new URL('./install.mjs', import.meta.url), path.join(repo, 'workspace/install.mjs'));
     cpSync(new URL('./harness', import.meta.url), path.join(repo, 'workspace/harness'), { recursive: true });
@@ -31,8 +34,9 @@ test('installer renders both skills in a moved repository, links Claude and refu
       }
     }
     for (const s of result.skills) { check(s.installed); assert.equal(realpathSync(s.claudeLink), realpathSync(s.installed)); }
-    assert.ok(readFileSync(path.join(home, '.agents/skills/agentboat-workspace/SKILL.md'), 'utf8').includes(repo.replaceAll('\\', '/')));
-    assert.ok(readFileSync(path.join(home, '.agents/skills/orca-project-coordinator/references/bridge.md'), 'utf8').includes(repo.replaceAll('\\', '/')));
+    const renderedRepo = realpathSync(repo).replaceAll('\\', '/');
+    assert.ok(readFileSync(path.join(home, '.agents/skills/agentboat-workspace/SKILL.md'), 'utf8').includes(renderedRepo));
+    assert.ok(readFileSync(path.join(home, '.agents/skills/orca-project-coordinator/references/bridge.md'), 'utf8').includes(renderedRepo));
     const updated = readFileSync(settingsFile, 'utf8'), installed = JSON.parse(updated);
     assert.equal(installed.theme, settings.theme);
     assert.deepEqual(installed.hooks.UserPromptSubmit, []);
@@ -40,7 +44,7 @@ test('installer renders both skills in a moved repository, links Claude and refu
       assert.deepEqual(installed.hooks[event].slice(0, -1), settings.hooks[event] ?? []);
       const { command, args, onFailure } = installed.hooks[event].at(-1).hooks[0];
       assert.equal(command, process.execPath);
-      assert.equal(args[0], path.join(repo, 'workspace/harness/hook.mjs'));
+      assert.equal(realpathSync(args[0]), realpathSync(path.join(repo, 'workspace/harness/hook.mjs')));
       assert.equal(onFailure, 'continue');
     }
     const backups = () => readdirSync(path.dirname(settingsFile)).filter(name => name.endsWith('.bak'));

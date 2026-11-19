@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import path from 'node:path'
 import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
-import { attention, groupedAttention, labels, projectSummary, type Messaging, type Project, type Workspace } from './model'
+import { attention, groupedAttention, labels, projectCounts, type Messaging, type Project, type Workspace } from './model'
 
 type Role = { role: 'workspace-main'; directory: string; summary?: string } | { role: 'project-lead'; projectId: string; summary?: string }
 const chat = (value?: string) => /^orca_session_id:claude_[\w-]+$/.test(value ?? '')
@@ -12,7 +12,7 @@ export function roleRegistry(file: string, read: () => Promise<{
 }>) {
   let chain = Promise.resolve()
   return () => {
-    const next = chain.then(async () => {
+    chain = chain.then(async () => {
       const { workspace, projects, current, mailbox } = await read()
       const visible = current?.filter(p => !p.hidden)
       const sessions: Record<string, Role> = {}
@@ -21,7 +21,7 @@ export function roleRegistry(file: string, read: () => Promise<{
         const summary = visible && [
           `工作间待处理 ${groupedAttention(visible.flatMap(attention)).length} 组`,
           ...visible.slice(0, 30).map(p => {
-            const counts = Object.entries(projectSummary(p).counts).flatMap(([key, count]) => count ? [`${labels[key as keyof typeof labels]} ${count}`] : [])
+            const counts = Object.entries(projectCounts(p)).flatMap(([key, count]) => count ? [`${labels[key as keyof typeof labels]} ${count}`] : [])
             return `- ${line(p.ref.name)}：${counts.join('，') || '暂无任务'}`
           }),
           ...(visible.length > 30 ? [`另有 ${visible.length - 30} 个项目，读 overview 查看`] : []),
@@ -53,7 +53,6 @@ export function roleRegistry(file: string, read: () => Promise<{
       await rm(file, { force: true }).catch(() => {})
       console.error('AgentBoat: 角色表刷新失败')
     })
-    chain = next
-    return next
+    return chain
   }
 }

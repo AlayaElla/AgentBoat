@@ -22,7 +22,7 @@ test('overdue Run questions join the inbox until the matching reply and notify t
   const reply = { ...ask, id: 'msg_reply', from_handle: 'run:run_fake', to_handle: ask.from_handle, type: 'status', subject: 'Re: Question', sequence: 11 }
   const status = { runId: p.runId, taskId: 'orca-task', dispatchId: 'fake', dispatchStatus: 'dispatched', workerState: 'ready' }
   const task = { id: status.taskId, run_id: p.runId, status: 'dispatched', completed_at: null }
-  let rows = [...noise, ask, { ...reply, to_handle: 'dispatch:wrong' }, { ...reply, thread_id: 'msg_other' }], failure = true
+  let rows = [...noise, ask, { ...reply, to_handle: 'dispatch:wrong' }, { ...reply, thread_id: 'msg_other' }, { ...reply, type: 'question' }], failure = true
   const sent: string[] = [], runs: string[] = []
   let c!: ReturnType<typeof createCoordinator>
   const worker = await mountWorker({ default: api => { c = createCoordinator(api, { projects: async () => refs,
@@ -123,6 +123,7 @@ test('independent panel edits merge; stale removals cannot erase a newer choice 
   const edit = (key: string, version: number, value: typeof draft | null) => worker.request('panel.feedbackState',{change:{projectId:'p1',items:[{key,version,value}]}})
   try {
     await Promise.all([edit(key,0,draft), edit(other,0,{...draft,itemId:'b'})])
+    await assert.rejects(() => worker.request('panel.feedbackState', { change: { projectId: 'p1', exact: true, items: [{ key, version: 1 }, { key, version: 1 }] } }), /草稿编号重复/)
     await edit(key,1,{...draft,result:'changes_requested'})
     await assert.rejects(()=>edit(key,1,null),/另一个面板/)
     await edit(other,1,null)
@@ -440,7 +441,7 @@ test('main messages use the existing source queue and retries never duplicate a 
   assert.equal(saved.deliveries[0].requestId, 'sent-main-message')
   assert.equal(sends.length, 1)
   assert.equal(sends[0].runId, 'run_project')
-  assert.ok(sends[0].body.includes('主 agent来源资料'))
+  assert.ok(sends[0].body.includes('工作间主 agent 转来'))
   assert.equal((await coordinator.store.get('p2')).events.length, 0)
   const unbound = { projectId: 'p2', requestId: input.requestId, runId: input.runId, text: input.text }
   const queued = await worker.request('workspace.message', unbound)

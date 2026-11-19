@@ -91,13 +91,12 @@ function words(command, bash) {
   return tokens;
 }
 const nameOf = value => value?.toLowerCase().replace(/\.exe$/, '');
-function isClient(script, cwd, bash) {
-  return !!script && same(shellPath(cwd, script, bash), clientPath);
-}
 function nodeAllowed(args, cwd, bash) {
   const [script, operation] = args;
-  if (isClient(script, cwd, bash)) return !!operation && !operation.startsWith('-');
-  return !!script && [...rules.scripts].some(([file, operations]) => same(shellPath(cwd, script, bash), file) && operations.has(operation));
+  if (!script) return false;
+  const file = shellPath(cwd, script, bash);
+  if (same(file, clientPath)) return !!operation && !operation.startsWith('-');
+  return [...rules.scripts].some(([entry, operations]) => same(file, entry) && operations.has(operation));
 }
 function readAllowed(name, args) {
   if (!rules.reads.has(name)) return false;
@@ -263,8 +262,8 @@ function stopBlocker(input, role) {
             questions.delete(replies.get(block.tool_use_id));
         }
         for (const [, receipt] of body.matchAll(/\{"submission":(\{[^\r\n]*?\}),"ok":true[,}]/g)) {
-          const submission = JSON.parse(receipt);
-          if (submission.projectId !== role.projectId || typeof submission.requestId !== 'string') continue;
+          const submission = jsonResult(receipt);
+          if (submission?.projectId !== role.projectId || typeof submission.requestId !== 'string') continue;
           pending = false;
           if (submission.phase === 'blocked' || submission.pendingDecision) questions.clear();
         }

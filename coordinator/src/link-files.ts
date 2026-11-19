@@ -6,7 +6,7 @@ import { userDataPath } from '../scripts/orca-cli.mjs'
 import { fail, fingerprint, object } from './store'
 
 export const maxLinkFileBytes = 25 * 1024 ** 2, maxLinkFiles = 10
-export const maxOutgoingFiles = 100 * 1024 ** 2, maxReceivedFiles = 1024 ** 3
+const maxOutgoingFiles = 100 * 1024 ** 2, maxReceivedFiles = 1024 ** 3
 export const fileChunkBytes = 48_000
 const manifestName = '.agentboat-transfer.json'
 export type LinkFile = { name: string; size: number; sha256: string; type: string }
