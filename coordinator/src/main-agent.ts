@@ -84,11 +84,12 @@ export async function switchLead(runtime: CoordinatorRuntime, input: LeadSwitch,
 }
 
 export function mainAgent(orca: OrcaWorkerApi, store: ProjectStore, runtime: CoordinatorRuntime, changed: () => void, bound: () => void, projects: () => Promise<Project[]>) {
-  async function read(): Promise<WorkspaceBinding> {
+  async function read(sample?: import('./model').AgentsSnapshot): Promise<WorkspaceBinding> {
     const w = await store.workspace()
     const takeover = takeoverView(w.takeover)
     const s = w.session
-    const online = s ? await runtime.targets().then(t => t.sessions.find(x => x.handle === s.handle)?.online ?? 'offline' as const).catch(() => 'unknown' as const) : 'unknown'
+    const activity = sample?.ok && sample.main?.handle === s?.handle ? sample.main?.status : undefined
+    const online = sample ? activity?.state === 'offline' ? 'offline' : activity && activity.state !== 'unknown' ? 'online' : 'unknown' : s ? await runtime.targets().then(t => t.sessions.find(x => x.handle === s.handle)?.online ?? 'offline' as const).catch(() => 'unknown' as const) : 'unknown'
     return { revision: w.revision, runId: w.runId,
       securityBoundary: mainSecurityBoundary,
       ...(s ? { session: { ...s, online } } : {}), ...(w.boundAt ? { boundAt: w.boundAt } : {}),

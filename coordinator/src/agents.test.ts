@@ -8,13 +8,28 @@ import { OrcaRuntime } from './runtime'
 
 const workspace = { id: 'ws-one', hostId: 'local', projectId: refs[0].repoId, path: '/example', kind: 'worktree', name: '示例', branch: 'main' }
 const agent = (state = 'working', sessionId = 's1') => ({ terminalId: null, title: '会话', agent: 'codex', state, stateStartedAt: Date.now(), sessionId })
-async function snapshot(workspaces: any[], agents: any, projects = [fresh({ ...refs[0], id: projectKey('local', refs[0].repoId) })], read: (args: string[]) => Promise<any> = async () => ({}), truncated = false) {
+async function snapshot(workspaces: any[], agents: any, projects = [fresh({ ...refs[0], id: projectKey('local', refs[0].repoId) })], read: (args: string[]) => Promise<any> = async () => ({}), truncated = false, main?: import('./model').AgentSession) {
   const host = mockHost({ results: { 'workspace.list': { workspaces, truncated }, 'agents.list': agents } })
   let api!: OrcaWorkerApi
   const worker = await mountWorker({ default: value => { api = value } }, { host })
-  try { return { result: await readAgents(api.host, read, projects), host } }
+  try { return { result: await readAgents(api.host, read, projects, main), host } }
   finally { await worker.deactivate() }
 }
+
+test('bound main samples its own workspace without showing it as a project; exact identity only', async () => {
+  const main = { handle: 'orca_session_id:main', workspace: 'id:' + workspace.id, path: workspace.path, workspaceName: '测试', title: '同名', agent: 'claude', online: 'online' as const }
+  const since = Date.now() - 300000
+  for (const [state, expected] of [['working','work'],['waiting','need'],['blocked','need'],['done','idle'],['other','unknown'],['exited','offline'],['duplicate','unknown']]) {
+    const own = { paneKey: 'structured-agent-session-main:pane', stateStartedAt: since, state, subagentObservation: state === 'exited' ? 'exited' : 'live' }
+    const inventory = { worktrees: [{ address: { environment: 'local', worktree: main.workspace }, agents: [own, { ...own, paneKey: 'structured-agent-session-other:pane', state:'working' }, ...(state === 'duplicate' ? [own] : [])] }] }
+    const { result, host } = await snapshot([workspace], { agents: [] }, [], async () => inventory, false, main)
+    assert.equal(host.callsOf('agents.list').length, 1); assert.deepEqual(result.agents, [])
+    assert.deepEqual(result.main, { handle: main.handle, status: ['work','need'].includes(expected) ? {state: expected, since} : {state: expected} })
+  }
+  const terminal = { ...main, handle:'term-exact' }
+  const { result } = await snapshot([workspace], { agents:[{...agent('working'),title:'同名',terminalId:'other'}, {...agent('waiting'),title:'同名',terminalId:terminal.handle,stateStartedAt:since}] }, [], undefined, false, terminal)
+  assert.deepEqual(result.main?.status,{state:'need',since})
+})
 
 test('host status maps waiting/blocked to need, working to work and done to done', async () => {
   assert.deepEqual(['waiting', 'blocked', 'working', 'done'].map(s => agentState(s as any)), ['need', 'need', 'work', 'done'])

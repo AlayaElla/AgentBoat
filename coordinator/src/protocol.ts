@@ -3,6 +3,7 @@ import type { DelegatedFeedback, FeedbackReply, LinksSnapshot, Sharing } from '.
 export {}
 declare module 'orca' {
   interface PluginRequests {
+    'panel.feedbackState': { input: { change?: import('./feedback-drafts').Delta }; output: import('./feedback-drafts').Sheets }
     'workspace.connections': { input: import('./connections').ConnectionsInput; output: import('./connections').Connection[] | import('./connections').ConnectionDetail }
     'workspace.agents': { input: { refresh?: boolean }; output: import('./model').AgentsSnapshot }
     'workspace.agent.open': { input: { id: string }; output: { opened: boolean; focusedTerminal: boolean } }
@@ -28,5 +29,5 @@ declare module 'orca' {
     'project.openArtifact': { input: { projectId: string; taskId: string; artifactId: string }; output: { opened: boolean } }
     'project.agent': { input: { operation: 'read' | 'bind' | 'submit'; projectId: string; revision?: number; requestId?: string; runId?: string; caller?: string; currentRunId?: string; token?: string; task?: unknown }; output: Snapshot }
   }
-  interface PluginPanelEvents { 'project.changed': { projectId: string }; 'workspace.open': { switching: boolean } }
+  interface PluginPanelEvents { 'project.changed': { projectId: string }; 'panel.draftsChanged': {}; 'workspace.open': { switching: boolean } }
 }

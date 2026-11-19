@@ -14,9 +14,24 @@ import { groupedAttention, isProjectShared } from './model'
 import { mainAgent, roleReminder, switchLead, takeoverView, recoverTakeover } from './main-agent'
 import { projectLeadDefaults } from '../../workspace/agent-launch.mjs'
 import { clientPath } from '../scripts/orca-cli.mjs'
+import { applyDelta, type Sheets } from './feedback-drafts'
 
 export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRuntime, transport?: MessageTransport, exportDirectory?: string, linkFiles?: LinkFiles) {
   const store = new ProjectStore(orca.storage, exportDirectory)
+  let draftWrites = Promise.resolve()
+  orca.panels.handle('panel.feedbackState', ({ change }) => {
+    const operation = draftWrites.then(async () => {
+      const sheets = (await orca.storage.get('panel.feedbackState') ?? {}) as unknown as Sheets
+      if (change) {
+        applyDelta(sheets, change)
+        await orca.storage.set('panel.feedbackState', sheets as any)
+        orca.panels.post('panel.draftsChanged', {})
+      }
+      return sheets
+    })
+    draftWrites = operation.then(() => {}, () => {})
+    return operation
+  })
   let catalog: ProjectRef[] | undefined
   let readingCatalog: Promise<{ refs?: ProjectRef[]; error?: string }> | undefined
   const busy = new Map<string, Promise<void>>()
@@ -33,7 +48,7 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
       do {
         const { list } = await availableProjectRecords()
         agentsDirty = false
-        try { live = await runtime.agents(list, orca.host) }
+        try { live = await runtime.agents(list, orca.host, (await store.workspace()).session) }
         catch { live = { ok: false, at: Date.now(), agents: [], error: 'agent 状态读不到' } }
         await updateStatus()
       } while (agentsDirty)
@@ -117,9 +132,10 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
     const ref = list.find(p => p.ref.id === input.projectId)
     if (!ref || !isProjectShared(ref, peer)) fail('项目未开放或已隐藏')
     const source = `主人在工作间 ${peer.name.replace(/\s+/g, ' ')} 提交`
-    await recordFeedback(input, { source, connectionId: peer.id, authorize: p => {
+    const project = await recordFeedback(input, { source, connectionId: peer.id, authorize: p => {
       if (!isProjectShared(p, peer)) fail('项目未开放或已隐藏')
     } })
+    return project.requests.find(r => r.id === `link-feedback:${fingerprint([peer.id, input.requestId])}`)?.fingerprint
   })
   orca.panels.handle('workspace.links', async input => {
     switch (input.operation) {
@@ -186,14 +202,15 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
     const [{ refs, error }, saved] = await Promise.all([availableProjects(), store.all()])
     return { list: mergeProjects(saved, refs), error }
   }
-  async function requireProject(id: string): Promise<ProjectRef> {
+  async function projectEntry(id: string) {
     await readingCatalog
     const { refs, error } = await availableProjects()
     if (error) fail(error)
     const ref = refs?.find(p => p.id === id)
     if (!ref) fail('项目已从 Orca 移除或不在工作间项目列表')
-    return ref
+    return { ref, refs }
   }
+  async function requireProject(id: string) { return (await projectEntry(id)).ref }
   async function ensure(id: string): Promise<Project> { return store.register(await requireProject(id)) }
   async function snapshot(id: string): Promise<Snapshot> {
     const { refs, error: runtimeError } = await availableProjects(), ref = refs.find(p => p.id === id)
@@ -465,7 +482,7 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
   orca.panels.handle('workspace.overview', async () => {
     const { list, error } = await availableProjectRecords()
     // Orca registration defines membership. A project can be registered without a workspace.
-    return { ...overview(list, await store.workspace(), error), workspace: await main.read(), links: await links.snapshot(), connections: await connections.list(), machines: [{ id: 'local', name: os.hostname(), role: 'host' as const, online: true }] }
+    return { ...overview(list, await store.workspace(), error), workspace: await main.read(live), links: await links.snapshot(), connections: await connections.list(), machines: [{ id: 'local', name: os.hostname(), role: 'host' as const, online: true }] }
   })
   orca.panels.handle('workspace.message', async input => {
     const id = text(input.projectId, '项目编号', 200)
@@ -531,8 +548,9 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
   })
   async function recordFeedback(input: Record<string, any>, remote?: { source: string; connectionId: string; authorize: (p: Project) => void }) {
     const request = input.requestId ? text(input.requestId, '请求编号', 200) : undefined
-    await store.mutate(input.projectId, input.revision === undefined ? undefined : revision(input.revision), async p => {
+    const project = await store.mutate(input.projectId, input.revision === undefined ? undefined : revision(input.revision), async p => {
       const before = remote ? undefined : structuredClone(p)
+      if (p.hidden) fail('项目已隐藏，请先恢复显示')
       feedback(p, input, remote?.source)
       if (before) {
         rememberProjectCaller(p, input)
@@ -546,11 +564,13 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
       }
     }, request ? { id: remote ? `link-feedback:${fingerprint([remote.connectionId, request])}` : request, input, authorize: remote?.authorize } : undefined)
     changed(input.projectId); defer(input.projectId)
+    return project
   }
   orca.panels.handle('project.feedback', async input => {
-    await ensure(input.projectId)
-    await recordFeedback(input)
-    return snapshot(input.projectId)
+    const { ref, refs } = await projectEntry(input.projectId)
+    await store.register(ref)
+    const { takeover, ...project } = await recordFeedback(input)
+    return { projects: refs, project }
   })
   orca.panels.handle('project.agent', async input => {
     const id = text(input.projectId, '项目编号', 200)

@@ -83,7 +83,8 @@ test('delegated feedback applies once in both directions and rechecks sharing on
     assert.equal((await send(b)).state, 'uncertain')
     assert.equal((await a.c.store.get('p1')).tasks[0].acceptance[0].status, 'passed')
     const joinerStarted = performance.now()
-    assert.equal((await send(b)).state, 'submitted')
+    const receipt = await send(b)
+    assert.deepEqual(receipt, { state:'submitted', requestId: request.requestId, fingerprint: fingerprint(request) })
     const joinerMs = performance.now() - joinerStarted
     assert.equal((await send(b)).state, 'submitted')
     await a.c.flush('p1')
@@ -322,7 +323,7 @@ test('details sync shares current main and scoped live agents without local iden
   const worker = await mountWorker({ default: api => { coordinator = createCoordinator(api, {
     projects: async () => [...refs, hidden.ref],
     targets: async () => ({ workspaces: [], sessions: online ? [session] : [] }),
-    agents: async () => { reads++; return { ok: true, at: Date.now(), agents: live } }
+    agents: async () => { reads++; return { ok: true, at: Date.now(), agents: live, main: { handle: session.handle, status: online ? {state:'work',since:now} : {state:'offline'} } } }
   }) } }, { host })
   try {
     const before = await coordinator.links.snapshot()
@@ -338,7 +339,7 @@ test('details sync shares current main and scoped live agents without local iden
     assert.equal(reads, 0)
 
     const details = await share('details', ['p1', 'hidden'])
-    assert.deepEqual(details.mainAgent, { agent: 'claude', title: '统筹会话', online: 'online' })
+    assert.deepEqual(details.mainAgent, { agent: 'claude', title: '统筹会话', online: 'online', activity: { state: 'work', since: now } })
     assert.deepEqual(details.projects.map(p => p.id), ['p1'])
     assert.deepEqual(details.projects[0].activity, { truncated: false, agents: [
       { agent: 'codex', role: 'worker', state: 'work', title: '正在检查', taskTitle: p.tasks[0].title, since: now }

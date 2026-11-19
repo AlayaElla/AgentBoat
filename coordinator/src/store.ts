@@ -3,7 +3,7 @@ import path from 'node:path'
 import { userDataPath } from '../scripts/orca-cli.mjs'
 import { mkdir, writeFile } from 'node:fs/promises'
 import type { StorageApi } from 'orca'
-import { taskState, type Acceptance, type Artifact, type Project, type ProjectRef, type SourceEvent, type Task, type Workspace, type Overview, type Attention, type Messaging, type AgentSession, type StoredTakeover, sourceName } from './model'
+import { attention, projectSummary, taskState, type Acceptance, type Artifact, type Project, type ProjectRef, type SourceEvent, type Task, type Workspace, type Overview, type Messaging, type AgentSession, type StoredTakeover, sourceName } from './model'
 
 export const maxMessageLength = 16000
 export function fail(message: string): never { throw Object.assign(new Error(message), { code: 'invalid_request' }) }
@@ -46,28 +46,12 @@ export function artifactUrl(value: unknown, root: string): string {
 }
 
 
-export function attention(project: Project): Attention[] {
-  if (project.hidden) return []
-  return project.tasks.flatMap(task => {
-    const base = { projectId: project.ref.id, taskId: task.id, title: task.title }
-    const items: Attention[] = task.decisions.filter(d => d.answer === undefined).map(d => ({ ...base, kind: 'decision', itemId: d.id, summary: d.question }))
-    items.push(...task.acceptance.filter(a => a.status === 'pending' && task.phase === 'ready').map(a => ({ ...base, kind: 'review' as const, itemId: a.id, summary: a.title, itemRevision: a.revision, fingerprint: a.fingerprint })))
-    items.push(...task.acceptance.filter(a => a.status === 'changes_requested').map(a => ({ ...base, kind: 'rework' as const, itemId: a.id, summary: a.history.at(-1)?.note || a.title })))
-    if (task.phase === 'blocked') items.push({ ...base, kind: 'blocked', itemId: task.id, summary: task.progress || task.goal })
-    return items.map(item => ({ ...item, summary: item.summary.replace(/\s+/g, ' ').slice(0, 300) }))
-  })
-}
 export function overview(projects: Project[], workspace: Workspace, error = ''): Overview {
   const hidden = projects.filter(p => p.hidden).map(p => p.ref)
   projects = projects.filter(p => !p.hidden)
   return { workspace: { revision: workspace.revision, runId: workspace.runId }, attention: projects.flatMap(attention),
     hidden,
-    projects: projects.map(p => {
-      const counts: Overview['projects'][number]['counts'] = { working: 0, decision: 0, review: 0, rework: 0, completed: 0, blocked: 0, paused: 0 }
-      for (const task of p.tasks) counts[taskState(task)]++
-      return { ref: p.ref, counts, bound: !!p.runId, updatedAt: p.updatedAt || '',
-        agents: p.tasks.flatMap(t => t.executions.map(e => ({ ...e, projectTaskId: t.id, state: taskState(t) }))) }
-    }), ...(error ? { error } : {}) }
+    projects: projects.map(projectSummary), ...(error ? { error } : {}) }
 }
 
 // Transition keys include acceptance revisions; reads never create notifications.
@@ -273,7 +257,7 @@ export function submitTask(project: Project, raw: unknown): void {
   else project.tasks.push(task)
 }
 
-export interface FeedbackItem { taskId: string; kind: 'acceptance' | 'decision'; itemId: string; itemRevision?: number; fingerprint?: string; result?: string; answer?: string; note?: string }
+export interface FeedbackItem { taskId: string; kind: 'acceptance' | 'decision'; itemId: string; itemRevision?: number; reviewTotal?: number; fingerprint?: string; result?: string; answer?: string; note?: string }
 export function feedback(project: Project, raw: unknown, source?: string): void {
   const items = object(raw).items
   if (!Array.isArray(items) || items.length > 100) fail('反馈条目格式不正确')
@@ -293,6 +277,7 @@ export function feedback(project: Project, raw: unknown, source?: string): void 
       if (input.kind === 'acceptance') {
         const item = task.acceptance.find(x => x.id === input.itemId)
         if (!item || item.revision !== input.itemRevision || task.phase !== 'ready' || item.status !== 'pending') fail('验收项已更新或不在待验收状态，请刷新后确认')
+        if (input.reviewTotal !== undefined && input.reviewTotal !== task.acceptance.filter(a => a.status === 'pending').length) fail('待验收项已更新，请刷新后确认')
         if (input.fingerprint !== undefined && input.fingerprint !== item.fingerprint) fail('验收内容已更新')
         if (!['passed', 'changes_requested'].includes(input.result)) fail('验收结论不正确')
         if (input.result === 'changes_requested' && !note) fail('请填写需要修改的内容')

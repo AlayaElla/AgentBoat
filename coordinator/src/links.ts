@@ -5,8 +5,8 @@ import { lookup } from 'node:dns'
 import { hostname, networkInterfaces } from 'node:os'
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto'
 import type { OrcaWorkerApi } from 'orca/worker'
-import { agents, compareAgentActivity, groupedAttention, isProjectShared, isRecentAgent, mainAgentStates, taskState, type AgentActivity, type AgentsSnapshot, type MainAgentActivity, type Project, type Task, type WorkspaceBinding } from './model'
-import { attention, fail, object, revision, strings, text, type FeedbackItem } from './store'
+import { attention, agents, compareAgentActivity, groupedAttention, isProjectShared, isRecentAgent, mainStatus, mainAgentStates, taskState, type AgentActivity, type AgentsSnapshot, type MainAgentActivity, type Project, type Task, type WorkspaceBinding } from './model'
+import { fail, fingerprint, object, revision, strings, text, type FeedbackItem } from './store'
 import { LinkMessages, type IncomingMessage, type MessageExchange, type WireMessage } from './link-messages'
 import { LinkFiles } from './link-files'
 import { setTimeout as delay } from 'node:timers/promises'
@@ -21,7 +21,7 @@ export type FeedbackTask = Pick<Task, 'id' | 'title' | 'phase'> & {
 }
 type DelegatedProject = { revision: number; tasks: FeedbackTask[] }
 export interface DelegatedFeedback { projectId: string; revision: number; requestId: string; items: FeedbackItem[] }
-export type FeedbackReply = { requestId: string; state: 'submitted' | 'rejected' | 'uncertain'; reason?: string }
+export type FeedbackReply = { requestId: string; state: 'submitted' | 'rejected' | 'uncertain'; fingerprint?: string; reason?: string }
 type FeedbackExchange = { request?: DelegatedFeedback; reply?: FeedbackReply }
 export interface SharedReport {
   workspaceId: string; name: string; scope: Scope; updatedAt: string
@@ -131,7 +131,7 @@ export function report(projects: Project[], peer: Sharing, workspaceId: string, 
     }) }
   if (!details) return result
   const workspace = activity?.workspace, session = workspace?.session
-  result.mainAgent = workspace?.runId ? { agent: publicAgent(session?.agent ?? ''), title: (session?.title ?? '').slice(0, maxActivityTitle), online: session?.online ?? 'unknown' } : null
+  result.mainAgent = workspace?.runId ? { agent: publicAgent(session?.agent ?? ''), title: (session?.title ?? '').slice(0, maxActivityTitle), online: session?.online ?? 'unknown', activity: mainStatus(session, activity?.live) } : null
   if (canDelegate(peer)) {
     let remaining = LIMIT - 2048 - Buffer.byteLength(JSON.stringify(result))
     // shortcut: keep each project's actionable report whole within a sync frame; page it if projects exceed the frame.
@@ -172,7 +172,16 @@ function received(raw: unknown, peer: Peer): SharedReport {
   if (details && r.mainAgent !== null) {
     const m = object(r.mainAgent)
     if (!knownAgent(m.agent) || typeof m.online !== 'string' || !Object.hasOwn(mainAgentStates, m.online)) fail('对端主 agent 格式不正确')
-    mainAgent = { agent: m.agent, online: m.online as MainAgentActivity['online'], title: str(m.title, maxActivityTitle) }
+    let activity: MainAgentActivity['activity']
+    if (m.activity !== undefined) {
+      const value = object(m.activity)
+      if (value.state === 'work' || value.state === 'need') {
+        if (!Number.isSafeInteger(value.since) || value.since <= 0) fail('对端主 agent 时间不正确')
+        activity = { state: value.state, since: value.since }
+      } else if (['idle', 'offline', 'unknown'].includes(value.state)) activity = { state: value.state }
+      else fail('对端主 agent 状态不正确')
+    }
+    mainAgent = { ...(activity ? { activity } : {}), agent: m.agent, online: m.online as MainAgentActivity['online'], title: str(m.title, maxActivityTitle) }
   }
   if (!details && 'mainAgent' in r || r.feedbackTruncated !== undefined && (!details || r.feedbackTruncated !== true)) fail('对端上报格式不正确')
   return { workspaceId: peer.workspaceId, name: text(r.name, '工作间名称', 200), scope: r.scope, updatedAt: str(r.updatedAt, 100), ...(details ? { mainAgent } : {}), ...(r.feedbackTruncated ? { feedbackTruncated: true } : {}), projects: r.projects.map((raw: unknown) => {
@@ -295,7 +304,7 @@ export class WorkspaceLinks {
   private syncing = new Map<string, Promise<string | undefined>>()
   private listening = ''
   private error = ''
-  constructor(private orca: Pick<OrcaWorkerApi, 'storage' | 'secrets'>, private projects: () => Promise<Project[]>, private changed: () => void, private chooseHost = invitationHost, private enqueue?: (peer: Peer, messages: IncomingMessage[]) => Promise<void>, private activity?: () => Promise<LocalActivity>, files = new LinkFiles(), private checkCatalog?: () => Promise<unknown>, private applyFeedback?: (peer: Peer, input: DelegatedFeedback) => Promise<void>) { this.messages = new LinkMessages(files) }
+  constructor(private orca: Pick<OrcaWorkerApi, 'storage' | 'secrets'>, private projects: () => Promise<Project[]>, private changed: () => void, private chooseHost = invitationHost, private enqueue?: (peer: Peer, messages: IncomingMessage[]) => Promise<void>, private activity?: () => Promise<LocalActivity>, files = new LinkFiles(), private checkCatalog?: () => Promise<unknown>, private applyFeedback?: (peer: Peer, input: DelegatedFeedback) => Promise<string | undefined>) { this.messages = new LinkMessages(files) }
   private serial<T>(fn: () => Promise<T>): Promise<T> { const p = this.chain.then(fn); this.chain = p.catch(() => {}); return p }
   private async data(): Promise<LinkData> {
     const raw = await this.orca.storage.get('workspace.links')
@@ -533,16 +542,20 @@ export class WorkspaceLinks {
     const exchange = object(raw)
     if (exchange.reply !== undefined) {
       const r = object(exchange.reply), pending = this.feedbackPending.get(p.id)
-      if (pending && r.requestId === pending.request.requestId && ['submitted', 'rejected', 'uncertain'].includes(r.state))
-        pending.finish({ requestId: r.requestId, state: r.state, ...(typeof r.reason === 'string' ? { reason: r.reason.slice(0, 1000) } : {}) })
+      if (pending && r.requestId === pending.request.requestId && ['submitted', 'rejected', 'uncertain'].includes(r.state)) {
+        if (r.state === 'submitted' && r.fingerprint !== fingerprint(pending.request))
+          pending.finish({ requestId: r.requestId, state: 'uncertain', reason: '缺少匹配的写入凭证' })
+        else pending.finish({ requestId: r.requestId, state: r.state, ...(r.state === 'submitted' ? { fingerprint: r.fingerprint } : {}), ...(typeof r.reason === 'string' ? { reason: r.reason.slice(0, 1000) } : {}) })
+      }
     }
     if (exchange.request === undefined) return
     const request = feedbackRequest(exchange.request)
     const requestId = request.requestId
     try {
       if (!canDelegate(p) || !this.applyFeedback) fail('对方未允许代为处理')
-      await this.applyFeedback(p, request)
-      return { requestId, state: 'submitted' } as const
+      const fingerprint = await this.applyFeedback(p, request)
+      if (!fingerprint) throw Error('没有写入凭证')
+      return { requestId, state: 'submitted', fingerprint } as const
     } catch (e) {
       if (e instanceof Error && (e as Error & { code?: string }).code === 'invalid_request')
         return { requestId, state: 'rejected', reason: e.message.slice(0, 1000) } as const

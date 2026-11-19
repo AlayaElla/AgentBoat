@@ -107,7 +107,7 @@ export interface Overview {
   workspace: WorkspaceBinding
   attention: Attention[]
   projects: {
-    ref: ProjectRef; counts: Record<TaskState, number>; updatedAt: string; bound: boolean
+    ref: ProjectRef; revision: number; counts: Record<TaskState, number>; updatedAt: string; bound: boolean
     agents: (Task['executions'][number] & { projectTaskId: string; state: TaskState })[]
   }[]
   error?: string
@@ -120,6 +120,24 @@ export function taskState(task: Task): 'working' | 'decision' | 'review' | 'rewo
   if (task.phase === 'ready' && task.acceptance.some(x => x.status === 'pending')) return 'review'
   if (task.phase === 'ready') return 'completed'
   return task.phase
+}
+
+export function attention(project: Project): Attention[] {
+  if (project.hidden) return []
+  return project.tasks.flatMap(task => {
+    const base = { projectId: project.ref.id, taskId: task.id, title: task.title }
+    const items: Attention[] = task.decisions.filter(d => d.answer === undefined).map(d => ({ ...base, kind: 'decision', itemId: d.id, summary: d.question }))
+    items.push(...task.acceptance.filter(a => a.status === 'pending' && task.phase === 'ready').map(a => ({ ...base, kind: 'review' as const, itemId: a.id, summary: a.title, itemRevision: a.revision, fingerprint: a.fingerprint })))
+    items.push(...task.acceptance.filter(a => a.status === 'changes_requested').map(a => ({ ...base, kind: 'rework' as const, itemId: a.id, summary: a.history.at(-1)?.note || a.title })))
+    if (task.phase === 'blocked') items.push({ ...base, kind: 'blocked', itemId: task.id, summary: task.progress || task.goal })
+    return items.map(item => ({ ...item, summary: item.summary.replace(/\s+/g, ' ').slice(0, 300) }))
+  })
+}
+export function projectSummary(p: Project): Overview['projects'][number] {
+  const counts: Overview['projects'][number]['counts'] = { working: 0, decision: 0, review: 0, rework: 0, completed: 0, blocked: 0, paused: 0 }
+  for (const task of p.tasks) counts[taskState(task)]++
+  return { ref: p.ref, revision: p.revision, counts, bound: !!p.runId, updatedAt: p.updatedAt || '',
+    agents: p.tasks.flatMap(t => t.executions.map(e => ({ ...e, projectTaskId: t.id, state: taskState(t) }))) }
 }
 
 export function groupedAttention(items: Attention[]) {
@@ -159,9 +177,15 @@ export interface LiveAgent {
   title: string; taskId?: string; taskTitle?: string; since: number
   workspaceId?: string; terminalId?: string
 }
-export type MainAgentActivity = Pick<AgentSession, 'agent' | 'title' | 'online'>
+export type MainStatus = { state: 'work' | 'need'; since: number } | { state: 'idle' | 'offline' | 'unknown' }
+export type MainAgentActivity = Pick<AgentSession, 'agent' | 'title' | 'online'> & { activity?: MainStatus }
+export function mainStatus(session: AgentSession | undefined, live?: AgentsSnapshot): MainStatus {
+  if (!session) return { state: 'unknown' }
+  if (live?.ok && live.main?.handle === session.handle) return live.main.status
+  return { state: session.online === 'offline' ? 'offline' : 'unknown' }
+}
 export type AgentActivity = Pick<LiveAgent, 'agent' | 'role' | 'state' | 'title' | 'since' | 'taskTitle'>
 export const isRecentAgent = (a: Pick<AgentActivity, 'state' | 'since'>, now = Date.now()) => a.state !== 'done' || now - a.since <= 86_400_000
 const agentPriority = { need: 0, work: 1, done: 2 }
 export const compareAgentActivity = (a: AgentActivity, b: AgentActivity) => agentPriority[a.state] - agentPriority[b.state] || b.since - a.since
-export interface AgentsSnapshot { ok: boolean; at: number; agents: LiveAgent[]; error?: string; truncated?: boolean }
+export interface AgentsSnapshot { ok: boolean; at: number; agents: LiveAgent[]; main?: { handle: string; status: MainStatus }; error?: string; truncated?: boolean }

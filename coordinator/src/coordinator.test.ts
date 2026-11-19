@@ -12,6 +12,41 @@ import { assertProjectIdle, OrcaRuntime } from './runtime'
 import { groupedAttention } from './model'
 const mainSession = { handle: 'orca_session_id:test-main', title: '测试主会话', workspace: 'id:test', workspaceName: '测试工作区', path: '/test', agent: 'claude', online: 'online' as const }
 
+test('feedback returns the committed snapshot without waiting for delivery or session inventory', async () => {
+  const project = fresh(refs[0]); project.runId = 'run_fake'; project.mainAgentHandle = 'test-session'; submitTask(project, deliverable)
+  const host = mockHost({ storage: { 'project:p1': project as any } })
+  let coordinator!: ReturnType<typeof createCoordinator>, release!: () => void, sends = 0, reads = 0
+  const gate = new Promise<void>(resolve => {release=resolve})
+  const worker = await mountWorker({ default: api => {coordinator=createCoordinator(api, {projects: async()=>refs,
+    targets: async()=>{reads++;await gate;return {workspaces:[],sessions:[]}},send: async()=>{sends++;await gate;return {}}})}}, {host})
+  try {
+    const input = {projectId:'p1', revision:0, requestId:'timing', items:[{taskId:'task-1',kind:'acceptance' as const,itemId:'page-check',itemRevision:1,result:'passed'}]}
+    const start=performance.now()
+    const reply=await Promise.race([worker.request('project.feedback',input), new Promise<never>((_,reject)=>{setTimeout(()=>reject(Error('反馈等待后台操作')),1000).unref()})])
+    assert.ok(performance.now()-start<1000);assert.equal(reads,0)
+    assert.equal(reply.project!.tasks[0].acceptance[0].status,'passed')
+    assert.equal(reply.project!.requests[0].id,input.requestId)
+    await new Promise<void>(resolve=>setImmediate(resolve));assert.ok(sends>0)
+  } finally {release();await coordinator.flush('p1');coordinator.stop();await worker.deactivate()}
+})
+
+test('independent panel edits merge; stale removals cannot erase a newer choice after reopening', async () => {
+  const host = mockHost(); let coordinator!: ReturnType<typeof createCoordinator>
+  const worker = await mountWorker({default: api => { coordinator = createCoordinator(api, {}) }}, {host})
+  const draft = {taskId:'task', kind:'acceptance' as const, itemId:'a', title:'a', signature:'v1', result:'passed'}
+  const key = '["task","acceptance","a"]', other = '["task","acceptance","b"]'
+  const edit = (key: string, version: number, value: typeof draft | null) => worker.request('panel.feedbackState',{change:{projectId:'p1',items:[{key,version,value}]}})
+  try {
+    await Promise.all([edit(key,0,draft), edit(other,0,{...draft,itemId:'b'})])
+    await edit(key,1,{...draft,result:'changes_requested'})
+    await assert.rejects(()=>edit(key,1,null),/另一个面板/)
+    await edit(other,1,null)
+    const saved=await worker.request('panel.feedbackState',{})
+    assert.deepEqual(saved.p1.entries,{[key]:{...draft,result:'changes_requested'}})
+    assert.deepEqual(host.data().storage['panel.feedbackState'],saved)
+  } finally {coordinator.stop();await worker.deactivate()}
+})
+
 test('connections isolate multiple A2A configs, tokens and histories', async () => {
   const first = { version: 1, revision: 2, enabled: false, port: 9901, url: 'http://127.0.0.1:9900', entries: [] }
   const token = 'test-only-token-12345678901234567890', host = mockHost({ storage: { 'workspace.connections': { version: 1, entries: [{ id: 'butler', name: 'Hermes', type: 'a2a' }] }, 'workspace.a2a:butler': first, workspace: { version: 1, revision: 0, runId: 'run_main', requests: [] } }, secrets: { 'butler:inbound': token, 'butler:outbound': token } })
@@ -291,7 +326,7 @@ test('workspace binding validates Runs, revisions, occupied project Runs and req
   await assert.rejects(() => worker.request('workspace.agent', { ...input, requestId: 'stale' }))
   await assert.rejects(() => worker.request('project.agent', { operation: 'bind', projectId: 'p2', revision: 0, requestId: 'reuse', runId: 'run_project' }))
   assert.ok(verified.includes('run_project'))
-  assert.deepEqual((await worker.request('workspace.overview')).workspace, bound)
+  assert.deepEqual((await worker.request('workspace.overview')).workspace, { ...bound, session: { ...bound.session, online: 'unknown' } })
   await worker.deactivate()
 })
 

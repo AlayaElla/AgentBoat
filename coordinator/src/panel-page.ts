@@ -1,13 +1,13 @@
 import type {} from 'orca/frame'
 import './protocol'
-import { agents, agentName, compareAgentActivity, groupedAttention, isProjectShared, isRecentAgent, labels, taskState, scopes, statuses, connectionStates, roles, mainAgentStates } from './model'
+import { attention, projectSummary, agents, agentName, compareAgentActivity, groupedAttention, isProjectShared, isRecentAgent, labels, taskState, scopes, statuses, connectionStates, roles, mainStatus, mainAgentStates } from './model'
 import type { Acceptance, AgentSession, Artifact, Attention, LeadSwitch, MainTakeover, Overview, Project, ProjectLead, Task, ProjectWorkspace, WorkspaceBinding } from './model'
 import type { FeedbackItem } from './store'
 import type { AgentActivity, AgentsSnapshot, MainAgentActivity } from './model'
 import type { DelegatedFeedback, FeedbackTask, LinksSnapshot, SharedReport, Sharing } from './links'
 
 type Page = { kind: string; projectId?: string; id?: string; pid?: string; inboxRow?: string }
-type Draft = { reviewTotal?: number; taskId: string; kind: 'acceptance' | 'decision'; itemId: string; itemRevision?: number; fingerprint?: string; signature: string; title: string; result?: string; answer?: string; note?: string }
+import { applyDelta, emptySheet, versionOf, type Attempt, type Delta, type Draft, type InboxRow, type Sheets } from './feedback-drafts'
 const root = document.getElementById('panel')!
 const req = (name: string, input?: any): Promise<any> => input === undefined
   ? orca.plugin.request(name as any)
@@ -25,12 +25,45 @@ let detail: any, targets: any
 let opened: Record<string, boolean> = { self: true }, wideInbox = false
 const tabsOf: Record<string, string> = {}
 let drafts: Record<string, Record<string, Draft>> = {}
-let feedbackRequests: Record<string, { signature: string; id: string; remote?: DelegatedFeedback; rows?: InboxRow[] }> = {}
+let feedbackRequests: Record<string, Attempt> = {}
+let sheets: Sheets = {}, sheetRead = 0, draftGeneration = 0, pendingEdits = 0, draftFailure = ''
+let edits: Promise<void> = Promise.resolve()
+function useSheets(next: Sheets) {
+  sheets = next
+  drafts = Object.fromEntries(Object.entries(next).map(([id, sheet]) => [id, sheet.entries]))
+  feedbackRequests = Object.fromEntries(Object.entries(next).flatMap(([id, sheet]) => sheet.attempt ? [[id, sheet.attempt]] : []))
+}
+async function readSheets() {
+  const read = ++sheetRead, generation = draftGeneration, next = await req('panel.feedbackState', {})
+  if (read === sheetRead && !pendingEdits && !busy && generation === draftGeneration) useSheets(next)
+}
+function changeFor(id: string, values: [string, Draft | null | undefined][], attempt?: Attempt | null): Delta {
+  const sheet = sheets[id] ?? emptySheet()
+  return { projectId: id, items: values.map(([key, value]) => ({ key, version: versionOf(sheet, key), value })),
+    ...(attempt !== undefined ? { attempt: { version: versionOf(sheet, 'attempt'), value: attempt } } : {}) }
+}
+function editChoices(id: string, values: [string, Draft | null][]) {
+  if (!values.length) return
+  const previous = feedbackRequests[id]
+  if (previous?.input && !previous.rejected) { error = '上次提交还没确认，请先重试核对'; render(); return }
+  const change = changeFor(id, values, previous ? null : undefined), generation = ++draftGeneration
+  applyDelta(sheets, change); useSheets(sheets); pendingEdits++
+  edits = edits.then(async () => {
+    const next = await req('panel.feedbackState', { change })
+    if (generation === draftGeneration) useSheets(next)
+  }).catch(e => { draftFailure = error = '草稿保存失败：' + e.message; render() }).finally(() => { pendingEdits-- })
+}
+async function saveSubmission(change: Delta) {
+  ++draftGeneration
+  useSheets(await req('panel.feedbackState', { change }))
+}
+function clearChoices(id: string) { editChoices(id, Object.keys(choices(id)).map(key => [key, null])) }
 const inlineRows = new Map<string, Frame>()
 const expandedRows = new Set<string>(), folded = new Map<string, boolean>()
 let error = '', notice = '', busy = false, more = false, nav = 0, refreshing = false, refreshSeq = 0
 let direction = '', leaving: Frame | undefined, lastInline = '', organizationScroll = 0, trayOpen = false
 let toastAction: { label: string; run: () => void } | undefined, toastTimer = 0, toastText = ''
+let submitStep = '正在提交…'
 let actionIds: Record<string, number> = {}, clickedAction = '', busyAction = ''
 let persistChain: Promise<unknown> = Promise.resolve()
 const persist = (key: string, value: any) => {
@@ -83,7 +116,7 @@ const nodeKey = (n: Node) => n instanceof HTMLElement ? n.dataset.key ?? n.datas
 function updateChildren(parent: HTMLElement, next: HTMLElement) {
   const old = Array.from(parent.childNodes)
   const move = (parent as HTMLElement & { moveBefore?: (node: Node, child: Node | null) => void }).moveBefore
-  const keyed = new Map(old.flatMap(n => nodeKey(n) ? [[nodeKey(n), n] as const] : []))
+  const keyed = new Map(old.flatMap(n => !(n instanceof HTMLElement && n.dataset.leaving !== undefined) && nodeKey(n) ? [[nodeKey(n), n] as const] : []))
   const loose = old.filter(n => !nodeKey(n))
   const remaining = new Set(old.filter(n => !(n instanceof HTMLElement && n.dataset.leaving !== undefined)))
   let cursor = parent.firstChild
@@ -108,7 +141,7 @@ function updateChildren(parent: HTMLElement, next: HTMLElement) {
   }
 }
 function animateRemoval(node: HTMLElement, entering: boolean, kind: string) {
-  if (!entering) { node.dataset.leaving = ''; node.inert = true }
+  if (!entering) { node.dataset.leaving = ''; node.inert = true; node.setAttribute('aria-hidden', 'true') }
   if (matchMedia('(prefers-reduced-motion: reduce)').matches) { if (!entering) node.remove(); return }
   const fade = kind === 'fade'
   const full = fade ? { opacity: 1 } : { height: `${node.offsetHeight}px`, opacity: 1 }
@@ -160,10 +193,10 @@ function icon(name: keyof typeof paths, cls = '') {
 }
 function button(text: string, action: () => any, cls = '', disabled = false, title = '', glyph?: keyof typeof paths) {
   const label = text || title
-  const id = `${label}:${actionIds[label] = (actionIds[label] ?? 0) + 1}`, waiting = busy && id === busyAction
+  const id = `${label}:${actionIds[label] = (actionIds[label] ?? 0) + 1}`, waiting = busy && (id === busyAction || action === submitFeedback && busyAction.startsWith('提交'))
   return el('button', { type: 'button', class: `btn ${cls}`, disabled: disabled || busy, title: title || text, 'data-action': id, 'aria-busy': waiting ? 'true' : undefined,
     'aria-label': !text || cls.includes('icon') || waiting ? label : undefined, onclick: () => { clickedAction = id; void action() } },
-  waiting ? [el('span', { class: 'spinner', 'aria-hidden': 'true' }), text.startsWith('提交') ? '提交中…' : '处理中…'] : [glyph ? icon(glyph) : null, text ? el('span', { class: 't trunc' }, text) : null])
+  waiting ? [el('span', { class: 'spinner', 'aria-hidden': 'true' }), text.startsWith('提交') ? submitStep : '处理中…'] : [glyph ? icon(glyph) : null, text ? el('span', { class: 't trunc' }, text) : null])
 }
 const item = (title: string, summary: string, action: () => any, extra?: any) => el('button', { type: 'button', class: 'item', 'aria-label': title, 'aria-description': summary, onclick: () => { void action() }, title }, extra?.classList?.contains('dot') ? extra : null, el('span', { class: 'body' }, el('span', { class: 'trunc' }, title), small(summary)), !extra?.classList?.contains('dot') ? extra : null, icon('chevron'))
 function input(label: string, initial: any = '', type = 'text', change?: (value: string) => void, placeholder?: string, fields = form, feedback = false) {
@@ -298,10 +331,16 @@ function back(toHome = false, preserveToast = false) {
   }
   void loadPage(restored).then(() => { if (active === restored) render() })
 }
+async function refreshOverview() {
+  const seq = ++refreshSeq
+  try { const next = await req('workspace.overview'); if (seq === refreshSeq) { all = next; render() } }
+  catch { /* The confirmed write does not depend on the background overview. */ }
+}
 async function refresh(forceAgents = false) {
   const n = ++refreshSeq
   if (forceAgents) { refreshing = true; render() }
   try {
+    if (forceAgents && !pendingEdits && !busy) { await readSheets(); draftFailure = '' }
     const [overview, agents] = await Promise.all([req('workspace.overview'), req('workspace.agents', { refresh: forceAgents })])
     if (n !== refreshSeq) return
     all = overview; live = agents
@@ -347,22 +386,25 @@ async function digest(value: string) {
 }
 function feedbackItems(drafts: Draft[]): Promise<FeedbackItem[]> {
   return Promise.all(drafts.map(async d => ({
-    taskId: d.taskId, kind: d.kind, itemId: d.itemId, itemRevision: d.itemRevision, result: d.result, note: d.note, answer: d.answer,
+    taskId: d.taskId, kind: d.kind, itemId: d.itemId, itemRevision: d.itemRevision, reviewTotal: d.reviewTotal, result: d.result, note: d.note, answer: d.answer,
     fingerprint: d.kind === 'decision' ? await digest(d.signature) : d.fingerprint
   })))
 }
 function choose(projectId: string, ...items: Draft[]) {
-  const group = drafts[projectId] ??= {}
-  for (const item of items) group[key(item.taskId, item.kind, item.itemId)] = item
-  persist('panel.drafts', drafts)
+  editChoices(projectId, items.map(item => [key(item.taskId, item.kind, item.itemId), item]))
 }
 function removeChoice(projectId: string, itemKey: string) {
-  delete drafts[projectId]?.[itemKey]
-  persist('panel.drafts', drafts); render()
+  editChoices(projectId, [[itemKey, null]]); render()
+}
+function activityStyle(activity: { state: string; since?: number }) {
+  const state = activity.state
+  if (state === 'need' || state === 'work') return { label: (state === 'need' ? '等你' : '工作中') + ' · ' + relative(activity.since) + '开始', tone: state }
+  if (state === 'done') return { label: relative(activity.since) + '完成', tone: 'ok' }
+  return { label: state === 'offline' ? '离线' : state === 'idle' ? '待命' : '未知', tone: state === 'offline' ? 'bad' : '' }
 }
 function agentRow(a: AgentActivity, projectName?: string, expanded = false) {
-  const duration = a.state === 'done' ? `${relative(a.since)}完成` : `${a.state === 'need' ? '等你' : '工作中'} · ${relative(a.since)}开始`
-  const line = el('div', { class: 'arow' }, dot(a.state === 'need' ? 'need' : a.state === 'work' ? 'work' : 'ok'), el('span', { class: 'none' }, agentName(a.agent)), el('span', { class: expanded ? 'grow any' : 'grow trunc' }, a.title), small(duration))
+  const { label: duration, tone } = activityStyle(a)
+  const line = el('div', { class: 'arow' }, dot(tone), el('span', { class: 'none' }, agentName(a.agent)), el('span', { class: expanded ? 'grow any' : 'grow trunc' }, a.title), small(duration))
   const task = expanded ? small(`关联任务 · ${a.taskTitle || '未关联'}`) : a.taskTitle && a.taskTitle !== a.title ? small(a.taskTitle) : null
   return projectName ? el('article', { class: 'aitem', 'data-st': a.state }, line, small(`${a.role === 'worker' ? 'worker' : '会话'} · ${projectName}`), task) : line
 }
@@ -397,8 +439,9 @@ function projectCard(p: { id: string; name: string; count: number; agents?: Agen
     agents.length || p.note ? el('div', { class: 'pcard-b' }, unfinished.map(a => agentRow(a)), done ? small(`✓ 已完成 ${done} 个`) : null, p.note ? small(p.note) : null) : null)
 }
 function mainAgentLine(agent: MainAgentActivity | null | undefined, open?: () => void, bound = !!agent, showLabel = true) {
-  const title = agent ? [agentName(agent.agent), agent.title, mainAgentStates[agent.online].label].filter(Boolean).join(' · ') : bound ? '已绑定' : '未绑定'
-  return el(open ? 'button' : 'div', { class: 'lead', type: open ? 'button' : undefined, 'aria-label': open ? showLabel ? '主 agent' : '管理主 agent' : undefined, onclick: open }, dot(agent?.online === 'online' ? 'ok' : ''), showLabel ? el('span', { class: 't' }, '主 agent') : null, el('span', { class: 'grow trunc xs muted', title }, title), open ? icon('chevron') : null)
+  const { label, tone } = activityStyle(open ? mainStatus(all.workspace.session, live) : agent?.activity ?? { state: agent?.online === 'offline' ? 'offline' : 'unknown' })
+  const title = agent ? [agentName(agent.agent), agent.title, label].filter(Boolean).join(' · ') : bound ? '已绑定' : '未绑定'
+  return el(open ? 'button' : 'div', { class: 'lead', type: open ? 'button' : undefined, 'aria-label': open ? showLabel ? '主 agent' : '管理主 agent' : undefined, onclick: open }, dot(tone), showLabel ? el('span', { class: 't' }, '主 agent') : null, el('span', { class: 'grow trunc xs muted', title }, title), open ? icon('chevron') : null)
 }
 const activityNote = (activity: SharedReport['projects'][number]['activity']) => activity === null ? 'agent 状态读不到' : activity?.truncated ? 'agent 未全部列出' : undefined
 function ownProjects() {
@@ -429,7 +472,7 @@ function workspaceNode(p?: LinksSnapshot['peers'][number]) {
       el('span', { class: 'sum trunc xs muted' }, p ? !active ? `离线 · 最后同步 ${relative(p.lastSyncAt)}` : report?.projects.length ? `${report.projects.length} 个项目` : '' : `${all.projects.length} 个项目`), p ? null : pill(total()), icon('chevron', 'turn')),
     p && !p.relation ? button('标关系', () => go({ kind: 'relation', id }), 'sm') : null), expansion(open, open || id in opened ? el('div', { class: 'wsr-b', id: `workspace-${id}`, 'data-skip': open ? undefined : '' }, open ? body : null) : null))
 }
-type InboxRow = { id: string; title: string; projectId?: string; taskId?: string; kind: Attention['kind'] | 'agent'; count?: number; agent?: AgentsSnapshot['agents'][number] }
+
 const inboxProjectName = (id: string) => {
   const remote = isRemote(id) ? remoteProject(id) : undefined
   return remote ? `${remote.name} · ${remote.peer.name}` : isRemote(id) ? '对方项目' : all.projects.find(p => p.ref.id === id)?.ref.name ?? all.hidden?.find(p => p.id === id)?.name ?? id
@@ -460,8 +503,7 @@ function selectReview(r: InboxRow, checked: boolean) {
   if (checked) choose(r.projectId!, ...reviewDrafts(r))
   else {
     const group = choices(r.projectId!)
-    for (const [k, item] of Object.entries(group)) if (item.taskId === r.taskId && item.kind === 'acceptance') delete group[k]
-    persist('panel.drafts', drafts)
+    editChoices(r.projectId!, Object.entries(group).filter(([, item]) => item.taskId === r.taskId && item.kind === 'acceptance').map(([key]) => [key, null]))
   }
 }
 function rowPage(r: InboxRow): Page {
@@ -496,7 +538,7 @@ function inboxBody(f: Frame) {
   const rowKind = JSON.parse(p.inboxRow!)[2] as Attention['kind']
   if (p.projectId && isRemote(p.projectId)) {
     const task = remoteProject(p.projectId)?.feedback.tasks.find(t => t.id === p.id), reason = remoteOffline(p.projectId)
-    return [reason ? callout(reason) : null, task ? feedbackCards(p.projectId, [task], '要你处理', rowKind) : small(feedbackRequests[p.projectId]?.remote ? '待核对，请从提交栏重试' : '这项已不在待处理清单')]
+    return [reason ? callout(reason) : null, task ? feedbackCards(p.projectId, [task], '要你处理', rowKind) : small(feedbackRequests[p.projectId]?.input ? '待核对，请从提交栏重试' : '这项已不在待处理清单')]
   }
   const currentProject = active.data?.current
   const project = currentProject && currentProject.ref.id === p.projectId ? currentProject : f.data?.current
@@ -513,7 +555,7 @@ function renderInboxRow(r: InboxRow, scope: string) {
   const selected = Object.values(choices(r.projectId ?? '')).filter(d => d.taskId === r.taskId && d.kind === (review ? 'acceptance' : 'decision'))
   const passed = selected.filter(d => d.result === 'passed').length
   const checks = review ? reviewDrafts(r) : []
-  const awaiting = r.projectId && feedbackRequests[r.projectId]?.remote && selected.length
+  const awaiting = r.projectId && isRemote(r.projectId) && feedbackRequests[r.projectId]?.input && selected.length
   const checked = checks.length ? checks.every(d => {
     const saved = choices(r.projectId!)[key(d.taskId, d.kind, d.itemId)]
     return saved?.result === 'passed' && saved.fingerprint === d.fingerprint && saved.itemRevision === d.itemRevision
@@ -630,14 +672,15 @@ function dock() {
   const count = items.length, incomplete = items.filter(({ d }) => invalidDraft(d)).length
   const offline = groups.map(([id]) => isRemote(id) ? remoteOffline(id) : '').find(Boolean)
   const label = incomplete ? `有 ${incomplete} 条还没写内容` : `已选 ${count} 条 · ${groups.length} 个项目`
-  const message = error || notice
+  const savedError = Object.entries(feedbackRequests).filter(([id, record]) => record.reason && Object.keys(choices(id)).length).map(([id, record]) => '「' + inboxProjectName(id) + '」未确认提交：' + record.reason).join('。')
+  const message = error || (!busy && savedError) || notice
   if (message !== toastText) {
     clearTimeout(toastTimer); toastText = message
-    if (message && !error) toastTimer = window.setTimeout(dismiss, toastAction?.label === '继续编辑' ? 6000 : 3200)
+    if (message && !error && !savedError) toastTimer = window.setTimeout(dismiss, toastAction?.label === '继续编辑' ? 6000 : 3200)
   }
   const action = toastAction ?? (error ? { label: '重试', run: () => { dismiss(); void refresh(true) } } : undefined)
   return el('footer', { class: 'dock', 'data-key': 'dock' },
-    el('div', { class: 'toasts', 'aria-live': 'polite', 'data-animate': 'fade' }, message ? el('div', { class: `toast${error ? ' danger' : ''}`, 'data-key': message, role: error ? 'alert' : 'status' },
+    el('div', { class: 'toasts', 'aria-live': 'polite', 'data-animate': 'fade' }, message ? el('div', { class: `toast${error || savedError ? ' danger' : ''}`, 'data-key': message, role: error || savedError ? 'alert' : 'status' },
       el('span', { class: 'grow any' }, message), action ? button(action.label, action.run, 'sm') : null,
       button('', dismiss, 'text sm icon', false, '关闭提示', 'close')) : null),
     expansion(count > 0, el('section', { class: 'sheet', 'aria-label': '待提交', 'data-sheet': '' },
@@ -646,57 +689,86 @@ function dock() {
         button('', () => removeChoice(projectId, id), 'text icon sm', false, `移除 ${d.title}`, 'close')), projectId + id)))),
       offline ? small(offline) : null,
       el('div', { class: 'row g2' }, el('button', { class: 'btn text grow trunc tray-toggle', type: 'button', disabled: busy, 'aria-expanded': String(trayOpen), onclick: () => { trayOpen = !trayOpen; render() } }, label),
-        button('清空', () => { drafts = {}; trayOpen = false; persist('panel.drafts', drafts); render() }, 'sm'),
+        button('清空', () => { for (const [id] of groups) clearChoices(id); trayOpen = false; render() }, 'sm'),
         button(`提交 ${count} 条`, submitFeedback, 'primary', !!incomplete || !!offline, offline || '')))))
 }
-async function submitRemoteFeedback(key: string, entries: Draft[], signature: string, rows: InboxRow[]) {
-  const offline = remoteOffline(key)
-  if (offline) throw Error(offline)
-  const [id, projectId] = JSON.parse(key), project = remoteProject(key)
-  const previous = feedbackRequests[key], replay = previous?.signature === signature ? previous.remote : undefined
-  if (!replay && (!project || !validFeedbackDrafts(project.feedback.tasks, entries))) throw Error('待处理项已更新，请核对原选择')
-  const input: DelegatedFeedback = replay ?? JSON.parse(JSON.stringify({ projectId, revision: project!.feedback.revision, requestId: crypto.randomUUID(), items: await feedbackItems(entries) }))
-  feedbackRequests[key] = { signature, id: input.requestId, remote: input, rows }
-  persist('panel.feedbackRequests', feedbackRequests)
-  await persistChain
-  let reply
-  try { reply = await req('workspace.linkFeedback', { id, ...input }) }
-  catch { throw Error('待核对：连接未确认提交结果，请重试') }
-  if (reply.state === 'submitted') return
-  if (reply.state === 'rejected') {
-    delete feedbackRequests[key]; persist('panel.feedbackRequests', feedbackRequests)
-    throw Error(reply.reason)
+function updateSubmittedProject(project: Project) {
+  ++refreshSeq; refreshing = false
+  for (const frame of [...stack, ...inlineRows.values()]) if (frame.data?.current?.ref.id === project.ref.id) { frame.data.current = project; frame.load = (frame.load ?? 0) + 1 }
+  if (current?.ref.id === project.ref.id) current = project
+  all.projects = all.projects.map(p => p.ref.id === project.ref.id ? projectSummary(project) : p)
+  all.attention = [...all.attention.filter(item => item.projectId !== project.ref.id), ...attention(project)]
+}
+async function submitGroup(projectId: string, entries: Draft[], rows: InboxRow[]) {
+  const remote = isRemote(projectId), signature = await digest(JSON.stringify(entries)), previous = feedbackRequests[projectId]
+  const items = entries.map(d => key(d.taskId, d.kind, d.itemId))
+  if (!entries.every((entry, index) => JSON.stringify(choices(projectId)[items[index]]) === JSON.stringify(entry))) throw Error('选择已更新，请核对')
+  const checked = (value: null | undefined) => items.map(item => [item, value] as [string, null | undefined])
+  let input = previous?.input, attempt: Attempt = { signature, ...(remote ? { rows } : {}) }
+  let rejected = false, saving = false
+  try {
+    if (input && previous?.signature !== signature) throw Error('上次提交的选择与当前不同，请刷新后核对')
+    const local: Project | undefined = !remote && input ? (await req('project.read', { projectId })).project : undefined
+    if (!input) {
+      const project = remote ? remoteProject(projectId)?.feedback : all.projects.find(p => p.ref.id === projectId)
+      if (!project || local?.hidden) throw Error('项目已隐藏或读不到')
+      if ('tasks' in project && !validFeedbackDrafts(project.tasks, entries)) throw Error('待处理项已更新，请核对原选择')
+      input = JSON.parse(JSON.stringify({ projectId: remote ? JSON.parse(projectId)[1] : projectId, revision: project.revision, requestId: crypto.randomUUID(), items: await feedbackItems(entries) })) as DelegatedFeedback
+    }
+    attempt = { ...attempt, input, reason: '上次提交尚未核实' }
+    submitStep = '正在保存提交记录…'; render()
+    saving = true
+    await saveSubmission({ ...changeFor(projectId, checked(undefined), attempt), exact: true })
+    saving = false
+    submitStep = '正在提交…'; render()
+    const expected = await digest(JSON.stringify(input))
+    let proof: string | undefined, updated: Project | undefined
+    if (remote) {
+      const offline = remoteOffline(projectId)
+      if (offline) throw Error(offline)
+      const reply = await req('workspace.linkFeedback', { id: JSON.parse(projectId)[0], ...input })
+      if (reply.requestId !== input.requestId) throw Error('待核对：回执编号不匹配')
+      if (reply.state !== 'submitted') { rejected = reply.state === 'rejected'; throw Error(reply.reason || '对端未确认提交') }
+      proof = reply.fingerprint
+    } else {
+      const prior = local?.requests.find(record => record.id === input!.requestId)
+      if (prior) { proof = prior.fingerprint; rejected = proof !== expected }
+      else {
+        if (local && (local.revision !== input.revision || !validFeedbackDrafts(local.tasks, entries))) { rejected = true; throw Error('项目已更新，请核对原选择') }
+        const reply = await req('project.feedback', input)
+        proof = reply?.project?.ref?.id === projectId ? reply.project.requests?.find((record: {id: string}) => record.id === input!.requestId)?.fingerprint : undefined
+        if (proof === expected) updated = reply.project
+      }
+    }
+    if (local && proof === expected) updated = local
+    if (proof !== expected) throw Error('待核对：缺少匹配的写入凭证')
+    saving = true
+    submitStep = '已写入，正在更新选择…'; render()
+    await saveSubmission(changeFor(projectId, checked(null), null))
+    if (updated) updateSubmittedProject(updated)
+  } catch (exception) {
+    const reason = exception instanceof Error ? exception.message : '提交未确认'
+    try {
+      await saveSubmission(changeFor(projectId, checked(undefined), { ...attempt, input: saving ? feedbackRequests[projectId]?.input : input, reason, rejected: rejected || (exception as any)?.code === 'invalid_request' }))
+    } catch { throw Error(reason + '；未能保存核对记录，请刷新核对') }
+    throw Error(reason)
   }
-  throw Error(`待核对：${reply.reason || '对端未确认，请重试'}`)
 }
 async function submitFeedback() {
   const groups = Object.entries(drafts).filter(([, group]) => Object.keys(group).length)
   if (!groups.length || groups.some(([, group]) => Object.values(group).some(invalidDraft))) return
   const origin = active
+  submitStep = '正在准备提交…'
   await act(async () => {
+    await edits
+    if (draftFailure) throw Error(draftFailure)
     let sent = 0
     const rejected: { projectId: string; reason: string }[] = []
     const before = inboxRows()
     for (const [projectId, group] of groups) {
-      const entries = Object.values(group), signature = await digest(JSON.stringify(entries))
+      const entries = Object.values(group)
       try {
-        if (isRemote(projectId)) await submitRemoteFeedback(projectId, entries, signature, before.filter(r => r.projectId === projectId && entries.some(d => d.taskId === r.taskId && d.kind === (r.kind === 'review' ? 'acceptance' : 'decision'))))
-        else {
-          const { project }: { project: Project | null } = await req('project.read', { projectId })
-          if (!project || project.hidden) throw new Error('项目已隐藏或读不到')
-          const previous = feedbackRequests[projectId]
-          const replay = previous?.signature === signature ? previous.id : undefined
-          if (!replay || !project.requests.some(r => r.id === replay)) {
-            if (!validFeedbackDrafts(project.tasks, entries)) throw new Error('待处理项已更新，请核对原选择')
-            const id = replay ?? crypto.randomUUID()
-            feedbackRequests[projectId] = { signature, id }
-            persist('panel.feedbackRequests', feedbackRequests)
-            await persistChain
-            await req('project.feedback', { projectId, revision: project.revision, requestId: id, items: await feedbackItems(entries) })
-          }
-        }
-        delete drafts[projectId]; delete feedbackRequests[projectId]
-        persist('panel.drafts', drafts); persist('panel.feedbackRequests', feedbackRequests)
+        await submitGroup(projectId, entries, before.filter(r => r.projectId === projectId && entries.some(d => d.taskId === r.taskId && d.kind === (r.kind === 'review' ? 'acceptance' : 'decision'))))
         sent += entries.length
         for (const r of before) if (r.projectId === projectId && entries.some(d => d.taskId === r.taskId && (
           r.kind === 'review' && d.kind === 'acceptance' || r.kind === 'decision' && d.kind === 'decision'
@@ -704,7 +776,7 @@ async function submitFeedback() {
       } catch (e) { rejected.push({ projectId, reason: (e as Error).message }) }
     }
     trayOpen = false
-    await refresh()
+    if (groups.some(([id]) => isRemote(id))) void refreshOverview()
     if (rejected.length) {
       error = rejected.map(r => `「${inboxProjectName(r.projectId)}」未确认提交：${r.reason}`).join('。') + (sent ? `。其余已提交 ${sent} 条` : '')
       const id = rejected[0].projectId
@@ -728,8 +800,8 @@ function projectPage() {
   const reason = workspaceTarget && 'error' in workspaceTarget ? workspaceTarget.error : !workspaceTarget ? '正在查找项目工作区…' : ''
   if (page.kind === 'project-settings') return [projectLeadSettings(p.ref.id), section('分工', ...Object.entries(roles).map(([k, title]) => select(title, { claude: 'Claude', codex: 'Codex' }, p.roles[k as keyof typeof roles])), button('保存', () => act(async () => { const s = await req('project.settings', { projectId: p.ref.id, revision: p.revision, roles: { design: form['设计'], code: form['代码'], review: form['审查'] } }); current = s.project; if (projectLeadPanel) projectLeadPanel.binding.revision = s.project.revision; markSaved(); notice = '已保存' }), 'primary')),
     section('开放给了谁', peers().filter(peer => peer.state === 'active' && isProjectShared(p, peer)).map(peer => small(peer.name))), small(`目录：${p.ref.path}`), button('导出记录', () => orca.files?.saveAs({ suggestedName: 'project-record.json', mimeType: 'application/json', data: JSON.stringify(p, null, 2) })),
-    button(p.hidden ? '恢复显示' : '隐藏项目', () => act(async () => { await req('project.visibility', { projectId: p.ref.id, revision: p.revision, hidden: !p.hidden }); delete drafts[p.ref.id]; persist('panel.drafts', drafts); await go({ kind: 'home' }, true); await refresh() })),
-    section('删除项目', callout('先导出记录，再从 Orca 移除项目并删除工作间记录，磁盘文件保留。有打开的会话时会拒绝。'), check('确认删除这个项目的全部工作间记录', !!form.delete, v => { form.delete = v; render() }), button('删除项目', () => act(async () => { const result = await req('project.delete', { projectId: p.ref.id, revision: p.revision, confirm: p.ref.id }); delete drafts[p.ref.id]; persist('panel.drafts', drafts); await go({ kind: 'home' }, true); await refresh(); notice = `已删除，记录已导出：${result.exportPath}` }), 'danger', !form.delete))]
+    button(p.hidden ? '恢复显示' : '隐藏项目', () => act(async () => { await req('project.visibility', { projectId: p.ref.id, revision: p.revision, hidden: !p.hidden }); clearChoices(p.ref.id); await go({ kind: 'home' }, true); await refresh() })),
+    section('删除项目', callout('先导出记录，再从 Orca 移除项目并删除工作间记录，磁盘文件保留。有打开的会话时会拒绝。'), check('确认删除这个项目的全部工作间记录', !!form.delete, v => { form.delete = v; render() }), button('删除项目', () => act(async () => { const result = await req('project.delete', { projectId: p.ref.id, revision: p.revision, confirm: p.ref.id }); clearChoices(p.ref.id); await go({ kind: 'home' }, true); await refresh(); notice = `已删除，记录已导出：${result.exportPath}` }), 'danger', !form.delete))]
   if (page.kind === 'task') {
     const t = p.tasks.find(t => t.id === page.id)
     if (!t) return callout('任务已不存在，请返回项目。')
@@ -885,9 +957,7 @@ function linksPage() {
         markSaved()
         notice = '已保存'
       })),
-      small(s.listening || '未监听'),
-      el('p', {}, 'Tailscale 流量已有端到端加密，只允许同一网络中有访问权限的设备连入，因此无需证书。'),
-      el('p', {}, '没有 Tailscale 时，可让邀请方监听回环地址，加入方用 SSH 本地端口转发，并让邀请方把访问地址填为加入方的转发入口。')]),
+      small(s.listening || '未监听')]),
     peers().some(p => p.status === 'pending') ? button('核对连接', () => act(async () => { all.links = await req('workspace.links', { operation: 'refresh' }); await refresh() })) : null]
 }
 function connectionPage() {
@@ -903,7 +973,7 @@ function connectionPage() {
 }
 function leadDescription(binding: WorkspaceBinding | undefined, label: string) {
   const s = binding?.session
-  return s ? [agentName(s.agent), s.title, label === '主会话' && s.online === 'unknown' ? '状态未知' : mainAgentStates[s.online].label].filter(Boolean).join(' · ')
+  return s ? [agentName(s.agent), s.title, label === '主 agent' ? activityStyle(mainStatus(s, live)).label : s.online === 'unknown' ? '状态未知' : mainAgentStates[s.online].label].filter(Boolean).join(' · ')
     : binding?.runId ? `已绑定${label}` : `还没有${label}`
 }
 type SwitchChoice = Omit<LeadSwitch, 'revision'>
@@ -1054,14 +1124,13 @@ new ResizeObserver(([entry]) => {
 }).observe(root)
 async function start() {
   try {
-    const [saved, savedDrafts, savedRequests, opening] = await Promise.all([orca.storage.get('panel.home'), orca.storage.get('panel.drafts'),
-      orca.storage.get('panel.feedbackRequests'), orca.storage.get('workspace.navigation')]) as any[]
+    const [saved, opening] = await Promise.all([orca.storage.get('panel.home'), orca.storage.get('workspace.navigation'), readSheets()]) as any[]
     if (saved?.at && Date.now() - saved.at < 30 * 60_000) {
       opened = saved.opened ?? opened; Object.assign(tabsOf, saved.tabs); more = !!saved.more
       stack.push(...saved.pages.slice(1).map((p: Page) => frameFor(p))); useFrame(stack.at(-1)!)
     }
-    drafts = savedDrafts ?? {}; feedbackRequests = savedRequests ?? {}
-    orca.plugin.on('project.changed', () => { void refresh() })
+    orca.plugin.on('panel.draftsChanged', () => { if (!busy && !pendingEdits) void readSheets().then(render).catch(e => { error = e.message; render() }) })
+    orca.plugin.on('project.changed', () => { if (!(busy && busyAction.startsWith('提交'))) void refresh() })
     orca.plugin.on('workspace.open', e => { void go({ kind: e.switching ? 'main' : 'home' }, true).then(() => refresh()) })
     if (opening?.switching) {
       const f = frameFor({ kind: 'main' }); stack = [homeFrame, f]; useFrame(f)

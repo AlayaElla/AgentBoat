@@ -1,4 +1,4 @@
-import { isRecentAgent, type Project, type LiveAgent, type AgentsSnapshot } from './model'
+import { isRecentAgent, type Project, type LiveAgent, type AgentsSnapshot, type AgentSession, type MainStatus } from './model'
 import type { HostApi, HostResult } from 'orca/host'
 import { projectKey } from './store'
 
@@ -7,17 +7,45 @@ type Read = (args: string[]) => Promise<any>
 export const maxAgentWorkspaces = 256, maxAgents = 2000
 
 // Host status is authoritative; worker history only identifies a saved execution.
-export async function readAgents(host: HostApi<'worker'>, read: Read, projects: Project[]): Promise<AgentsSnapshot> {
+export async function readAgents(host: HostApi<'worker'>, read: Read, projects: Project[], main?: AgentSession): Promise<AgentsSnapshot> {
   const at = Date.now()
   try {
     const list = await host.call('workspace.list', {})
     const visible = new Map(projects.filter(p => !p.hidden).map(p => [p.ref.id, p]))
+    const workspaceId = main?.workspace.replace(/^id:/, '')
+    const mainWorkspace = list.workspaces.find(w => (w.hostId ?? 'local') === 'local' && w.id === workspaceId)
+    let status: MainStatus = { state: 'unknown' }
+    const sample = (state: string, since: number): MainStatus => {
+      if (!Number.isFinite(since) || since <= 0 || !['working', 'blocked', 'waiting', 'done'].includes(state)) return { state: 'unknown' }
+      const mapped = agentState(state as HostResult<'agents.list'>['agents'][number]['state'])
+      return mapped === 'done' ? { state: 'idle' } : { state: mapped, since }
+    }
+    if (main && main.handle.startsWith('orca_session_id:')) {
+      try {
+        const inventory = await read(['worktree', 'ps', '--limit', '10000', '--agent-wait'])
+        const matches = inventory.worktrees.filter((w: any) => w.address?.environment === 'local' && (w.hostId ?? 'local') === 'local' && w.address.worktree === main.workspace)
+          .flatMap((w: any) => w.agents ?? []).filter((a: any) => !a.parentPaneKey && main.handle === 'orca_session_id:' + /^structured-agent-session-(.+):[^:]+$/.exec(a.paneKey ?? '')?.[1])
+        if (!inventory.truncated && !inventory.hostScope?.omittedHostIds?.includes('local')) {
+          if (!matches.length || matches.length === 1 && matches[0].subagentObservation === 'exited') status = { state: 'offline' }
+          else if (matches.length === 1) status = sample(matches[0].state, matches[0].stateStartedAt)
+        }
+      } catch { status = { state: 'unknown' } }
+    }
     const local = list.workspaces.filter(w => (w.hostId ?? 'local') === 'local' && w.projectId && visible.has(projectKey('local', w.projectId)))
+    if (mainWorkspace) { const index = local.indexOf(mainWorkspace); if (index >= 0) local.splice(index, 1); local.unshift(mainWorkspace) }
     let truncated = list.truncated || local.length > maxAgentWorkspaces
     const workers = new Map<string, any[]>(), agents: LiveAgent[] = []
     workspaces: for (const w of local.slice(0, maxAgentWorkspaces)) {
       const projectId = projectKey('local', w.projectId!), project = visible.get(projectId)
-      const result = await host.call('agents.list', { workspaceId: w.id })
+      const result = await host.call('agents.list', { workspaceId: w.id }).catch(error => {
+        if (w === mainWorkspace && !project) return { agents: [] }
+        throw error
+      })
+      if (main && w === mainWorkspace && !main.handle.startsWith('orca_session_id:')) {
+        const matches = result.agents.filter(a => a.terminalId === main.handle)
+        if (matches.length === 1 && result.agents.length < 50) status = sample(matches[0].state, matches[0].stateStartedAt)
+      }
+      if (!project) continue
       // Host caps each workspace at 50 without a truncation flag; do not present that boundary as a full count.
       if (result.agents.length >= 50) truncated = true
       if (!workers.has(projectId) && result.agents.some(a => a.terminalId)) {
@@ -48,7 +76,14 @@ export async function readAgents(host: HostApi<'worker'>, read: Read, projects: 
           title: taskTitle || a.title || '会话', ...(task ? { taskId: task.id } : {}), ...(taskTitle ? { taskTitle } : {}), since })
       }
     }
-    return { ok: true, at, agents, ...(truncated ? { truncated: true } : {}) }
+    if (main && !main.handle.startsWith('orca_session_id:') && status.state === 'unknown') {
+      try {
+        const inventory = await read(['terminal', 'list', '--limit', '10000'])
+        const matches = inventory.terminals.filter((terminal: any) => terminal.handle === main.handle)
+        if (!inventory.truncated && !inventory.hostScope?.omittedHostIds?.includes('local') && (!matches.length || matches.length === 1 && matches[0].connected === false)) status = { state: 'offline' }
+      } catch { status = { state: 'unknown' } }
+    }
+    return { ok: true, at, agents, ...(main ? { main: { handle: main.handle, status } } : {}), ...(truncated ? { truncated: true } : {}) }
   } catch { return { ok: false, at, agents: [], error: 'agent 状态读不到' } }
 }
 export function agentState(state: HostResult<'agents.list'>['agents'][number]['state']): LiveAgent['state'] {
