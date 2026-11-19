@@ -1,5 +1,6 @@
 import { assert, test, mockHost, mountWorker } from 'orca/testing'
 import { hostname } from 'node:os'
+import path from 'node:path'
 import type { OrcaWorkerApi } from 'orca/worker'
 import { WorkspaceLinks, defaultWorkspaceName, endpoint, invitationHost, report } from './links'
 import { refs, sample } from './fixtures'
@@ -472,6 +473,61 @@ test('Orca catalog controls project visibility, pending counts, writes, notices 
     assert.ok((await overview()).attention.length > 0)
     assert.equal(sends, 0)
   } finally { coordinator.stop(); b.links.stop(); await worker.deactivate() }
+})
+
+test('the bound main directory leaves the project list, inbox, agents, notices and shared report without losing records', async () => {
+  const peer = await instance('B'), p = sample().project!
+  p.ref.path = path.resolve('main-folder')
+  const other = { ...refs[1], workspace: '', path: path.resolve('other-folder') }
+  const nested = { ...other, id: 'nested', path: path.join(p.ref.path, 'separate-project') }
+  p.deliveries.push({ id: 'queued', state: 'pending', subject: '待发通知', body: '测试' })
+  const session = { handle: 'main', title: '工作间主会话', workspace: 'identity:main', workspaceName: '工作间',
+    path: `${process.platform === 'win32' ? p.ref.path.toUpperCase() : p.ref.path}${path.sep}`, agent: 'codex', online: 'online' as const }
+  const host = mockHost({ storage: { 'project:p1': p as any } })
+  let c!: ReturnType<typeof createCoordinator>, sends = 0
+  const worker = await mountWorker({ default: api => { c = createCoordinator(api, {
+    projects: async () => [p.ref, other, nested],
+    targets: async () => ({ workspaces: [], sessions: [session] }),
+    identify: async () => session,
+    send: async () => { sends++; return {} },
+    agents: async projects => ({ ok: true, at: Date.now(), agents: projects.filter(pr => pr.ref.id === p.ref.id).map(pr => ({ id: 'main', projectId: pr.ref.id,
+      agent: 'codex', role: 'session', state: 'need', rawState: 'waiting', title: session.title, since: Date.now() })) })
+  }) } }, { host })
+  const view = () => worker.request('workspace.overview')
+  const ids = async () => (await view()).projects.map(pr => pr.ref.id)
+  try {
+    assert.deepEqual(await ids(), ['p1', 'p2', 'nested'])
+    assert.ok((await view()).attention.some(i => i.projectId === 'p1'))
+    const { id } = (await peer.links.join((await c.links.invite()).invitation!.code)).peers[0]
+    await c.links.share({ id, revision: (await c.links.snapshot()).revision, scope: 'details', allProjects: true })
+    const shared = async () => (await peer.links.refresh()).peers[0].report?.projects.map(p => p.id)
+    assert.deepEqual(await shared(), ['p1', 'p2', 'nested'])
+
+    const bound = await worker.request('workspace.agent', { operation: 'bind', revision: 0, runId: 'run_main', currentRunId: 'run_main', caller: session.handle, requestId: 'bind-main' })
+    assert.equal(bound.session?.title, session.title)
+    assert.deepEqual(await ids(), ['p2', 'nested'])
+    assert.equal((await view()).workspace.session?.title, session.title)
+    assert.deepEqual((await view()).attention, [])
+    assert.deepEqual((await worker.request('projects.list')).projects.map(p => p.id), ['p2', 'nested'])
+    await assert.rejects(() => worker.request('project.read', { projectId: 'p1' }), /工作间项目列表/)
+    assert.deepEqual((await worker.request('workspace.agents', { refresh: true })).agents, [])
+    assert.deepEqual(await shared(), ['p2', 'nested'])
+    await c.updateStatus()
+    assert.equal((host.callsOf('statusBar.update').at(-1) as any).text, '工作间 · 待处理 0')
+    await c.flush('p1')
+    assert.equal(sends, 0)
+    assert.deepEqual(await c.store.get('p1'), p)
+
+    // Simulate the saved state after takeover; its old-session notice is covered by the takeover tests.
+    await c.store.mutateWorkspace(w => { w.session = { ...session, path: other.path } })
+    assert.deepEqual(await ids(), ['p1', 'nested'])
+    assert.deepEqual(await shared(), ['p1', 'nested'])
+    await c.store.mutateWorkspace(w => { w.runId = '' })
+    assert.deepEqual(await ids(), ['p1', 'p2', 'nested'])
+    assert.deepEqual(await shared(), ['p1', 'p2', 'nested'])
+    assert.deepEqual(await c.store.get('p1'), p)
+    assert.equal(sends, 0)
+  } finally { c.stop(); peer.links.stop(); await worker.deactivate() }
 })
 
 test('refresh does not broadcast changes when there is no outbound peer to sync', async () => {

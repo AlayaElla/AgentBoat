@@ -105,6 +105,11 @@ async function setup(options = {}) {
     }
     const calls = [];
     window.fixture = { project, projects, links, live, workspace, calls, hostCalls: [], stored, workspaceTarget: { workspaceId: 'identity:project-workspace', multipleConversations: true }, emit: () => events['project.changed']?.({}), race: false, prune: () => { task.acceptance[0].revision++; task.acceptance[0].fingerprint = 'new-version'; project.revision++; } };
+    if (options.boundMainFolder) {
+      project.ref.name = '主会话目录';
+      workspace.session.title = '工作间主会话';
+      window.fixture.removedProjects = [project.ref.id];
+    }
     window.orca = { shell: { openExternal: async url => { calls.push({ name: 'shell.openExternal', input: url }); return { opened: true }; } }, storage: { get: async k => clone(stored[k] ?? null), set: async (k, v) => { stored[k] = clone(v); }, delete: async k => { delete stored[k]; } }, plugin: { on: (name, callback) => { events[name] = callback; return { dispose() {} }; }, request: async (name, input) => {
       if (input !== undefined && !isJson(input)) throw Error('input: Invalid input');
       calls.push({ name, input: clone(input) });
@@ -870,6 +875,16 @@ try {
     await page.getByRole('alert').filter({ hasText: '打不开「本机成果」：这个项目当前没有工作区' }).waitFor();
     await page.getByRole('button', { name: '网页成果 · v1', exact: true }).click();
     assert.deepEqual(await page.evaluate(() => fixture.calls.filter(c => c.name === 'shell.openExternal').map(c => c.input)), ['https://example.com/']);
+  });
+  await setup({ inboxBatch: true, boundMainFolder: true, width: 1040 });
+  await test('the home project cards omit the bound main directory but retain the main agent', async () => {
+    const local = page.locator('[data-workspace=self]');
+    await local.getByRole('button', { name: '移动项目', exact: true }).waitFor();
+    await local.getByText(/工作间主会话/).waitFor();
+    assert.equal(await local.getByRole('button', { name: '主会话目录', exact: true }).count(), 0);
+    assert.equal(await rail().getByRole('button', { name: '页面交付', exact: true }).count(), 0);
+    assert.equal(await rail().getByRole('button', { name: '等批准', exact: true }).count(), 0);
+    if (process.env.PANEL_EVIDENCE_DIR) await page.screenshot({ path: path.join(process.env.PANEL_EVIDENCE_DIR, 'main-directory-hidden.png'), animations: 'disabled' });
   });
   await setup({ manyProjects: true });
   await test('agent failure and truncation each render once across home, project and task pages', async () => {

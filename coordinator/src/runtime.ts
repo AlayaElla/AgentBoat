@@ -30,7 +30,7 @@ export class OrcaRuntime implements CoordinatorRuntime {
     try {
       ({ stdout } = await execute(await this.executable(), [...args, '--environment', 'local', '--json', ...(args[0] === 'orchestration' ? ['--full'] : [])], {
         timeout: 25000, maxBuffer: 8 * 1024 * 1024, windowsHide: true,
-        env: { ...process.env, ORCA_ENVIRONMENT: 'local', ...(process.platform === 'win32' ? {
+        env: { ...process.env, ...(process.platform === 'win32' ? {
           APPDATA: process.env.APPDATA || path.join(os.homedir(), 'AppData', 'Roaming'),
           LOCALAPPDATA: process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local')
         } : {}) }
