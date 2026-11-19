@@ -14,15 +14,14 @@ Orca 会显示来源、权限和审批指纹。核对插件为 `alayaella.agentb
 
 ## 首次设置
 
-在同一个 Orca 用户环境下运行下面的命令。它从 Orca 当前安装的版本运行首次设置。
+打开一次「工作间」后，在同一个 Orca 用户环境下通过固定入口运行首次设置。
 
 **Windows PowerShell**
 
 ```powershell
 $orcaData = if ($env:ORCA_USER_DATA_PATH) { $env:ORCA_USER_DATA_PATH } else { Join-Path $env:APPDATA orca }
-$plugin = Join-Path $orcaData 'plugins/alayaella.agentboat'
-$version = (Get-Content (Join-Path $plugin current) -Raw).Trim()
-if ($version -match '^[0-9a-f]{64}$') { node (Join-Path $plugin "$version/setup.mjs") } else { throw '找不到 AgentBoat 当前安装版本' }
+$entry = Join-Path $orcaData 'agentboat-current'
+node (Join-Path $entry 'setup.mjs')
 ```
 
 **macOS 或 Linux**
@@ -32,13 +31,8 @@ case "$(uname -s)" in
   Darwin) orca_data="$HOME/Library/Application Support/orca" ;;
   *) orca_data="${XDG_CONFIG_HOME:-$HOME/.config}/orca" ;;
 esac
-plugin="${ORCA_USER_DATA_PATH:-$orca_data}/plugins/alayaella.agentboat"
-version=$(cat "$plugin/current")
-if printf '%s\n' "$version" | grep -Eq '^[0-9a-f]{64}$'; then
-  node "$plugin/$version/setup.mjs"
-else
-  printf '%s\n' '找不到 AgentBoat 当前安装版本' >&2
-fi
+entry="${ORCA_USER_DATA_PATH:-$orca_data}/agentboat-current"
+node "$entry/setup.mjs"
 ```
 
 命令会列出将写入的两个 skill 目录及 Claude 链接（`~/.agents/skills`、`~/.claude/skills`），还有 `~/.claude/settings.json` 和 `~/.codex/hooks.json`（设置了 `CODEX_HOME` 时使用该目录）。输入 `yes` 后先把已有内容备份到 `~/.agentboat/backups/setup-*`，再同步 skill 并合并 hooks。打开新的 agent 会话加载 skill。在 Codex CLI 输入 `/hooks`，核对并信任 AgentBoat 的 hooks。
@@ -57,7 +51,9 @@ fi
 orca plugin update alayaella.agentboat
 ```
 
-有新权限时按 Orca 回执审核。升级后重新运行上面的首次设置命令，将 skill 和 hooks 指向当前安装版本。随后开启新会话并在 Codex 内重新核对 hook 信任。
+有新权限时按 Orca 回执审核。插件启动时会按该 Orca 配置的 `current` 更新 `agentboat-current`（Windows 目录联接，macOS 或 Linux 目录符号链接）。已在运行的会话可继续使用同一个 `agentboat-current/coordinator/scripts/client.mjs`，相关说明和 hooks 也随入口更新。入口被删除时，重启插件即可重建；若该位置已有其他内容，先将其移开。
+
+只有 skill 文本变化时才需要重跑首次设置，再开启新会话加载新文本。从使用版本哈希路径的旧版首次升级到固定入口时也请执行一次，并在 Codex 的 `/hooks` 中核对新路径。
 
 ## 维护
 

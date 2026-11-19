@@ -4,7 +4,7 @@ import { pluginDataPath } from '../scripts/orca-cli.mjs'
 import { mkdir, writeFile } from 'node:fs/promises'
 import type { StorageApi } from 'orca'
 import { ProjectArchive } from './project-archive'
-import { attention, projectSummary, taskState, type Acceptance, type Artifact, type Project, type ProjectRef, type SourceEvent, type Task, type Workspace, type Overview, type Messaging, type AgentSession, type StoredTakeover } from './model'
+import { blockedRevision, attention, projectSummary, taskState, type Acceptance, type Artifact, type Project, type ProjectRef, type SourceEvent, type Task, type Workspace, type Overview, type Messaging, type AgentSession, type StoredTakeover } from './model'
 
 export const maxMessageLength = 16000
 export function fail(message: string): never { throw Object.assign(new Error(message), { code: 'invalid_request' }) }
@@ -59,7 +59,7 @@ export function overview(projects: Project[], workspace: Workspace, error = ''):
 export const workspaceNotices = (p: Project) => (p.hidden ? [] : p.tasks).flatMap(t => [
     ...t.decisions.filter(d => d.answer === undefined).map(d => ({ key: [t.id, 'decision', d.id], task: t, action: `请向用户确认：${d.question}` })),
     ...t.acceptance.filter(a => t.phase === 'ready' && a.status === 'pending').map(a => ({ key: [t.id, 'review', a.id, a.revision], task: t, action: `请用户验收：${a.title}` })),
-    ...((t.phase === 'blocked' || taskState(t) === 'completed') ? [{ key: [t.id, t.phase === 'blocked' ? 'blocked' : 'completed'], task: t, action: t.phase === 'blocked' ? `请协调解除受阻：${t.progress || t.goal}` : '任务已完成，请汇总告知用户' }] : [])
+    ...((blockedRevision(t) !== undefined || taskState(t) === 'completed') ? [{ key: [t.id, t.phase === 'blocked' ? 'blocked' : 'completed'], task: t, action: t.phase === 'blocked' ? `请协调解除受阻：${t.progress || t.goal}` : '任务已完成，请汇总告知用户' }] : [])
   ])
 export function notifyWorkspace(before: Project, after: Project, runId: string): void {
   if (!runId) return
@@ -227,6 +227,9 @@ export function submitTask(project: Project, raw: unknown): void {
   task.goal = text(input.goal, '任务目标', 16000)
   task.progress = typeof input.progress === 'string' ? input.progress.slice(0, 16000) : task.progress
   task.phase = phase
+  delete task.blockedStatus
+  if (phase === 'blocked') task.blockedRevision = project.revision + 1
+  else delete task.blockedRevision
   for (const a of list(input.artifacts ?? [], '成果')) {
     const artifact: Artifact = { id: text(a.id, '成果编号', 200), label: text(a.label, '成果名称', 200), url: artifactUrl(a.url, project.ref.path), version: text(a.version, '成果版本', 200) }
     const previous = task.artifacts.find(x => x.id === artifact.id)
@@ -234,7 +237,7 @@ export function submitTask(project: Project, raw: unknown): void {
     if (!previous) task.artifacts.push(artifact)
   }
   const withdrawals: FeedbackItem[] = []
-  function submittedItems(kind: FeedbackItem['kind'], entries: Record<string, any>[]) {
+  function submittedItems(kind: 'decision' | 'acceptance', entries: Record<string, any>[]) {
     for (const entry of entries) {
       if (entry.discarded !== undefined && typeof entry.discarded !== 'boolean') fail('discarded 必须是布尔值')
       if (!entry.discarded) continue
@@ -280,7 +283,7 @@ export function submitTask(project: Project, raw: unknown): void {
     if (!task.sourceIds.includes(sourceId)) task.sourceIds.push(sourceId)
   }
   // The lead withdrew these itself, so its own notice is not queued back to it.
-  if (withdrawals.length) applyFeedback(project.ref.id, [task], withdrawals, '项目主会话', true)
+  if (withdrawals.length) applyFeedback(project, [task], withdrawals, '项目主会话', true)
   if (phase === 'completed' && taskState({ ...task, phase: 'ready' }) !== 'completed') fail('仍有待决定、待验收或需修改的事项，不能标记为完成')
   task.updatedAt = new Date().toISOString()
   task.submittedAt = task.updatedAt
@@ -288,11 +291,11 @@ export function submitTask(project: Project, raw: unknown): void {
   else project.tasks.push(task)
 }
 
-export interface FeedbackItem { taskId: string; kind: 'acceptance' | 'decision'; itemId: string; itemRevision?: number; reviewTotal?: number; fingerprint?: string; result?: string; answer?: string; note?: string }
+export interface FeedbackItem { taskId: string; kind: 'acceptance' | 'decision' | 'blocked'; itemId: string; itemRevision?: number; reviewTotal?: number; fingerprint?: string; result?: string; answer?: string; note?: string }
 export function feedback(project: Project, raw: unknown, source?: string): void {
-  project.deliveries.push(applyFeedback(project.ref.id, project.tasks, object(raw).items, source))
+  project.deliveries.push(applyFeedback(project, project.tasks, object(raw).items, source))
 }
-function applyFeedback(projectId: string, tasks: Task[], items: unknown, source?: string, withdrawal = false): Project['deliveries'][number] {
+function applyFeedback(project: Project, tasks: Task[], items: unknown, source?: string, withdrawal = false): Project['deliveries'][number] {
   if (!Array.isArray(items) || items.length > 100) fail('反馈条目格式不正确')
   if (!items.length) fail('请至少提交一条反馈')
   const seen = new Set<string>()
@@ -308,6 +311,13 @@ function applyFeedback(projectId: string, tasks: Task[], items: unknown, source?
       if (!withdrawal && task.phase === 'paused') fail('任务已暂停')
       const note = typeof input.note === 'string' ? input.note.trim().slice(0, 8000) : ''
       const discarded = input.result === 'discarded'
+      if (input.kind === 'blocked') {
+        const current = blockedRevision(task)
+        if (current === undefined || input.itemId !== task.id || input.itemRevision !== current) fail('受阻项已更新，请刷新后确认')
+        if (input.answer !== undefined || (input.result !== undefined && !discarded)) fail('受阻项只接受备注或丢弃')
+        if (!discarded || input.note !== undefined && input.note !== '') text(input.note, '受阻备注')
+        return { task, note: (input.note ?? '') as string, discarded, title: discarded ? '主人丢弃了这项受阻' : '主人答复了这项受阻' }
+      }
       if (input.kind === 'acceptance') {
         const item = task.acceptance.find(x => x.id === input.itemId)
         if (!item || item.revision !== input.itemRevision || (!withdrawal && task.phase !== 'ready') || item.status !== 'pending') fail('验收项已更新或不在待验收状态，请刷新后确认')
@@ -328,25 +338,38 @@ function applyFeedback(projectId: string, tasks: Task[], items: unknown, source?
   })
   const at = new Date().toISOString()
   for (const v of validated) {
+    v.task.updatedAt = at
+    if (!v.item) {
+      v.task.blockedStatus = v.discarded ? 'discarded' : 'replied'
+      if (!v.note) continue
+      const id = randomUUID()
+      recordSource(project, { id, source: 'owner-feedback', sourceId: id, threadId: id, taskId: v.task.id,
+        senderId: source ?? '主人', text: v.note, receivedAt: at, chatId: '' })
+      continue
+    }
     if ('status' in v.item) v.item.status = v.result as Acceptance['status']
     else v.item.answer = v.discarded ? null : v.result
     const actor = source ?? (v.discarded ? '主人' : undefined)
     v.item.history.push({ at, revision: v.revision, result: v.result, note: v.note, ...(actor ? { source: actor } : {}) })
-    v.task.updatedAt = at
   }
-  const body = validated.map(v => `[项目 ${projectId} / 任务 ${v.task.id}]\n${v.task.title}\n${v.title}\n${v.discarded ? '已丢弃' : v.subject + '：' + v.result}\n${v.note}`).join('\n\n')
+  const body = validated.map(v => `[项目 ${project.ref.id} / 任务 ${v.task.id}]\n${v.task.title}\n${v.title}\n${v.item ? (v.discarded ? '已丢弃' : v.subject + '：' + v.result) + '\n' : ''}${v.note}`).join('\n\n')
   return { id: randomUUID(), subject: `${withdrawal ? '项目主会话撤下' : '用户反馈'} · ${validated.length} 条`, body: source ? `${source}\n\n${body}` : body, state: 'pending' }
 }
 
-export function receiveEvent(project: Project, event: SourceEvent): void {
-  if (project.events.some(x => x.source === event.source && x.sourceId === event.sourceId)) return
-  const earlier = project.events.find(x => x.threadId === event.threadId && x.taskId)
-  if (earlier) {
-    event.taskId = earlier.taskId
+function recordSource(project: Project, event: SourceEvent) {
+  if (project.events.some(x => x.source === event.source && x.sourceId === event.sourceId)) return false
+  const earlier = !event.taskId && project.events.find(x => x.threadId === event.threadId && x.taskId)
+  if (earlier) event.taskId = earlier.taskId
+  if (event.taskId) {
     const task = project.tasks.find(x => x.id === event.taskId)
     if (task && !task.sourceIds.includes(event.id)) task.sourceIds.push(event.id)
   }
   project.events.push(event)
+  return true
+}
+
+export function receiveEvent(project: Project, event: SourceEvent): void {
+  if (!recordSource(project, event)) return
   project.deliveries.push({ id: event.id, subject: event.taskId ? '主 agent任务补充' : '主 agent项目消息',
     body: `[工作间主 agent 转来]\n项目：${project.ref.id}\n来源编号：${event.id}\n关联任务：${event.taskId ?? '待判断'}\n发送者：${event.senderId}\n${event.text}`, state: 'pending' })
 }

@@ -1,6 +1,6 @@
 # client.mjs 命令
 
-`node "{{AGENTBOAT_REPO}}/coordinator/scripts/client.mjs" <命令>`（安装器按本机仓库位置填写；仓库移动后重新安装）。写命令的 JSON 放进文件（UTF-8，可带 BOM），文件路径作参数；标 stdin 的从标准输入读，这类输入不落文件。回执在 `result.result`。
+从 skill 标出的 AgentBoat 入口调用 `coordinator/scripts/client.mjs`。写命令的 JSON 放进文件（UTF-8，可带 BOM），文件路径作参数；标 stdin 的从标准输入读，这类输入不落文件。回执在 `result.result`。
 
 ## 通用
 
@@ -53,6 +53,7 @@
 
 - 整批先校验。任务不在等验收、版本不符、已处理或重复的条目，只要有一条，整批拒绝并标出序号。
 - 验收用 `passed` 或 `changes_requested`，需要修改时必须写意见。丢弃验收或决定用 `"result":"discarded"`，原因选填在 `note`，决定省略 `answer`。
+- 答复受阻项用 `{"taskId":"任务编号","kind":"blocked","itemId":"任务编号","itemRevision":1,"note":"主人原话"}`。itemRevision 取任务的 blockedRevision，旧记录省略该字段时取 0。可以继续补充；丢弃时加 `"result":"discarded"`，原因选填在 `note`。项目主会话重新提交任务后，按新状态和版本处理。
 - requestId 可省略。带上时，原样重放不会重复写入。
 - 代处理已开放的对方项目，在顶层加连接编号 `id`，并提供对方的 projectId、revision 和唯一 requestId。离线或回执未确认时保留原请求编号核对。
 - 只给项目主 agent 发一条消息，后续由它跟进。
@@ -67,4 +68,4 @@
 - `connection-send`（stdin）：`{name,runId,requestId,contextId?,text}`。同一事项沿用 contextId。
 - `connection-reply`（stdin）：`{name,runId,id,requestId,text}`，id 是对方发来的 task.id。
 - `feishu-reply`：`{runId,eventId,requestId,text}`，回到原消息所在的会话。
-- `links-*`（工作间连接和主 agent 互发消息）：见 `{{AGENTBOAT_REPO}}/coordinator/LINKS.md`。
+- `links-*`（工作间连接和主 agent 互发消息）：见入口目录下的 `coordinator/LINKS.md`。

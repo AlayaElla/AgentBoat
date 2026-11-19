@@ -3,12 +3,13 @@
 Node.js + Git + 运行中的 Orca 桌面端，以及已加载的项目协作插件、已安装的 `orca-project-coordinator` skill。无需重建插件。脚本使用 `ORCA_CLI_COMMAND`（Windows 默认当前用户 Orca 安装路径），命令固定作用于本机 Orca；不接管工作间主 Run。
 
 ```powershell
-node workspace/install.mjs
 node workspace/workspace.mjs init
 node workspace/workspace.mjs templates
 ```
 
-安装一次同步工作间与项目协作两份 skill 到 `~/.agents/skills/`，并让 `~/.claude/skills/` 的对应名称链接到它们；Windows 用 junction，不弹管理员授权。安装时把仓库占位符替换成本机真实路径，换机器或移动仓库后重新运行安装。已有其他链接/目录会拒绝覆盖。skill 全文在 [skill/agentboat-workspace/SKILL.md](skill/agentboat-workspace/SKILL.md)，加载后说“开启工作间管理”。安装不启动 agent，不改变主 Run。上述 Node 命令在 Windows PowerShell 和 macOS 终端均可用。
+以上命令从 AgentBoat 入口目录运行。正式版入口是当前 Orca 用户数据目录下的 `agentboat-current`，随插件升级更新。首次设置通过此目录的 `setup.mjs` 安装两份 skill 和 hooks，只有 skill 文本变化时才需要重跑。开发版入口是本机仓库，首次安装或移动仓库后运行 `node workspace/install.mjs`。
+
+两份 skill 位于 `~/.agents/skills/`，Claude 通过 `~/.claude/skills/` 的目录链接读取；Windows 使用 junction。安装器遇到其他 Claude 链接或目录会拒绝覆盖。skill 全文在 [skill/agentboat-workspace/SKILL.md](skill/agentboat-workspace/SKILL.md)，加载后说“开启工作间管理”。
 
 安装器会向 `~/.claude/settings.json` 和 `~/.codex/hooks.json` 各合并三条 AgentBoat hook。Codex 使用自定义 `CODEX_HOME` 时写入该目录。修改前在原文件旁备份为 `*.agentboat-*.bak`，保留已有 hooks。它们只对插件已登记的 Orca 管理员会话生效。
 

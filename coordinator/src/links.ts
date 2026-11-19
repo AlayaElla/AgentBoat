@@ -5,7 +5,7 @@ import { lookup } from 'node:dns'
 import { networkInterfaces } from 'node:os'
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto'
 import type { OrcaWorkerApi } from 'orca/worker'
-import { backupInCharge, attention, agents, compareAgentActivity, groupedAttention, isProjectShared, isRecentAgent, labels, mainStatus, mainAgentStates, taskState, type AgentActivity, type AgentsSnapshot, type MainAgentActivity, type Project, type Task, type WorkspaceBinding } from './model'
+import { backupInCharge, blockedRevision, attention, agents, compareAgentActivity, groupedAttention, isProjectShared, isRecentAgent, labels, mainStatus, mainAgentStates, taskState, type AgentActivity, type AgentsSnapshot, type MainAgentActivity, type Project, type Task, type WorkspaceBinding } from './model'
 import { fail, fingerprint, object, revision, strings, text, type FeedbackItem } from './store'
 import { LinkMessages, type IncomingMessage, type MessageExchange, type WireMessage } from './link-messages'
 import { LinkFiles } from './link-files'
@@ -13,7 +13,7 @@ import { setTimeout as delay } from 'node:timers/promises'
 
 type Scope = 'none' | 'summary' | 'details'
 export interface Sharing { scope: Scope; allProjects: boolean; projectIds: string[]; delegateFeedback?: boolean }
-export type FeedbackTask = Pick<Task, 'id' | 'title' | 'phase'> & {
+export type FeedbackTask = Pick<Task, 'id' | 'title' | 'phase' | 'blockedRevision' | 'blockedStatus'> & {
   decisions: Pick<Task['decisions'][number], 'id' | 'question' | 'options' | 'answer'>[]
   acceptance: Omit<Task['acceptance'][number], 'history'>[]
   artifacts: Task['artifacts']
@@ -28,7 +28,7 @@ export interface SharedReport {
   mainAgent?: MainAgentActivity | null
   feedbackTruncated?: true
   projects: { id: string; name: string; updatedAt: string; counts: Record<string, number>; pending: number
-    tasks?: { title: string; phase: Task['phase']; state: ReturnType<typeof taskState>; decisions: string[]; acceptance: string[] }[]
+    tasks?: { title: string; blockedPending?: boolean; phase: Task['phase']; state: ReturnType<typeof taskState>; decisions: string[]; acceptance: string[] }[]
     activity?: { agents: AgentActivity[]; truncated: boolean } | null; feedback?: DelegatedProject }[]
 }
 type LocalActivity = { workspace: WorkspaceBinding; live: AgentsSnapshot }
@@ -105,10 +105,12 @@ function delegatedProject(p: Project): DelegatedProject {
     if (t.phase === 'paused') return []
     const decisions = t.decisions.filter(d => d.answer === undefined).map(({ id, question, options }) => ({ id, question, options }))
     const acceptance = t.phase === 'ready' ? t.acceptance.filter(a => a.status === 'pending').map(({ id, title, details, artifactIds, revision, status, fingerprint }) => ({ id, title, details, artifactIds, revision, status, fingerprint })) : []
-    if (!decisions.length && !acceptance.length) return []
+    const version = blockedRevision(t)
+    if (!decisions.length && !acceptance.length && version === undefined) return []
     const ids = new Set(acceptance.flatMap(a => a.artifactIds))
     const artifacts = t.artifacts.filter(a => ids.has(a.id)).map(({ id, label, version, url }) => ({ id, label, version, url: /^https?:\/\//i.test(url) ? url : '' }))
-    return [{ id: t.id, title: t.title, phase: t.phase, decisions, acceptance, artifacts }]
+    return [{ id: t.id, title: t.title, phase: t.phase, decisions, acceptance, artifacts,
+      ...(version !== undefined && { blockedRevision: version, blockedStatus: t.blockedStatus, progress: t.progress.trim() || t.goal }) }]
   }) }
 }
 
@@ -123,6 +125,7 @@ export function report(projects: Project[], peer: Sharing, workspaceId: string, 
       return { id: p.ref.id, name: p.ref.name, updatedAt: p.updatedAt || '', counts,
         pending: details ? groupedAttention(attention(p)).length : tasks.reduce((n, t) => n + t.decisions.filter(d => d.answer === undefined).length + (t.phase === 'ready' ? t.acceptance.filter(a => a.status === 'pending').length : 0), 0),
         ...(details ? { activity: null, tasks: tasks.map(t => ({ title: t.title, phase: t.phase, state: taskState(t),
+          ...(t.phase === 'blocked' && { blockedPending: blockedRevision(t) !== undefined }),
           decisions: t.decisions.filter(d => d.answer === undefined).map(d => d.question),
           acceptance: t.phase === 'ready' ? t.acceptance.filter(a => a.status === 'pending').map(a => a.title) : [] })) } : {}) }
     }) }
@@ -196,7 +199,8 @@ function received(raw: unknown, peer: Peer): SharedReport {
         if (!['working', 'ready', 'completed', 'blocked', 'paused'].includes(t.phase) ||
           t.state !== undefined && (typeof t.state !== 'string' || !Object.hasOwn(labels, t.state))) fail('对端任务阶段不正确')
         const state = t.state ?? taskState({ phase: t.phase, decisions: decisions.map(() => ({})), acceptance: acceptance.map(() => ({ status: 'pending' })) })
-        return { title: str(t.title, 200), phase: t.phase, state, decisions, acceptance }
+        return { title: str(t.title, 200), phase: t.phase, state, decisions, acceptance,
+          ...(typeof t.blockedPending === 'boolean' && { blockedPending: t.blockedPending }) }
       })
       out.activity = null
       if (p.activity !== null) {
@@ -221,7 +225,9 @@ function receivedFeedback(raw: unknown): DelegatedProject {
   const list = (value: unknown, max: number) => Array.isArray(value) && value.length <= max ? value.map(object) : fail('对端待处理列表格式不正确')
   return { revision: revision(r.revision), tasks: list(r.tasks, 1000).map(t => {
     if (!['working', 'ready', 'completed', 'blocked'].includes(t.phase)) fail('对端待处理任务状态不正确')
+    if (t.blockedRevision !== undefined && (t.phase !== 'blocked' || t.blockedStatus !== undefined && t.blockedStatus !== 'replied')) fail('对端受阻项格式不正确')
     return { id: text(t.id, '任务编号', 200), title: text(t.title, '任务名称', 200), phase: t.phase,
+      ...(t.blockedRevision !== undefined && { blockedRevision: revision(t.blockedRevision), blockedStatus: t.blockedStatus, progress: text(t.progress, '受阻说明', 16000) }),
       decisions: list(t.decisions, 100).map(d => ({ id: text(d.id, '决定编号', 200), question: text(d.question, '问题', 4000), options: strings(d.options, '选项', 10).map(x => text(x, '选项', 200)) })),
       acceptance: list(t.acceptance, 100).map(a => {
         if (t.phase !== 'ready' || a.status !== 'pending' || typeof a.fingerprint !== 'string' || !/^[0-9a-f]{64}$/.test(a.fingerprint)) fail('对端验收格式不正确')

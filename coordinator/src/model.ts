@@ -23,6 +23,8 @@ export interface Task {
   executions: { runId: string; taskId: string; dispatchId: string; agent: 'codex' | 'claude' }[]
   artifacts: Artifact[]; acceptance: Acceptance[]; decisions: Decision[]; sourceIds: string[]
   updatedAt: string
+  blockedRevision?: number
+  blockedStatus?: 'replied' | 'discarded'
   submittedAt?: string
 }
 export interface SourceEvent {
@@ -116,7 +118,7 @@ type TaskState = ReturnType<typeof taskState>
 export type Attention = {
   projectId: string; taskId: string
   itemId: string; title: string; summary: string
-} & ({ kind: 'review'; itemRevision: number; fingerprint: string } | { kind: 'decision' | 'blocked' | 'rework' })
+} & ({ kind: 'review'; itemRevision: number; fingerprint: string } | { kind: 'decision' | 'blocked' | 'rework'; replied?: boolean })
 export interface OwnerQuestion { id: string; projectId: string; runId: string; from: string; title: string; body: string; at: number; report?: import('../scripts/worker-reports.mjs').WorkerReport }
 export const isRunNotice = (id: string) => /^(?:orca-question|orca-report|orca-mail):/.test(id)
 export interface Overview {
@@ -144,6 +146,10 @@ export function taskState(task: { phase: Task['phase']; decisions: Pick<Decision
   return task.phase
 }
 
+export function blockedRevision(task: Pick<Task, 'phase' | 'blockedStatus' | 'blockedRevision'>) {
+  return task.phase === 'blocked' && task.blockedStatus !== 'discarded' ? task.blockedRevision ?? 0 : undefined
+}
+
 export function attention(project: Project): Attention[] {
   if (project.hidden) return []
   return project.tasks.flatMap(task => {
@@ -151,7 +157,7 @@ export function attention(project: Project): Attention[] {
     const items: Attention[] = task.decisions.filter(d => d.answer === undefined).map(d => ({ ...base, kind: 'decision', itemId: d.id, summary: d.question }))
     items.push(...task.acceptance.filter(a => a.status === 'pending' && task.phase === 'ready').map(a => ({ ...base, kind: 'review' as const, itemId: a.id, summary: a.title, itemRevision: a.revision, fingerprint: a.fingerprint })))
     items.push(...task.acceptance.filter(a => a.status === 'changes_requested').map(a => ({ ...base, kind: 'rework' as const, itemId: a.id, summary: a.history.at(-1)?.note || a.title })))
-    if (task.phase === 'blocked') items.push({ ...base, kind: 'blocked', itemId: task.id, summary: task.progress || task.goal })
+    if (blockedRevision(task) !== undefined) items.push({ ...base, kind: 'blocked', replied: task.blockedStatus === 'replied', itemId: task.id, summary: task.progress || task.goal })
     return items.map(item => ({ ...item, summary: item.summary.replace(/\s+/g, ' ').slice(0, 300) }))
   })
 }

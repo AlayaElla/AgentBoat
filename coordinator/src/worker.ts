@@ -14,7 +14,7 @@ import { LinkFiles } from './link-files'
 import { groupedAttention, isProjectShared, isRunNotice, type OwnerQuestion } from './model'
 import { mainAgent, roleReminder, switchLead, takeoverView, recoverTakeover } from './main-agent'
 import { projectLeadDefaults } from '../../workspace/agent-launch.mjs'
-import { clientPath, release, roleRegistryPath } from '../scripts/orca-cli.mjs'
+import { clientPath, installationRoot, release, roleRegistryPath } from '../scripts/orca-cli.mjs'
 import { cliBridge } from '../scripts/cli-bridge.mjs'
 import { applyDelta, type Sheets } from './feedback-drafts'
 import { roleRegistry } from './role-registry'
@@ -867,6 +867,8 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
 let coordinator: ReturnType<typeof createCoordinator> | undefined
 let cli: ReturnType<typeof cliBridge> | undefined
 export default async function activate(orca: OrcaWorkerApi): Promise<void> {
+  // A broken stable link must not stop the plugin; the versioned paths keep working.
+  if (release) try { installationRoot() } catch (error) { console.error(`AgentBoat 固定入口未更新：${error instanceof Error ? error.message : error}`) }
   const runtime = new OrcaRuntime(async () => {
     const configured = await orca.settings.get('cliPath')
     return typeof configured === 'string' && configured.trim() ? configured.trim() : defaultExecutable

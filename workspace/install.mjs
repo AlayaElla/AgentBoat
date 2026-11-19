@@ -3,8 +3,8 @@ import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import os from 'node:os';
 import { fileURLToPath } from 'node:url';
+import { installationRoot } from '../coordinator/scripts/orca-cli.mjs';
 
-const repository = fileURLToPath(new URL('../', import.meta.url)).replaceAll('\\', '/').replace(/\/$/, '');
 function hookSettings(file, handler, owned, matchers) {
   let info;
   try { info = lstatSync(file); } catch (e) { if (e.code !== 'ENOENT') throw e; }
@@ -40,8 +40,9 @@ function hookSettings(file, handler, owned, matchers) {
   };
 }
 export function install(home = os.homedir(), codexHome = path.join(home, '.codex')) {
+  const repository = installationRoot().replaceAll('\\', '/');
   const skills = ['agentboat-workspace', 'orca-project-coordinator'].map(name => ({
-    source: fileURLToPath(new URL(name === 'agentboat-workspace' ? './skill/agentboat-workspace/' : '../coordinator/skill/orca-project-coordinator/', import.meta.url)),
+    source: path.join(repository, name === 'agentboat-workspace' ? 'workspace' : 'coordinator', 'skill', name),
     target: path.join(home, '.agents/skills', name), link: path.join(home, '.claude/skills', name)
   }));
   // Refuse a foreign directory before changing the installed skill; never request admin rights.
@@ -51,7 +52,7 @@ export function install(home = os.homedir(), codexHome = path.join(home, '.codex
     if (entry && (!entry.isSymbolicLink() || realpathSync(link) !== realpathSync(target))) throw new Error(`Claude 位置已有其他内容，未覆盖：${link}`);
     if (existsSync(target) && (!lstatSync(target).isDirectory() || lstatSync(target).isSymbolicLink())) throw new Error(`安装目标必须是普通目录：${target}`);
   }
-  const script = fileURLToPath(new URL('./harness/hook.mjs', import.meta.url));
+  const script = path.join(repository, 'workspace/harness/hook.mjs');
   if (!existsSync(script)) throw Error('找不到 AgentBoat hooks');
   const marker = '--agentboat-role-harness';
   const claude = hookSettings(path.join(home, '.claude', 'settings.json'),
@@ -82,4 +83,4 @@ export function install(home = os.homedir(), codexHome = path.join(home, '.codex
   return { repository, skills: skills.map(({ target, link }) => ({ installed: target, claudeLink: link })),
     codexHooks: path.join(codexHome, 'hooks.json'), codexTrust: '在 Codex CLI 输入 /hooks，查看并信任三条 AgentBoat hook。' };
 }
-if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) console.log(JSON.stringify(install(os.homedir(), process.env.CODEX_HOME || undefined), null, 2));
+if (process.argv[1] && existsSync(process.argv[1]) && realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)) console.log(JSON.stringify(install(os.homedir(), process.env.CODEX_HOME || undefined), null, 2));

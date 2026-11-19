@@ -1,4 +1,4 @@
-import { executable as orca } from '../coordinator/scripts/orca-cli.mjs';
+import { activeUserDataPath, clientPath as client, executable as orca, release } from '../coordinator/scripts/orca-cli.mjs';
 import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync, realpathSync, appendFileSync, statSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
@@ -11,7 +11,6 @@ export { launchReceipt } from './agent-launch.mjs';
 
 export const root = fileURLToPath(new URL('../', import.meta.url));
 const home = path.resolve(process.env.AGENTBOAT_HOME || path.join(os.homedir(), '.agentboat'));
-const client = path.join(root, 'coordinator/scripts/client.mjs');
 
 const json = file => JSON.parse(readFileSync(file, 'utf8').replace(/^\uFEFF/, ''));
 const save = (file, value) => writeFileSync(file, JSON.stringify(value, null, 2) + '\n');
@@ -23,7 +22,8 @@ const run = (executable, args, cwd = root, env = process.env) => execFileSync(ex
   cwd, env, encoding: 'utf8', windowsHide: true, timeout: 120000, maxBuffer: 8 * 1024 * 1024,
 });
 function call(args, cwd) {
-  const reply = JSON.parse(run(orca, [...args, '--environment', 'local', '--json'], cwd));
+  const env = release ? { ...process.env, ORCA_USER_DATA_PATH: activeUserDataPath() } : process.env;
+  const reply = JSON.parse(run(orca, [...args, '--environment', 'local', '--json'], cwd, env));
   if (!reply.ok) throw new Error(JSON.stringify(reply.error));
   return reply.result;
 }
@@ -309,7 +309,7 @@ export function remember(input) {
   return { file, id, saved: true, committed: false };
 }
 
-if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+if (process.argv[1] && existsSync(process.argv[1]) && realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)) {
   try {
     const [command, argument] = process.argv.slice(2);
     let result;

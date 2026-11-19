@@ -127,7 +127,7 @@ export function publish(root, id, reviewer, evidence) {
   return { name: id, ...records[id], mergeRequired: true };
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
+if (process.argv[1] && fs.existsSync(process.argv[1]) && import.meta.url === pathToFileURL(fs.realpathSync(process.argv[1])).href) {
   try {
     const { values, positionals: [command] } = parseArgs({ allowPositionals: true, options: Object.fromEntries(['root', 'name', 'description', 'path', 'reviewer', 'source'].map(k => [k, { type: 'string' }])) });
     const root = values.root || process.cwd();
