@@ -3,6 +3,7 @@ import path from 'node:path'
 import { pluginDataPath } from '../scripts/orca-cli.mjs'
 import { mkdir, writeFile } from 'node:fs/promises'
 import type { StorageApi } from 'orca'
+import { ProjectArchive } from './project-archive'
 import { attention, projectSummary, taskState, type Acceptance, type Artifact, type Project, type ProjectRef, type SourceEvent, type Task, type Workspace, type Overview, type Messaging, type AgentSession, type StoredTakeover } from './model'
 
 export const maxMessageLength = 16000
@@ -71,9 +72,10 @@ export function notifyWorkspace(before: Project, after: Project, runId: string):
 
 export class ProjectStore {
   private chain: Promise<unknown> = Promise.resolve()
+  private archive: ProjectArchive
   constructor(private storage: Pick<StorageApi, 'get' | 'set' | 'keys' | 'delete'>,
     private exportDirectory = path.join(pluginDataPath(), 'exports'),
-    private updateRoles?: () => Promise<void>) {}
+    private updateRoles?: () => Promise<void>) { this.archive = new ProjectArchive(exportDirectory) }
   async remove(id: string, expected: number, absent: () => Promise<void>): Promise<string> {
     return this.serial(async () => {
       const project = await this.get(id)
@@ -184,9 +186,11 @@ export class ProjectStore {
       const project = await this.get(id)
       request?.authorize?.(project)
       const hash = request && fingerprint(request.input)
-      const prior = request && project.requests.find(x => x.id === request.id)
+      const recent = request && project.requests.find(x => x.id === request.id)
+      const prior = recent ?? (request && await this.archive.receipt(project, request.id))
       if (prior) {
         if (prior.fingerprint !== hash) fail('同一个请求编号不能用于不同内容')
+        if (!recent) project.requests.push(prior) // Return the proof to this caller only.
         return project
       }
       if (expected !== undefined && expected !== project.revision) fail('项目已更新，请刷新后再提交')
@@ -194,8 +198,15 @@ export class ProjectStore {
       project.revision++
       project.updatedAt = new Date().toISOString()
       if (request) project.requests.push({ id: request.id, fingerprint: hash! })
-      // shortcut: one project per bridge reply; use paged storage before expanding the 256 KiB bridge limit.
-      if (Buffer.byteLength(JSON.stringify(project)) > 200_000) fail('项目记录已接近面板传输上限，请先导出记录；原记录已保留')
+      const archiveError = await this.archive.compact(project)
+      const bytes = Buffer.byteLength(JSON.stringify(project))
+      if (bytes > 200_000) {
+        const sizes = { 任务: project.tasks, 来源消息: project.events, 通知: project.deliveries, 请求凭证: project.requests }
+        const parts = Object.entries(sizes).map(([name, rows]) => `${name} ${Buffer.byteLength(JSON.stringify(rows))} 字节`)
+        const advice = archiveError ? `归档失败（${archiveError}），请检查归档目录权限和磁盘空间后重试`
+          : '请缩短本次提交的任务或消息正文，将长文放在成果文件中；若现有记录已满，需升级为支持分页的版本'
+        fail(`项目记录 ${bytes} 字节，超过 200000 字节上限（${parts.join('、')}）。${advice}。原记录已保留`)
+      }
       await this.storage.set(`project:${id}`, project as any)
       if (backgroundRoles) setImmediate(() => { void this.updateRoles?.().catch(() => {}) })
       else await this.updateRoles?.()

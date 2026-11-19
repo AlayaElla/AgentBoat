@@ -57,6 +57,7 @@ export interface Project {
   takeover?: StoredTakeover
   hidden?: boolean
   updatedAt?: string
+  archive?: { id: string; start: number; end: number }
   roles: { design: 'codex' | 'claude'; code: 'codex' | 'claude'; review: 'codex' | 'claude' }
   tasks: Task[]; events: SourceEvent[]; deliveries: Delivery[]; requests: { id: string; fingerprint: string }[]
 }

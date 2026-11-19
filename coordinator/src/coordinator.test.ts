@@ -1,7 +1,7 @@
 import { assert, mockHost, mountWorker, test } from 'orca/testing'
 import { testCoordinator as createCoordinator } from './test-runtime'
 import { refs, deliverable } from './fixtures'
-import { fresh, feedback, submitTask, ProjectStore, overview, notifyWorkspace } from './store'
+import { fresh, feedback, fingerprint, submitTask, ProjectStore, overview, notifyWorkspace } from './store'
 import { report } from './links'
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import os from 'node:os'
@@ -372,14 +372,76 @@ test('delete refreshes Orca catalog, requires exact confirmation and revision, e
   } finally { c.stop(); await worker.deactivate() }
 })
 
+function projectStorage(project: ReturnType<typeof fresh>): ConstructorParameters<typeof ProjectStore>[0] {
+  const values = new Map<string, any>([[`project:${project.ref.id}`, project]])
+  return { get: async k => values.get(k), set: async (k, v) => { values.set(k, structuredClone(v)) },
+    keys: async () => [...values.keys()], delete: async k => { values.delete(k) } }
+}
+
 test('failed export never deletes or alters a project', async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), 'agentboat-export-failure-')), blocked = path.join(directory, 'file')
   await writeFile(blocked, 'not a directory')
-  const p = fresh(refs[0]), values = new Map<string, any>([['project:p1', p]])
-  const store = new ProjectStore({ get: async k => values.get(k), set: async (k, v) => { values.set(k, v) }, keys: async () => [...values.keys()],
-    delete: async k => { values.delete(k) } }, blocked)
+  const p = fresh(refs[0])
+  const store = new ProjectStore(projectStorage(p), blocked)
   await assert.rejects(() => store.remove('p1', 0, async () => {}))
   assert.deepEqual(await store.get('p1'), p)
+})
+
+test('first write archives oversized history and preserves actionable notifications and replay proofs across restart', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'agentboat-project-archive-'))
+  const project = fresh(refs[0])
+  submitTask(project, deliverable)
+  const unfinished = (['pending', 'sending', 'uncertain'] as const).map(state => ({ id: state, state, subject: state, body: state }))
+  const quoted = { id: 'quote', state: 'sent' as const, subject: '', body: '', external: { channel: 'feishu' as const, appId: 'app', chatId: 'chat', messageId: 'msg',
+    target: { projectId: 'p1', taskId: deliverable.id, kind: 'acceptance' as const, itemId: 'page-check', itemRevision: 1, fingerprint: project.tasks[0].acceptance[0].fingerprint } } }
+  const history = Array.from({ length: 50 }, (_, i) => ({ id: String(i), state: 'sent' as const, subject: '通知', body: 'x'.repeat(4200) }))
+  project.deliveries.push(...unfinished, quoted, ...history)
+  project.requests = Array.from({ length: 132 }, (_, i) => ({ id: String(i), fingerprint: fingerprint(i) }))
+  const storage = projectStorage(project)
+  const restart = () => new ProjectStore(storage, dir)
+  try {
+    assert.ok(Buffer.byteLength(JSON.stringify(project)) > 200_000)
+    const store = restart()
+    const saved = await store.mutate('p1', 0, p => { p.runId = 'main' })
+    assert.ok(Buffer.byteLength(JSON.stringify(saved)) < 200_000)
+    assert.deepEqual(saved.tasks, project.tasks)
+    assert.deepEqual(saved.deliveries, [...unfinished, quoted, ...history.slice(-24)])
+    const file = path.join(dir, (await readdir(dir))[0])
+    const original = await readFile(file, 'utf8'), batch = JSON.parse(original)
+    assert.deepEqual(batch.deliveries, history.slice(0, -24))
+    assert.deepEqual(batch.requests, project.requests.slice(0, -128))
+    // A crash after a partial append must not corrupt the next committed batch.
+    await writeFile(file, '{"unfinished":', { flag: 'a' })
+    const calls = [132, 133].map(i => store.mutate('p1', undefined, () => {}, { id: String(i), input: i }))
+    const [, last] = await Promise.all(calls)
+    assert.equal(last.revision, 3)
+    assert.ok((await readFile(file, 'utf8')).startsWith(original))
+    const resumed = restart()
+    for (const i of [0, 4, 5]) {
+      const replay = await resumed.mutate('p1', 0, () => { throw Error('duplicate write') }, { id: String(i), input: i })
+      assert.equal(replay.revision, 3)
+      assert.deepEqual(replay.requests.at(-1), project.requests[i])
+    }
+    await assert.rejects(() => resumed.mutate('p1', 0, () => {}, { id: '0', input: 'different' }), /不同内容/)
+    assert.equal((await resumed.get('p1')).requests.length, 128)
+  } finally { await rm(dir, { recursive: true, force: true }) }
+})
+
+test('archive failure retains history, permits writes that fit and describes an oversized write', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'agentboat-project-archive-failure-'))
+  const blocked = path.join(dir, 'file'), project = fresh(refs[0])
+  project.deliveries = Array.from({ length: 30 }, (_, i) => ({ id: String(i), state: 'sent', body: '', subject: '通知' }))
+  project.requests = Array.from({ length: 129 }, (_, i) => ({ id: String(i), fingerprint: fingerprint(i) }))
+  const store = new ProjectStore(projectStorage(project), blocked)
+  try {
+    await writeFile(blocked, '')
+    const saved = await store.mutate('p1', 0, p => { p.runId = 'main' })
+    assert.equal(saved.runId, 'main')
+    assert.deepEqual(saved.requests, project.requests)
+    assert.deepEqual(saved.deliveries, project.deliveries)
+    await assert.rejects(() => store.mutate('p1', 1, p => { p.deliveries[0].body = 'x'.repeat(200_000) }), /200000.*通知.*归档失败/)
+    assert.deepEqual(await store.get('p1'), saved)
+  } finally { await rm(dir, { recursive: true, force: true }) }
 })
 
 test('concurrent requests, replay and project boundaries preserve records', async () => {

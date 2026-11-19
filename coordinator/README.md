@@ -59,6 +59,8 @@ node ../workspace/install.mjs
 
 macOS 默认插件数据目录为 `~/Library/Application Support/orca/plugins-data/local.agentboat`；Windows 默认位于用户的 `AppData/Roaming/orca/plugins-data/local.agentboat`（使用系统 APPDATA）。两者均优先使用 `ORCA_USER_DATA_PATH` 指定的 Orca 用户数据目录。备份脚本与项目导出共用这条规则；开发版或自定义 profile 应在当前 Orca 终端内执行，或显式设置该环境变量。
 
+每次项目写入会保留最近 24 条已结束通知，方便在面板回看近期活动。待发、发送中、待核对通知和仍可回复的飞书提醒全部保留。最近 128 个请求凭证随项目返回，覆盖多轮提交和反馈核对。更早的通知和凭证完整追加到插件数据目录的 `exports/project-<archive.id>.jsonl`，落盘后才移出项目。重试更早的编号也会核对原指纹。备份或还原时请将项目记录和 `exports` 一起保存。
+
 ## 本地开发
 
 实时 agent 状态要求 Orca >=1.4.261，授权时新增「读取 agent 状态」和「读取工作区」；`workspace:write` 不包含读取权限。`workspace.agents` 按工作区调用宿主 `agents.list`，waiting/blocked 显示「需要你」、working 显示「工作中」、done 显示「已完成」。worker 监听 `agent.status.changed`，即使面板关闭也更新状态栏，60 秒兜底刷新；最多读取 256 个本机工作区、2000 条状态，截断会提示且状态栏数量带 `+`，已完成保留 24 小时。宿主每工作区最多返回 50 条且没有截断字段，达到 50 条时也显示数量不完整提示。

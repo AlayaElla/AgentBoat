@@ -297,11 +297,11 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
   }
   async function requireProject(id: string) { return (await projectEntry(id)).ref }
   async function ensure(id: string): Promise<Project> { return store.register(await requireProject(id)) }
-  async function snapshot(id: string): Promise<Snapshot> {
+  async function snapshot(id: string, written?: Project): Promise<Snapshot> {
     const { refs, error: runtimeError } = await availableProjects(), ref = refs.find(p => p.id === id)
     if (!ref) fail(runtimeError ?? '项目已从 Orca 移除或不在工作间项目列表')
-    const project = !runtimeError ? await store.register(ref)
-      : (await store.all()).find(p => p.ref.id === id) ?? fresh(ref)
+    const project = written ?? (!runtimeError ? await store.register(ref)
+      : (await store.all()).find(p => p.ref.id === id) ?? fresh(ref))
     const sessions = project.mainAgentHandle && !runtimeError ? await runtime.targets().then(t => t.sessions).catch(() => undefined) : undefined
     const lead = projectBinding(project, sessions), agent = projectAgentKind(project)
     const { takeover, ...visible } = project
@@ -584,7 +584,7 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
     const id = text(input.projectId, '项目编号', 200)
     await ensure(id)
     const requestId = text(input.requestId, '请求编号', 200), message = text(input.text, '消息', maxMessageLength)
-    await store.mutate(id, input.revision === undefined ? undefined : revision(input.revision), async p => {
+    const written = await store.mutate(id, input.revision === undefined ? undefined : revision(input.revision), async p => {
       const w = await store.workspace()
       if (!w.runId || input.runId !== w.runId) fail('请使用已绑定的工作间主 agent Run')
       const eventId = `workspace-agent:${fingerprint([id, requestId])}`
@@ -592,7 +592,7 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
         chatId: '', senderId: w.runId, text: message, receivedAt: new Date().toISOString() })
     }, { id: requestId, input })
     changed(id); defer(id)
-    const result = await snapshot(id)
+    const result = await snapshot(id, written)
     return { ...result, ...(!result.project?.runId ? { queued: '项目还没有主会话，已排队' } : {}) }
   })
   orca.panels.handle('projects.list', async () => {
@@ -681,7 +681,7 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
       await runtime.verifyRun(runId, caller)
       if (caller) takeoverSession = await runtime.identify(caller, runId, input.currentRunId)
     }
-    await store.mutate(id, revision(input.revision), async p => {
+    const written = await store.mutate(id, revision(input.revision), async p => {
       if (input.operation === 'bind') {
         if ((await store.workspace()).runId === input.runId) fail('请在目标会话创建独立的项目 Run')
         if ((await store.all()).some(x => x.ref.id !== id && x.runId === input.runId)) fail('该主会话 Run 已绑定其他项目')
@@ -710,7 +710,7 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
     }, request)
     changed(id)
     defer(id)
-    return snapshot(id)
+    return snapshot(id, written)
   })
   orca.panels.handle('project.deliver', async input => {
     await ensure(input.projectId)

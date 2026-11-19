@@ -770,7 +770,7 @@ async function submitGroup(projectId: string, entries: Draft[], rows: InboxRow[]
       const prior = local?.requests.find(record => record.id === input!.requestId)
       if (prior) { proof = prior.fingerprint; rejected = proof !== expected; updated = local }
       else {
-        if (local && (local.revision !== input.revision || !validFeedbackDrafts(local.tasks, entries))) { rejected = true; throw Error('项目已更新，请核对原选择') }
+        if (local && !local.archive && (local.revision !== input.revision || !validFeedbackDrafts(local.tasks, entries))) { rejected = true; throw Error('项目已更新，请核对原选择') }
         const reply = await req('project.feedback', input)
         proof = reply?.project?.ref?.id === projectId ? reply.project.requests?.find((record: {id: string}) => record.id === input!.requestId)?.fingerprint : undefined
         if (proof === expected) updated = reply.project
