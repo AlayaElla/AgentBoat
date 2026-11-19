@@ -142,3 +142,20 @@ cp.execFileSync=(_exe,args)=>{if(args[0]==='orchestration'){if(args.includes('--
     }
   } finally { rmSync(dir, {recursive:true,force:true}); }
 });
+
+test('submit emits the hook receipt only for the exact saved write and preserves the bridge reply', () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'project-submit-client-'));
+  const fixture = path.join(dir, 'orca-fixture.mjs'), input = path.join(dir, 'input.json');
+  writeFileSync(fixture, "import cp from 'node:child_process'; import {syncBuiltinESMExports} from 'node:module'; import {createHash} from 'node:crypto';\n" +
+    "cp.execFileSync=(_exe,args)=>{const raw=args[args.indexOf('--data')+1]; const input=JSON.parse(raw);const fingerprint=process.env.TEST_UNMATCHED?'wrong':createHash('sha256').update(raw).digest('hex');return JSON.stringify({ok:true,result:{result:{project:{ref:{id:input.projectId},tasks:[{...input.task,acceptance:[{status:'pending'}]}],requests:[{id:input.requestId,fingerprint}]}}}});};syncBuiltinESMExports();");
+  writeFileSync(input, JSON.stringify({ projectId: 'p1', runId: 'run_self', requestId: 'one', task: { id: 't1', phase: 'ready' } }));
+  try {
+    const call = unmatched => JSON.parse(execFileSync(process.execPath, ['--import', pathToFileURL(fixture).href, 'scripts/client.mjs', 'submit', input], {
+      encoding: 'utf8', windowsHide: true, env: { ...process.env, TEST_UNMATCHED: unmatched ? '1' : '' }
+    }));
+    const reply = call(false);
+    assert.deepEqual(reply.submission, { projectId: 'p1', requestId: 'one', taskId: 't1', phase: 'ready', pendingAcceptance: true });
+    assert.equal(reply.result.result.project.ref.id, 'p1');
+    assert.equal(call(true).submission, undefined);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});

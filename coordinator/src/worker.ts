@@ -13,11 +13,17 @@ import { LinkFiles } from './link-files'
 import { groupedAttention, isProjectShared } from './model'
 import { mainAgent, roleReminder, switchLead, takeoverView, recoverTakeover } from './main-agent'
 import { projectLeadDefaults } from '../../workspace/agent-launch.mjs'
-import { clientPath } from '../scripts/orca-cli.mjs'
+import { clientPath, roleRegistryPath } from '../scripts/orca-cli.mjs'
 import { applyDelta, type Sheets } from './feedback-drafts'
+import { roleRegistry } from './role-registry'
 
-export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRuntime, transport?: MessageTransport, exportDirectory?: string, linkFiles?: LinkFiles) {
-  const store = new ProjectStore(orca.storage, exportDirectory)
+export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRuntime, transport?: MessageTransport, exportDirectory?: string, linkFiles?: LinkFiles, roleFile?: string) {
+  const refreshRoles: (() => Promise<void>) | undefined = roleFile ? roleRegistry(roleFile, async () => {
+    const [workspace, projects, mailbox] = await Promise.all([store.workspace(), store.all(), store.messaging().catch(() => undefined)])
+    const registered = catalog && mergeProjects(projects, projectRefs(catalog, workspace))
+    return { workspace, projects: registered ?? projects, mailbox, current: catalogUnavailable ? undefined : registered }
+  }) : undefined
+  const store: ProjectStore = new ProjectStore(orca.storage, exportDirectory, refreshRoles)
   let draftWrites = Promise.resolve()
   orca.panels.handle('panel.feedbackState', ({ change }) => {
     const operation = draftWrites.then(async () => {
@@ -33,6 +39,7 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
     return operation
   })
   let catalog: ProjectRef[] | undefined
+  let catalogUnavailable = false
   let readingCatalog: Promise<{ refs?: ProjectRef[]; error?: string }> | undefined
   const busy = new Map<string, Promise<void>>()
   const changed = (projectId = '') => { agentsDirty = true; links.localChanged(); orca.panels.post('project.changed', { projectId }); void updateStatus().catch(() => {}) }
@@ -179,24 +186,32 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
     return readingCatalog ??= (async () => {
       try {
         const refs = await runtime.projects(orca.host)
-        if (!catalog || catalog.length !== refs.length || catalog.some((p, i) => {
+        const changed = !catalog || catalog.length !== refs.length || catalog.some((p, i) => {
           const next = refs[i]
           return p.id !== next.id || p.name !== next.name || p.workspace !== next.workspace || p.path !== next.path
-        })) {
+        })
+        const refreshRegistry = catalogUnavailable || changed && catalog !== undefined
+        if (changed) {
           agentsDirty = true
           if (catalog) links.localChanged()
         }
-        return { refs: catalog = refs }
+        catalog = refs
+        catalogUnavailable = false
+        if (refreshRegistry) void refreshRoles?.()
+        return { refs }
       } catch (e) {
+        if (!catalogUnavailable) { catalogUnavailable = true; void refreshRoles?.() }
         return { refs: catalog, error: `无法读取 Orca 项目：${e instanceof Error ? e.message.slice(0, 2000) : '请检查 Orca 与 CLI 路径'}` }
       }
     })().finally(() => { readingCatalog = undefined })
   }
-  async function availableProjects() {
-    const [{ refs, error }, { runId, session }] = await Promise.all([readCatalog(), store.workspace()])
-    const projects = refs ?? (await store.all()).map(p => p.ref)
+  function projectRefs(refs: ProjectRef[], { runId, session }: import('./model').WorkspaceBinding) {
     const directory = runId && session?.path
-    return { refs: directory ? projects.filter(p => path.relative(directory, p.path) !== '') : projects, error }
+    return directory ? refs.filter(p => path.relative(directory, p.path) !== '') : refs
+  }
+  async function availableProjects() {
+    const [{ refs, error }, workspace] = await Promise.all([readCatalog(), store.workspace()])
+    return { refs: projectRefs(refs ?? (await store.all()).map(p => p.ref), workspace), error }
   }
   async function availableProjectRecords() {
     const [{ refs, error }, saved] = await Promise.all([availableProjects(), store.all()])
@@ -642,6 +657,7 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
 
   let refreshMain: ReturnType<typeof setInterval> | undefined
   return { store, links, connections, ingest, flush, flushMailbox, updateStatus, stop: () => { clearInterval(refreshMain); for (const event of activityEvents) event.dispose(); connections.stop(); links.stop(); sources.stop() }, async start() {
+    if (refreshRoles) { await readCatalog(); await refreshRoles() }
     await links.start()
     await connections.start()
     await main.recover()
@@ -670,7 +686,7 @@ export default async function activate(orca: OrcaWorkerApi): Promise<void> {
     const configured = await orca.settings.get('cliPath')
     return typeof configured === 'string' && configured.trim() ? configured.trim() : defaultExecutable
   })
-  coordinator = createCoordinator(orca, runtime)
+  coordinator = createCoordinator(orca, runtime, undefined, undefined, undefined, roleRegistryPath())
   await coordinator.start()
 }
 export function deactivate(): void { coordinator?.stop() }

@@ -6,12 +6,17 @@ const start = '<!-- AgentBoat:workspace-role:start -->';
 const end = '<!-- AgentBoat:workspace-role:end -->';
 const heading = '## 角色卡\n\n';
 
+export function readRoleCard(role) {
+  const skill = role === 'workspace-main' ? '../../workspace/skill/agentboat-workspace/SKILL.md' : '../skill/orca-project-coordinator/SKILL.md';
+  const card = readFileSync(new URL(skill, import.meta.url), 'utf8').replaceAll('\r\n', '\n').split(heading)[1]?.split('\n\n')[0];
+  if (!card?.trim()) throw Error('找不到主会话角色卡');
+  return card;
+}
+
 export function writeMainRoleCards(directory) {
   if (typeof directory !== 'string' || !path.isAbsolute(directory)) throw Error('绑定回执缺少工作间主会话的绝对目录');
   const root = realpathSync(directory);
-  const skill = readFileSync(new URL('../../workspace/skill/agentboat-workspace/SKILL.md', import.meta.url), 'utf8').replaceAll('\r\n', '\n');
-  const card = skill.split(heading)[1]?.split('\n\n')[0];
-  if (!card?.trim()) throw Error('找不到工作间角色卡');
+  const card = readRoleCard('workspace-main');
 
   const updates = ['CLAUDE.md', 'AGENTS.md'].flatMap(name => {
     const file = path.join(root, name);

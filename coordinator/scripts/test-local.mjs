@@ -10,7 +10,7 @@ const cliPath = realpathSync(path.isAbsolute(executable) ? executable : execFile
 const resources = path.resolve(path.dirname(cliPath), '../app.asar.unpacked/resources/plugins/declarative');
 await mkdir('.orca/local-test', { recursive: true });
 const runtime = path.join(resources, 'orca-runtime.mjs');
-const tests = ['butler', 'coordinator', 'feishu', 'links', 'link-messages', 'main-agent', 'agents'];
+const tests = ['butler', 'coordinator', 'feishu', 'links', 'link-messages', 'main-agent', 'agents', 'role-registry'];
 await build({
   entryPoints: tests.map(name => `src/${name}.test.ts`), outdir: '.orca',
   bundle: true, platform: 'node', format: 'esm', target: 'node22',
@@ -18,4 +18,4 @@ await build({
   banner: {js:"import { createRequire as __testRequire } from 'node:module'; import { fileURLToPath as __testFile } from 'node:url'; import __testPath from 'node:path'; const require = __testRequire(import.meta.url); const __filename = __testFile(import.meta.url); const __dirname = __testPath.dirname(__filename);"},
   outExtension:{'.js':'.mjs'}
 });
-execFileSync(process.execPath, ['--test', ...tests.map(name => `.orca/${name}.test.mjs`), 'scripts/client.test.mjs', 'scripts/paths.test.mjs', '../workspace/install.test.mjs', '../workspace/workspace.test.mjs', '../workspace/project-skills.test.mjs'], {stdio:'inherit'});
+execFileSync(process.execPath, ['--test', ...tests.map(name => `.orca/${name}.test.mjs`), 'scripts/client.test.mjs', 'scripts/paths.test.mjs', '../workspace/install.test.mjs', '../workspace/workspace.test.mjs', '../workspace/project-skills.test.mjs', '../workspace/harness/hook.test.mjs'], {stdio:'inherit'});

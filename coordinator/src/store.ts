@@ -72,7 +72,8 @@ export function notifyWorkspace(before: Project, after: Project, runId: string):
 export class ProjectStore {
   private chain: Promise<unknown> = Promise.resolve()
   constructor(private storage: Pick<StorageApi, 'get' | 'set' | 'keys' | 'delete'>,
-    private exportDirectory = path.join(userDataPath(), 'plugins-data', 'local.project-coordinator', 'exports')) {}
+    private exportDirectory = path.join(userDataPath(), 'plugins-data', 'local.project-coordinator', 'exports'),
+    private updateRoles?: () => Promise<void>) {}
   async remove(id: string, expected: number, absent: () => Promise<void>): Promise<string> {
     return this.serial(async () => {
       const project = await this.get(id)
@@ -83,6 +84,7 @@ export class ProjectStore {
       await writeFile(exportPath, JSON.stringify(project, null, 2) + '\n', { flag: 'wx', flush: true })
       await absent()
       await this.storage.delete(`project:${id}`)
+      await this.updateRoles?.()
       return exportPath
     })
   }
@@ -110,6 +112,7 @@ export class ProjectStore {
       }
       if (Buffer.byteLength(JSON.stringify(m)) > 200_000) fail('工作间消息记录已达容量上限；原记录已保留')
       await this.storage.set('workspace.messaging', m as any)
+      await this.updateRoles?.()
       return m
     })
   }
@@ -126,6 +129,7 @@ export class ProjectStore {
       if (expected !== undefined && w.revision !== expected) fail('工作间已更新，请刷新后再提交')
       fn(w); w.revision++
       await this.storage.set('workspace', w as any)
+      await this.updateRoles?.()
       return w
     })
   }
@@ -147,6 +151,7 @@ export class ProjectStore {
       w.session = session; w.boundAt = new Date().toISOString(); delete w.takeover
       w.runId = runId; w.revision++; w.requests.push({ id: request.id, fingerprint: hash })
       await this.storage.set('workspace', w as any)
+      await this.updateRoles?.()
       return w
     })
   }
@@ -192,6 +197,7 @@ export class ProjectStore {
       // shortcut: one project per bridge reply; use paged storage before expanding the 256 KiB bridge limit.
       if (Buffer.byteLength(JSON.stringify(project)) > 200_000) fail('项目记录已接近面板传输上限，请先导出记录；原记录已保留')
       await this.storage.set(`project:${id}`, project as any)
+      await this.updateRoles?.()
       return project
     })
   }

@@ -15,3 +15,4 @@ export function userDataPath(platform = process.platform, env = process.env, hom
 
 // Source scripts, bundled plugin and isolated tests all sit one level below coordinator.
 export const clientPath = fileURLToPath(new URL('../scripts/client.mjs', import.meta.url));
+export const roleRegistryPath = (platform = process.platform, env = process.env, home = os.homedir()) => path.join(userDataPath(platform, env, home), 'plugins-data', 'local.project-coordinator', 'roles.json');

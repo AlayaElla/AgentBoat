@@ -3,6 +3,7 @@ import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
+import { createHash } from 'node:crypto';
 import { writeMainRoleCards } from './main-role-card.mjs';
 
 const [operation, argument] = process.argv.slice(2);
@@ -55,6 +56,16 @@ try {
       catch (error) { binding.roleCardWarning = `绑定已成功，角色卡未完整写入：${error.message}。修正后用原请求重试。`; }
     }
     process.stdout.write(JSON.stringify(reply, null, 2) + '\n');
+  } else if (operation === 'submit') {
+    const reply = JSON.parse(stdout), result = reply.result?.result, project = result?.project;
+    const task = project?.tasks?.find(t => t.id === input.task?.id);
+    const fingerprint = createHash('sha256').update(JSON.stringify(input)).digest('hex');
+    if (reply.ok && project?.ref?.id === input.projectId && task && project.requests?.some(r => r.id === input.requestId && r.fingerprint === fingerprint)) {
+      const submission = { projectId: project.ref.id, requestId: input.requestId, taskId: task.id, phase: task.phase, pendingAcceptance: task.acceptance?.some(a => a.status === 'pending') ?? false };
+      process.stdout.write(JSON.stringify({ submission, ...reply }) + '\n');
+    } else {
+      process.stdout.write(stdout);
+    }
   } else if (operation !== 'message') process.stdout.write(stdout);
   else {
     const reply = JSON.parse(stdout), result = reply.result?.result;
