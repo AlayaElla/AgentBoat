@@ -8,7 +8,8 @@ import { readAgents, type AgentsSnapshot } from './agents'
 import type { Project } from './model'
 import type { HostApi } from 'orca/host'
 import { agentFlags, launchReceipt, type AgentLaunch } from '../../workspace/agent-launch.mjs'
-import { inboxLimit, openQuestions, type OrcaQuestion, type OrcaWorkerRecord } from '../scripts/orca-questions.mjs'
+import { inboxLimit, openRunMail, type OrcaQuestion, type OrcaWorkerRecord } from '../scripts/orca-questions.mjs'
+import type { WorkerReport } from '../scripts/worker-reports.mjs'
 
 const execute = promisify(execFile)
 export interface CoordinatorRuntime {
@@ -21,7 +22,7 @@ export interface CoordinatorRuntime {
   openOverview(): Promise<void>
   removeProject(ref: ProjectRef, host: HostApi<'worker'>): Promise<void>
   agents(projects: Project[], host: HostApi<'worker'>, main?: AgentSession): Promise<AgentsSnapshot>
-  questions(runId: string): Promise<OrcaQuestion[]>
+  mail(runId: string): Promise<{ questions: OrcaQuestion[]; reports: WorkerReport[] }>
   hermesApprovalMode(): Promise<string>
   send(runId: string, delivery: Delivery): Promise<{ requestId?: string }>
 }
@@ -85,11 +86,11 @@ export class OrcaRuntime implements CoordinatorRuntime {
   }
   async openOverview() { await this.call(['plugin', 'open', 'local.project-coordinator', '--panel', 'project-coordinator']) }
   async agents(projects: Project[], host: HostApi<'worker'>, main?: AgentSession) { return readAgents(host, args => this.call(args), projects, main) }
-  async questions(runId: string) {
+  async mail(runId: string) {
     // shortcut: Orca inbox has no pagination; scan the newest bounded window.
     const result = await this.call(['orchestration', 'inbox', '--run', runId, '--limit', String(inboxLimit)])
     if (!Array.isArray(result.messages) || result.messages.some((m: any) => !m || m.run_id !== runId)) fail('Orca 运行邮件无法核对')
-    return openQuestions(result.messages, runId, async ids => {
+    return openRunMail(result.messages, runId, async ids => {
       const [taskList, workers] = await Promise.all([
         this.call(['orchestration', 'task-list', '--run', runId]),
         this.questionWorkers(runId, ids)

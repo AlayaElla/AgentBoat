@@ -10,7 +10,13 @@ node workspace/workspace.mjs templates
 
 安装一次同步工作间与项目协作两份 skill 到 `~/.agents/skills/`，并让 `~/.claude/skills/` 的对应名称链接到它们；Windows 用 junction，不弹管理员授权。安装时把仓库占位符替换成本机真实路径，换机器或移动仓库后重新运行安装。已有其他链接/目录会拒绝覆盖。skill 全文在 [skill/agentboat-workspace/SKILL.md](skill/agentboat-workspace/SKILL.md)，加载后说“开启工作间管理”。安装不启动 agent，不改变主 Run。上述 Node 命令在 Windows PowerShell 和 macOS 终端均可用。
 
-安装器也会给用户级 `~/.claude/settings.json` 合并 AgentBoat 的三个 Claude Code hooks。写入前在旁边备份为 `settings.json.agentboat-*.bak`，保留已有 hooks。它们只对插件已登记的 Orca Claude 管理员会话生效。工作间管理员应逐条运行获准的管理和只读命令。需要 stdin 时可用 Bash 的输入重定向或 PowerShell 的 `Get-Content -Raw … | node …`。项目主会话用独立的 `client.mjs submit` 命令登记完成或待验收，便于 Stop 检查提交回执。
+安装器会向 `~/.claude/settings.json` 和 `~/.codex/hooks.json` 各合并三条 AgentBoat hook。Codex 使用自定义 `CODEX_HOME` 时写入该目录。修改前在原文件旁备份为 `*.agentboat-*.bak`，保留已有 hooks。它们只对插件已登记的 Orca 管理员会话生效。
+
+首次安装后，在 Codex CLI 输入 `/hooks`，检查源文件为用户级 `hooks.json`、命令指向本仓库 `workspace/harness/hook.mjs`，再信任 AgentBoat 的 SessionStart、PreToolUse 和 Stop 三条。安装器只写 hook 定义，信任由 Codex 在用户确认后记录。 [Codex hooks 文档](https://learn.chatgpt.com/docs/hooks)
+
+工作间管理员应逐条运行获准的管理和只读命令。需要 stdin 时可用 Bash 的输入重定向或 PowerShell 的 `Get-Content -Raw … | node …`。项目主会话用 `client.mjs submit` 登记成果，并在对应任务的 `executions` 里保留 Orca Run、任务和派工编号。
+
+插件只处理仍在执行、最近 24 小时内的回报和问题。回报超过 30 分钟仍未提交，或问题超过 10 分钟仍未回复，先提醒项目主会话一次。首次投递后过 2 小时仍待处理，再提醒工作间主 agent，由它判断是否告知主人。项目主会话实际登记的待决定、受阻和待验收事项进入「等你处理」。
 
 `AGENTBOAT_HOME` 默认 `~/.agentboat`；init 保留已有模板和记忆，不覆盖定制。目录有 templates、memory、projects（立项日志）、assignments（派活日志）、requests（插件请求原文）。记忆有独立 Git 仓库，脚本只暂存不提交；主人的明确内容和推断分开，外部工作间单独目录。所有来源与日志可能含用户原话，按本机私有资料保管，不放凭据。
 

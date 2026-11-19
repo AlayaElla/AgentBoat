@@ -1,8 +1,8 @@
-import type { Attention, LiveAgent, OwnerQuestion } from './model'
+import type { Attention, LiveAgent } from './model'
 import type { DelegatedFeedback } from './links'
 
 export type Draft = { reviewTotal?: number; taskId: string; kind: 'acceptance' | 'decision'; itemId: string; itemRevision?: number; fingerprint?: string; signature: string; title: string; result?: string; answer?: string; note?: string }
-export type InboxRow = { id: string; title: string; projectId?: string; taskId?: string; kind: Attention['kind'] | 'agent' | 'question'; count?: number; agent?: LiveAgent; question?: OwnerQuestion }
+export type InboxRow = { id: string; title: string; projectId?: string; taskId?: string; kind: Attention['kind'] | 'agent'; count?: number; agent?: LiveAgent }
 export type Attempt = { signature: string; input?: DelegatedFeedback; rows?: InboxRow[]; reason?: string; rejected?: boolean }
 type Sheet = { entries: Record<string, Draft>; attempt?: Attempt; versions: Record<string, number>; floor: number }
 export type Sheets = Record<string, Sheet>

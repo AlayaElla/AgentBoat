@@ -10,10 +10,11 @@ import type { OrcaWorkerApi } from 'orca/worker'
 import type { CoordinatorRuntime } from './runtime'
 import { assertProjectIdle, OrcaRuntime } from './runtime'
 import { groupedAttention } from './model'
-import { inboxLimit, openQuestions, questionWait, questionMaxAge } from '../scripts/orca-questions.mjs'
+import { inboxLimit, openRunMail, questionWait, questionMaxAge } from '../scripts/orca-questions.mjs'
+import { escalationWait, projectSubmissions, reportSubmitted, reportWait, workerReport } from '../scripts/worker-reports.mjs'
 const mainSession = { handle: 'orca_session_id:test-main', title: '测试主会话', workspace: 'id:test', workspaceName: '测试工作区', path: '/test', agent: 'claude', online: 'online' as const }
 
-test('overdue Run questions join the inbox until the matching reply and notify the main agent once', async () => {
+test('overdue Run questions remind the project once and clear on a matching reply', async () => {
   const p = fresh(refs[0]); p.runId = 'run_fake'
   const host = mockHost({ storage: { 'project:p1': p as any, workspace: { version: 1, revision: 0, runId: 'run_main', session: mainSession, requests: [] } } })
   const ask = { id: 'msg_question', from_handle: 'dispatch:fake', to_handle: 'run:run_fake', run_id: 'run_fake', thread_id: 'msg_question',
@@ -26,8 +27,8 @@ test('overdue Run questions join the inbox until the matching reply and notify t
   const sent: string[] = [], runs: string[] = []
   let c!: ReturnType<typeof createCoordinator>
   const worker = await mountWorker({ default: api => { c = createCoordinator(api, { projects: async () => refs,
-    questions: async run => { runs.push(run); if (failure) throw Error('fixture failure'); return openQuestions(rows, run, async () => ({ workers: [status], tasks: [task] })) },
-    send: async (run, { body }) => { assert.equal(run, 'run_main'); sent.push(body); return {} } }) } }, { host })
+    mail: async run => { runs.push(run); if (failure) throw Error('fixture failure'); return openRunMail(rows, run, async () => ({ workers: [status], tasks: [task] })) },
+    send: async (run, { body }) => { assert.equal(run, p.runId); sent.push(body); return {} } }) } }, { host })
   const pending = async () => (await worker.request('workspace.overview')).questions
   try {
     await c.refreshQuestions()
@@ -42,7 +43,7 @@ test('overdue Run questions join the inbox until the matching reply and notify t
     assert.equal(sent.length, 1)
     assert.ok(sent[0].includes(ask.body))
     await c.updateStatus()
-    assert.ok((host.callsOf('statusBar.update').at(-1) as any).text.endsWith('待处理 1'))
+    assert.ok((host.callsOf('statusBar.update').at(-1) as any).text.endsWith('待处理 0'))
     await c.refreshQuestions(); await c.flushMailbox()
     assert.equal(sent.length, 1)
     task.status = 'completed'
@@ -57,11 +58,11 @@ test('overdue Run questions join the inbox until the matching reply and notify t
     await c.refreshQuestions()
     assert.equal((await pending())?.length, 1)
     rows = [reply, ...rows]
-    await c.refreshQuestions()
-    assert.deepEqual(await pending(), [])
-    rows = [ask]
+    await c.store.mutateMessaging(m => { m.deliveries[0].runNotice!.attemptedAt = Date.now() - escalationWait - 1000 })
     await c.refreshQuestions(); await c.flushMailbox()
+    assert.deepEqual(await pending(), [])
     assert.equal(sent.length, 1)
+    assert.equal((await c.store.messaging()).deliveries.length, 1)
     await c.store.mutate('p1', undefined, changed => { changed.runId = 'run_replaced' })
     assert.deepEqual(await pending(), [])
     await c.refreshQuestions()
@@ -70,7 +71,7 @@ test('overdue Run questions join the inbox until the matching reply and notify t
   } finally { c.stop(); await worker.deactivate() }
 })
 
-test('only recent questions from a verified unfinished Orca dispatch and task are eligible', async () => {
+test('questions and worker reports require recent mail from a verified unfinished dispatch and task', async () => {
   const run = 'run_fixture', now = Date.now()
   const row = (id: string, dispatch: string, age = questionWait + 1) => ({
     id, from_handle: 'dispatch:' + dispatch, to_handle: 'run:' + run, run_id: run, type: 'question',
@@ -79,22 +80,87 @@ test('only recent questions from a verified unfinished Orca dispatch and task ar
   const worker = (id: string, taskId = 'open', overrides = {}) => ({
     dispatchId: id, runId: run, taskId, dispatchStatus: 'dispatched', workerState: 'ready', ...overrides
   })
+  const report = (id: string, dispatch: string, taskId: string, from: string, age: number) =>
+    ({ ...row(id, dispatch, age), type: 'worker_done', from_handle: from, payload: JSON.stringify({ taskId, dispatchId: dispatch, outcome: 'succeeded' }) })
+  const historicSenders = ['structworker_7fa88d8f', 'structworker_636a98be', 'structworker_441cd3ca']
   const messages = [
     row('recent', 'live'), row('edge', 'live', questionMaxAge), row('too-new', 'live', questionWait),
     row('expired', 'live', questionMaxAge + 1), row('finished', 'ended'), row('closed', 'released'),
     row('finished-task', 'ended-task'), row('worker-done', 'settled'), row('unverified', 'unknown'),
     { ...row('send-as-user', 'live'), from_handle: 'orca_session_id:untagged' },
     { ...row('legacy', 'live'), from_handle: 'structworker_fixture', payload: '{"dispatchId":"live","taskId":"open"}' },
-    { ...row('wrong-sender', 'live'), from_handle: 'structworker_other', payload: '{"dispatchId":"live","taskId":"open"}' }
+    { ...row('wrong-sender', 'live'), from_handle: 'structworker_other', payload: '{"dispatchId":"live","taskId":"open"}' },
+    ...historicSenders.map((handle, i) =>
+      report('historic-' + i, 'historic-' + i, 'open', handle, (5 + i % 2) * questionMaxAge)),
+    report('recent-report', 'live', 'open', 'structworker_fixture', reportWait + 1),
+    report('too-new-report', 'live', 'open', 'structworker_fixture', reportWait),
+    report('ended-dispatch', 'ended', 'open', 'dispatch:ended', reportWait + 1),
+    report('ended-task', 'ended-task', 'closed', 'dispatch:ended-task', reportWait + 1)
   ]
-  const results = await openQuestions(messages, run, async () => ({
+  const results = await openRunMail(messages, run, async () => ({
     workers: [worker('live', 'open', { agentTerminalHandle: 'structworker_fixture' }), worker('ended', 'open', { dispatchStatus: 'completed' }),
       worker('released', 'open', { terminalState: 'released' }), worker('ended-task', 'closed'),
-      worker('settled', 'open', { workerState: 'succeeded' })],
+      worker('settled', 'open', { workerState: 'succeeded' }),
+      ...historicSenders.map((handle, i) => worker('historic-' + i, 'open', { agentTerminalHandle: handle }))],
     tasks: [{ id: 'open', status: 'dispatched', run_id: run }, { id: 'closed', status: 'completed', run_id: run }]
   }), now)
-  assert.deepEqual(results.map(q => q.id), ['recent', 'edge', 'legacy'])
-  assert.deepEqual(await openQuestions([row('old', 'live', questionMaxAge + 1)], run, async () => { throw Error('unexpected work lookup') }, now), [])
+  assert.deepEqual(results.questions.map(q => q.id), ['recent', 'edge', 'legacy'])
+  assert.deepEqual(results.reports.map(q => q.id), ['recent-report'])
+  assert.deepEqual(await openRunMail([row('old', 'live', questionMaxAge + 1)], run, async () => { throw Error('unexpected work lookup') }, now), { questions: [], reports: [] })
+})
+
+test('Run mail first reminds the project and escalates once after two hours unless the project submits', async () => {
+  const now = Date.now(), project = fresh(refs[0]); project.runId = 'run_report'
+  const host = mockHost({ storage: { 'project:p1': project as any,
+    workspace: { version: 1, revision: 0, runId: 'run_main', session: mainSession, requests: [] } } })
+  const raw = { type: 'worker_done', id: 'msg_report', run_id: project.runId, to_handle: 'run:' + project.runId, from_handle: 'structworker_fixture',
+    body: '实现已完成，等待验收', created_at: new Date(now - reportWait + 10_000).toISOString(),
+    payload: JSON.stringify({ taskId: 'orca-task', dispatchId: 'ctx_task', outcome: 'succeeded' }) }
+  assert.equal(workerReport({ ...raw, payload: { _orcaLifecycleRejection: { reason: 'fixture' } } }), undefined)
+  const sent: { run: string; body: string }[] = []
+  let coordinator!: ReturnType<typeof createCoordinator>
+  const worker = await mountWorker({ default: api => {
+    coordinator = createCoordinator(api, { projects: async () => refs, mail: run => openRunMail([raw], run, async () => ({
+      workers: [{ runId: run, taskId: 'orca-task', dispatchId: 'ctx_task', dispatchStatus: 'dispatched', workerState: 'ready', agentTerminalHandle: raw.from_handle }],
+      tasks: [{ id: 'orca-task', run_id: run, status: 'dispatched' }]
+    })), send: async (run, { subject, body }) => { if (subject.includes('执行者回报待提交')) sent.push({ run, body }); return {} } })
+  } }, { host })
+  async function submit(revision: number, id: string, orcaTaskId: string) {
+    return worker.request('project.agent', { operation: 'submit', projectId: 'p1', revision, requestId: 'submit-' + id,
+      task: { id, title: id, goal: id, phase: 'working', executions: [{ runId: project.runId, taskId: orcaTaskId, dispatchId: 'ctx_task', agent: 'codex' }] } })
+  }
+  try {
+    await coordinator.refreshQuestions()
+    assert.deepEqual((await worker.request('workspace.overview')).reports, [])
+    raw.created_at = new Date(now - reportWait - 1000).toISOString()
+    await coordinator.refreshQuestions(); await coordinator.flushMailbox()
+    const raised = (await worker.request('workspace.overview')).reports
+    assert.equal(raised?.length, 1)
+    assert.equal(raised?.[0].from, 'structworker_fixture')
+    assert.equal(sent.length, 1); assert.ok(sent[0].body.includes(raw.body))
+    assert.equal(sent[0].run, project.runId)
+    await coordinator.refreshQuestions(); await coordinator.flushMailbox()
+    assert.equal(sent.length, 1)
+    await coordinator.store.mutateMessaging(m => { m.deliveries[0].runNotice!.attemptedAt = Date.now() - escalationWait - 1000 })
+    await coordinator.refreshQuestions(); await coordinator.flushMailbox()
+    assert.deepEqual(sent.map(d => d.run), [project.runId, 'run_main'])
+    await coordinator.refreshQuestions(); await coordinator.flushMailbox()
+    assert.equal(sent.length, 2)
+    await submit(0, 'other-task', 'other-orca-task')
+    assert.deepEqual((await worker.request('workspace.overview')).reports, [])
+    raw.id = 'msg_already_submitted'
+    await coordinator.refreshQuestions(); await coordinator.flushMailbox()
+    assert.deepEqual((await worker.request('workspace.overview')).reports, [])
+    assert.equal(sent.length, 2)
+    const saved = await coordinator.store.get('p1')
+    const task = saved.tasks[0], report = workerReport(raw)!
+    task.executions[0].taskId = 'orca-task'
+    task.submittedAt = new Date(report.at! - 1000).toISOString()
+    task.updatedAt = new Date(report.at! + 1000).toISOString()
+    assert.ok(projectSubmissions(saved).some(proof => reportSubmitted(report, proof)))
+    task.executions[0].taskId = 'unrelated'
+    assert.ok(!projectSubmissions(saved).some(proof => reportSubmitted(report, proof)))
+  } finally { await coordinator.flush('p1'); coordinator.stop(); await worker.deactivate() }
 })
 
 test('feedback returns the committed snapshot without waiting for delivery or session inventory', async () => {

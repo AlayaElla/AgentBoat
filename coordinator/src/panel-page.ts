@@ -93,8 +93,7 @@ const pending = (p?: string) => groupedAttention(all.attention).filter(a => !p |
 const needs = () => live.ok ? live.agents.filter(a => a.state === 'need') : []
 const agentInboxKey = (id: string) => JSON.stringify(['agent', id])
 const total = () => inboxRows().length
-const questionsFor = (id?: string) => (all.questions ?? []).filter(q => !id || q.projectId === id)
-const projectCount = (id: string) => pending(id).length + needs().filter(a => a.projectId === id).length + questionsFor(id).length
+const projectCount = (id: string) => pending(id).length + needs().filter(a => a.projectId === id).length
 const projectAgents = (id?: string) => live.ok ? live.agents.filter(a => (!id || a.projectId === id) && isRecentAgent(a)) : []
 const relative = (at?: number | string) => {
   if (!at) return '未知'
@@ -258,7 +257,7 @@ async function loadPage(f = active, projectRead?: Promise<any>) {
   f.load = request
   try {
     const [snapshot, connection, sessions, leadPanel] = await Promise.all([
-      p.projectId && p.kind !== 'question' && !isRemote(p.projectId) ? projectRead ?? req('project.read', { projectId: p.projectId }) : null,
+      p.projectId && !isRemote(p.projectId) ? projectRead ?? req('project.read', { projectId: p.projectId }) : null,
       p.kind === 'connection' && p.id ? req('workspace.connections', { operation: 'read', connectionId: p.id }) : null,
       p.kind === 'main' ? req('workspace.agent.targets') : null,
       p.kind === 'project-settings' && p.projectId ? req('project.lead', { projectId: p.projectId }) : undefined
@@ -352,7 +351,7 @@ async function refresh(forceAgents = false) {
     }
     const visible = active === homeFrame && !wideInbox
     const read = new Map<string, Promise<any>>()
-    const details = visible ? [...inlineRows].filter(([id, f]) => id.startsWith(active.key + '[') && expandedRows.has(id) && f.page.projectId && f.page.kind !== 'question' && !isRemote(f.page.projectId)) : []
+    const details = visible ? [...inlineRows].filter(([id, f]) => id.startsWith(active.key + '[') && expandedRows.has(id) && f.page.projectId && !isRemote(f.page.projectId)) : []
     await Promise.all([loadPage(active), ...details.map(([, f]) => {
       const projectId = f.page.projectId!
       if (!read.has(projectId)) read.set(projectId, req('project.read', { projectId }))
@@ -449,7 +448,7 @@ function ownProjects() {
   const projects = all.projects.filter(p => !homeFrame.form['找项目'] || p.ref.name.toLowerCase().includes(homeFrame.form['找项目'].toLowerCase()))
   const cardFor = (p: Overview['projects'][number]) => projectCard({ ...p.ref, count: projectCount(p.ref.id), agents: projectAgents(p.ref.id) }, () => { void go({ kind: 'project', projectId: p.ref.id }) })
   return [all.projects.length > 12 ? input('找项目', '', 'search', () => render(), '输入项目名', homeFrame.form) : null, ...(all.machines ?? [{ id: 'local', name: '', role: 'host' }]).map(m => {
-    const list = projects.filter(p => p.ref.hostId === m.id), active = list.filter(p => Object.values(p.counts).some(Boolean) || projectCount(p.ref.id) || projectAgents(p.ref.id).some(a => a.state !== 'done')), idle = list.filter(p => !active.includes(p))
+    const list = projects.filter(p => p.ref.hostId === m.id), active = list.filter(p => Object.values(p.counts).some(Boolean) || projectAgents(p.ref.id).some(a => a.state !== 'done')), idle = list.filter(p => !active.includes(p))
     return el('div', { class: 'stack g2' }, (all.machines?.length ?? 0) > 1 ? small(`${m.role === 'host' ? '主机' : '电脑'} · ${m.name}`) : null, el('div', { class: 'cards' }, active.sort((a, b) => projectCount(b.ref.id) - projectCount(a.ref.id)).map(cardFor)), idle.length ? fold('idle-' + m.id, `还没有任务的项目 ${idle.length} 个`, () => el('div', { class: 'cards' }, idle.map(cardFor)), undefined, !!homeFrame.form['找项目']) : null)
   }), !all.projects.length ? small('还没有项目，在 Orca 中添加项目后会显示在这里。') : null]
 }
@@ -483,8 +482,7 @@ const finishing = new Map<string, InboxRow>()
 function inboxRows(projectId?: string): InboxRow[] {
   const entries: InboxRow[] = [
     ...needs().filter(a => !projectId || a.projectId === projectId).map(a => ({ id: agentInboxKey(a.id), kind: 'agent' as const, title: a.title, agent: a, projectId: a.projectId })),
-    ...pending(projectId).map(a => ({ ...a, id: inboxKey(a.projectId, a.taskId, a.kind) })),
-    ...questionsFor(projectId).map(q => ({ id: inboxKey(q.projectId, q.id, 'question'), kind: 'question' as const, title: q.title, projectId: q.projectId, question: q }))
+    ...pending(projectId).map(a => ({ ...a, id: inboxKey(a.projectId, a.taskId, a.kind) }))
   ]
   if (!projectId) for (const p of remoteProjects()) for (const t of p.feedback.tasks) for (const [kind, count] of [
     ['decision', t.decisions.length], ['review', t.acceptance.length]
@@ -509,7 +507,6 @@ function selectReview(r: InboxRow, checked: boolean) {
   }
 }
 function rowPage(r: InboxRow): Page {
-  if (r.question) return { kind: 'question', projectId: r.projectId, id: r.question.id, inboxRow: r.id }
   return r.kind === 'agent' ? { kind: 'agents', inboxRow: r.id } : { kind: 'task', projectId: r.projectId, id: r.taskId, inboxRow: r.id }
 }
 function openInbox(r: InboxRow, scope: string, keyboard = false) {
@@ -537,11 +534,6 @@ function fold(id: string, title: string, body: () => any, count?: number, defaul
 }
 function inboxBody(f: Frame) {
   const p = f.page
-  if (p.kind === 'question') {
-    const q = questionsFor(p.projectId).find(q => q.id === p.id)
-    return q ? card(small(`${inboxProjectName(q.projectId)} · 执行者 ${q.from} · ${relative(q.at)}`),
-      el('p', { class: 'any', style: 'white-space: pre-wrap' }, q.body)) : small('这项已不在待处理清单')
-  }
   if (p.kind === 'agents') return agentNeedContent(p.inboxRow)
   const rowKind = JSON.parse(p.inboxRow!)[2] as Attention['kind']
   if (p.projectId && isRemote(p.projectId)) {
@@ -569,7 +561,6 @@ function renderInboxRow(r: InboxRow, scope: string) {
     return saved?.result === 'passed' && saved.fingerprint === d.fingerprint && saved.itemRevision === d.itemRevision
   }) : !!awaiting && passed === r.count
   const summary = r.agent ? `${agentName(r.agent.agent)} · ${relative(r.agent.since)}开始等待`
-    : r.question ? `待回复 · ${inboxProjectName(r.question.projectId)} · ${r.question.from}`
     : `${review ? `${r.count} 项成果` : r.kind === 'decision' ? '待决定' : '受阻'} · ${inboxProjectName(r.projectId!)}${r.projectId && isRemote(r.projectId) && remoteOffline(r.projectId) ? ' · 离线' : ''}`
   const action = item(r.title, summary, () => openInbox(r, scope), review ? null : dot(r.kind === 'blocked' ? 'bad' : 'need'))
   action.dataset.inboxRow = r.id
@@ -1035,7 +1026,6 @@ function settingsPage() {
 function titleOf(f: Frame) {
   const p = f.page, project = f.data?.current, peer = all?.links?.peers.find(x => x.id === p.id)
   switch (p.kind) {
-    case 'question': return '执行者等回复'
     case 'project': return project?.ref.name ?? all?.projects.find(x => x.ref.id === p.projectId)?.ref.name ?? '项目'
     case 'task': return (p.projectId && isRemote(p.projectId) ? remoteProject(p.projectId)?.feedback.tasks.find(t => t.id === p.id)?.title : undefined) ?? project?.tasks.find(x => x.id === p.id)?.title ?? all?.attention.find(x => x.projectId === p.projectId && x.taskId === p.id)?.title ?? '任务'
     case 'peer': return peer?.name ?? '工作间连接'
@@ -1049,7 +1039,7 @@ const loadIssue = (f: Frame) => el('div', { class: 'card', role: 'alert' }, el('
   button('重试', () => { f.error = undefined; const ready = f === homeFrame ? refresh(true) : loadPage(f); render(); void ready.then(render) }, 'sm'))
 function content(): any {
   if (active.error) return loadIssue(active)
-  if (page.kind === 'question' || page.inboxRow && isRemote(page.projectId)) return inboxBody(active)
+  if (page.inboxRow && isRemote(page.projectId)) return inboxBody(active)
   if (!active.data) return skeleton()
   if (page.projectId) return current ? projectPage() : callout('项目已被移除或不可用')
   if (['peer', 'relation', 'peer-project'].includes(page.kind)) return peerPage()
@@ -1134,7 +1124,7 @@ async function start() {
     const [saved, opening] = await Promise.all([orca.storage.get('panel.home'), orca.storage.get('workspace.navigation'), readSheets()]) as any[]
     if (saved?.at && Date.now() - saved.at < 30 * 60_000) {
       opened = saved.opened ?? opened; Object.assign(tabsOf, saved.tabs); more = !!saved.more
-      stack.push(...saved.pages.slice(1).map((p: Page) => frameFor(p))); useFrame(stack.at(-1)!)
+      stack.push(...saved.pages.slice(1).filter((p: Page) => p.kind !== 'question').map((p: Page) => frameFor(p))); useFrame(stack.at(-1)!)
     }
     orca.plugin.on('panel.draftsChanged', () => { if (!busy && !pendingEdits) void readSheets().then(render).catch(e => { error = e.message; render() }) })
     orca.plugin.on('project.changed', () => { if (!(busy && busyAction.startsWith('提交'))) void refresh() })

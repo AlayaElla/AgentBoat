@@ -14,11 +14,13 @@ test('Claude role hooks scope actions by Orca identity and fail open', () => {
   const registry = roleRegistryPath(process.platform, env);
   const sessions = {
     'orca_session_id:claude_workspace': { role: 'workspace-main', directory: main, summary: '工作间待处理 1 组' },
-    'orca_session_id:claude_project': { role: 'project-lead', projectId: 'p1', summary: '待验收 1 项' }
+    'orca_session_id:claude_project': { role: 'project-lead', projectId: 'p1', summary: '待验收 1 项' },
+    'orca_session_id:codex_workspace': { role: 'workspace-main', directory: main, summary: '工作间待处理 1 组' },
+    'orca_session_id:codex_project': { role: 'project-lead', projectId: 'p1', runId: 'run_fixture', summary: '待验收 1 项' }
   };
   const hook = fileURLToPath(new URL('./hook.mjs', import.meta.url));
   const run = (id, input) => {
-    const p = spawnSync(process.execPath, [hook], { encoding: 'utf8', input: typeof input === 'string' ? input : JSON.stringify({ cwd: main, ...input }),
+    const p = spawnSync(process.execPath, [hook, ...(id.startsWith('codex_') ? ['--codex'] : [])], { encoding: 'utf8', input: typeof input === 'string' ? input : JSON.stringify({ cwd: main, ...input }),
       env: { ...env, ORCA_AGENT_SESSION_ID: id }, windowsHide: true });
     assert.equal(p.status, 0, p.stderr);
     return { decision: p.stdout ? JSON.parse(p.stdout) : null, stderr: p.stderr };
@@ -111,6 +113,23 @@ test('Claude role hooks scope actions by Orca identity and fail open', () => {
     symlinkSync(outside, path.join(main, 'outside'), process.platform === 'win32' ? 'junction' : 'dir');
     assert.equal(cmd(overview + ' > outside/out.txt'), 'deny');
     assert.equal(cmd('npm run build', 'Monitor'), 'deny');
+    for (const command of ['orca plugin list --json', 'orca plugin logs local.project-coordinator']) {
+      assert.equal(cmd(command), undefined);
+      assert.equal(pre('Bash', { command }, 'codex_workspace'), undefined);
+    }
+    for (const command of ['orca plugin install .', 'orca plugin enable local.project-coordinator', 'orca plugin dev reload .'])
+      assert.equal(pre('Bash', { command }, 'codex_workspace'), 'deny');
+
+    assert.match(run('codex_workspace', { hook_event_name: 'SessionStart', source: 'startup', transcript_path: transcript, session_id: 'native-fixture' }).decision.hookSpecificOutput.additionalContext, /工作间管理员/);
+    assert.equal(run('codex_worker', { hook_event_name: 'SessionStart' }).decision, null);
+    assert.equal(pre('Bash', { command: 'npm run build' }, 'codex_workspace'), 'deny');
+    assert.equal(pre('Bash', { command: 'npm run build' }, 'codex_project'), undefined);
+    assert.equal(pre('Bash', { command: 'npm run build' }, 'codex_worker'), undefined);
+    const patch = (...instructions) => ({ command: ['*** Begin Patch', ...instructions, '*** End Patch'].join('\n') });
+    assert.equal(pre('apply_patch', patch('*** Add File: ok.txt', '+ok'), 'codex_workspace'), undefined);
+    assert.equal(pre('apply_patch', patch('*** Delete File: ' + path.join(project, 'no.txt')), 'codex_workspace'), 'deny');
+    assert.equal(pre('apply_patch', patch('*** Update File: ok.txt', '*** Move to: ' + path.join(project, 'no.txt'), '@@', '-a', '+b'), 'codex_workspace'), 'deny');
+    assert.equal(pre('apply_patch', patch('*** Delete File: ' + path.join(project, 'no.txt')), 'codex_worker'), undefined);
 
     setTranscript(user('normal message with worker_done mentioned'));
     assert.equal(stop(), undefined);
@@ -177,6 +196,28 @@ test('Claude role hooks scope actions by Orca identity and fail open', () => {
     setTranscript(user('查看收件箱'), assistant('q', 'orca orchestration check --json'), result('q',
       '{"ok":true,"result":{"messages":[{"id":"msg_owner","type":"question","body":"请主人扫码"}]}}'));
     assert.equal(stop(), 'block');
+    const rollout = payload => ({ type: 'response_item', timestamp: '2026-11-19T00:00:00.000Z', payload });
+    const codexMail = rollout({ type: 'message', role: 'user', id: 'msg_codex', content: [{ type: 'input_text', text: done.message.content }] });
+    const codexCheck = rollout({ type: 'function_call', name: 'exec_command', call_id: 'codex-check', arguments: '{"cmd":"orca orchestration check --json"}' });
+    const codexResult = (id, output) => rollout({ type: 'function_call_output', call_id: id, output });
+    const report = { type: 'worker_done', id: 'msg_specific', run_id: 'run_fixture', created_at: '2026-11-19T00:00:00.000Z', payload: { taskId: 'orca-task', dispatchId: 'ctx_fixture' } };
+    const structuredMail = codexResult('codex-check', JSON.stringify({ ok: true, result: { messages: [report] } }));
+    const codexSubmit = rollout({ type: 'function_call', name: 'exec_command', call_id: 'codex-submit', arguments: JSON.stringify({ cmd: 'prefix; node client.mjs submit fixture.json' }) });
+    const codexReceipt = (taskId, submittedAt, phase = 'working') => codexResult('codex-submit', JSON.stringify({ submission: {
+      projectId: 'p1', requestId: 'req-1', phase, submittedAt, executions: [{ runId: 'run_fixture', taskId, dispatchId: 'ctx_fixture' }]
+    }, ok: true }));
+    setTranscript(codexMail);
+    assert.equal(stop(false, 'codex_project'), 'block');
+    setTranscript(codexCheck, structuredMail, codexSubmit, codexReceipt('other-task', '2026-11-19T00:01:00.000Z'));
+    assert.equal(stop(false, 'codex_project'), undefined);
+    setTranscript(codexCheck, structuredMail, codexSubmit, codexReceipt('orca-task', '2026-11-18T23:59:00.000Z'));
+    assert.equal(stop(false, 'codex_project'), 'block');
+    setTranscript(codexCheck, structuredMail, codexSubmit, codexReceipt('orca-task', '2026-11-19T00:01:00.000Z'));
+    assert.equal(stop(false, 'codex_project'), undefined);
+    setTranscript(codexCheck, structuredMail, codexSubmit, codexReceipt('other-task', '2026-11-19T00:01:00.000Z', 'blocked'));
+    assert.equal(stop(false, 'codex_project'), undefined);
+    setTranscript(codexMail);
+    assert.equal(stop(true, 'codex_project'), undefined);
     writeFileSync(transcript, 'invalid JSONL');
     assert.equal(stop(), undefined);
   } finally { rmSync(temp, { recursive: true, force: true }); }

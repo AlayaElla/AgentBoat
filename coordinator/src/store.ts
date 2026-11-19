@@ -260,6 +260,7 @@ export function submitTask(project: Project, raw: unknown): void {
   if (phase === 'completed' && task.acceptance.some(x => x.status !== 'passed')) fail('待验收或需修改的结果不能标记为完成')
   if (phase === 'completed' && task.decisions.some(x => x.answer === undefined)) fail('尚有未回答的决定，不能标记为完成')
   task.updatedAt = new Date().toISOString()
+  task.submittedAt = task.updatedAt
   if (old) project.tasks[project.tasks.indexOf(old)] = task
   else project.tasks.push(task)
 }

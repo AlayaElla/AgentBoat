@@ -24,6 +24,16 @@ test('installer renders both skills in a moved repository, links Claude and refu
       Stop: [{ hooks: [{ type: 'command', command: 'prior-stop' }] }], UserPromptSubmit: [] } };
     const original = JSON.stringify(settings, null, 3);
     writeFileSync(settingsFile, original);
+    const codexFile = path.join(home, '.codex/hooks.json'), config = path.join(home, '.codex/config.toml');
+    mkdirSync(path.dirname(codexFile), { recursive: true });
+    const existing = { description: 'original', hooks: {
+      SessionStart: [{ hooks: [{ type: 'command', command: 'orca' }] }],
+      PreToolUse: [{ matcher: '', hooks: [{ type: 'command', command: 'remote-hooks' }] }],
+      Stop: [{ hooks: [{ type: 'command', command: 'ponytail' }] }], Interrupt: []
+    } };
+    const originalCodex = JSON.stringify(existing, null, 3);
+    writeFileSync(codexFile, originalCodex);
+    writeFileSync(config, 'model = "fixture"\n[hooks.state]\n');
     const result = install(home);
     assert.equal(result.skills.length, 2);
     function check(dir) {
@@ -47,11 +57,24 @@ test('installer renders both skills in a moved repository, links Claude and refu
       assert.equal(realpathSync(args[0]), realpathSync(path.join(repo, 'workspace/harness/hook.mjs')));
       assert.equal(onFailure, 'continue');
     }
+    const codex = readFileSync(codexFile, 'utf8'), codexHooks = JSON.parse(codex);
+    assert.equal(codexHooks.description, 'original');
+    assert.deepEqual(codexHooks.hooks.Interrupt, []);
+    for (const event of ['SessionStart', 'PreToolUse', 'Stop']) {
+      assert.deepEqual(codexHooks.hooks[event].slice(0, -1), existing.hooks[event]);
+      assert.match(codexHooks.hooks[event].at(-1).hooks[0].command, /harness\/hook\.mjs['"] --agentboat-role-harness --codex$/);
+    }
+    const codexBackups = () => readdirSync(path.dirname(codexFile)).filter(name => name.endsWith('.bak'));
+    assert.equal(codexBackups().length, 1);
+    assert.equal(readFileSync(path.join(path.dirname(codexFile), codexBackups()[0]), 'utf8'), originalCodex);
     const backups = () => readdirSync(path.dirname(settingsFile)).filter(name => name.endsWith('.bak'));
     assert.equal(backups().length, 1);
     assert.equal(readFileSync(path.join(path.dirname(settingsFile), backups()[0]), 'utf8'), original);
     assert.deepEqual(install(home), result);
     assert.equal(readFileSync(settingsFile, 'utf8'), updated);
+    assert.equal(readFileSync(codexFile, 'utf8'), codex);
+    assert.equal(codexBackups().length, 1);
+    assert.equal(readFileSync(config, 'utf8'), 'model = "fixture"\n[hooks.state]\n');
     assert.equal(backups().length, 1);
     const foreignHome = path.join(temp, 'foreign-home');
     mkdirSync(path.join(foreignHome, '.claude/skills/orca-project-coordinator'), { recursive: true });

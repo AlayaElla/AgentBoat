@@ -11,7 +11,7 @@
 
 - `projects`：项目列表，不含工作间主 agent 自己所在的目录。
 - `overview`：读取绑定、待处理、项目和连接全量。attention 是待决定、待验收、受阻、返修；questions 是仍在执行的 Orca 执行者在最近 24 小时发出、超过 10 分钟未回复的问题。执行记录不代表 agent 在线。
-- `overview --brief`：日常核对待办，返回 `{attention,questions,projects:[{id,name,counts}]}`。项目目录和连接设置在全量总览里。
+- `overview --brief`：日常核对待办，返回 `{attention,questions,reports,projects:[{id,name,counts}]}`。questions 和 reports 是供管理员核对的项目 Run 邮件，插件先提醒项目主会话，再按超时情况提醒工作间主 agent。项目目录和连接设置在全量总览里。
 - `read <projectId>`：`{project,lead}`，project 含 revision、runId、roles、tasks、events、deliveries。
 - `read <projectId> --task <taskId>`：只核对一项任务时使用，返回 `{projectId,revision,task}`。任务不存在时返回错误。
 - `project-lead <projectId>`：项目的主会话（`binding`）、待接管状态和在线目标会话。
@@ -35,7 +35,7 @@
 ```
 
 - phase：working、blocked、paused、ready、completed。
-- 数组按 id 合并，省略的保留。任务、验收和来源的编号保持不变。成果 id 不能改写，每个新的成果版本用新 id；问题变了用新的决定 id。
+- 数组按 id 合并，省略的保留。任务、验收和来源的编号保持不变。成果 id 不能改写，每个新的成果版本用新 id；问题变了用新的决定 id。登记执行者成果时，在对应任务的 executions 保留 Orca Run、任务和派工编号。
 - 验收的 revision、status、history 由插件维护；核对内容或关联成果变了，自动出新版本。
 - sourceIds 用本项目 events 的 id，一个来源只关联一个任务。
 - 一次 submit 带出多条新事项时，插件只给工作间主 agent 发一条汇总通知。未绑定时不发，之后绑定也不补发。

@@ -180,3 +180,20 @@ syncBuiltinESMExports();`);
     assert.throws(() => call('read', 'p1', '--task', 'absent'), /找不到任务 absent/);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
+
+test('the bridge explains approval and reload errors while keeping unrelated validation errors', () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'client-reload-'));
+  const fixture = path.join(dir, 'orca-fixture.mjs');
+  writeFileSync(fixture, `import cp from 'node:child_process'; import {syncBuiltinESMExports} from 'node:module';
+cp.execFileSync=()=>{throw Object.assign(Error('CLI rejected'),{stdout:process.env.FIXTURE_REPLY});};syncBuiltinESMExports();`);
+  const run = error => execFileSync(process.execPath, ['--import', pathToFileURL(fixture).href, 'scripts/client.mjs', 'overview'],
+    { encoding: 'utf8', windowsHide: true, stdio: ['ignore','pipe','pipe'], env: { ...process.env, FIXTURE_REPLY: JSON.stringify({ok:false,error}) } });
+  try {
+    for (const error of [
+      {code:'approval_required'},
+      {code:'invalid_argument',message:'local.project-coordinator is not approved and enabled, so its worker cannot run.'},
+      {code:'plugin_request_failed',data:{requestCode:'unavailable'}}
+    ]) assert.throws(() => run(error), /插件正在重载或等待批准/);
+    assert.throws(() => run({code:'invalid_argument',message:'the caller used malformed JSON'}), /the caller used malformed JSON/);
+  } finally { rmSync(dir, {recursive:true,force:true}); }
+});

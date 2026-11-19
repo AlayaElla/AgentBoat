@@ -37,6 +37,9 @@ test('role registry mirrors active bindings, replaces old roles and drops delete
     await worker.request('project.agent', { operation: 'bind', projectId: 'p1', revision: (await c.store.get('p1')).revision, runId: 'run_next', caller: 'orca_session_id:claude_next', requestId: 'project-bind' })
     assert.equal(read()['orca_session_id:claude_previous'], undefined)
     assert.equal(read()['orca_session_id:claude_next'].projectId, 'p1')
+    await worker.request('project.agent', { operation: 'bind', projectId: 'p1', revision: (await c.store.get('p1')).revision, runId: 'run_codex', caller: 'orca_session_id:codex_next', requestId: 'codex-bind' })
+    assert.equal(read()['orca_session_id:claude_next'], undefined)
+    assert.equal(read()['orca_session_id:codex_next'].runId, 'run_codex')
     const old = main.handle
     main = { ...main, handle: 'orca_session_id:claude_replacement' }
     await c.store.mutateWorkspace(w => { w.session = main; w.runId = 'run_replacement' })

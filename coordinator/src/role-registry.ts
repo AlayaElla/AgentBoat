@@ -3,8 +3,9 @@ import path from 'node:path'
 import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { attention, groupedAttention, labels, projectCounts, type Messaging, type Project, type Workspace } from './model'
 
-type Role = { role: 'workspace-main'; directory: string; summary?: string } | { role: 'project-lead'; projectId: string; summary?: string }
-const chat = (value?: string) => /^orca_session_id:claude_[\w-]+$/.test(value ?? '')
+type Role = { role: 'workspace-main'; directory: string; summary?: string } | { role: 'project-lead'; projectId: string; runId: string; summary?: string }
+const chat = (value?: string, agent?: string) => /^orca_session_id:(?:claude|codex)_[\w-]+$/.test(value ?? '') ||
+  agent === 'codex' && /^orca_session_id:[\da-f]{8}(?:-[\da-f]{4}){3}-[\da-f]{12}$/i.test(value ?? '')
 const line = (value: string) => value.replace(/\s+/g, ' ').slice(0, 200)
 
 export function roleRegistry(file: string, read: () => Promise<{
@@ -17,7 +18,7 @@ export function roleRegistry(file: string, read: () => Promise<{
       const visible = current?.filter(p => !p.hidden)
       const sessions: Record<string, Role> = {}
       const main = workspace.session
-      if (workspace.runId && main && chat(main.handle)) {
+      if (workspace.runId && main && chat(main.handle, main.agent)) {
         const summary = visible && [
           `工作间待处理 ${groupedAttention(visible.flatMap(attention)).length} 组`,
           ...visible.slice(0, 30).map(p => {
@@ -31,14 +32,14 @@ export function roleRegistry(file: string, read: () => Promise<{
       }
       for (const p of projects) {
         const handle = p.mainSession?.handle ?? p.mainAgentHandle
-        if (!p.runId || !handle || !chat(handle) || sessions[handle]?.role === 'workspace-main') continue
+        if (!p.runId || !handle || !chat(handle, p.mainSession?.agent) || sessions[handle]?.role === 'workspace-main') continue
         const active = p.tasks.filter(t => t.phase === 'working'), pending = attention({ ...p, hidden: false }).filter(i => i.kind === 'decision' || i.kind === 'review')
         const summary = [
           `项目 ${line(p.ref.name)}，进行中 ${active.length} 项，待决定 ${pending.filter(i => i.kind === 'decision').length} 项，待验收 ${pending.filter(i => i.kind === 'review').length} 项`,
           ...active.slice(0, 10).map(t => `- 进行中：${line(t.title)}`),
           ...pending.slice(0, 15).map(i => `- ${i.kind === 'decision' ? '待决定' : '待验收'}：${line(i.summary)}`)
         ].join('\n')
-        sessions[handle] = { role: 'project-lead', projectId: p.ref.id, summary }
+        sessions[handle] = { role: 'project-lead', projectId: p.ref.id, runId: p.runId, summary }
       }
       const json = JSON.stringify({ version: 1, sessions }) + '\n'
       if (json === await readFile(file, 'utf8').catch(e => { if (e.code !== 'ENOENT') throw e })) return

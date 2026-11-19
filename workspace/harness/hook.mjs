@@ -4,6 +4,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { roleRegistryPath, clientPath } from '../../coordinator/scripts/orca-cli.mjs';
 import { readRoleCard } from '../../coordinator/scripts/main-role-card.mjs';
+import { workerReport, reportSubmitted } from '../../coordinator/scripts/worker-reports.mjs';
 
 const workspaceDir = fileURLToPath(new URL('../', import.meta.url));
 const agentboatHome = path.resolve(process.env.AGENTBOAT_HOME || path.join(os.homedir(), '.agentboat'));
@@ -16,7 +17,7 @@ const rules = {
   gitRead: new Set(['status', 'log', 'diff', 'show']),
   gitMemory: new Set(['add', 'commit']),
   find: new Set(['-name', '-iname', '-path', '-ipath', '-type', '-maxdepth', '-mindepth', '-print']),
-  orca: new Set(['status', 'search', 'skills get', 'skills list', 'project list', 'repo list', 'worktree ps', 'worktree list', 'terminal list', 'agent list',
+  orca: new Set(['status', 'search', 'skills get', 'skills list', 'project list', 'repo list', 'worktree ps', 'worktree list', 'terminal list', 'agent list', 'plugin list', 'plugin logs',
     ...['run-create', 'run-current', 'run-list', 'run-show', 'send', 'check', 'reply', 'inbox', 'task-create', 'task-list', 'task-update', 'worker-start', 'worker-list', 'worker-show', 'worker-read', 'worker-stop', 'worker-release', 'worker-abandon', 'worker-keep-open', 'request-show', 'dispatch-show', 'dispatch', 'ask', 'gate-list', 'gate-resolve'].map(op => 'orchestration ' + op)]),
   scripts: new Map([
     [path.join(workspaceDir, 'workspace.mjs'), new Set(['init', 'templates', 'create', 'dispatch', 'remember'])],
@@ -49,6 +50,17 @@ function canonical(file) {
 function writeAllowed(input, role) {
   const file = input.tool_name === 'NotebookEdit' ? input.tool_input?.notebook_path : input.tool_input?.file_path;
   return writablePath(input.cwd, file, [role.directory, agentboatHome]);
+}
+function patchAllowed(input, role) {
+  const patch = input.tool_input?.command;
+  if (typeof patch !== 'string') return false;
+  const lines = patch.trim().split(/\r?\n/);
+  if (lines[0] !== '*** Begin Patch' || lines.at(-1) !== '*** End Patch') return false;
+  const paths = lines.flatMap(line => {
+    const header = /^\*\*\* (?:Add File|Delete File|Update File|Move to): (.+)$/.exec(line.trimStart());
+    return header ? [header[1]] : [];
+  });
+  return !!paths.length && paths.every(file => file === file.trim() && writablePath(input.cwd, file, [role.directory, agentboatHome]));
 }
 function writablePath(cwd, file, roots) {
   if (typeof file !== 'string' || !file || typeof cwd !== 'string' || !path.isAbsolute(cwd) || file.split(/[\\/]/).includes('..')) return false;
@@ -194,6 +206,18 @@ function toolText(block) {
 function jsonResult(value) {
   try { return JSON.parse(value.slice(value.indexOf('{'))); } catch { return undefined; }
 }
+function codexRow(row) {
+  if (row.type !== 'response_item') return;
+  const item = row.payload;
+  if (item?.type === 'message' && item.role === 'user')
+    return { type: 'user', uuid: item.id || row.timestamp, message: { content: (item.content ?? []).map(block => ({ ...block, type: block.type === 'input_text' ? 'text' : block.type })) } };
+  if (item?.type === 'function_call' && ['exec_command', 'shell_command'].includes(item.name)) {
+    const args = jsonResult(item.arguments);
+    return { type: 'assistant', message: { content: [{ type: 'tool_use', id: item.call_id, name: process.platform === 'win32' ? 'PowerShell' : 'Bash', input: { command: args?.cmd ?? args?.command } }] } };
+  }
+  if (item?.type === 'function_call_output')
+    return { type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: item.call_id, content: item.output }] } };
+}
 function transcriptTail(file) {
   const fd = openSync(file, 'r');
   try {
@@ -204,20 +228,31 @@ function transcriptTail(file) {
     return lines.filter(Boolean).map(line => JSON.parse(line)).filter(row => !row.isSidechain);
   } finally { closeSync(fd); }
 }
-function stopBlocker(input, role) {
-  if (input.stop_hook_active) return;
+function stopBlocker(input, role, codex) {
+  if (input.stop_hook_active || typeof input.transcript_path !== 'string') return;
   const rows = transcriptTail(input.transcript_path);
   const shells = new Set(), checks = new Map(), replies = new Map(), questions = new Set();
-  const seenDone = new Set();
-  let pending = false;
-  const markDone = id => { if (id && !seenDone.has(id)) { seenDone.add(id); pending = true; } };
-  for (const row of rows) {
+  const seenDone = new Set(), pending = new Map();
+  const markDone = message => {
+    const report = workerReport({ run_id: role.runId, ...message });
+    if (report && (!role.runId || report.runId === role.runId) && !seenDone.has(report.id)) {
+      seenDone.add(report.id);
+      pending.set(report.id, report);
+    }
+  };
+  for (const raw of rows) {
+    const row = codex ? codexRow(raw) : raw;
+    if (!row) continue;
     const content = row.message?.content;
     const blocks = typeof content === 'string' ? [{ type: 'text', text: content }] : Array.isArray(content) ? content : [];
     if (row.type === 'user' || row.type === 'system') for (const block of blocks) if (block.type === 'text' && typeof block.text === 'string') {
       const header = block.text.split(/\r?\n/, 1)[0];
       if (isMail.test(header)) {
-        if (workerDone.test(header)) markDone(row.messageId ?? row.message?.id ?? row.uuid);
+        if (workerDone.test(header)) markDone({
+          type: 'worker_done', id: row.messageId ?? row.message?.id ?? row.uuid,
+          from: header.match(/\(([^()]+)\)(?: \[(?:URGENT|HIGH)\])? \(worker_done\)/)?.[1],
+          payload: block.text.match(/^Payload: (\{[^\r\n]+\})\s*$/mi)?.[1]
+        });
         for (const id of receivedQuestions(block.text)) questions.add(id);
       } else if (row.type === 'user' && !row.isMeta) questions.clear();
     }
@@ -243,11 +278,11 @@ function stopBlocker(input, role) {
           const messages = result?.result?.messages;
           const check = checks.get(block.tool_use_id) === 'check';
           if (result?.ok && Array.isArray(messages)) {
-            for (const m of messages) if (m.type === 'worker_done' && (check || (!m.handled && !m.read))) markDone(m.id);
+            for (const m of messages) if (check || (!m.handled && !m.read)) markDone(m);
           } else {
             for (const [, id, flags] of body.matchAll(/^(msg_[\w-]+) worker_done from ([^\r\n]+)$/gm))
-              if (check || flags.includes('[unhandled]')) markDone(id);
-            if (check && workerDone.test(body)) markDone(row.uuid ?? block.tool_use_id);
+              if (check || flags.includes('[unhandled]')) markDone({ type: 'worker_done', id });
+            if (check && workerDone.test(body)) markDone({ type: 'worker_done', id: row.uuid ?? block.tool_use_id });
           }
           if (check) {
             for (const id of receivedQuestions(body, true)) questions.add(id);
@@ -264,17 +299,20 @@ function stopBlocker(input, role) {
         for (const [, receipt] of body.matchAll(/\{"submission":(\{[^\r\n]*?\}),"ok":true[,}]/g)) {
           const submission = jsonResult(receipt);
           if (submission?.projectId !== role.projectId || typeof submission.requestId !== 'string') continue;
-          pending = false;
+          const time = Date.parse(submission.submittedAt ?? raw.timestamp);
+          for (const report of pending.values()) if (reportSubmitted(report, { at: Number.isFinite(time) ? time : undefined })) pending.delete(report.id);
           if (submission.phase === 'blocked' || submission.pendingDecision) questions.clear();
         }
       }
     }
   }
-  return questions.size ? questionReason : pending ? stopReason : undefined;
+  return questions.size ? questionReason : pending.size ? stopReason : undefined;
 }
 function run() {
-  const id = process.env.ORCA_AGENT_SESSION_ID;
-  if (!id || !/^claude_[\w-]+$/.test(id)) return;
+  const codex = process.argv.includes('--codex');
+  const id = process.env.ORCA_AGENT_SESSION_ID?.replace(/^orca_session_id:/, '');
+  const valid = codex ? /^(?:codex_[\w-]+|[\da-f]{8}(?:-[\da-f]{4}){3}-[\da-f]{12})$/i : /^claude_[\w-]+$/;
+  if (!id || !valid.test(id)) return;
   const data = JSON.parse(readFileSync(roleRegistryPath(), 'utf8'));
   if (data?.version !== 1 || !data.sessions || typeof data.sessions !== 'object' || Array.isArray(data.sessions)) throw Error('角色表格式不正确');
   const role = data.sessions['orca_session_id:' + id];
@@ -286,11 +324,13 @@ function run() {
   if (input.hook_event_name === 'SessionStart')
     return { hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: context(role) } };
   if (input.hook_event_name === 'Stop' && role.role === 'project-lead') {
-    const reason = stopBlocker(input, role);
+    const reason = stopBlocker(input, role, codex);
     if (reason) return { decision: 'block', reason };
   }
   if (input.hook_event_name !== 'PreToolUse' || role.role !== 'workspace-main') return;
-  const denied = rules.writes.has(input.tool_name) ? !writeAllowed(input, role) : rules.shells.has(input.tool_name) && !commandAllowed(input, role);
+  if (codex && input.tool_name === 'Bash' && process.platform === 'win32') input.tool_name = 'PowerShell';
+  const denied = codex && input.tool_name === 'apply_patch' ? !patchAllowed(input, role)
+    : rules.writes.has(input.tool_name) ? !writeAllowed(input, role) : rules.shells.has(input.tool_name) && !commandAllowed(input, role);
   if (denied) return { hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: redirect } };
 }
 

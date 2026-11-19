@@ -22,6 +22,7 @@ export interface Task {
   executions: { runId: string; taskId: string; dispatchId: string; agent: 'codex' | 'claude' }[]
   artifacts: Artifact[]; acceptance: Acceptance[]; decisions: Decision[]; sourceIds: string[]
   updatedAt: string
+  submittedAt?: string
 }
 export interface SourceEvent {
   id: string; source: string; sourceId: string; threadId: string; chatId: string
@@ -34,6 +35,7 @@ interface FeedbackTarget {
 export interface Delivery {
   id: string; subject: string; body: string
   noticeKeys?: string[]
+  runNotice?: { stage: 'project' | 'workspace'; projectId: string; runId: string; attemptedAt?: number }
   receiptHash?: string
   linkMessageHash?: string
   targetRunId?: string
@@ -99,8 +101,8 @@ export type Attention = {
   projectId: string; taskId: string
   itemId: string; title: string; summary: string
 } & ({ kind: 'review'; itemRevision: number; fingerprint: string } | { kind: 'decision' | 'blocked' | 'rework' })
-export interface OwnerQuestion { id: string; projectId: string; runId: string; from: string; title: string; body: string; at: number }
-export const isQuestionDelivery = (id: string) => id.startsWith('orca-question:')
+export interface OwnerQuestion { id: string; projectId: string; runId: string; from: string; title: string; body: string; at: number; report?: import('../scripts/worker-reports.mjs').WorkerReport }
+export const isRunNotice = (id: string) => /^(?:orca-question|orca-report|orca-mail):/.test(id)
 export interface Overview {
   connections?: import('./connections').Connection[]
   machines?: { id: string; name: string; role: 'host' | 'client'; online?: boolean }[]
@@ -109,6 +111,7 @@ export interface Overview {
   workspace: WorkspaceBinding
   attention: Attention[]
   questions?: OwnerQuestion[]
+  reports?: OwnerQuestion[]
   projects: {
     ref: ProjectRef; revision: number; counts: Record<TaskState, number>; updatedAt: string; bound: boolean
     agents: (Task['executions'][number] & { projectTaskId: string; state: TaskState })[]

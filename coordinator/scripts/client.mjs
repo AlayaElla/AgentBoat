@@ -65,7 +65,8 @@ try {
     const task = project?.tasks?.find(t => t.id === input.task?.id);
     const fingerprint = createHash('sha256').update(JSON.stringify(input)).digest('hex');
     if (reply.ok && project?.ref?.id === input.projectId && task && project.requests?.some(r => r.id === input.requestId && r.fingerprint === fingerprint)) {
-      const submission = { projectId: project.ref.id, requestId: input.requestId, taskId: task.id, phase: task.phase, pendingAcceptance: task.acceptance?.some(a => a.status === 'pending') ?? false, pendingDecision: task.decisions?.some(d => d.answer === undefined) ?? false };
+      const submission = { projectId: project.ref.id, requestId: input.requestId, taskId: task.id, phase: task.phase, pendingAcceptance: task.acceptance?.some(a => a.status === 'pending') ?? false, pendingDecision: task.decisions?.some(d => d.answer === undefined) ?? false,
+        submittedAt: task.submittedAt };
       process.stdout.write(JSON.stringify({ submission, ...reply }) + '\n');
     } else {
       process.stdout.write(stdout);
@@ -74,8 +75,8 @@ try {
     const reply = JSON.parse(stdout), result = reply.result?.result;
     if (reply.ok && reply.result?.ok !== false && result) {
       if (brief) {
-        const { attention, questions, projects, error } = result;
-        reply.result.result = { attention, questions, projects: projects.map(({ ref, counts }) => ({ id: ref.id, name: ref.name, counts })), error };
+        const { attention, questions, reports, projects, error } = result;
+        reply.result.result = { attention, questions, reports, projects: projects.map(({ ref, counts }) => ({ id: ref.id, name: ref.name, counts })), error };
       } else {
         const { project } = result, task = project.tasks.find(task => task.id === taskId);
         if (!task) {
@@ -102,7 +103,13 @@ try {
     process.stdout.write(JSON.stringify(reply, null, 2) + '\n');
   }
 } catch (e) {
-  if (e.stdout) process.stderr.write(e.stdout);
+  let error;
+  try { error = JSON.parse(e.stdout || e.stderr).error; } catch { /* Keep the original CLI response. */ }
+  if (['approval_required', 'approval_stale'].includes(error?.code) ||
+    ['unavailable', 'consent_required'].includes(error?.data?.requestCode) ||
+    error?.code === 'invalid_argument' && /is not approved and enabled, so its worker cannot run/i.test(error.message))
+    process.stderr.write('插件正在重载或等待批准，稍后重试。写入结果待核对时，请沿用原请求编号。\n');
+  else if (e.stdout) process.stderr.write(e.stdout);
   else process.stderr.write('Orca 请求未取得回执，请先读项目记录核对，勿直接重复写入。\n');
   process.exitCode = 1;
 }
