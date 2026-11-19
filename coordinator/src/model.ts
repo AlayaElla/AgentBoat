@@ -116,7 +116,7 @@ export interface Overview {
   error?: string
 }
 
-export function taskState(task: Task): 'working' | 'decision' | 'review' | 'rework' | 'completed' | 'blocked' | 'paused' {
+export function taskState(task: { phase: Task['phase']; decisions: Pick<Decision, 'answer'>[]; acceptance: Pick<Acceptance, 'status'>[] }): keyof typeof labels {
   if (task.phase === 'paused') return 'paused'
   if (task.decisions.some(x => x.answer === undefined)) return 'decision'
   if (task.acceptance.some(x => x.status === 'changes_requested')) return 'rework'

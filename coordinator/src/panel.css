@@ -69,7 +69,8 @@ html.dark .btn.danger{background:color-mix(in oklab,var(--orca-destructive) 60%,
 /* 列表行：照 Orca 组件式面板的列表行（上下 6 左右 8，圆角 8，悬停变深一点）。等你处理、设置、任务都用它 */
 .list{display:flex;flex-direction:column;list-style:none;margin:0;padding:0}
 .item{display:flex;width:100%;align-items:flex-start;gap:8px;min-width:0;padding:6px 8px;border:0;border-radius:var(--r-md);background:none;text-align:left;cursor:pointer}
-.item:hover{background:var(--hover)}
+div.item{cursor:default}
+button.item:hover{background:var(--hover)}
 .item>.body{display:flex;flex:1;min-width:0;flex-direction:column;gap:2px}
 .item>.dot{margin-top:6px}.item>.i{margin-top:2px;color:var(--orca-muted-foreground)}.item>.pill,.item>.tag{margin-top:1px}
 
@@ -223,7 +224,7 @@ html,body{height:100%;overflow:hidden}#panel{height:100%;width:100%}.panel{conta
 .chev{color:var(--orca-muted-foreground);transition:transform var(--ab-t-fast) var(--ab-ease)}
 [aria-expanded=true]>.chev.turn{transform:rotate(90deg)}
 /* 按下去立刻有反应（现在只有悬停有） */
-.item:active,.pcard-h:active,.wsr-h:active,.note:active,.fold-h:active{background:color-mix(in oklab,var(--orca-foreground) 13%,transparent)}
+button.item:active,.pcard-h:active,.wsr-h:active,.note:active,.fold-h:active{background:color-mix(in oklab,var(--orca-foreground) 13%,transparent)}
 .item[data-navigating],.pcard-h[data-navigating],.wsr-h[data-navigating]{background:var(--hover);cursor:progress}
 
 /* 层：一页一层，每层自己滚动。被盖住的层留在原地（看不见、点不到），返回时原样还在：滚动位置、页签、展开的块、填到一半的字都不用另外保存 */

@@ -73,7 +73,7 @@ async function setup(options = {}, hub) {
     }
     const p = (id, relation, status = 'connected') => ({ id, name: '工作间 ' + id, workspaceId: 'ws-' + id, state: status === 'pending' ? 'pending' : 'active', relation, sharingSet: false, status, scope: 'none', projectIds: [], lastSyncAt: new Date(now - 100000).toISOString(), receivedAt: new Date(now).toISOString(),
       ...(status === 'connected' ? { report: { scope: 'details', mainAgent: { agent: 'codex', title: '对方统筹会话', online: 'online', activity: {state:'work', since:now-300000} }, projects: [{ id: 'remote-p', name: '开放的项目', updatedAt: new Date().toISOString(), pending: 0, counts: { blocked: 1 },
-        tasks: [{ title: '受阻任务', phase: 'blocked', decisions: [], acceptance: [] }], activity: { truncated: true, agents: [
+        tasks: [{ title: '受阻任务', phase: 'blocked', state: 'blocked', decisions: [], acceptance: [] }], activity: { truncated: true, agents: [
           { agent: 'claude', role: 'session', state: 'need', title: '等待确认设计', since: now - 60_000 },
           { agent: 'codex', role: 'worker', state: 'work', title: '正在检查布局', taskTitle: '核对布局', since: now - 180_000 },
           { agent: 'codex', role: 'worker', state: 'done', title: '页面检查完成', since: now - 360_000 }
@@ -86,6 +86,10 @@ async function setup(options = {}, hub) {
           { id: 'local', label: '设计原稿', version: 'v1', url: '' }, { id: 'web', label: '网页预览', version: 'v1', url: 'https://example.com/preview' }] },
         { id: 'remote-d', title: '对方设计决定', phase: 'working', decisions: [{ id: 'option', question: '采用哪个设计？', options: ['浅色'] }], acceptance: [], artifacts: [] },
       ] } });
+      if (options.peerProjectPage) project.feedback.tasks.push({ ...clone(project.feedback.tasks[0]), id: 'second', title: '对方图标交付' });
+      project.tasks = project.feedback.tasks.map(t => ({ title: t.title, phase: t.phase, state: t.phase === 'ready' ? 'review' : 'decision',
+        decisions: t.decisions.map(d => d.question), acceptance: t.acceptance.map(a => a.title) }));
+      project.pending = project.tasks.length;
     }
     const live = { ok: true, at: now, agents: [{ id: 'agent-need', projectId: 'p1', agent: 'codex', role: 'worker', state: 'need', rawState: 'waiting', verified: true, title: '等批准', taskTitle: '页面交付', last: '等待用户批准', since: now - 60000, workspaceId: 'identity:project-workspace', terminalId: 'term-need' }, { id: 'agent-work', projectId: 'p1', agent: 'claude', role: 'session', state: 'work', rawState: 'working', verified: false, title: '正在工作', last: '正在处理', since: now - 20000 }] };
     if (options.empty || options.projectUnbound) live.agents = [];
@@ -203,6 +207,10 @@ async function setup(options = {}, hub) {
         if (input.revision !== project.feedback.revision) return { state: 'rejected', reason: '项目已更新' };
         project.feedback.tasks = [];
         project.feedback.revision++;
+        if (options.peerProjectPage) {
+          const { id, ...wire } = input;
+          return { state: 'submitted', requestId: input.requestId, fingerprint: await digest(wire) };
+        }
         window.fixture.lostLinkFeedback = input.requestId;
         return { state: 'uncertain', requestId: input.requestId, reason: '待核对：连接超时或断开' };
       }
@@ -817,8 +825,9 @@ try {
     assert.equal(await body.getByText('外部连接', { exact: true }).count(), 0);
     if (process.env.PANEL_EVIDENCE_DIR) await node.screenshot({ path: path.join(process.env.PANEL_EVIDENCE_DIR, 'peer-details.png') });
     await body.getByRole('button', { name: '开放的项目', exact: true }).click();
-    await page.locator('.acol .aitem[data-st=work]').getByText('核对布局', { exact: true }).waitFor();
-    await page.getByText('受阻任务').waitFor();
+    await currentLayer().getByRole('button', { name: '受阻任务', exact: true }).waitFor();
+    await currentLayer().getByRole('tab', { name: 'Agent' }).click();
+    await currentLayer().locator('.acol .aitem[data-st=work]').getByText('核对布局', { exact: true }).waitFor();
     assert.equal(await page.getByRole('button', { name: '打开会话', exact: true }).count(), 0);
     assert.equal(await currentLayer().locator('input,textarea').count(), 0);
     await home();
@@ -871,6 +880,80 @@ try {
     await list.getByRole('button', { name: '工作间 side', exact: true }).waitFor();
     assert.equal(await disconnected.count(), 0);
     assert.deepEqual(await page.evaluate(() => fixture.calls.filter(c => c.name === 'workspace.links').map(c => c.input)), [{ operation: 'revoke', id: 'down' }]);
+  });
+  await setup({ width: 1040, delegatedFeedback: true, peerProjectPage: true });
+  await test('peer project shares local tabs and inbox, respects read-only and offline reports, and submits delegated feedback', async () => {
+    const tabs = () => currentLayer().getByRole('tab');
+    const tab = name => currentLayer().getByRole('tab', { name, exact: true });
+    const shot = async state => {
+      if (process.env.PANEL_EVIDENCE_DIR) await page.screenshot({ path: path.join(process.env.PANEL_EVIDENCE_DIR, 'peer-project-' + state + '.png'), animations: 'disabled' });
+    };
+    await project();
+    const tabStructure = () => tabs().evaluateAll(nodes => nodes.map(n => [n.className, n.textContent.replace(/[0-9]/g, ''), !!n.querySelector('.n')]));
+    const localTabs = (await tabStructure()).slice(0, 3);
+    const leadStyle = await currentLayer().locator('.project-lead').getAttribute('class');
+    await home();
+    await review('对方页面交付 · 对方示例项目 · 工作间 up').waitFor();
+    const up = page.locator('[data-workspace=up]');
+    await up.locator('.wsr-h').click();
+    await up.getByRole('button', { name: '对方示例项目', exact: true }).click();
+    assert.deepEqual(await tabStructure(), localTabs);
+    assert.equal(await currentLayer().locator('.project-lead').getAttribute('class'), leadStyle);
+    assert.deepEqual(await tabs().allTextContents(), ['待处理4', '任务3', 'Agent3']);
+    await currentLayer().getByText('来自「工作间 up」，可代为处理').waitFor();
+    await tab('任务').click();
+    assert.deepEqual(await currentLayer().locator('.item .body .xs').allTextContents(), ['待验收', '待决定', '待验收']);
+    assert.doesNotMatch(await currentLayer().innerText(), /ready|working/);
+    await tab('Agent').click();
+    assert.equal(await currentLayer().locator('.acol').count(), 3);
+    await tab('待处理').click();
+    const check = currentLayer().getByRole('checkbox', { name: /选择验收 · 对方页面交付/ });
+    await page.evaluate(() => {
+      const peer = fixture.links.peers[0];
+      fixture.originalFeedback = peer.report.projects[0].feedback;
+      delete peer.report.projects[0].feedback;
+      fixture.emit();
+    });
+    await currentLayer().getByText('对方未开放代为处理').waitFor();
+    assert.equal(await check.isDisabled(), true);
+    assert.equal(await currentLayer().getByRole('button', { name: '全选验收' }).count(), 0);
+    assert.equal(await review('对方页面交付').count(), 0);
+    await currentLayer().getByRole('button', { name: '对方页面交付', exact: true }).click();
+    await currentLayer().locator('.irow.open .irow-b').getByText('成果 remote-a').waitFor();
+    await shot('readonly');
+    await page.evaluate(() => { fixture.links.peers[0].report.feedbackTruncated = true; fixture.emit(); });
+    await currentLayer().getByText(/超过同步上限/).waitFor();
+    await page.evaluate(() => {
+      const peer = fixture.links.peers[0];
+      delete peer.report.feedbackTruncated;
+      peer.report.projects[0].feedback = fixture.originalFeedback;
+      fixture.emit();
+    });
+    await currentLayer().getByRole('button', { name: '全选验收' }).click();
+    assert.equal(await check.isChecked(), true);
+    await currentLayer().getByRole('button', { name: '对方页面交付', exact: true }).click();
+    await currentLayer().getByRole('button', { name: '需要修改' }).click();
+    await currentLayer().getByRole('textbox').fill('请调整间距');
+    await shot('delegated');
+    await page.evaluate(() => {
+      const peer = fixture.links.peers[0]; fixture.connectedReport = peer.report;
+      peer.offlineFeedback = peer.report.projects.map(({ id, name, feedback }) => ({ id, name, feedback }));
+      delete peer.report; peer.status = 'offline'; fixture.emit();
+    });
+    await currentLayer().getByText('「工作间 up」离线，暂不能提交', { exact: true }).first().waitFor();
+    assert.deepEqual(await tabs().allTextContents(), ['待处理3']);
+    assert.equal(await check.isDisabled(), true);
+    assert.equal(await dock().getByRole('button', { name: '提交 2 条' }).isDisabled(), true);
+    await shot('offline');
+    await page.evaluate(() => {
+      const peer = fixture.links.peers[0]; peer.report = fixture.connectedReport; delete peer.offlineFeedback;
+      peer.status = 'connected'; fixture.emit();
+    });
+    await dock().getByRole('button', { name: '提交 2 条' }).click();
+    await page.getByRole('status').filter({ hasText: '已提交 2 条' }).waitFor();
+    const writes = await page.evaluate(() => fixture.calls.filter(c => ['workspace.linkFeedback', 'project.feedback'].includes(c.name)));
+    assert.deepEqual(writes.map(c => [c.name, c.input.id, c.input.projectId]), [['workspace.linkFeedback', 'up', 'p1']]);
+    assert.deepEqual(writes[0].input.items.map(i => [i.taskId, i.result]), [['t1', 'changes_requested'], ['second', 'passed']]);
   });
   await setup({ width: 1040, delegatedFeedback: true });
   await test('delegated feedback uses the home inbox, one submit bar, and the original retry request', async () => {

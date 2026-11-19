@@ -394,11 +394,16 @@ test('invites expire/cancel, malformed and oversized requests fail closed, expli
     const project = { ...valid.projects[0], activity: { truncated: false, agents: [agent] } }
     const packet = { ...valid, projects: [project] }
     assert.equal(await post(s.listening, '/sync', { id: p.id, report: packet, exchange }, token), 200)
+    assert.deepEqual(project.tasks?.map(t => t.state), ['review', 'decision'])
+    const legacyTasks = project.tasks!.map(({ state, ...task }) => task)
+    assert.equal(await post(s.listening, '/sync', { id: p.id, report: { ...packet, projects: [{ ...project, tasks: legacyTasks }] }, exchange }, token), 200)
     const accepted = (await a.links.snapshot()).peers[0].report
+    assert.deepEqual(accepted?.projects[0].tasks, project.tasks)
     for (const changed of [
       { ...packet, mainAgent: undefined }, { ...packet, mainAgent: { agent: [], title: '统筹', online: 'online' } },
       { ...packet, mainAgent: { agent: 'claude', title: '统筹', online: 'somewhere' } },
       { ...packet, projects: [{ ...project, activity: undefined }] },
+      { ...packet, projects: [{ ...project, tasks: [{ ...project.tasks![0], state: 'ready' }] }] },
       ...[{ agent: 'invented' }, { role: 'owner' }, { state: 'online' }, { since: String(agent.since) }, { title: '甲'.repeat(201) }, { taskTitle: [{}] }]
         .map(change => ({ ...packet, projects: [{ ...project, activity: { truncated: false, agents: [{ ...agent, ...change }] } }] })),
       { ...packet, projects: [{ ...project, activity: { truncated: true, agents: Array(21).fill(agent) } }] },
