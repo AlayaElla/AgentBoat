@@ -1,6 +1,6 @@
 # client.mjs 命令
 
-`node "{{AGENTBOAT_REPO}}/coordinator/scripts/client.mjs" <命令>`（安装器按本机仓库位置填写；仓库移动后重新安装）。写命令的 JSON 放进文件（UTF-8，可带 BOM），文件路径作参数；标 stdin 的从标准输入读，这类输入不落文件。回执在 `result.result`。
+从 skill 标出的 AgentBoat 入口调用 `coordinator/scripts/client.mjs`。写命令的 JSON 放进文件（UTF-8，可带 BOM），文件路径作参数；标 stdin 的从标准输入读，这类输入不落文件。回执在 `result.result`。
 
 ## 通用
 
@@ -65,4 +65,4 @@
 - `connection-send`（stdin）：`{name,runId,requestId,contextId?,text}`。同一事项沿用 contextId。
 - `connection-reply`（stdin）：`{name,runId,id,requestId,text}`，id 是对方发来的 task.id。
 - `feishu-reply`：`{runId,eventId,requestId,text}`，回到原消息所在的会话。
-- `links-*`（工作间连接和主 agent 互发消息）：见 `{{AGENTBOAT_REPO}}/coordinator/LINKS.md`。
+- `links-*`（工作间连接和主 agent 互发消息）：见入口目录下的 `coordinator/LINKS.md`。

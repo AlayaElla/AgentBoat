@@ -11,7 +11,7 @@ description: 用户说“开启工作间管理”或“工作间：”时，在 
 
 先核对当前会话是主人指定的工作间主 agent。带 Task / Dispatch 编号时，按执行者身份完成分配的任务。
 
-仓库在 `{{AGENTBOAT_REPO}}`（安装器按本机位置填写；仓库移动后重新安装）。命令的格式和输入只写在仓库里的三份说明里：
+AgentBoat 入口在 `{{AGENTBOAT_REPO}}`。以下脚本和说明路径均相对于此目录：
 
 - `client.mjs`：`node "{{AGENTBOAT_REPO}}/coordinator/scripts/client.mjs" <命令>`，见 `coordinator/skill/orca-project-coordinator/references/bridge.md`。
 - `workspace.mjs` 的 `create`、`dispatch`、`remember`：见 `workspace/README.md`。

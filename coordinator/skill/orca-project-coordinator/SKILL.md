@@ -11,7 +11,7 @@ description: 用户明确说“开启项目协作”或“项目协作：”时�
 
 - 已开启的项目，后续补充、结果和返修都沿用，不用再说触发词。
 - 带 Orca Task / Dispatch 编号时，你是执行者，按 `orchestration` 的执行者规则做完分配的任务。
-- 命令和输入格式见 [references/bridge.md](references/bridge.md)。操作 Orca 前，先读 `orca-cli`、`orchestration` 的版本匹配指南。
+- AgentBoat 入口是 `{{AGENTBOAT_REPO}}`。用 `node "{{AGENTBOAT_REPO}}/coordinator/scripts/client.mjs" <命令>` 调用，输入格式见 `{{AGENTBOAT_REPO}}/coordinator/skill/orca-project-coordinator/references/bridge.md`。操作 Orca 前，先读 `orca-cli`、`orchestration` 的版本匹配指南。
 
 ## 绑定
 
