@@ -1,6 +1,9 @@
 import type { Snapshot, Project, ProjectRef, Overview, WorkspaceBinding, MessagingSnapshot, LeadSwitch, ProjectLead } from './model'
 import type { DelegatedFeedback, FeedbackReply, LinksSnapshot, Sharing } from './links'
-export {}
+export interface ArchivePage {
+  end: number; previousEnd?: number; tasks: Project['tasks']
+  deliveries: number; events: number; requests: number; history: number
+}
 declare module 'orca' {
   interface PluginRequests {
     'panel.feedbackState': { input: { change?: import('./feedback-drafts').Delta }; output: import('./feedback-drafts').Sheets }
@@ -21,13 +24,14 @@ declare module 'orca' {
     'workspace.message': { input: { projectId: string; revision?: number; requestId: string; runId: string; text: string }; output: Snapshot & { queued?: string } }
     'projects.list': { output: { projects: ProjectRef[]; error?: string } }
     'project.read': { input: { projectId: string }; output: Snapshot }
+    'project.archive': { input: { projectId: string; end?: number }; output: ArchivePage }
     'project.lead': { input: { projectId: string } | (LeadSwitch & { projectId: string }); output: ProjectLead }
     'project.openMain': { input: { projectId: string }; output: { opened: boolean; multipleConversations?: boolean } }
     'project.settings': { input: { projectId: string; revision: number; roles: Project['roles']; runId?: string; caller?: string }; output: Snapshot }
     'project.feedback': { input: { projectId: string; revision?: number; requestId?: string; runId?: string; caller?: string; items: import('./store').FeedbackItem[] }; output: Snapshot }
     'project.deliver': { input: { projectId: string; deliveryId: string }; output: Snapshot }
-    'project.openArtifact': { input: { projectId: string; taskId: string; artifactId: string }; output: { opened: boolean } }
-    'project.agent': { input: { operation: 'read' | 'bind' | 'submit'; projectId: string; revision?: number; requestId?: string; runId?: string; caller?: string; currentRunId?: string; token?: string; task?: unknown }; output: Snapshot }
+    'project.openArtifact': { input: { projectId: string; taskId: string; artifactId: string; archiveEnd?: number }; output: { opened: boolean } }
+    'project.agent': { input: { operation: 'read' | 'bind' | 'submit'; projectId: string; revision?: number; requestId?: string; runId?: string; caller?: string; currentRunId?: string; token?: string; task?: unknown; taskId?: string }; output: Snapshot & { task?: import('./model').Task; archiveStatus?: '已归档' } }
   }
   interface PluginPanelEvents { 'project.changed': { projectId: string }; 'panel.draftsChanged': {}; 'workspace.open': { switching: boolean } }
 }

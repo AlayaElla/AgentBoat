@@ -1,18 +1,18 @@
 import type {} from 'orca/frame'
-import './protocol'
+import type { ArchivePage } from './protocol'
 import { attention, projectSummary, agents, agentName, compareAgentActivity, groupedAttention, isProjectShared, isRecentAgent, labels, taskState, scopes, statuses, connectionStates, roles, mainStatus, mainAgentStates } from './model'
 import type { Acceptance, AgentSession, Artifact, Attention, LeadSwitch, MainTakeover, Overview, Project, ProjectLead, ProjectWorkspace, WorkspaceBinding } from './model'
 import type { FeedbackItem } from './store'
 import type { AgentActivity, AgentsSnapshot, MainAgentActivity } from './model'
 import type { DelegatedFeedback, FeedbackTask, LinksSnapshot, SharedReport, Sharing } from './links'
 
-type Page = { kind: string; projectId?: string; id?: string; pid?: string; inboxRow?: string }
+type Page = { kind: string; projectId?: string; id?: string; pid?: string; inboxRow?: string; end?: number }
 import { applyDelta, emptySheet, feedbackFailure, versionOf, type Attempt, type Delta, type Draft, type InboxRow, type Sheets } from './feedback-drafts'
 const root = document.getElementById('panel')!
 const req = (name: string, input?: any, timeoutMs?: number): Promise<any> => input === undefined
   ? orca.plugin.request(name as any)
   : orca.plugin.request(name as any, JSON.parse(JSON.stringify(input)), timeoutMs ? { timeoutMs } : undefined)
-type PageData = { current: Project | null; lead?: WorkspaceBinding; leadPanel?: ProjectLead; workspace?: ProjectWorkspace; connection?: any; targets?: any }
+type PageData = { current: Project | null; lead?: WorkspaceBinding; leadPanel?: ProjectLead; workspace?: ProjectWorkspace; connection?: any; targets?: any; archive?: ArchivePage }
 type Frame = { key: string; page: Page; form: Record<string, any>; data?: PageData; error?: string; load?: number; opener?: HTMLElement; dirty?: boolean; mounted?: boolean }
 let frameId = 0
 const frameFor = (page: Page): Frame => ({ key: 'page-' + ++frameId, page, form: {} })
@@ -265,14 +265,15 @@ async function loadPage(f = active, projectRead?: Promise<any>) {
   const p = f.page, request = (f.load ?? 0) + 1
   f.load = request
   try {
-    const [snapshot, connection, sessions, leadPanel] = await Promise.all([
+    const [snapshot, connection, sessions, leadPanel, archive] = await Promise.all([
       p.projectId && !isRemote(p.projectId) ? projectRead ?? req('project.read', { projectId: p.projectId }) : null,
       p.kind === 'connection' && p.id ? req('workspace.connections', { operation: 'read', connectionId: p.id }) : null,
       p.kind === 'main' ? req('workspace.agent.targets') : null,
-      p.kind === 'project-settings' && p.projectId ? req('project.lead', { projectId: p.projectId }) : undefined
+      p.kind === 'project-settings' && p.projectId ? req('project.lead', { projectId: p.projectId }) : undefined,
+      p.kind === 'archive' || (p.kind === 'task' && p.end !== undefined) ? req('project.archive', { projectId: p.projectId, end: p.end }) : undefined
     ])
     if (request !== f.load) return
-    f.data = { current: snapshot?.project ?? null, lead: snapshot?.lead, workspace: snapshot?.workspaceTarget, connection, targets: sessions, leadPanel }
+    f.data = { current: snapshot?.project ?? null, lead: snapshot?.lead, workspace: snapshot?.workspaceTarget, connection, targets: sessions, leadPanel, archive }
     f.error = undefined
     if (f === active) useFrame(f)
   } catch (e) {
@@ -642,18 +643,18 @@ function organization() {
   return section('组织', button('＋ 连接', () => go({ kind: 'links' }), 'text sm'), el('div', { class: 'org' }, up.length ? el('div', { class: 'org-up', role: 'group', 'aria-label': '上级' }, up.map(p => workspaceNode(p))) : null,
     el('div', { class: `org-in ${up.length || side.length ? 'l1' : ''} ${up.length ? 'up' : ''}` }, el('div', { class: `org-self ${side.length ? 'sib' : ''}` }, workspaceNode(), down.length ? el('div', { class: 'org-kids', role: 'group', 'aria-label': '下级' }, down.length > 8 ? el('div', { class: 'org-tools' }, input('找工作间', '', 'search', () => render(), undefined, homeFrame.form)) : null, down.filter(p => !homeFrame.form['找工作间'] || p.name.includes(homeFrame.form['找工作间'])).map(p => workspaceNode(p))) : null), side.length ? el('div', { class: 'org-side', role: 'group', 'aria-label': '平级' }, side.map(p => workspaceNode(p))) : null), free.length ? el('div', { class: 'org-free', role: 'group', 'aria-label': '还没标关系' }, free.map(p => workspaceNode(p))) : null))
 }
-function openArtifact(projectId: string, taskId: string, artifact: Artifact) {
+function openArtifact(projectId: string, taskId: string, artifact: Artifact, archiveEnd?: number) {
   return act(async () => {
     try {
       if (/^https?:\/\//i.test(artifact.url)) {
         if (!orca.shell) throw Error('请在 Orca 桌面应用中打开链接')
         const result = await orca.shell.openExternal(artifact.url)
         if (!result.opened && result.reason !== 'cancelled') throw Error('请在 Orca 窗口可见时重试')
-      } else if (!(await req('project.openArtifact', { projectId, taskId, artifactId: artifact.id })).opened) {
+      } else if (!(await req('project.openArtifact', { projectId, taskId, artifactId: artifact.id, archiveEnd })).opened) {
         throw Error('Orca 未打开文件')
       }
     } catch (e) {
-      toastAction = { label: '重试', run: () => openArtifact(projectId, taskId, artifact) }
+      toastAction = { label: '重试', run: () => openArtifact(projectId, taskId, artifact, archiveEnd) }
       throw Error(`打不开「${artifact.label}」：${e instanceof Error ? e.message : '请在 Orca 桌面应用中重试'}`)
     }
   }, false)
@@ -875,27 +876,39 @@ function projectLeadRow(label: string, tone: string, description?: string, contr
 function projectPage() {
   if (!current) return callout('正在读取项目…')
   const p = current
+  const listTasks = (tasks: Project['tasks'], end?: number) => taskList(tasks.map(t => ({ ...t, state: taskState(t),
+    open: () => go({ kind: 'task', projectId: p.ref.id, id: t.id, ...(end !== undefined && { end }) }) })))
+  if (page.kind === 'archive') {
+    const archive = active.data?.archive
+    if (!archive) return small('正在读取归档…')
+    return [archive.tasks.length ? listTasks(archive.tasks, archive.end) : small('这批没有归档任务'),
+      small(`通知 ${archive.deliveries} 条 · 来源消息 ${archive.events} 条 · 请求凭证 ${archive.requests} 条 · 历史 ${archive.history} 条`),
+      archive.previousEnd ? button('更早一批', () => go({ kind: 'archive', projectId: p.ref.id, end: archive.previousEnd })) : null]
+  }
   const reason = workspaceTarget && 'error' in workspaceTarget ? workspaceTarget.error : !workspaceTarget ? '正在查找项目工作区…' : ''
   if (page.kind === 'project-settings') return [projectLeadSettings(p.ref.id), section('分工', ...Object.entries(roles).map(([k, title]) => select(title, { claude: 'Claude', codex: 'Codex' }, p.roles[k as keyof typeof roles])), button('保存', () => act(async () => { const s = await req('project.settings', { projectId: p.ref.id, revision: p.revision, roles: { design: form['设计'], code: form['代码'], review: form['审查'] } }); current = s.project; if (projectLeadPanel) projectLeadPanel.binding.revision = s.project.revision; markSaved(); notice = '已保存' }), 'primary')),
     section('开放给了谁', peers().filter(peer => peer.state === 'active' && isProjectShared(p, peer)).map(peer => small(peer.name))), small(`目录：${p.ref.path}`), button('导出记录', () => orca.files?.saveAs({ suggestedName: 'project-record.json', mimeType: 'application/json', data: JSON.stringify(p, null, 2) })),
     button(p.hidden ? '恢复显示' : '隐藏项目', () => act(async () => { await req('project.visibility', { projectId: p.ref.id, revision: p.revision, hidden: !p.hidden }); clearChoices(p.ref.id); await go({ kind: 'home' }, true); await refresh() })),
     section('删除项目', callout('先导出记录，再从 Orca 移除项目并删除工作间记录，磁盘文件保留。有打开的会话时会拒绝。'), check('确认删除这个项目的全部工作间记录', !!form.delete, v => { form.delete = v; render() }), button('删除项目', () => act(async () => { const result = await req('project.delete', { projectId: p.ref.id, revision: p.revision, confirm: p.ref.id }); clearChoices(p.ref.id); await go({ kind: 'home' }, true); await refresh(); notice = `已删除，记录已导出：${result.exportPath}` }), 'danger', !form.delete))]
   if (page.kind === 'task') {
-    const t = p.tasks.find(t => t.id === page.id)
+    const archive = active.data?.archive
+    const t = (archive?.tasks ?? p.tasks).find(t => t.id === page.id)
     if (!t) return callout('任务已不存在，请返回项目。')
     if (page.inboxRow) return inboxBody(active)
-    const artifacts = t.artifacts.map(a => button(a.label + ' · ' + a.version, () => openArtifact(p.ref.id, t.id, a), 'sm'))
+    const artifacts = t.artifacts.map(a => button(a.label + ' · ' + a.version, () => openArtifact(p.ref.id, t.id, a, archive?.end), 'sm'))
     const workers = projectAgents(p.ref.id).filter(a => a.taskId === t.id && a.state !== 'done')
-    const messages = p.events.filter(e => t.sourceIds.includes(e.id) || e.taskId === t.id)
-    const records = [...t.decisions.filter(d => d.answer !== undefined).map(d => small([`${d.question}：${d.answer}`, d.history.at(-1)?.source].filter(Boolean).join(' · '))),
+    const messages = archive ? [] : p.events.filter(e => t.sourceIds.includes(e.id) || e.taskId === t.id)
+    const records = archive ? [] : [...t.decisions.filter(d => d.answer !== undefined).map(d => small([`${d.question}：${d.answer}`, d.history.at(-1)?.source].filter(Boolean).join(' · '))),
       ...t.acceptance.filter(a => a.status !== 'pending').map(a => small([`${a.title}：${a.status === 'passed' ? '已通过' : '需要修改'}`, a.history.at(-1)?.note, a.history.at(-1)?.source].filter(Boolean).join(' · ')))]
     return [row(tag(labels[taskState(t)]), small(`${p.ref.name} · ${relative(t.updatedAt)}更新`)),
-      feedbackCards(p.ref.id, [t]),
-      section('进展', el('p', { class: 'any' }, t.progress), small('现在谁在做'),
-        !live.ok ? small('agent 状态读不到') : workers.length ? workers.map(a => agentRow(a, p.ref.name)) : small('没有看到 agent 在做这个任务'), live.ok && live.truncated ? small('agent 状态未全部读取') : null),
+      archive ? null : feedbackCards(p.ref.id, [t]),
+      section('进展', el('p', { class: 'any' }, t.progress), archive ? null : [small('现在谁在做'),
+        !live.ok ? small('agent 状态读不到') : workers.length ? workers.map(a => agentRow(a, p.ref.name)) : small('没有看到 agent 在做这个任务'), live.ok && live.truncated ? small('agent 状态未全部读取') : null]),
       fold(active.key + '-goal', '目标', () => el('p', { class: 'any' }, t.goal), undefined, true),
       artifacts.length ? fold(active.key + '-artifacts', '成果', () => artifacts, artifacts.length) : null,
       messages.length ? fold(active.key + '-sources', '来源消息', () => messages.map(e => card(e.text)), messages.length) : null,
+      archive && t.acceptance.length ? section('验收', t.acceptance.map(a => card(a.title, small(a.status === 'passed' ? '已通过' : a.status === 'pending' ? '待验收' : '需要修改'), small(a.details)))) : null,
+      archive && t.decisions.length ? section('决定', t.decisions.map(d => card(d.question, small(d.answer ?? '待决定')))) : null,
       records.length ? fold(active.key + '-records', '记录', () => records, records.length) : null]
   }
   const manage = (sectionName: '在线会话' | '新会话') => async () => {
@@ -921,7 +934,8 @@ function projectPage() {
     projectTabs(p.ref.id, {
       inbox: { count: projectCount(p.ref.id), body: () => emptyUnbound ? card(el('p', {}, '这个项目还没有主会话'), unboundActions())
         : empty && !p.tasks.length ? small('还没有任务。跟主 agent 说要做什么，它会在这里立项。') : inbox(p.ref.id) },
-      tasks: { count: p.tasks.length, body: () => taskList(p.tasks.map(t => ({ ...t, state: taskState(t), open: () => go({ kind: 'task', projectId: p.ref.id, id: t.id }) }))) },
+      tasks: { count: p.tasks.length, body: () => [listTasks(p.tasks), p.archive?.taskCount ?
+        button(`更早的 ${p.archive.taskCount} 项已归档`, () => go({ kind: 'archive', projectId: p.ref.id, end: p.archive?.end }), 'text sm') : null] },
       agents: { count: projectAgents(p.ref.id).length, body: () => agentsPage(p.ref.id) },
       messages: { count: p.deliveries.length + p.events.length, body: () => [
           p.deliveries.length ? section('通知', p.deliveries.map(d => card(d.subject, small(d.state === 'uncertain' ? '待核对，不会自动重发' : d.state === 'sent' ? '已通知' : '待通知'), small(d.error || ''),
@@ -1133,8 +1147,9 @@ function settingsPage() {
 function titleOf(f: Frame) {
   const p = f.page, project = f.data?.current, peer = all?.links?.peers.find(x => x.id === p.id)
   switch (p.kind) {
+    case 'archive': return '项目归档'
     case 'project': return project?.ref.name ?? all?.projects.find(x => x.ref.id === p.projectId)?.ref.name ?? '项目'
-    case 'task': return (p.projectId && isRemote(p.projectId) ? remoteFeedback(p.projectId)?.tasks.find(t => t.id === p.id)?.title : undefined) ?? project?.tasks.find(x => x.id === p.id)?.title ?? all?.attention.find(x => x.projectId === p.projectId && x.taskId === p.id)?.title ?? '任务'
+    case 'task': return (p.projectId && isRemote(p.projectId) ? remoteFeedback(p.projectId)?.tasks.find(t => t.id === p.id)?.title : undefined) ?? (f.data?.archive?.tasks ?? project?.tasks)?.find(x => x.id === p.id)?.title ?? all?.attention.find(x => x.projectId === p.projectId && x.taskId === p.id)?.title ?? '任务'
     case 'peer': return peer?.name ?? '工作间连接'
     case 'peer-project': return (peer?.report?.projects ?? peer?.offlineFeedback)?.find(x => x.id === p.pid)?.name ?? '项目'
     case 'connection': return f.data?.connection?.connection?.name ?? all?.connections?.find(c => c.id === p.id)?.name ?? '连接'

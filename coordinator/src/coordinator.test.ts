@@ -264,7 +264,7 @@ test('artifact opening uses the project workspace and a relative file path, and 
         return { opened: true }
       }, 'workspace.open': { opened: true }
     } })
-    const worker = await mountWorker({ default: api => { c = createCoordinator(api, { projects: async () => [refs[0], { ...ref, workspace }] }) } }, { host })
+    const worker = await mountWorker({ default: api => { c = createCoordinator(api, { projects: async () => [refs[0], { ...ref, workspace }] }, undefined, path.join(dir, 'exports')) } }, { host })
     try {
       const open = (artifactId: string, projectId = ref.id) => worker.request('project.openArtifact', { projectId, taskId: deliverable.id, artifactId })
       assert.deepEqual(await open('a0'), { opened: true })
@@ -277,6 +277,15 @@ test('artifact opening uses the project workspace and a relative file path, and 
       assert.deepEqual(host.calls.filter(c => c.method === 'editor.open' || c.method === 'workspace.open'), files.slice(0, 2).flatMap(name => [
         { method: 'editor.open', params: { workspaceId, path: `design files/${name}` } }, { method: 'workspace.open', params: { workspaceId } }
       ]))
+      workspace = ref.workspace
+      const saved = await c.store.mutate(ref.id, 0, project => {
+        project.tasks[0].updatedAt = '2020-01-01'
+        for (let i = 0; i < 20; i++) submitTask(project, { ...deliverable, id: String(i), phase: 'completed', acceptance: [] })
+      })
+      const archived = { projectId: ref.id, taskId: deliverable.id, artifactId: 'a1', archiveEnd: saved.archive!.end }
+      assert.deepEqual(await worker.request('project.openArtifact', archived), { opened: true })
+      await assert.rejects(() => open('a1'), /请选择本项目的本机成果/)
+      await assert.rejects(() => worker.request('project.openArtifact', { ...archived, archiveEnd: 1 }), /归档批次不存在/)
     } finally { c.stop(); await worker.deactivate() }
   } finally { await rm(dir, { recursive: true, force: true }) }
 })
@@ -427,9 +436,111 @@ test('first write archives oversized history and preserves actionable notificati
   } finally { await rm(dir, { recursive: true, force: true }) }
 })
 
+test('the first write archives whole completed tasks and submit restores their history and sources after restart', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'agentboat-tasks-'))
+  const p = fresh(refs[0])
+  submitTask(p, { ...deliverable, decisions: [{ id: 'd', question: '方向？' }] })
+  feedback(p, { items: [{ taskId: deliverable.id, kind: 'decision', itemId: 'd', answer: '甲' },
+    { taskId: deliverable.id, kind: 'acceptance', itemId: 'page-check', itemRevision: 1, result: 'passed' }] })
+  const old = p.tasks[0]
+  old.updatedAt = '2020-01-01'; old.sourceIds.push('old')
+  const event = { id: 'old', taskId: old.id, source: 'test', sourceId: '1', senderId: '', chatId: '', threadId: '', text: '原文', receivedAt: old.updatedAt }
+  p.events.push(event)
+  for (let i = 0; i < 20; i++) submitTask(p, { ...deliverable, id: String(i), phase: 'completed', acceptance: [] })
+  for (const phase of ['working', 'blocked', 'paused', 'ready'] as const) {
+    submitTask(p, { ...deliverable, phase, id: phase })
+    p.tasks.at(-1)!.sourceIds.push(phase)
+    p.events.push({ ...event, id: phase, taskId: phase })
+  }
+  submitTask(p, { ...deliverable, id: 'decision', decisions: [{ id: 'q', question: '下一步？' }] })
+  submitTask(p, { ...deliverable, id: 'rework' })
+  feedback(p, { items: [{ taskId: 'rework', kind: 'acceptance', itemId: 'page-check', itemRevision: 1, result: 'changes_requested', note: '修改' }] })
+  const host = mockHost({ storage: { 'project:p1': p as any } })
+  let c!: ReturnType<typeof createCoordinator>
+  const mount = () => mountWorker({ default: api => { c = createCoordinator(api, { projects: async () => refs }, undefined, dir) } }, { host })
+  let worker = await mount()
+  try {
+    const saved = await c.store.mutate('p1', 0, () => {})
+    assert.deepEqual(saved.tasks, p.tasks.slice(1))
+    assert.deepEqual(saved.events, p.events.slice(1))
+    assert.equal(saved.archive?.taskCount, 1)
+    c.stop(); await worker.deactivate(); worker = await mount()
+    const read = () => worker.request('project.agent', { operation: 'read', projectId: 'p1', taskId: old.id })
+    const result = await read()
+    assert.equal(result.archiveStatus, '已归档')
+    assert.deepEqual(result.task, old)
+    const report = { id: 'm', from: '', body: '', at: Date.parse(old.submittedAt!) }
+    assert.deepEqual(await c.store.archive.submittedReports({ ...saved, tasks: [] }, [report]), new Set(['m']))
+    const archive = await worker.request('project.archive', { projectId: 'p1' })
+    assert.deepEqual(archive, { end: saved.archive!.end, tasks: [old], deliveries: 0, events: 1, requests: 0, history: 0 })
+    const input = { operation: 'submit' as const, projectId: 'p1', revision: 1, requestId: 'reopen',
+      task: { id: old.id, phase: 'working', title: old.title, goal: old.goal, sourceIds: ['old'] } }
+    const restored = (await worker.request('project.agent', input)).project!
+    assert.equal(restored.archive?.taskCount, 0)
+    const task = restored.tasks.find(t => t.id === old.id)!
+    assert.deepEqual(task, { ...old, phase: 'working', updatedAt: task.updatedAt, submittedAt: task.submittedAt })
+    assert.deepEqual(restored.events.find(e => e.id === 'old'), event)
+    assert.equal((await read()).archiveStatus, undefined)
+    assert.equal((await worker.request('project.agent', input)).project!.tasks.filter(t => t.id === old.id).length, 1)
+  } finally { c.stop(); await worker.deactivate(); await rm(dir, { recursive: true, force: true }) }
+})
+
+test('each pressure stage stops as soon as the write fits and old feedback remains readable', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'agentboat-pressure-'))
+  try {
+    for (const stage of [1, 2, 3, 4]) {
+      const p = fresh(refs[0])
+      submitTask(p, { ...deliverable, phase: 'working', decisions: [{ id: 'd', question: '决定？' }] })
+      const active = p.tasks[0], entry = { at: '2020-01-01', revision: 1, result: 'answer', note: 'x'.repeat(3000) }
+      active.acceptance[0].history = [entry, entry]
+      active.decisions[0].history = [entry, entry]
+      submitTask(p, { ...deliverable, id: 'done', phase: 'completed', acceptance: [], progress: 'x'.repeat(5000) })
+      p.requests = Array.from({ length: 100 }, (_, i) => ({ id: String(i), fingerprint: fingerprint(i) }))
+      p.deliveries = [{ id: 'sent', state: 'sent', subject: '', body: 'x'.repeat(5000) }]
+      active.progress = 'x'.repeat([0, 202000, 208000, 217000, 221000][stage] - Buffer.byteLength(JSON.stringify(p)))
+      const storage = projectStorage(p)
+      const saved = await new ProjectStore(storage, dir).mutate('p1', 0, () => {})
+      assert.ok(Buffer.byteLength(JSON.stringify(saved)) <= 200000)
+      assert.equal(saved.deliveries.length, 0)
+      assert.equal(saved.requests.length, stage < 2 ? 100 : 1)
+      assert.equal(saved.tasks.length, stage < 3 ? 2 : 1)
+      assert.equal(saved.archive?.last?.history, stage === 4 ? 2 : 0)
+      assert.deepEqual(await new ProjectStore(storage, dir).archive.task(saved, active.id), active)
+    }
+  } finally { await rm(dir, { recursive: true, force: true }) }
+})
+
+test('uncommitted task versions are invisible after a failed storage write and active-only overflow keeps the original', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'agentboat-archive-commit-'))
+  const p = fresh(refs[0])
+  for (let i = 0; i < 22; i++) {
+    submitTask(p, { ...deliverable, id: String(i), phase: 'completed', acceptance: [] })
+    p.tasks.at(-1)!.updatedAt = new Date(i * 1000).toISOString()
+  }
+  const storage = projectStorage(p), store = new ProjectStore(storage, dir)
+  try {
+    const saved = await store.mutate('p1', 0, () => {})
+    const failing = new ProjectStore({ ...storage, set: async () => { throw Error('storage offline') } }, dir)
+    await assert.rejects(() => failing.mutate('p1', 1, async project => {
+      await failing.archive.restore(project, '0', [])
+      project.tasks.at(-1)!.title = '未提交版本'
+    }), /storage offline/)
+    const next = await store.mutate('p1', 1, project => { project.requests = Array.from({ length: 129 }, (_, i) => ({ id: String(i), fingerprint: fingerprint(i) })) })
+    const restarted = new ProjectStore(storage, dir)
+    assert.deepEqual(await restarted.archive.task(next, '0'), p.tasks[0])
+    assert.equal((await restarted.archive.page(next)).batch.previous!.end, saved.archive!.end)
+    await assert.rejects(() => store.mutate('p1', 2, project => {
+      project.tasks[0].phase = 'paused'; project.tasks[0].goal = 'x'.repeat(205000)
+    }), /剩余记录用于当前工作.*成果文件/)
+    assert.deepEqual(await store.get('p1'), next)
+  } finally { await rm(dir, { recursive: true, force: true }) }
+})
+
 test('archive failure retains history, permits writes that fit and describes an oversized write', async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'agentboat-project-archive-failure-'))
   const blocked = path.join(dir, 'file'), project = fresh(refs[0])
+  for (let i = 0; i < 21; i++) submitTask(project, { ...deliverable, id: String(i), phase: 'completed', acceptance: [] })
+  project.events.push({ id: 'event', source: 'test', sourceId: 'one', senderId: '', chatId: '', threadId: '', text: '来源', receivedAt: '2001-01-01' })
   project.deliveries = Array.from({ length: 30 }, (_, i) => ({ id: String(i), state: 'sent', body: '', subject: '通知' }))
   project.requests = Array.from({ length: 129 }, (_, i) => ({ id: String(i), fingerprint: fingerprint(i) }))
   const store = new ProjectStore(projectStorage(project), blocked)
@@ -438,6 +549,8 @@ test('archive failure retains history, permits writes that fit and describes an 
     const saved = await store.mutate('p1', 0, p => { p.runId = 'main' })
     assert.equal(saved.runId, 'main')
     assert.deepEqual(saved.requests, project.requests)
+    assert.deepEqual(saved.tasks, project.tasks)
+    assert.deepEqual(saved.events, project.events)
     assert.deepEqual(saved.deliveries, project.deliveries)
     await assert.rejects(() => store.mutate('p1', 1, p => { p.deliveries[0].body = 'x'.repeat(200_000) }), /200000.*通知.*归档失败/)
     assert.deepEqual(await store.get('p1'), saved)

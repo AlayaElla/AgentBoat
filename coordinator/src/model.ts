@@ -11,10 +11,10 @@ interface UserFeedback { at: string; revision: number; result: string; note: str
 export interface Acceptance {
   id: string; title: string; details: string; artifactIds: string[]; revision: number
   status: 'pending' | 'passed' | 'changes_requested'; history: UserFeedback[]
-  fingerprint: string
+  fingerprint: string; archivedHistory?: number
 }
 interface Decision {
-  id: string; question: string; options: string[]; answer?: string; history: UserFeedback[]
+  id: string; question: string; options: string[]; answer?: string; history: UserFeedback[]; archivedHistory?: number
 }
 export interface Task {
   id: string; title: string; goal: string; progress: string
@@ -57,7 +57,7 @@ export interface Project {
   takeover?: StoredTakeover
   hidden?: boolean
   updatedAt?: string
-  archive?: { id: string; start: number; end: number }
+  archive?: { id: string; start: number; end: number; taskCount?: number; last?: { revision: number; tasks: number; events: number; deliveries: number; requests: number; history: number } }
   roles: { design: 'codex' | 'claude'; code: 'codex' | 'claude'; review: 'codex' | 'claude' }
   tasks: Task[]; events: SourceEvent[]; deliveries: Delivery[]; requests: { id: string; fingerprint: string }[]
 }
@@ -143,6 +143,7 @@ export function attention(project: Project): Attention[] {
 export function projectCounts(p: Project) {
   const counts: Overview['projects'][number]['counts'] = { working: 0, decision: 0, review: 0, rework: 0, completed: 0, blocked: 0, paused: 0 }
   for (const task of p.tasks) counts[taskState(task)]++
+  counts.completed += p.archive?.taskCount ?? 0
   return counts
 }
 

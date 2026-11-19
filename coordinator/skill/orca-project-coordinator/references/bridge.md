@@ -13,7 +13,7 @@
 - `overview`：读取绑定、待处理、项目和连接全量。attention 是待决定、待验收、受阻、返修；questions 是仍在执行的 Orca 执行者在最近 24 小时发出、超过 10 分钟未回复的问题。执行记录不代表 agent 在线。
 - `overview --brief`：日常核对待办，返回 `{attention,questions,reports,projects:[{id,name,counts}]}`。questions 和 reports 是供管理员核对的项目 Run 邮件，插件先提醒项目主会话，再按超时情况提醒工作间主 agent。项目目录和连接设置在全量总览里。
 - `read <projectId>`：`{project,lead}`，project 含 revision、runId、roles、tasks、events、deliveries。
-- `read <projectId> --task <taskId>`：只核对一项任务时使用，返回 `{projectId,revision,task}`。任务不存在时返回错误。
+- `read <projectId> --task <taskId>`：核对单项任务及完整反馈历史，返回 `{projectId,revision,task}`。从归档找到时还返回 `archiveStatus: "已归档"`。再次 submit 同一编号会恢复并合并原任务。任务不存在时返回错误。
 - `project-lead <projectId>`：项目的主会话（`binding`）、待接管状态和在线目标会话。
 - `main-read`：工作间主 agent 的绑定；`main-targets`：可接管的在线会话。
 - `connections`、`connection-read <名字>`、`connection-check <名字>`（只做无害查询）。

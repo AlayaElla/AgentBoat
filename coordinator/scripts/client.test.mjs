@@ -147,16 +147,25 @@ test('submit emits the hook receipt only for the exact saved write and preserves
   const dir = mkdtempSync(path.join(os.tmpdir(), 'project-submit-client-'));
   const fixture = path.join(dir, 'orca-fixture.mjs'), input = path.join(dir, 'input.json');
   writeFileSync(fixture, "import cp from 'node:child_process'; import {syncBuiltinESMExports} from 'node:module'; import {createHash} from 'node:crypto';\n" +
-    "cp.execFileSync=(_exe,args)=>{const raw=args[args.indexOf('--data')+1]; const input=JSON.parse(raw);const fingerprint=process.env.TEST_UNMATCHED?'wrong':createHash('sha256').update(raw).digest('hex');return JSON.stringify({ok:true,result:{result:{project:{ref:{id:input.projectId},tasks:[{...input.task,acceptance:[{status:'pending'}]}],requests:[{id:input.requestId,fingerprint}]}}}});};syncBuiltinESMExports();");
-  writeFileSync(input, JSON.stringify({ projectId: 'p1', runId: 'run_self', requestId: 'one', task: { id: 't1', phase: 'ready' } }));
+    `cp.execFileSync=(_exe,args)=>{
+      const raw=args[args.indexOf('--data')+1], input=JSON.parse(raw);
+      const fingerprint=process.env.TEST_UNMATCHED?'wrong':createHash('sha256').update(raw).digest('hex');
+      const archived=!!process.env.TEST_ARCHIVED, task={...input.task,acceptance:archived?[]:[{status:'pending'}]};
+      return JSON.stringify({ok:true,result:{result:{task:archived?task:undefined,project:{
+        ref:{id:input.projectId},revision:2,archive:archived?{last:{revision:2,tasks:1}}:undefined,
+        tasks:archived?[]:[task],requests:[{id:input.requestId,fingerprint}]
+      }}}});
+    };syncBuiltinESMExports();`);
+  writeFileSync(input, JSON.stringify({ projectId: 'p1', revision: 1, runId: 'run_self', requestId: 'one', task: { id: 't1', phase: 'ready' } }));
   try {
-    const call = unmatched => JSON.parse(execFileSync(process.execPath, ['--import', pathToFileURL(fixture).href, 'scripts/client.mjs', 'submit', input], {
-      encoding: 'utf8', windowsHide: true, env: { ...process.env, TEST_UNMATCHED: unmatched ? '1' : '' }
+    const call = (unmatched, archived = false) => JSON.parse(execFileSync(process.execPath, ['--import', pathToFileURL(fixture).href, 'scripts/client.mjs', 'submit', input], {
+      encoding: 'utf8', windowsHide: true, env: { ...process.env, TEST_UNMATCHED: unmatched ? '1' : '', TEST_ARCHIVED: archived ? '1' : '' }
     }));
     const reply = call(false);
     assert.deepEqual(reply.submission, { projectId: 'p1', requestId: 'one', taskId: 't1', phase: 'ready', pendingAcceptance: true, pendingDecision: false });
     assert.equal(reply.result.result.project.ref.id, 'p1');
     assert.equal(call(true).submission, undefined);
+    assert.deepEqual(call(false, true).submission, { ...reply.submission, pendingAcceptance: false, archived: { revision: 2, tasks: 1 } });
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -166,7 +175,8 @@ test('brief and single-task reads preserve the bridge envelope and omit unrelate
 const ref={id:'p1',name:'示例',path:'/private/path'}, counts={working:2};
 const project={ref, revision:3, tasks:[{id:'t1',title:'一'},{id:'t2',title:'二'}], events:['private']};
 const overview={workspace:{runId:'main'},links:['private'],attention:[{title:'待决定'}],questions:[{id:'msg_1'}],projects:[{ref,counts}]};
-cp.execFileSync=(_exe,args)=>JSON.stringify({ok:true,id:'fixture',result:{result:args[4]==='workspace.overview'?overview:args[4]==='project.agent'?{project,lead:{private:true}}:null}});
+cp.execFileSync=(_exe,args)=>{const archived=args.includes('--data')&&JSON.parse(args[args.indexOf('--data')+1]).taskId==='old';
+return JSON.stringify({ok:true,id:'fixture',result:{result:args[4]==='workspace.overview'?overview:args[4]==='project.agent'?{project,lead:{private:true},...(archived?{task:{id:'old'},archiveStatus:'已归档'}:{})}:null}});};
 syncBuiltinESMExports();`);
   const call = (...args) => JSON.parse(execFileSync(process.execPath, ['--import', pathToFileURL(fixture).href, 'scripts/client.mjs', ...args],
     { encoding: 'utf8', windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] }));
@@ -177,6 +187,7 @@ syncBuiltinESMExports();`);
     assert.equal(call('overview').result.result.workspace.runId, 'main');
     assert.deepEqual(call('read', 'p1', '--task', 't2').result.result, { projectId: 'p1', revision: 3, task: { id: 't2', title: '二' } });
     assert.equal(call('read', 'p1').result.result.project.tasks.length, 2);
+    assert.deepEqual(call('read', 'p1', '--task', 'old').result.result, { projectId: 'p1', revision: 3, task: { id: 'old' }, archiveStatus: '已归档' });
     assert.throws(() => call('read', 'p1', '--task', 'absent'), /找不到任务 absent/);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });

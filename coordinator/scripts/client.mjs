@@ -20,7 +20,7 @@ const caller = process.env.ORCA_AGENT_SESSION_ID ? `orca_session_id:${process.en
 const currentRun = () => JSON.parse(execFileSync(executable, ['orchestration', 'run-current', '--json', '--full'], { encoding: 'utf8', windowsHide: true, timeout: 25000, maxBuffer: 1024 * 1024 }));
 
 const input = operation === 'connections' ? { operation: 'read' } : operation.startsWith('connection-') ? { ...(['connection-read','connection-check'].includes(operation) ? { name: argument } : JSON.parse(readFileSync(0, 'utf8').replace(/^\uFEFF/, ''))), operation: operation.slice(11) } : operation.startsWith('links-') ? { ...(['links-join', 'links-configure', 'links-rename', 'links-share', 'links-relate', 'links-revoke', 'links-send'].includes(operation) ? JSON.parse(readFileSync(0, 'utf8').replace(/^\uFEFF/, '')) : {}), operation: operation.slice(6) } : ['projects', 'overview'].includes(operation) ? null : operation === 'main-read' ? { operation: 'read' } : operation === 'read'
-  ? { operation, projectId: argument }
+  ? { operation, projectId: argument, ...(singleTask ? { taskId } : {}) }
   : operation === 'project-lead' ? { projectId: argument }
   : operation === 'main-targets' ? null
   : { ...JSON.parse(readFileSync(operation === 'main-bind' || leadBind || leadSwitch ? 0 : argument, 'utf8').replace(/^\uFEFF/, '')), ...(['message', 'feedback', 'feishu-reply', 'project-lead-switch'].includes(operation) ? {} : { operation: operation === 'main-bind' || leadBind ? 'bind' : operation }) };
@@ -68,11 +68,12 @@ try {
     process.stdout.write(JSON.stringify(reply, null, 2) + '\n');
   } else if (operation === 'submit') {
     const reply = JSON.parse(stdout), result = reply.result?.result, project = result?.project;
-    const task = project?.tasks?.find(t => t.id === input.task?.id);
+    const task = project?.tasks?.find(t => t.id === input.task?.id) ?? (result?.task?.id === input.task?.id ? result?.task : undefined);
     const fingerprint = createHash('sha256').update(JSON.stringify(input)).digest('hex');
     if (reply.ok && project?.ref?.id === input.projectId && task && project.requests?.some(r => r.id === input.requestId && r.fingerprint === fingerprint)) {
+      const archived = project.archive?.last;
       const submission = { projectId: project.ref.id, requestId: input.requestId, taskId: task.id, phase: task.phase, pendingAcceptance: task.acceptance?.some(a => a.status === 'pending') ?? false, pendingDecision: task.decisions?.some(d => d.answer === undefined) ?? false,
-        submittedAt: task.submittedAt };
+        submittedAt: task.submittedAt, ...(archived && archived.revision === input.revision + 1 && archived.revision === project.revision ? { archived } : {}) };
       process.stdout.write(JSON.stringify({ submission, ...reply }) + '\n');
     } else {
       process.stdout.write(stdout);
@@ -84,12 +85,12 @@ try {
         const { attention, questions, reports, projects, error } = result;
         reply.result.result = { attention, questions, reports, projects: projects.map(({ ref, counts }) => ({ id: ref.id, name: ref.name, counts })), error };
       } else {
-        const { project } = result, task = project.tasks.find(task => task.id === taskId);
+        const { project } = result, task = result.task ?? project.tasks.find(task => task.id === taskId);
         if (!task) {
           process.stderr.write(`项目 ${project.ref.id} 中找不到任务 ${taskId}。\n`);
           process.exit(1);
         }
-        reply.result.result = { projectId: project.ref.id, revision: project.revision, task };
+        reply.result.result = { projectId: project.ref.id, revision: project.revision, task, ...(result.archiveStatus ? { archiveStatus: result.archiveStatus } : {}) };
       }
     }
     process.stdout.write(JSON.stringify(reply) + '\n');

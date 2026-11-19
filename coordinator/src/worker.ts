@@ -6,7 +6,7 @@ import type { OrcaWorkerApi } from 'orca/worker'
 import { agents, type AgentSession, type LeadSwitch, type Project, type ProjectLead, type ProjectRef, type Snapshot, type SourceEvent, type Delivery, type MessagingSnapshot } from './model'
 import { FeishuSources, notifyFeishu, type MessageTransport } from './feishu'
 import { OrcaRuntime, defaultExecutable, type CoordinatorRuntime } from './runtime'
-import { ProjectStore, artifactUrl, fail, feedback, fingerprint, fresh, maxMessageLength, notifyWorkspace, object, overview, receiveEvent, submitTask, text, revision, mergeProjects, feishuConfig, takeoverActive, verifyTakeover } from './store'
+import { ProjectStore, artifactUrl, fail, feedback, fingerprint, fresh, maxMessageLength, notifyWorkspace, object, overview, receiveEvent, submitTask, strings, text, revision, mergeProjects, feishuConfig, takeoverActive, verifyTakeover } from './store'
 import { WorkspaceLinks } from './links'
 import { fileErrorText, incomingHash, linkMessageHistory } from './link-messages'
 import { LinkFiles } from './link-files'
@@ -93,16 +93,23 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
   let questions: OwnerQuestion[] = [], pollingQuestions: Promise<void> | undefined
   let actionableRunMail = new Set<string>()
   const mailKey = (item: OwnerQuestion) => fingerprint([item.runId, item.id])
-  const unsubmitted = (items: OwnerQuestion[], list: Project[]) => {
+  const unsubmitted = async (items: OwnerQuestion[], list: Project[]) => {
     const projects = new Map(list.filter(p => !p.hidden).map(p => [p.ref.id, p]))
     const proofs = new Map<string, ReturnType<typeof projectSubmissions>>()
-    return items.filter(item => {
+    const remaining = items.filter(item => {
       const project = projects.get(item.projectId)
       if (!project || project.runId !== item.runId) return false
       if (!item.report) return true
       if (!proofs.has(item.projectId)) proofs.set(item.projectId, projectSubmissions(project))
       return !proofs.get(item.projectId)!.some(proof => reportSubmitted(item.report!, proof))
     })
+    const archived = new Set<OwnerQuestion>()
+    for (const id of proofs.keys()) {
+      const rows = remaining.filter(q => q.projectId === id && q.report)
+      const submitted = await store.archive.submittedReports(projects.get(id)!, rows.map(q => q.report!))
+      for (const q of rows) if (submitted.has(q.report!.id)) archived.add(q)
+    }
+    return remaining.filter(q => !archived.has(q))
   }
   const visibleQuestions = (list: Project[]) => unsubmitted(questions, list)
   function refreshQuestions() {
@@ -126,7 +133,7 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
       const current = await availableProjectRecords()
       if (current.error) return
       const currentRuns = new Map(current.list.filter(p => !p.hidden).map(p => [p.ref.id, p]))
-      const verified = unsubmitted([...updated.values()].flatMap(result => result.questions), current.list)
+      const verified = await unsubmitted([...updated.values()].flatMap(result => result.questions), current.list)
       questions = verified.sort((a, b) => a.at - b.at || a.id.localeCompare(b.id))
       actionableRunMail = new Set(verified.map(mailKey))
       const w = await store.workspace()
@@ -577,7 +584,7 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
   orca.panels.handle('workspace.overview', async () => {
     const { list, error } = await availableProjectRecords()
     // Orca registration defines membership. A project can be registered without a workspace.
-    const inbox = visibleQuestions(list)
+    const inbox = await visibleQuestions(list)
     return { ...overview(list, await store.workspace(), error), questions: inbox.filter(item => !item.report), reports: inbox.filter(item => item.report), workspace: await main.read(live), links: await links.snapshot(), connections: await connections.list(), machines: [{ id: 'local', name: os.hostname(), role: 'host' as const, online: true }] }
   })
   orca.panels.handle('workspace.message', async input => {
@@ -622,6 +629,13 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
     return { deleted: id, exportPath }
   })
   orca.panels.handle('project.read', input => snapshot(text(input.projectId, '项目编号', 200)))
+  orca.panels.handle('project.archive', async input => {
+    const p = await ensure(input.projectId)
+    const { batch } = await store.archive.page(p, input.end)
+    return { end: input.end ?? p.archive!.end, ...(batch.previous && { previousEnd: batch.previous.end }), tasks: batch.tasks ?? [],
+      deliveries: batch.deliveries.length, events: batch.events?.length ?? 0, requests: batch.requests.length,
+      history: batch.history?.reduce((count, part) => count + part.rows.length, 0) ?? 0 }
+  })
   orca.panels.handle('project.lead', input => {
     const id = text(input.projectId, '项目编号', 200)
     return 'mode' in input ? switchProjectLead(id, input) : readProjectLead(id)
@@ -670,7 +684,13 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
   })
   orca.panels.handle('project.agent', async input => {
     const id = text(input.projectId, '项目编号', 200)
-    if (input.operation === 'read') return snapshot(id)
+    if (input.operation === 'read') {
+      const result = await snapshot(id)
+      if (input.taskId === undefined || !result.project) return result
+      const taskId = text(input.taskId, '任务编号', 200)
+      const task = await store.archive.task(result.project, taskId)
+      return { ...result, task, ...(task && !result.project.tasks.some(t => t.id === taskId) ? { archiveStatus: '已归档' as const } : {}) }
+    }
     await ensure(id)
     if (!['bind', 'submit'].includes(input.operation)) fail('不支持的协作操作')
     const request = { id: text(input.requestId, '请求编号', 200), input }
@@ -702,6 +722,8 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
         }
         p.runId = input.runId!
       } else {
+        const task = object(input.task)
+        await store.archive.restore(p, text(task.id, '任务编号', 200), strings(task.sourceIds ?? [], '来源编号'))
         const before = structuredClone(p)
         submitTask(p, input.task)
         await notify(before, p)
@@ -710,7 +732,12 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
     }, request)
     changed(id)
     defer(id)
-    return snapshot(id, written)
+    const result = await snapshot(id, written)
+    if (input.operation === 'submit') {
+      const taskId = text(object(input.task).id, '任务编号', 200)
+      if (!written.tasks.some(t => t.id === taskId)) return { ...result, task: await store.archive.task(written, taskId), archiveStatus: '已归档' as const }
+    }
+    return result
   })
   orca.panels.handle('project.deliver', async input => {
     await ensure(input.projectId)
@@ -722,7 +749,8 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
   })
   orca.panels.handle('project.openArtifact', async input => {
     const ref = await requireProject(input.projectId), p = await store.register(ref)
-    const a = p.tasks.find(x => x.id === input.taskId)?.artifacts.find(x => x.id === input.artifactId)
+    const tasks = input.archiveEnd === undefined ? p.tasks : (await store.archive.page(p, input.archiveEnd)).batch.tasks
+    const a = tasks?.find(x => x.id === input.taskId)?.artifacts.find(x => x.id === input.artifactId)
     if (!a || /^https?:/i.test(a.url)) fail('请选择本项目的本机成果')
     if (!ref.workspace) fail('这个项目当前没有工作区')
     const url = artifactUrl(a.url, ref.path)

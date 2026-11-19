@@ -72,7 +72,7 @@ export function notifyWorkspace(before: Project, after: Project, runId: string):
 
 export class ProjectStore {
   private chain: Promise<unknown> = Promise.resolve()
-  private archive: ProjectArchive
+  readonly archive: ProjectArchive
   constructor(private storage: Pick<StorageApi, 'get' | 'set' | 'keys' | 'delete'>,
     private exportDirectory = path.join(pluginDataPath(), 'exports'),
     private updateRoles?: () => Promise<void>) { this.archive = new ProjectArchive(exportDirectory) }
@@ -198,15 +198,7 @@ export class ProjectStore {
       project.revision++
       project.updatedAt = new Date().toISOString()
       if (request) project.requests.push({ id: request.id, fingerprint: hash! })
-      const archiveError = await this.archive.compact(project)
-      const bytes = Buffer.byteLength(JSON.stringify(project))
-      if (bytes > 200_000) {
-        const sizes = { 任务: project.tasks, 来源消息: project.events, 通知: project.deliveries, 请求凭证: project.requests }
-        const parts = Object.entries(sizes).map(([name, rows]) => `${name} ${Buffer.byteLength(JSON.stringify(rows))} 字节`)
-        const advice = archiveError ? `归档失败（${archiveError}），请检查归档目录权限和磁盘空间后重试`
-          : '请缩短本次提交的任务或消息正文，将长文放在成果文件中；若现有记录已满，需升级为支持分页的版本'
-        fail(`项目记录 ${bytes} 字节，超过 200000 字节上限（${parts.join('、')}）。${advice}。原记录已保留`)
-      }
+      await this.archive.compact(project)
       await this.storage.set(`project:${id}`, project as any)
       if (backgroundRoles) setImmediate(() => { void this.updateRoles?.().catch(() => {}) })
       else await this.updateRoles?.()
@@ -245,7 +237,7 @@ export function submitTask(project: Project, raw: unknown): void {
     const aid = text(a.id, '验收编号', 200)
     const previous = task.acceptance.find(x => x.id === aid)
     if (previous?.fingerprint === af) continue
-    const item: Acceptance = { id: aid, ...fields, revision: (previous?.revision ?? 0) + 1, status: 'pending', history: previous?.history ?? [], fingerprint: af }
+    const item: Acceptance = { ...previous, id: aid, ...fields, revision: (previous?.revision ?? 0) + 1, status: 'pending', history: previous?.history ?? [], fingerprint: af }
     if (previous) task.acceptance[task.acceptance.indexOf(previous)] = item
     else task.acceptance.push(item)
   }

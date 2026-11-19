@@ -55,6 +55,11 @@ async function setup(options = {}, hub) {
     const project = { version: 1, ref: { id: 'p1', name: '示例项目', hostId: 'local', repoId: 'repo', workspace: 'id:repo', path: '/example' }, revision: 2, runId: 'run_project', roles: { design: 'claude', code: 'codex', review: 'codex' }, tasks: [task], events: [], deliveries: [], requests: [] };
     const projects = options.empty ? [] : [project];
     if (options.empty) project.tasks = [];
+    const archivedTask = { ...task, title: '归档任务', progress: '旧版页面已验收', phase: 'completed',
+      artifacts: [{ id: 'md', label: '验收文档', version: 'v1', url: '/example/review.md' }],
+      acceptance: [{ ...acceptance('版式'), status: 'passed', history: [{ note: '历史原文' }] }],
+      decisions: [{ id: 'd', question: '采用哪个版本？', answer: '第一版', history: [] }] };
+    if (options.archive) project.archive = { taskCount: 1, end: 50 };
     if (options.projectUnbound) { project.runId = ''; project.tasks = []; }
     if (options.inboxBatch) {
       const other = clone(project);
@@ -160,6 +165,9 @@ async function setup(options = {}, hub) {
         const p = projects.find(p => p.ref.id === input.projectId);
         return clone({ project: p ?? null, lead: p ? binding(p) : undefined, projects: projects.map(p => p.ref), workspaceTarget: window.fixture.workspaceTarget });
       }
+      if (name === 'project.archive' && input.projectId === 'p1') return input.end === 25 ?
+        { end: 25, tasks: [], deliveries: 5, events: 0, requests: 4, history: 0 } :
+        { end: 50, previousEnd: 25, tasks: [archivedTask], deliveries: 2, events: 1, requests: 3, history: 4 };
       if (name === 'project.lead') {
         const p = projects.find(p => p.ref.id === input.projectId);
         if (input.mode) {
@@ -177,7 +185,8 @@ async function setup(options = {}, hub) {
         return clone({ binding: binding(p), defaultAgent: 'claude', sessions: workspaceError ? [] : projectSessions, ...(workspaceError ? { workspaceError } : {}) });
       }
       if (name === 'project.openArtifact') {
-        const target = projects.find(p => p.ref.id === input.projectId)?.tasks.find(t => t.id === input.taskId);
+        const target = input.archiveEnd === 50 && input.projectId === 'p1' && input.taskId === archivedTask.id ? archivedTask :
+          projects.find(p => p.ref.id === input.projectId)?.tasks.find(t => t.id === input.taskId);
         if (!target?.artifacts.some(a => a.id === input.artifactId)) throw Error('请选择本项目的本机成果');
         if (window.fixture.workspaceTarget.error) throw Error(window.fixture.workspaceTarget.error);
         if (window.fixture.artifactError) throw Error(window.fixture.artifactError);
@@ -554,6 +563,32 @@ try {
       assert.deepEqual(await calls(), ['md', 'html', 'html', 'html', 'md'].map(expected));
     });
   }
+  await setup({ archive: true });
+  await test('project tasks open readable archive batches, task details and their archived artifacts', async () => {
+    await page.locator('[data-project=p1] .pcard-h').click();
+    await currentLayer().getByRole('tab', { name: 'Agent', exact: true }).click();
+    assert.equal(await currentLayer().getByRole('button', { name: /项已归档/ }).count(), 0);
+    await currentLayer().getByRole('tab', { name: '任务', exact: true }).click();
+    await currentLayer().getByRole('button', { name: '更早的 1 项已归档' }).click();
+    await currentLayer().getByText('通知 2 条 · 来源消息 1 条 · 请求凭证 3 条 · 历史 4 条').waitFor();
+    const archivedRow = currentLayer().getByRole('button', { name: '归档任务' });
+    assert.match(await archivedRow.getAttribute('aria-description'), /已完成 · .+/);
+    await archivedRow.click();
+    await activeHeader().getByRole('heading', { name: '归档任务' }).waitFor();
+    await currentLayer().getByText('旧版页面已验收').waitFor();
+    await currentLayer().getByRole('region', { name: '验收' }).getByText('已通过').waitFor();
+    await currentLayer().getByRole('region', { name: '决定' }).getByText('第一版').waitFor();
+    assert.doesNotMatch(await currentLayer().innerText(), /历史原文|现在谁在做/);
+    await currentLayer().getByRole('button', { name: /^成果 / }).click();
+    await currentLayer().getByRole('button', { name: '验收文档 · v1' }).click();
+    assert.deepEqual(await page.evaluate(() => fixture.calls.filter(c => c.name === 'project.openArtifact').at(-1)?.input),
+      { projectId: 'p1', taskId: 't1', artifactId: 'md', archiveEnd: 50 });
+    await back();
+    await currentLayer().getByRole('button', { name: '更早一批' }).click();
+    await currentLayer().getByText('这批没有归档任务').waitFor();
+    await currentLayer().getByText('通知 5 条 · 来源消息 0 条 · 请求凭证 4 条 · 历史 0 条').waitFor();
+    assert.equal(await currentLayer().getByRole('button', { name: '更早一批' }).count(), 0);
+  });
   await setup({ manyProjects: true, idleProjects: true });
   await test('nested navigation restores tab, scroll, focus and open folds and hides covered content', async () => {
     await page.getByRole('button', { name: /^还没有任务的项目/ }).click();
