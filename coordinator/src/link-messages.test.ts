@@ -13,6 +13,9 @@ import { createConnection, createServer, type AddressInfo, type Socket } from 'n
 import { setTimeout as delay } from 'node:timers/promises'
 import { refs } from './fixtures'
 import type { CoordinatorRuntime } from './runtime'
+import { roleReminder } from './main-agent'
+
+const messageEnding = (body: string) => `${body}\n\n${roleReminder.workspace}`
 
 async function workspace(name: string, bound: boolean, savedDeliveries: Delivery[] = [], files = testFiles(), extra?: Partial<CoordinatorRuntime>) {
   const sends: { runId: string; delivery: Delivery }[] = []
@@ -91,7 +94,7 @@ for (const forward of [false, true]) test('long poll delivers immediately over '
         await until(() => (a.coordinator.links as any).waiters.has(id))
         const started = performance.now(), body = 'isolated latency sample ' + i
         const send = from.send(id, 'latency-' + i, body)
-        await until(() => to.sends.find(entry => entry.delivery.body.endsWith(body)), 1000)
+        await until(() => to.sends.find(entry => entry.delivery.body.endsWith(messageEnding(body))), 1000)
         const elapsed = performance.now() - started
         assert.ok(elapsed < 1000)
         measured.push(elapsed.toFixed(1))
@@ -123,12 +126,12 @@ test('wait replaces the previous request and checks credentials, reconnects and 
 
     await a.coordinator.links.start()
     await b.coordinator.links.start()
-    await until(() => b.sends.some(entry => entry.delivery.body.endsWith('wakes the next request')))
+    await until(() => b.sends.some(entry => entry.delivery.body.endsWith(messageEnding('wakes the next request'))))
     await until(() => (a.coordinator.links as any).waiters.has(id))
     a.coordinator.links.stop()
     assert.equal((await b.send(id, 'offline-wait', 'offline on loopback')).peers[0].pendingMessages, 1)
     await a.coordinator.links.start()
-    await until(() => a.sends.some(entry => entry.delivery.body.endsWith('offline on loopback')), 4000)
+    await until(() => a.sends.some(entry => entry.delivery.body.endsWith(messageEnding('offline on loopback'))), 4000)
     await until(() => (a.coordinator.links as any).waiters.has(id))
     await a.coordinator.links.revoke(id)
     await until(async () => (await b.read()).peers.length === 0)
@@ -293,7 +296,7 @@ test('both main agents exchange messages on one listener, with durable offline d
     assert.equal(a.sends[0].delivery.subject, '来自工作间「' + origin.name + '」的主 agent（' + id + '）')
     assert.ok(a.sends[0].delivery.body.includes('可以直接处理。要立项、派 agent、花额度或发文件时直接做，做完告诉主人。不发密钥、凭据和本机路径。'))
     assert.ok(a.sends[0].delivery.body.includes('links-send，id 填 ' + id))
-    assert.ok(a.sends[0].delivery.body.endsWith('加入方的文字'))
+    assert.ok(a.sends[0].delivery.body.endsWith(messageEnding('加入方的文字')))
 
     await a.send(id, 'one', '邀请方的文字')
     await b.coordinator.links.refresh()
@@ -356,7 +359,7 @@ test('pending, delivered and received previews stay short while the agent receiv
     }
     await b.coordinator.flushMailbox()
     assert.equal(b.sends.length, 2)
-    assert.ok(b.sends.every(({ delivery }) => delivery.body.endsWith(body)))
+    assert.ok(b.sends.every(({ delivery }) => delivery.body.endsWith(messageEnding(body))))
     for (const [side, state] of [[a, 'delivered'], [b, 'received']] as const) {
       const { recentMessages } = (await side.read()).peers[0]
       assert.deepEqual(recentMessages?.map(m => [m.state, m.preview, 'text' in m]), [[state, preview, false], [state, preview, false]])

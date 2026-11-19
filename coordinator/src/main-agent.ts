@@ -8,6 +8,10 @@ import type { AgentLaunch } from '../../workspace/agent-launch.mjs'
 import { ProjectStore, fail, fingerprint, takeoverActive, text, revision } from './store'
 
 const mainSecurityBoundary = 'Run 归属由会话自报；替换授权来自面板一次性凭据。同一系统用户的本机程序可读写插件数据。'
+export const roleReminder = {
+  workspace: '提醒：你是工作间管理员，项目里的活交给项目主会话。',
+  project: '提醒：你是项目管理员，实现交给执行者，成果要 submit 成待验收。'
+}
 
 export function takeoverView(t?: StoredTakeover): MainTakeover | undefined {
   if (!t) return
@@ -27,6 +31,7 @@ export async function switchLead(runtime: CoordinatorRuntime, input: LeadSwitch,
   targets: () => Promise<Inventory>
   mutate: (update: (binding: Binding) => void, expected?: number) => Promise<unknown>
   changed: () => void
+  role: keyof typeof roleReminder
   prompt: (token: string, expiresAt: string) => string
   subject?: string
   launch?: Omit<AgentLaunch, 'agent'>
@@ -56,7 +61,7 @@ export async function switchLead(runtime: CoordinatorRuntime, input: LeadSwitch,
     w.takeover = { id, target, expiresAt, tokenHash: fingerprint(token), state: 'sending', mode: existing ? 'existing' : 'new' }
   }, expected)
   changed()
-  const prompt = options.prompt(token, expiresAt)
+  const prompt = `${options.prompt(token, expiresAt)}\n\n${roleReminder[options.role]}`
   let handle: string
   try {
     handle = existing ? (await runtime.requestTakeover(target.handle, prompt, options.subject), target.handle)
@@ -125,6 +130,7 @@ export function mainAgent(orca: OrcaWorkerApi, store: ProjectStore, runtime: Coo
   })
   orca.panels.handle('workspace.agent.switch', async input => {
     await switchLead(runtime, input, {
+      role: 'workspace',
       targets: () => runtime.targets(), mutate: (update, expected) => store.mutateWorkspace(update, expected), changed,
       prompt: (token, expiresAt) => `开启工作间管理。主人已在项目协作面板发起切换，请由当前会话接管工作间主 agent。先读 $agentboat-workspace；自己创建新的协调 Run。接管脚本绝对路径：${JSON.stringify(clientPath)}\n用 node 调用此路径的 main-read，再以最新 revision 和唯一 requestId 调用 main-bind --check；检查通过后重读 main-read，以最新 revision 和新的 requestId 正式 main-bind。main-bind 从标准输入接收 JSON；caller 由脚本从当前 Orca 环境取得，不要填写别人的会话或 Run。一次性接管凭据：${token}\n有效至：${expiresAt}\n仅用于本次接管，不保存到文件或记忆，不转发。绑定成功后先读取 overview 补齐之前的待办；已经送达原主 agent 的通知不会补发。`
     })

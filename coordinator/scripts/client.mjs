@@ -3,6 +3,7 @@ import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
+import { writeMainRoleCards } from './main-role-card.mjs';
 
 const [operation, argument] = process.argv.slice(2);
 const leadBind = operation === 'project-lead-bind', leadSwitch = operation === 'project-lead-switch';
@@ -47,7 +48,14 @@ if (operation === 'message') args.push('--environment', 'local');
 if (input) args.push('--data', JSON.stringify(input));
 try {
   const stdout = execFileSync(executable, args, { encoding: 'utf8', windowsHide: true, timeout: 40000, maxBuffer: 1024 * 1024 });
-  if (operation !== 'message') process.stdout.write(stdout);
+  if (operation === 'main-bind' && !input.checkOnly) {
+    const reply = JSON.parse(stdout), binding = reply.result?.result;
+    if (reply.ok && binding?.runId === input.runId && binding.session?.handle === caller) {
+      try { writeMainRoleCards(binding.session.path); }
+      catch (error) { binding.roleCardWarning = `绑定已成功，角色卡未完整写入：${error.message}。修正后用原请求重试。`; }
+    }
+    process.stdout.write(JSON.stringify(reply, null, 2) + '\n');
+  } else if (operation !== 'message') process.stdout.write(stdout);
   else {
     const reply = JSON.parse(stdout), result = reply.result?.result;
     if (reply.ok && result?.project) {

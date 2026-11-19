@@ -11,7 +11,7 @@ import { WorkspaceLinks } from './links'
 import { fileErrorText, incomingHash, linkMessageHistory } from './link-messages'
 import { LinkFiles } from './link-files'
 import { groupedAttention, isProjectShared } from './model'
-import { mainAgent, switchLead, takeoverView, recoverTakeover } from './main-agent'
+import { mainAgent, roleReminder, switchLead, takeoverView, recoverTakeover } from './main-agent'
 import { projectLeadDefaults } from '../../workspace/agent-launch.mjs'
 import { clientPath } from '../scripts/orca-cli.mjs'
 
@@ -256,6 +256,7 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
     const { agent, ...defaults } = projectLeadDefaults
     const selectedAgent = input.agent ?? agent
     await switchLead(runtime, { ...input, agent: selectedAgent, workspace: scoped?.workspace?.workspace }, {
+      role: 'project',
       targets: async () => ({ sessions: scoped?.sessions ?? [], workspaces: scoped?.workspaces ?? [] }),
       mutate: (update, expected) => store.mutate(id, expected, async project => {
         if (ownerRun !== undefined && (!ownerRun || (await store.workspace()).runId !== ownerRun)) fail('请使用已绑定的工作间主 agent Run')
@@ -338,9 +339,10 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
       m.inbox.find(x => x.event.id === id)!.state = 'done'
     })
   }
-  async function sendDelivery(d: Delivery, fallbackRunId = '') {
+  async function sendDelivery(d: Delivery, role: keyof typeof roleReminder, fallbackRunId = '') {
     if (d.external) return { messageId: await sources.send(d) }
-    return runtime.send(d.targetRunId || fallbackRunId, d)
+    const body = d.id.startsWith('retired:') ? d.body : `${d.body}\n\n${roleReminder[role]}`
+    return runtime.send(d.targetRunId || fallbackRunId, { ...d, body })
   }
   function deferMailbox() { setImmediate(() => { void flushMailbox().catch(() => {}) }) }
   async function flushMailbox(): Promise<void> {
@@ -355,7 +357,7 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
           if (!d) break
           await store.mutateMessaging(m => { m.deliveries.find(x => x.id === d.id)!.state = 'sending' })
           try {
-            const receipt = await sendDelivery(d, d.linkMessageHash ? runId : undefined)
+            const receipt = await sendDelivery(d, 'workspace', d.linkMessageHash ? runId : undefined)
             await store.mutateMessaging(m => {
               const saved = m.deliveries.find(x => x.id === d.id)!
               saved.state = 'sent'
@@ -395,7 +397,7 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
           if (!claimed) continue
           attempted = true
           try {
-            const receipt = await sendDelivery(delivery, runId)
+            const receipt = await sendDelivery(delivery, delivery.targetRunId ? 'workspace' : 'project', runId)
             await store.mutate(id, undefined, p => {
               const d = p.deliveries.find(x => x.id === delivery.id)!
               d.state = 'sent'; if ('requestId' in receipt && receipt.requestId) d.requestId = receipt.requestId
@@ -434,7 +436,7 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
     return messagingSnapshot()
   }
   const connections = new Connections(orca, async () => (await store.workspace()).runId,
-    (run, id, body, name) => runtime.send(run, { id, subject: `来自外部连接「${name}」`, body, state: 'pending' }), () => changed(), messagingSnapshot, feishuSettings, async () => {
+    (run, id, body, name) => sendDelivery({ id, targetRunId: run, subject: `来自外部连接「${name}」`, body, state: 'pending' }, 'workspace'), () => changed(), messagingSnapshot, feishuSettings, async () => {
       await store.mutateMessaging(m => { m.feishu = { enabled: false, appId: '', chatIds: [], senderIds: [] }; m.inbox = []; m.deliveries = m.deliveries.filter(d => !d.external) })
       await orca.secrets.delete(`feishu:${mailbox}`); await syncSources()
     })

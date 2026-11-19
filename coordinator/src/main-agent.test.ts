@@ -5,6 +5,7 @@ import { testCoordinator as createCoordinator } from './test-runtime'
 import { fresh } from './store'
 import { refs } from './fixtures'
 import { mainTargets, OrcaRuntime } from './runtime'
+import { roleReminder } from './main-agent'
 import path from 'node:path'
 import { existsSync } from 'node:fs'
 import { projectLeadDefaults } from '../../workspace/agent-launch.mjs'
@@ -65,6 +66,7 @@ test('project lead switches only within its workspace and preserves tasks and qu
     assert.equal(first.binding.takeover?.state, 'waiting')
     assert.ok(requests[0].prompt.includes('$orca-project-coordinator'))
     assert.ok(requests[0].prompt.includes('project-lead-bind'))
+    assert.ok(requests[0].prompt.endsWith(roleReminder.project))
     assert.ok(requests[0].subject?.includes('接管项目主会话'))
     assert.equal(JSON.stringify(first).includes('tokenHash'), false)
     const snapshot = await worker.request('project.read', { projectId: 'p1' })
@@ -95,7 +97,7 @@ test('project lead switches only within its workspace and preserves tasks and qu
     assert.deepEqual(bound.project?.tasks, p.tasks)
     await c.flush('p1')
     assert.equal(notices.filter(n => n.run === 'run_old' && n.body.includes('停止派活') && n.body.includes(replacement.title)).length, 1)
-    assert.deepEqual(notices.filter(n => n.run === 'run_next').map(n => n.body), ['给当前项目主会话'])
+    assert.deepEqual(notices.filter(n => n.run === 'run_next').map(n => n.body), [`给当前项目主会话\n\n${roleReminder.project}`])
     await bind(final.binding.revision, 3, 'run_next')
     await c.flush('p1')
     assert.equal(notices.length, 2)
@@ -204,7 +206,7 @@ for (const mode of ['existing', 'new'] as const) test(`main takeover ${mode}: ta
   const project = fresh(refs[0]); project.runId = 'run_project'
   const binding = { version: 1, revision: 2, session: { ...session, handle: 'previous-handle' }, runId: 'run_old', requests: [] }
   const host = mockHost({ storage: { workspace: binding, 'project:p1': project as any } })
-  const prompts: string[] = [], sends: { run: string; subject: string }[] = []
+  const prompts: string[] = [], sends: { run: string; subject: string; body: string }[] = []
   let c!: ReturnType<typeof createCoordinator>, storage!: OrcaWorkerApi['storage'], launched = 0
   const worker = await mountWorker({ default: (api: OrcaWorkerApi) => {
     storage = api.storage
@@ -214,7 +216,7 @@ for (const mode of ['existing', 'new'] as const) test(`main takeover ${mode}: ta
       targets: async () => ({ sessions: [session], workspaces: [{ workspace: session.workspace, name: session.workspaceName, path: session.path }] }),
       requestTakeover: async (handle, prompt) => { assert.equal(handle, session.handle); prompts.push(prompt) },
       launchMain: async (workspace, agent, prompt) => { assert.equal(workspace, session.workspace); assert.equal(agent, 'claude'); launched++; prompts.push(prompt); return session.handle },
-      send: async (run, d) => { sends.push({ run, subject: d.subject }); return {} }
+      send: async (run, d) => { sends.push({ run, subject: d.subject, body: d.body }); return {} }
     }, { sync: async () => {}, stop() {}, state: () => ({ state: 'off', message: '' }), send: async () => 'test' })
   } }, { host })
   try {
@@ -229,6 +231,7 @@ for (const mode of ['existing', 'new'] as const) test(`main takeover ${mode}: ta
     const token = tokenFrom(prompts[0]); assert.equal(JSON.stringify(host.data().storage).includes(token), false)
     const script = JSON.parse(/接管脚本绝对路径：([^\n]+)/.exec(prompts[0])![1])
     assert.ok(path.isAbsolute(script)); assert.ok(existsSync(script)); assert.ok(prompts[0].includes('main-bind --check'))
+    assert.ok(prompts[0].endsWith(roleReminder.workspace))
     assert.equal(JSON.stringify(switching).includes('tokenHash'), false)
     const current = () => worker.request('workspace.agent', { operation: 'read' })
     await assert.rejects(() => worker.request('workspace.agent', { ...bind, revision: switching.revision, token: 'wrong' }))
@@ -265,7 +268,7 @@ for (const mode of ['existing', 'new'] as const) test(`main takeover ${mode}: ta
     await c.store.mutateMessaging(m => { m.feishu = { enabled: true, appId: 'test-app', chatIds: ['chat'], senderIds: ['owner'] } })
     await c.ingest('test-app', { id: 'new-feishu', source: 'feishu', sourceId: 'test-app:event', threadId: '', chatId: 'chat', senderId: 'owner', text: '测试新飞书消息', receivedAt: new Date().toISOString() })
     await c.flushMailbox()
-    assert.ok(sends.some(s => s.run === 'run_next' && s.subject === '飞书工作间消息'))
+    assert.ok(sends.some(s => s.run === 'run_next' && s.subject === '飞书工作间消息' && s.body.endsWith(roleReminder.workspace)))
     assert.equal(sends.filter(s => s.run === 'run_old').length, 1)
     const saved = JSON.stringify(host.data().storage)
     await worker.request('workspace.overview'); await worker.request('project.read', { projectId: 'p1' })
