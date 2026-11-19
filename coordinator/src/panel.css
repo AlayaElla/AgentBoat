@@ -225,6 +225,7 @@ html,body{height:100%;overflow:hidden}#panel{height:100%;width:100%}.sr-only{pos
 
 /* 顶栏不再跟着内容滚：它在层的外面，换页时不动，只换里面的字 */
 .top{position:static;margin:0;padding:10px 12px;min-height:52px;gap:4px}
+.top>.btn.icon>.i{width:14px;height:14px}
 .top>.btn.back,.pane-top>.btn.back{flex:0 1 auto;min-width:0;max-width:46%;margin:0 4px 0 0;padding:0 8px 0 4px;gap:2px}
 .btn>.t{overflow:hidden;text-overflow:ellipsis;min-width:0}
 .btn.sm.icon{width:24px}

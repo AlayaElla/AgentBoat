@@ -1,7 +1,7 @@
 import type {} from 'orca/frame'
 import './protocol'
 import { agents, agentName, compareAgentActivity, groupedAttention, isProjectShared, isRecentAgent, labels, taskState, scopes, statuses, connectionStates, roles, mainAgentStates } from './model'
-import type { Acceptance, AgentSession, Attention, LeadSwitch, MainTakeover, Overview, Project, ProjectLead, Task, ProjectWorkspace, WorkspaceBinding } from './model'
+import type { Acceptance, AgentSession, Artifact, Attention, LeadSwitch, MainTakeover, Overview, Project, ProjectLead, Task, ProjectWorkspace, WorkspaceBinding } from './model'
 import type { FeedbackItem } from './store'
 import type { AgentActivity, AgentsSnapshot, MainAgentActivity } from './model'
 import type { LinksSnapshot, SharedReport, Sharing } from './links'
@@ -135,8 +135,10 @@ const tag = (t: string, tone = '') => el('span', { class: `tag ${tone}` }, t)
 const callout = (text: string, tone = '') => el('div', { class: `callout ${tone}`, role: tone === 'danger' ? 'alert' : 'status' }, text)
 const paths = {
   chevron: 'M9 18l6-6-6-6', back: 'M15 18l-6-6 6-6', close: 'm18 6-12 12M6 6l12 12',
-  refresh: 'M20 7v5h-5M4 17v-5h5M5.3 8a7.5 7.5 0 0 1 12.4-3L20 8M4 16l2.3 3A7.5 7.5 0 0 0 19 16',
-  home: 'm3 10 9-7 9 7v10h-6v-6H9v6H3z', settings: 'M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8zm0-5v2m0 14v2M3 12h2m14 0h2M5.6 5.6 7 7m10 10 1.4 1.4m0-12.8L17 7M7 17l-1.4 1.4'
+  // Lucide paths used by Orca for settings and refresh-cw.
+  refresh: 'M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8 M21 3v5h-5 M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16 M8 16H3v5',
+  settings: 'M9.671 4.136a2.34 2.34 0 0 1 4.659 0 2.34 2.34 0 0 0 3.319 1.915 2.34 2.34 0 0 1 2.33 4.033 2.34 2.34 0 0 0 0 3.831 2.34 2.34 0 0 1-2.33 4.033 2.34 2.34 0 0 0-3.319 1.915 2.34 2.34 0 0 1-4.659 0 2.34 2.34 0 0 0-3.32-1.915 2.34 2.34 0 0 1-2.33-4.033 2.34 2.34 0 0 0 0-3.831A2.34 2.34 0 0 1 6.35 6.051a2.34 2.34 0 0 0 3.319-1.915Z M15 12a3 3 0 1 0-6 0 3 3 0 1 0 6 0Z',
+  home: 'm3 10 9-7 9 7v10h-6v-6H9v6H3z'
 }
 function icon(name: keyof typeof paths, cls = '') {
   const holder = el('span', { class: `i ${name === 'chevron' ? 'chev ' : ''}${cls}`, 'aria-hidden': 'true', 'data-key': `icon-${name}` })
@@ -378,9 +380,9 @@ function projectCard(p: { id: string; name: string; count: number; agents?: Agen
     el('button', { type: 'button', class: 'pcard-h', title: p.name, 'aria-label': p.name, 'aria-description': p.summary ?? (p.count ? `待处理 ${p.count}` : undefined), onclick: open }, el('span', { class: 'name grow trunc' }, p.name), pill(p.count), p.summary ? small(p.summary) : null, icon('chevron')),
     agents.length || p.note ? el('div', { class: 'pcard-b' }, unfinished.map(a => agentRow(a)), done ? small(`✓ 已完成 ${done} 个`) : null, p.note ? small(p.note) : null) : null)
 }
-function mainAgentLine(agent: MainAgentActivity | null | undefined, open?: () => void, bound = !!agent) {
-  const title = agent ? [agentName(agent.agent), agent.title, mainAgentStates[agent.online].label].filter(Boolean).join(' · ') : bound ? '已绑定主 agent' : '还没有主 agent'
-  return el(open ? 'button' : 'div', { class: 'lead', type: open ? 'button' : undefined, 'aria-label': open ? '主 agent' : undefined, onclick: open }, dot(agent?.online === 'online' ? 'ok' : ''), el('span', { class: 't' }, '主 agent'), el('span', { class: 'grow trunc xs muted', title }, title), open ? icon('chevron') : null)
+function mainAgentLine(agent: MainAgentActivity | null | undefined, open?: () => void, bound = !!agent, showLabel = true) {
+  const title = agent ? [agentName(agent.agent), agent.title, mainAgentStates[agent.online].label].filter(Boolean).join(' · ') : bound ? '已绑定' : '未绑定'
+  return el(open ? 'button' : 'div', { class: 'lead', type: open ? 'button' : undefined, 'aria-label': open ? showLabel ? '主 agent' : '管理主 agent' : undefined, onclick: open }, dot(agent?.online === 'online' ? 'ok' : ''), showLabel ? el('span', { class: 't' }, '主 agent') : null, el('span', { class: 'grow trunc xs muted', title }, title), open ? icon('chevron') : null)
 }
 const activityNote = (activity: SharedReport['projects'][number]['activity']) => activity === null ? 'agent 状态读不到' : activity?.truncated ? 'agent 未全部列出' : undefined
 function ownProjects() {
@@ -539,6 +541,22 @@ function organization() {
   return section('组织', button('＋ 连接', () => go({ kind: 'links' }), 'text sm'), el('div', { class: 'org' }, up.length ? el('div', { class: 'org-up', role: 'group', 'aria-label': '上级' }, up.map(p => workspaceNode(p))) : null,
     el('div', { class: `org-in ${up.length || side.length ? 'l1' : ''} ${up.length ? 'up' : ''}` }, el('div', { class: `org-self ${side.length ? 'sib' : ''}` }, workspaceNode(), down.length ? el('div', { class: 'org-kids', role: 'group', 'aria-label': '下级' }, down.length > 8 ? el('div', { class: 'org-tools' }, input('找工作间', '', 'search', () => render(), undefined, homeFrame.form)) : null, down.filter(p => !homeFrame.form['找工作间'] || p.name.includes(homeFrame.form['找工作间'])).map(p => workspaceNode(p))) : null), side.length ? el('div', { class: 'org-side', role: 'group', 'aria-label': '平级' }, side.map(p => workspaceNode(p))) : null), free.length ? el('div', { class: 'org-free', role: 'group', 'aria-label': '还没标关系' }, free.map(p => workspaceNode(p))) : null))
 }
+function openArtifact(projectId: string, taskId: string, artifact: Artifact) {
+  return act(async () => {
+    try {
+      if (/^https?:\/\//i.test(artifact.url)) {
+        if (!orca.shell) throw Error('请在 Orca 桌面应用中打开链接')
+        const result = await orca.shell.openExternal(artifact.url)
+        if (!result.opened && result.reason !== 'cancelled') throw Error('请在 Orca 窗口可见时重试')
+      } else if (!(await req('project.openArtifact', { projectId, taskId, artifactId: artifact.id })).opened) {
+        throw Error('Orca 未打开文件')
+      }
+    } catch (e) {
+      toastAction = { label: '重试', run: () => openArtifact(projectId, taskId, artifact) }
+      throw Error(`打不开「${artifact.label}」：${e instanceof Error ? e.message : '请在 Orca 桌面应用中重试'}`)
+    }
+  }, false)
+}
 function feedbackCards(projectId: string, tasks: Task[], title = '要你处理', only?: Attention['kind']) {
   return tasks.map(t => {
     const acceptance = !only || only === 'review' ? pendingAcceptances(t) : []
@@ -563,7 +581,7 @@ function feedbackCards(projectId: string, tasks: Task[], title = '要你处理',
     }), acceptance.map(a => {
       const k = key(t.id, 'acceptance', a.id), draft = choices(projectId)[k], base = acceptanceDraft(t.id, a)
       return keyed(card(row(el('h3', { class: 'h2 any grow' }, a.title), tag(`第 ${a.revision} 版`)), el('p', { class: 'any' }, a.details),
-        t.artifacts.filter(ar => a.artifactIds.includes(ar.id)).map(ar => button(`打开成果 · ${ar.label}`, () => /^https?:/i.test(ar.url) ? orca.shell?.openExternal(ar.url) : req('project.openArtifact', { projectId, taskId: t.id, artifactId: ar.id }), 'sm')),
+        t.artifacts.filter(ar => a.artifactIds.includes(ar.id)).map(ar => button(`打开成果 · ${ar.label}`, () => openArtifact(projectId, t.id, ar), 'sm')),
         row(...['passed', 'changes_requested'].map(result => {
           const b = button(result === 'passed' ? '通过' : '需要修改', () => { choose(projectId, { ...base, result, note: draft?.note ?? '' }); render() }, 'sm')
           b.setAttribute('aria-pressed', String(draft?.result === result)); return b
@@ -660,10 +678,7 @@ function projectPage() {
     const t = p.tasks.find(t => t.id === page.id)
     if (!t) return callout('任务已不存在，请返回项目。')
     if (page.inboxRow) return inboxBody(active)
-    const artifacts = t.artifacts.map(a => {
-      const remote = /^https?:/i.test(a.url)
-      return button(a.label + ' · ' + a.version, () => remote ? orca.shell?.openExternal(a.url) : req('project.openArtifact', { projectId: p.ref.id, taskId: t.id, artifactId: a.id }), 'sm', !remote && !!reason, remote ? '' : reason)
-    })
+    const artifacts = t.artifacts.map(a => button(a.label + ' · ' + a.version, () => openArtifact(p.ref.id, t.id, a), 'sm'))
     const workers = projectAgents(p.ref.id).filter(a => a.taskId === t.id && a.state !== 'done')
     const messages = p.events.filter(e => t.sourceIds.includes(e.id) || e.taskId === t.id)
     const records = [...t.decisions.filter(d => d.answer !== undefined).map(d => small(`${d.question}：${d.answer}`)),
@@ -673,7 +688,7 @@ function projectPage() {
       section('进展', el('p', { class: 'any' }, t.progress), small('现在谁在做'),
         !live.ok ? small('agent 状态读不到') : workers.length ? workers.map(a => agentRow(a, p.ref.name)) : small('没有看到 agent 在做这个任务'), live.ok && live.truncated ? small('agent 状态未全部读取') : null),
       fold(active.key + '-goal', '目标', () => el('p', { class: 'any' }, t.goal), undefined, true),
-      artifacts.length ? fold(active.key + '-artifacts', '成果', () => [artifacts, reason && t.artifacts.some(a => !/^https?:/i.test(a.url)) ? small(reason) : null], artifacts.length) : null,
+      artifacts.length ? fold(active.key + '-artifacts', '成果', () => artifacts, artifacts.length) : null,
       messages.length ? fold(active.key + '-sources', '来源消息', () => messages.map(e => card(e.text)), messages.length) : null,
       records.length ? fold(active.key + '-records', '记录', () => records, records.length) : null]
   }
@@ -875,7 +890,7 @@ function mainPage() {
 }
 function settingsPage() {
   return [
-    section('主 agent', mainAgentLine(all.workspace.session, () => go({ kind: 'main' }), !!all.workspace.runId)),
+    section('主 agent', el('div', {}, mainAgentLine(all.workspace.session, () => go({ kind: 'main' }), !!all.workspace.runId, false))),
     section('外部连接', button('添加连接', () => go({ kind: 'add-connection' }), 'sm'), (all.connections ?? []).map(c => keyed(
       item(c.name, `${c.type === 'a2a' ? 'A2A agent' : '飞书'} · ${connectionStates[c.state]}`, () => go({ kind: 'connection', id: c.id })), c.id)), !all.connections?.length ? small('没有外部连接') : null),
     section('工作间连接', button('邀请或加入', () => go({ kind: 'links' }), 'sm'), peers().map(p => keyed(item(p.name, statuses[p.status], () => go({ kind: 'peer', id: p.id })), p.id)), !peers().length ? small('没有工作间连接') : null),

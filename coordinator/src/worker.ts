@@ -1,4 +1,6 @@
 import os from 'node:os'
+import path from 'node:path'
+import { realpath, stat } from 'node:fs/promises'
 import { Connections } from './connections'
 import type { OrcaWorkerApi } from 'orca/worker'
 import { agents, type AgentSession, type LeadSwitch, type Project, type ProjectLead, type ProjectRef, type Snapshot, type SourceEvent, type Delivery, type MessagingSnapshot } from './model'
@@ -578,7 +580,13 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
     if (!a || /^https?:/i.test(a.url)) fail('请选择本项目的本机成果')
     if (!ref.workspace) fail('这个项目当前没有工作区')
     const url = artifactUrl(a.url, ref.path)
-    await orca.host.call('editor.open', { workspaceId: ref.workspace.replace(/^id:/, ''), path: url })
+    const [root, file] = await Promise.all([realpath(ref.path), realpath(url)]).catch(() => fail('成果文件不存在或无法访问'))
+    artifactUrl(file, root)
+    if (!(await stat(file).catch(() => undefined))?.isFile()) fail('成果文件不存在或无法访问')
+    const target = workspaceId(ref.workspace)
+    // The host opens a tab in the target workspace without showing that workspace.
+    await orca.host.call('editor.open', { workspaceId: target, path: path.relative(ref.path, url).split(path.sep).join('/') })
+    if (!(await openWorkspace(target)).opened) fail('未能切换到成果所在的工作区')
     return { opened: true }
   })
 

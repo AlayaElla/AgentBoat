@@ -53,6 +53,13 @@ async function setup(options = {}) {
       const other = clone(project);
       Object.assign(other.ref, { id: 'p2', name: '移动项目' });
       other.tasks = [{ ...clone(task), id: 't2', title: '移动端交付', acceptance: [acceptance('b1')] }];
+      if (options.artifacts) {
+        other.tasks[0].artifacts = [
+          { id: 'md', label: '设计文档', version: 'v1', url: '/example/docs/design.md' },
+          { id: 'html', label: '样稿 v9', version: 'v9', url: '/example/docs/preview.html' },
+        ];
+        other.tasks[0].acceptance[0].artifactIds = ['md', 'html'];
+      }
       projects.push(other);
       project.tasks.push({ ...clone(task), id: 't3', title: '动效交付', acceptance: [acceptance('a3')] },
         { ...clone(task), id: 'd1', title: '设计决定', phase: 'working', acceptance: [], decisions: [{ id: 'd1', question: '选择方案', options: ['方案一'], history: [] }] });
@@ -90,7 +97,7 @@ async function setup(options = {}) {
     }
     const calls = [];
     window.fixture = { project, projects, links, live, workspace, calls, hostCalls: [], stored, workspaceTarget: { workspaceId: 'identity:project-workspace', multipleConversations: true }, emit: () => events['project.changed']?.({}), race: false, prune: () => { task.acceptance[0].revision++; task.acceptance[0].fingerprint = 'new-version'; project.revision++; } };
-    window.orca = { storage: { get: async k => clone(stored[k] ?? null), set: async (k, v) => { stored[k] = clone(v); }, delete: async k => { delete stored[k]; } }, plugin: { on: (name, callback) => { events[name] = callback; return { dispose() {} }; }, request: async (name, input) => {
+    window.orca = { shell: { openExternal: async url => { calls.push({ name: 'shell.openExternal', input: url }); return { opened: true }; } }, storage: { get: async k => clone(stored[k] ?? null), set: async (k, v) => { stored[k] = clone(v); }, delete: async k => { delete stored[k]; } }, plugin: { on: (name, callback) => { events[name] = callback; return { dispose() {} }; }, request: async (name, input) => {
       if (input !== undefined && !isJson(input)) throw Error('input: Invalid input');
       calls.push({ name, input: clone(input) });
       if (name === 'workspace.overview') return clone({ workspace, projects: [...registered().map(p => ({ ref: p.ref, counts: { review: p.tasks.filter(t => t.phase === 'ready' && t.acceptance.some(a => a.status === 'pending')).length }, agents: [], bound: true, updatedAt: '' })), ...(options.manyProjects ? Array.from({ length: 13 }, (_, i) => ({ ref: { ...project.ref, id: 'p' + (i + 2), name: '项目 ' + (i + 2) }, counts: { working: options.idleProjects ? 0 : 1 }, agents: [], bound: true, updatedAt: '' })) : [])], hidden: [], attention: attention(), links, connections: [], machines: [{ id: 'local', name: '主机', role: 'host' }] });
@@ -126,6 +133,13 @@ async function setup(options = {}) {
         }
         const workspaceError = window.fixture.workspaceTarget.error;
         return clone({ binding: binding(p), defaultAgent: 'claude', sessions: workspaceError ? [] : projectSessions, ...(workspaceError ? { workspaceError } : {}) });
+      }
+      if (name === 'project.openArtifact') {
+        const target = projects.find(p => p.ref.id === input.projectId)?.tasks.find(t => t.id === input.taskId);
+        if (!target?.artifacts.some(a => a.id === input.artifactId)) throw Error('请选择本项目的本机成果');
+        if (window.fixture.workspaceTarget.error) throw Error(window.fixture.workspaceTarget.error);
+        if (window.fixture.artifactError) throw Error(window.fixture.artifactError);
+        return { opened: true };
       }
       if (name === 'project.openMain') {
         if (window.fixture.delayOpen) await new Promise(r => { window.fixture.finishOpen = r; });
@@ -337,6 +351,31 @@ try {
     await editor.waitFor();
     assert.equal(await editor.inputValue(), '调整布局');
   });
+  for (const width of [1040, 400]) {
+    await setup({ width, inboxBatch: true, artifacts: true });
+    await test(`artifact actions use the owning project and report failures at ${width}px`, async () => {
+      if (width === 1040) await openReview('页面交付');
+      else await rail().getByRole('button', { name: '再看 2 条' }).click();
+      const body = await openReview('移动端交付');
+      const calls = () => page.evaluate(() => fixture.calls.filter(c => c.name === 'project.openArtifact').map(c => c.input));
+      const expected = artifactId => ({ projectId: 'p2', taskId: 't2', artifactId });
+      await body.getByRole('button', { name: '打开成果 · 设计文档', exact: true }).click();
+      await page.evaluate(() => { fixture.artifactError = '成果文件不存在或无法访问'; });
+      await body.getByRole('button', { name: '打开成果 · 样稿 v9', exact: true }).click();
+      const error = page.getByRole('alert').filter({ hasText: '打不开「样稿 v9」：成果文件不存在或无法访问' });
+      await error.waitFor();
+      assert.deepEqual(await calls(), ['md', 'html'].map(expected));
+      await page.evaluate(() => { delete fixture.artifactError; });
+      await error.getByRole('button', { name: '重试' }).click();
+      await error.waitFor({ state: 'detached' });
+      await body.getByRole('button', { name: '任务详情', exact: true }).click();
+      const detail = currentLayer();
+      await detail.getByRole('button', { name: '打开成果 · 样稿 v9', exact: true }).click();
+      await detail.getByRole('button', { name: /^成果 / }).click();
+      await detail.getByRole('button', { name: '设计文档 · v1', exact: true }).click();
+      assert.deepEqual(await calls(), ['md', 'html', 'html', 'html', 'md'].map(expected));
+    });
+  }
   await setup({ manyProjects: true, idleProjects: true });
   await test('nested navigation restores tab, scroll, focus and open folds and hides covered content', async () => {
     await page.getByRole('button', { name: /^还没有任务的项目/ }).click();
@@ -419,9 +458,31 @@ try {
   });
   await setup({ width: 320 });
   await test('settings five sections fit 320 and unsaved forms return immediately with continue editing', async () => {
+    for (const [label, start, end] of [['刷新', 'M3 12a9 9', 'M8 16H3v5'], ['设置', 'M9.671 4.136', 'M15 12a3 3 0 1 0-6 0 3 3 0 1 0 6 0Z']]) {
+      const button = page.locator('.top').getByRole('button', { name: label, exact: true });
+      assert.equal(await button.getAttribute('title'), label);
+      assert.equal(await button.getAttribute('aria-label'), label);
+      const svg = button.locator('svg');
+      const graphic = await svg.locator('path').getAttribute('d');
+      assert.ok(graphic.startsWith(start) && graphic.endsWith(end));
+      assert.equal(await svg.getAttribute('stroke-width'), '2');
+      assert.equal((await svg.boundingBox()).width, 14);
+    }
+    if (process.env.PANEL_EVIDENCE_DIR) await page.locator('.top').screenshot({ path: path.join(process.env.PANEL_EVIDENCE_DIR, 'toolbar.png'), animations: 'disabled' });
     await page.getByRole('button', { name: '设置', exact: true }).click();
-    for (const name of ['主 agent', '外部连接', '工作间连接', '机器', '隐藏的项目']) await currentLayer().getByRole('heading', { name, exact: true }).waitFor();
+    for (const name of ['主 agent', '外部连接', '工作间连接', '机器', '隐藏的项目']) {
+      const section = currentLayer().getByRole('region', { name, exact: true });
+      const heading = section.locator(':scope > .sec-h > h2');
+      assert.equal(await heading.innerText(), name);
+      if (name === '主 agent') {
+        const manage = section.getByRole('button', { name: '管理主 agent', exact: true });
+        assert.equal(await section.getByText('主 agent', { exact: true }).count(), 1);
+        assert.equal(await section.locator('.sec-h button').count(), 0);
+        assert.ok((await manage.boundingBox()).y >= (await heading.boundingBox()).y + (await heading.boundingBox()).height);
+      }
+    }
     assert.equal(await currentLayer().evaluate(e => e.scrollWidth <= e.clientWidth), true);
+    if (process.env.PANEL_EVIDENCE_DIR) await page.screenshot({ path: path.join(process.env.PANEL_EVIDENCE_DIR, 'settings-320.png'), animations: 'disabled' });
     await currentLayer().getByRole('button', { name: '工作间 free', exact: true }).click();
     await currentLayer().getByRole('button', { name: '改关系', exact: true }).click();
     await currentLayer().getByRole('radio', { name: '上级 · 画在你上面' }).check();
@@ -506,7 +567,7 @@ try {
     await setup({ unbound, width: 300 });
     await test(`main agent one-click ${unbound ? 'set' : 'replace'}, pending cancel/reselect, expiry/failure and new Claude/Codex`, async () => {
       await page.getByRole('button', { name: '设置', exact: true }).click();
-      await page.getByRole('button', { name: '主 agent', exact: true }).click();
+      await page.getByRole('button', { name: '管理主 agent', exact: true }).click();
       const action = unbound ? '设为主 agent' : '换成它';
       assert.equal(await page.getByRole('checkbox').count(), 0);
       assert.equal(await page.getByLabel('切换方式', { exact: true }).count(), 0);
@@ -738,8 +799,11 @@ try {
     await page.getByText('这个项目当前没有工作区', { exact: true }).waitFor();
     await page.getByRole('tab', { name: '任务', exact: true }).click();
     await page.getByRole('button', { name: '移动端交付', exact: true }).click();
-    assert.equal(await page.getByRole('button', { name: /^成果 / }).click().then(() => page.getByRole('button', { name: '本机成果 · v1', exact: true }).isDisabled()), true);
-    assert.equal(await page.getByRole('button', { name: '网页成果 · v1', exact: true }).isEnabled(), true);
+    await page.getByRole('button', { name: /^成果 / }).click();
+    await page.getByRole('button', { name: '本机成果 · v1', exact: true }).click();
+    await page.getByRole('alert').filter({ hasText: '打不开「本机成果」：这个项目当前没有工作区' }).waitFor();
+    await page.getByRole('button', { name: '网页成果 · v1', exact: true }).click();
+    assert.deepEqual(await page.evaluate(() => fixture.calls.filter(c => c.name === 'shell.openExternal').map(c => c.input)), ['https://example.com/']);
   });
   await setup({ manyProjects: true });
   await test('agent failure and truncation each render once across home, project and task pages', async () => {

@@ -3,7 +3,7 @@ import { testCoordinator as createCoordinator } from './test-runtime'
 import { refs, deliverable } from './fixtures'
 import { fresh, feedback, submitTask, ProjectStore, overview, notifyWorkspace } from './store'
 import { report } from './links'
-import { mkdtemp, readFile, readdir, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import type { OrcaWorkerApi } from 'orca/worker'
@@ -59,6 +59,39 @@ test('remove uses exact setup, checks every session and terminal, and fails clos
   const worker = await mountWorker({ default: async api => { await runtime.removeProject(ref, api.host) } }, { host })
   await worker.deactivate()
   assert.deepEqual(calls.find(a => a[1] === 'setup-delete'), ['project', 'setup-delete', '--setup', 'exact', '--force'])
+})
+
+test('artifact opening uses the project workspace and a relative file path, and rejects missing files', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'agentboat-artifacts-'))
+  const ref = { ...refs[1], path: dir }, p = fresh(ref)
+  const files = ['设计稿.md', '样稿 v9.html', 'missing.md']
+  const docs = path.join(dir, 'design files')
+  let c!: ReturnType<typeof createCoordinator>, workspace = ref.workspace
+  try {
+    await mkdir(docs)
+    for (const name of files.slice(0, 2)) await writeFile(path.join(docs, name), 'fixture')
+    submitTask(p, { ...deliverable, artifacts: files.map((name, i) => ({ id: `a${i}`, label: name, version: 'v1', url: path.join(docs, name) })), acceptance: [] })
+    const host = mockHost({ storage: { 'project:p2': p as any }, results: {
+      'editor.open': async (input: any) => {
+        await readFile(path.join(dir, input.path))
+        return { opened: true }
+      }, 'workspace.open': { opened: true }
+    } })
+    const worker = await mountWorker({ default: api => { c = createCoordinator(api, { projects: async () => [refs[0], { ...ref, workspace }] }) } }, { host })
+    try {
+      const open = (artifactId: string, projectId = ref.id) => worker.request('project.openArtifact', { projectId, taskId: deliverable.id, artifactId })
+      assert.deepEqual(await open('a0'), { opened: true })
+      assert.deepEqual(await open('a1'), { opened: true })
+      await assert.rejects(() => open('a2'), /成果文件不存在或无法访问/)
+      await assert.rejects(() => open('a0', refs[0].id), /请选择本项目的本机成果/)
+      workspace = ''
+      await assert.rejects(() => open('a0'), /这个项目当前没有工作区/)
+      const workspaceId = ref.workspace.slice(3)
+      assert.deepEqual(host.calls.filter(c => c.method === 'editor.open' || c.method === 'workspace.open'), files.slice(0, 2).flatMap(name => [
+        { method: 'editor.open', params: { workspaceId, path: `design files/${name}` } }, { method: 'workspace.open', params: { workspaceId } }
+      ]))
+    } finally { c.stop(); await worker.deactivate() }
+  } finally { await rm(dir, { recursive: true, force: true }) }
 })
 
 test('attention counts reviews per task and excludes rework consistently', () => {
