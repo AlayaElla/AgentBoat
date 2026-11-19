@@ -5,7 +5,7 @@ import { lookup } from 'node:dns'
 import { networkInterfaces } from 'node:os'
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto'
 import type { OrcaWorkerApi } from 'orca/worker'
-import { backupInCharge, blockedRevision, attention, agents, compareAgentActivity, groupedAttention, isProjectShared, isRecentAgent, labels, mainStatus, mainAgentStates, taskState, type AgentActivity, type AgentsSnapshot, type MainAgentActivity, type Project, type Task, type WorkspaceBinding } from './model'
+import { actingMain, blockedRevision, projectCounts, attention, agents, compareAgentActivity, groupedAttention, isProjectShared, isRecentAgent, labels, mainStatus, mainAgentStates, taskState, type AgentActivity, type AgentsSnapshot, type MainAgentActivity, type Project, type Task, type WorkspaceBinding } from './model'
 import { fail, fingerprint, object, revision, strings, text, type FeedbackItem } from './store'
 import { LinkMessages, type IncomingMessage, type MessageExchange, type WireMessage } from './link-messages'
 import { LinkFiles } from './link-files'
@@ -120,19 +120,17 @@ export function report(projects: Project[], peer: Sharing, workspaceId: string, 
   const result: SharedReport = { workspaceId, name, scope: peer.scope, updatedAt: new Date().toISOString(), projects:
     allowed.map(p => {
       const tasks = p.tasks
-      const counts: Record<string, number> = {}
-      for (const t of tasks) { const state = taskState(t); counts[state] = (counts[state] || 0) + 1 }
-      return { id: p.ref.id, name: p.ref.name, updatedAt: p.updatedAt || '', counts,
-        pending: details ? groupedAttention(attention(p)).length : tasks.reduce((n, t) => n + t.decisions.filter(d => d.answer === undefined).length + (t.phase === 'ready' ? t.acceptance.filter(a => a.status === 'pending').length : 0), 0),
+      return { id: p.ref.id, name: p.ref.name, updatedAt: p.updatedAt || '', counts: Object.fromEntries(Object.entries(projectCounts(p)).filter(([, count]) => count)),
+        pending: groupedAttention(attention(p)).length,
         ...(details ? { activity: null, tasks: tasks.map(t => ({ title: t.title, phase: t.phase, state: taskState(t),
           ...(t.phase === 'blocked' && { blockedPending: blockedRevision(t) !== undefined }),
           decisions: t.decisions.filter(d => d.answer === undefined).map(d => d.question),
           acceptance: t.phase === 'ready' ? t.acceptance.filter(a => a.status === 'pending').map(a => a.title) : [] })) } : {}) }
     }) }
   if (!details) return result
-  const workspace = activity?.workspace, primary = workspace?.session, b = workspace?.backup
-  const session = primary && b && backupInCharge(b) ? { ...primary, handle: b.handle!, agent: b.agent, title: '备用主会话', online: 'unknown' as const } : primary
-  result.mainAgent = workspace?.runId ? { agent: publicAgent(session?.agent ?? ''), title: (session?.title ?? '').slice(0, maxActivityTitle), online: session?.online ?? 'unknown', activity: mainStatus(session, activity?.live) } : null
+  const workspace = activity?.workspace, session = actingMain(workspace), status = mainStatus(session, activity?.live)
+  result.mainAgent = workspace?.runId ? { agent: publicAgent(session?.agent ?? ''), title: (session?.title ?? '').slice(0, maxActivityTitle),
+    online: status.state === 'unknown' ? session?.online ?? 'unknown' : status.state === 'offline' ? 'offline' : 'online', activity: status } : null
   if (canDelegate(peer)) {
     let remaining = LIMIT - 2048 - Buffer.byteLength(JSON.stringify(result))
     // shortcut: keep each project's actionable report whole within a sync frame; page it if projects exceed the frame.

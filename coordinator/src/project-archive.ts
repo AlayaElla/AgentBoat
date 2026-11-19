@@ -4,6 +4,7 @@ import path from 'node:path'
 import { taskState, type Project, type Task, type SourceEvent } from './model'
 import { projectSubmissions, reportSubmitted, type WorkerReport } from '../scripts/worker-reports.mjs'
 
+type Submissions = Map<string, ReturnType<typeof projectSubmissions>[number]>
 type Cursor = NonNullable<Project['archive']>
 type Position = Pick<Cursor, 'id' | 'start' | 'end'>
 type History = { taskId: string; kind: 'acceptance' | 'decisions'; itemId: string; start: number; rows: Task['acceptance'][number]['history'] }
@@ -24,7 +25,12 @@ function fileName(id: string) {
 
 export class ProjectArchive {
   private indexes = new Map<string, { end: number; proofs: Map<string, string>; taskIds: Set<string>; sourceOwners: Set<string> }>()
+  private submissions = new Map<string, { end: number; read: Promise<Submissions> }>()
   constructor(private directory: string) {}
+
+  forget(p: Project) {
+    if (p.archive) { this.indexes.delete(p.archive.id); this.submissions.delete(p.archive.id) }
+  }
 
   // Only committed cursors are followed. Failed writes may leave unused bytes at EOF.
   private async *batches(p: Project, stop = 0) {
@@ -54,7 +60,7 @@ export class ProjectArchive {
 
   async page(p: Project, end?: number) {
     for await (const row of this.batches(p)) {
-      if (end === undefined || row.end === end) return { name: fileName(p.archive!.id), batch: row.batch }
+      if (end === undefined || row.end === end) return row.batch
     }
     throw Error('归档批次不存在，请重新打开归档')
   }
@@ -76,21 +82,45 @@ export class ProjectArchive {
     return fingerprint && { id, fingerprint }
   }
 
+  private archiveSubmissions(p: Project) {
+    const head = p.archive!, cached = this.submissions.get(head.id)
+    if (cached?.end === head.end) return cached.read
+    const prior = cached && cached.end < head.end ? cached : undefined
+    const read = (async () => {
+      const latest: Submissions = new Map()
+      for await (const { batch } of this.batches(p, prior?.end)) {
+        const tasks = batch.tasks ?? []
+        projectSubmissions({ ...p, tasks }).forEach((proof, i) => {
+          if (!latest.has(tasks[i].id)) latest.set(tasks[i].id, proof)
+        })
+      }
+      if (prior) for (const [id, proof] of await prior.read) if (!latest.has(id)) latest.set(id, proof)
+      return latest
+    })()
+    this.submissions.set(head.id, { end: head.end, read })
+    void read.catch(() => { if (this.submissions.get(head.id)?.read === read) this.submissions.delete(head.id) })
+    return read
+  }
+
   async submittedReports(p: Project, reports: WorkerReport[]) {
     const submitted = new Set<string>()
-    if (!reports.length || !p.archive?.taskCount) return submitted
-    const seen = new Set(p.tasks.map(t => t.id))
-    for await (const { batch } of this.batches(p)) {
-      const tasks = (batch.tasks ?? []).filter(t => !seen.has(t.id))
-      for (const t of tasks) seen.add(t.id)
-      const proofs = projectSubmissions({ ...p, tasks })
-      for (const report of reports) if (proofs.some(proof => reportSubmitted(report, proof))) submitted.add(report.id)
-      if (submitted.size === reports.length) break
+    if (!reports.length) return submitted
+    const current = projectSubmissions(p)
+    const remaining: WorkerReport[] = []
+    for (const r of reports) {
+      if (current.some(proof => reportSubmitted(r, proof))) submitted.add(r.id)
+      else remaining.push(r)
+    }
+    if (remaining.length && p.archive?.taskCount) {
+      const live = new Set(p.tasks.map(t => t.id))
+      for (const [id, proof] of await this.archiveSubmissions(p)) {
+        if (!live.has(id)) for (const r of remaining) if (reportSubmitted(r, proof)) submitted.add(r.id)
+      }
     }
     return submitted
   }
 
-  async task(p: Project, id: string) {
+  private async storedTask(p: Project, id: string) {
     let task = p.tasks.find(t => t.id === id)
     if (!task && p.archive?.taskCount) {
       for await (const { batch } of this.batches(p)) {
@@ -98,6 +128,11 @@ export class ProjectArchive {
         if (task) break
       }
     }
+    return task
+  }
+
+  async task(p: Project, id: string) {
+    let task = await this.storedTask(p, id)
     if (!task) return
     if (![...task.acceptance, ...task.decisions].some(item => item.archivedHistory)) return task
     task = structuredClone(task)
@@ -120,7 +155,7 @@ export class ProjectArchive {
     const cached = this.indexes.get(p.archive.id)
     const index = cached?.end === p.archive.end ? cached : undefined
     let task = p.tasks.find(t => t.id === id)
-    const archived = !task && (!index || index.taskIds.has(id)) && await this.task(p, id)
+    const archived = !task && (!index || index.taskIds.has(id)) && await this.storedTask(p, id)
     if (archived) {
       task = archived
       p.tasks.push(archived)

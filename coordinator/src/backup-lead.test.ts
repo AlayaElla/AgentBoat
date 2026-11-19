@@ -24,11 +24,11 @@ test('在线主用存在超过十五分钟的待办且已知不在工作时才�
 async function fixture(project: Project, workspace?: Workspace, exports?: string) {
   const host = mockHost({ storage: { ['project:' + project.ref.id]: project as any, ...(workspace ? { workspace: workspace as any } : {}) } })
   const env = { sessions: [primary], available: true, failLaunch: false, owner: primary.handle as string | null, generation: 1, installed: ['claude', 'codex'], spaces: [{ workspace: primary.workspace, name: '项目', path: primary.path }], launches: [] as { agent: string; options: unknown; prompt: string }[],
-    contacts: [] as string[], mailRuns: [] as string[], controls: [] as { handle: string; prompt: string }[], deliveries: [] as string[], reports: [] as any[] }
+    catalogReads: 0, contacts: [] as string[], mailRuns: [] as string[], controls: [] as { handle: string; prompt: string }[], deliveries: [] as string[], reports: [] as any[] }
   let c!: ReturnType<typeof testCoordinator>
   const worker = await mountWorker({ default: api => {
     c = testCoordinator(api, {
-      projects: async () => env.available ? [project.ref] : [],
+      projects: async () => { env.catalogReads++; return env.available ? [project.ref] : [] },
       targets: async () => ({ sessions: env.sessions, workspaces: env.spaces }),
       runBinding: async id => ({ owner: env.owner, generation: id === 'run_park' ? 1 : env.generation, objective: id === 'run_park' ? 'AgentBoat 备用待命 ' + (await c.store.get(project.ref.id)).backup?.cycle : undefined }),
       syncContacts: async jobs => { env.contacts = jobs.map(j => j.id); return Object.fromEntries(jobs.map(j => [j.id, { dispatch: 'ctx_contact' }])) },
@@ -79,6 +79,10 @@ test('在线主用探测满十分钟未确认才接管原 Run，随后可恢复�
     assert.ok(env.controls[1].prompt.includes('执行者已完成'))
     assert.deepEqual(await command('take'), { useRun: p.runId })
     env.owner = env.controls[1].handle
+    env.generation = NaN
+    await assert.rejects(() => command('take'), /代次/)
+    await poll(); assert.equal((await c.store.get(p.ref.id)).backup?.phase, 'taking')
+    env.generation = 2
     // Orca changed its owner just before the plugin restarted; recover from run-show.
     const interrupted = await c.store.get(p.ref.id)
     const reboot = await fixture(interrupted)
@@ -211,6 +215,21 @@ test('联络只在接管成功后建立，重启延用原编号，取消、切�
   } finally { await close(); rmSync(exports, { recursive: true, force: true }) }
 })
 
+test('联络路由恢复前交回通知保留在队列，恢复后只发送一次', async () => {
+  const p = bound()
+  const backup = { primary: primary.handle, agent: 'codex', handle: 'orca_session_id:backup', phase: 'returning' as const,
+    since: now, cycle: 'cycle', history: [], contact: { id: 'contact', workspace: primary.workspace, primary: primary.handle } }
+  const { c, env, poll, close } = await fixture({ ...p, backup, deliveries: [{ id: 'resume', subject: '', body: '', state: 'pending',
+    targetRunId: p.runId, control: { action: 'resume', cycle: backup.cycle, handle: primary.handle } }] })
+  try {
+    env.owner = backup.handle
+    await c.flush(p.ref.id)
+    assert.equal((await c.store.get(p.ref.id)).deliveries[0].state, 'pending')
+    await poll(); await poll()
+    assert.deepEqual(env.controls.map(m => m.handle), ['dispatch:ctx_contact'])
+  } finally { await close() }
+})
+
 test('没有备用的原因按角色通知一次，原因修复后自动清除', async () => {
   const p = bound(), w = { version: 1, revision: 1, requests: [], runId: 'run_workspace', session: { ...primary, workspace: 'id:workspace', path: '/workspace', handle: 'orca_session_id:workspace' } } as Workspace
   const { c, env, poll, close } = await fixture(p, w)
@@ -268,6 +287,15 @@ test('失败后仅在主人确认当前版本时重新开一次', async () => {
     await poll()
     assert.equal(env.launches.length, 2)
     assert.equal((await c.store.get(p.ref.id)).backup?.phase, 'standby')
+  } finally { await close() }
+})
+
+test('空闲项目每轮只读取一次项目目录', async () => {
+  const p = bound(), { c, env, close } = await fixture({ ...p, backup: { primary: primary.handle, agent: 'codex',
+    handle: 'spare', phase: 'standby', cycle: 'c', since: now, history: [] } })
+  try {
+    await c.checkBackups()
+    assert.equal(env.catalogReads, 1)
   } finally { await close() }
 })
 

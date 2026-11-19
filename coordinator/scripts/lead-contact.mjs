@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmdirSync, unlinkSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { clientPath, pluginDataPath } from './orca-cli.mjs';
+import { activeUserDataPath, clientPath, pluginDataPath, release } from './orca-cli.mjs';
 
 const read = file => JSON.parse(readFileSync(file, 'utf8'));
 function save(file, value) {
@@ -19,9 +19,27 @@ export function reconcileContact(job, state, closing, call, persist) {
   const saveState = updates => { Object.assign(state, updates); persist(state); };
   if (!state.run && closing) return saveState({ closed: true });
   if (!state.run) {
-    const run = call('run-create', '--objective', objective).run;
+    let run;
+    if (state.creating) {
+      // A controller may stop after Orca created the Run but before its ID reached disk.
+      let cursor;
+      const matches = [];
+      const pages = new Set();
+      do {
+        const page = call('run-list', '--limit', '100', ...(cursor ? ['--cursor', cursor] : []));
+        matches.push(...page.runs.filter(r => r.objective === objective));
+        cursor = page.nextCursor;
+        if (cursor && pages.has(cursor)) throw Error('联络 Run 分页未前进');
+        pages.add(cursor);
+      } while (cursor);
+      if (matches.length !== 1) return saveState({ unresolved: true, error: '联络 Run 创建回执不唯一或缺失，请核对 ' + objective });
+      [run] = matches;
+    } else {
+      saveState({ creating: true });
+      run = call('run-create', '--objective', objective).run;
+    }
     if (run?.objective !== objective || !/^run_[\w-]+$/.test(run.id)) throw Error('联络 Run 回执不符');
-    saveState({ run: run.id });
+    saveState({ run: run.id, creating: false });
   }
   if (call('run-show', '--id', state.run).run?.objective !== objective) throw Error('联络 Run 归属不符');
   call('run-use', '--id', state.run);
@@ -68,7 +86,8 @@ export async function serve(dir) {
     const put = s => save(file, s);
     const call = (...args) => {
       let out;
-      try { out = execFileSync(job.executable, ['orchestration', ...args, '--environment', 'local', '--json', '--full'], { encoding: 'utf8', windowsHide: true, timeout: 25000 }); }
+      try { out = execFileSync(job.executable, ['orchestration', ...args, '--environment', 'local', '--json', '--full'], { encoding: 'utf8', windowsHide: true, timeout: 25000,
+        ...(release && { env: { ...process.env, ORCA_USER_DATA_PATH: activeUserDataPath() } }) }); }
       catch (e) { if (!e.stdout) throw e; out = e.stdout; }
       const reply = JSON.parse(out);
       if (!reply.ok) throw Object.assign(Error(reply.error?.message || 'Orca 联络失败'), { code: reply.error?.code });
@@ -122,7 +141,7 @@ export class LeadContacts {
         if (alive(Number(readFileSync(lock, 'utf8')))) continue;
         unlinkSync(lock);
       }
-      if (!closing && (state.ready || (state.task && wantedById.get(id)?.online === false))) continue;
+      if (!closing && (state.ready || state.unresolved || (state.task && wantedById.get(id)?.online === false))) continue;
       const attempt = id + ':' + closing;
       if ((this.started.get(attempt) ?? 0) + 60_000 > Date.now()) continue;
       this.started.set(attempt, Date.now());

@@ -267,10 +267,12 @@ test('two loopback workspaces pair once, share only selected local projects, cha
       await a.links.share({ id: peer.id, revision: s.revision, scope, projectIds })
       return (await b.links.refresh()).peers[0].report!
     }
+    a.projects[0].archive = { id: 'fixture', start: 0, end: 1, taskCount: 8 }
     let r = await setA('summary')
     assert.deepEqual(r.projects.map(p => p.id), ['p1'])
     assert.equal(r.projects[0].tasks, undefined)
-    assert.equal(r.projects[0].pending, 2)
+    assert.equal(r.projects[0].pending, 3)
+    assert.equal(r.projects[0].counts.completed, 8)
     assert.equal(JSON.stringify(r).includes('D:\\'), false)
     r = await setA('details')
     assert.equal(r.projects[0].tasks![0].acceptance[0], '首页布局')
@@ -331,7 +333,7 @@ test('details sync shares current main and scoped live agents without local iden
   const worker = await mountWorker({ default: api => { coordinator = createCoordinator(api, {
     projects: async () => [...refs, hidden.ref],
     targets: async () => ({ workspaces: [], sessions: online ? [session] : [] }),
-    agents: async () => { reads++; return { ok: true, at: Date.now(), agents: live, main: { handle: session.handle, status: online ? {state:'work',since:now} : {state:'offline'} } } }
+    agents: async (_, __, acting) => { reads++; return { ok: true, at: Date.now(), agents: live, main: { handle: acting!.handle, status: online ? {state:'work',since:now} : {state:'offline'} } } }
   }) } }, { host })
   try {
     const before = await coordinator.links.snapshot()
@@ -363,9 +365,13 @@ test('details sync shares current main and scoped live agents without local iden
     assert.equal(updated.projects[0].activity?.agents[0].title, '等你回复')
     assert.equal(updated.projects[0].activity?.truncated, true)
 
+    await coordinator.store.mutateWorkspace(w => { w.backup = { agent: 'codex', primary: session.handle, handle: 'private-spare', phase: 'active', since: now, cycle: 'test', history: [] } })
+    online = true
     live = [{ ...visible, title: '保存项目后更新' }]
     await worker.request('project.settings', { projectId: p.ref.id, revision: p.revision, roles: p.roles })
-    assert.equal((await b.links.refresh()).peers[0].report?.projects[0].activity?.agents[0].title, '保存项目后更新')
+    const active = (await b.links.refresh()).peers[0].report!
+    assert.equal(active.projects[0].activity?.agents[0].title, '保存项目后更新')
+    assert.deepEqual(active.mainAgent, { agent: 'codex', title: '备用主会话', online: 'online', activity: { state: 'work', since: now } })
   } finally { coordinator.stop(); b.links.stop(); await worker.deactivate() }
 })
 

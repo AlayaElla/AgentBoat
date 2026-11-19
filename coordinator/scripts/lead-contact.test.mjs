@@ -10,7 +10,8 @@ function fixture(interrupt) {
   const call = (op, ...args) => {
     calls.push(op);
     switch (op) {
-      case 'run-create': run = { id: 'run_contact', objective: args[1] }; return { run };
+      case 'run-create': run = { id: 'run_contact', objective: args[1] }; break;
+      case 'run-list': return { runs: run ? [run] : [] };
       case 'run-show': case 'run-use': assert.equal(args[1], run.id); return { run };
       case 'task-list': return { tasks: task ? [task] : [] };
       case 'task-create': task = { id: 'task_contact', run_id: run.id, spec: args[3], status: 'ready' }; break;
@@ -21,11 +22,11 @@ function fixture(interrupt) {
       default: assert.fail(op);
     }
     if (op === interrupt) { interrupt = ''; throw Error('receipt lost'); }
-    return { task, dispatch };
+    return { run, task, dispatch };
   };
   return { call, calls, result: () => ({ run, task, dispatch }) };
 }
-for (const loss of ['task-create', 'dispatch']) test('contact recovers a lost ' + loss + ' receipt and closes the exact assignment', () => {
+for (const loss of ['run-create', 'task-create', 'dispatch']) test('contact recovers a lost ' + loss + ' receipt and closes the exact assignment', () => {
   const f = fixture(loss);
   let stored = {};
   const sync = closing => reconcileContact(job, structuredClone(stored), closing, f.call, s => { stored = structuredClone(s); });

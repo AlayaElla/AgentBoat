@@ -2,6 +2,12 @@
 
 从 skill 标出的 AgentBoat 入口调用 `coordinator/scripts/client.mjs`。写命令的 JSON 放进文件（UTF-8，可带 BOM），文件路径作参数；标 stdin 的从标准输入读，这类输入不落文件。回执在 `result.result`。
 
+## 备用接管
+
+额度不足时，由已配置的备用按主人授权接管，沿用原有权限。只有一家可用 agent 时，告诉主人。
+备用平时待命。收到接管通知，先读插件记录，再在自己的会话执行通知中的 `lead-take`，接续原 Run 的收件箱和执行者。
+主用能继续工作时，执行通知中的 `lead-ready`。接管前的探测在 10 分钟内确认。备用已接管时，主用确认恢复后，备用用 `lead-handoff` 写明已做和剩余事项，主用用 `lead-resume` 接回。
+
 ## 通用
 
 - 写入要带读到的 revision 和唯一 requestId。

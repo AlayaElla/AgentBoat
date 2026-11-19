@@ -86,6 +86,7 @@ export class ProjectStore {
       await writeFile(exportPath, JSON.stringify(project, null, 2) + '\n', { flag: 'wx', flush: true })
       await absent()
       await this.storage.delete(`project:${id}`)
+      this.archive.forget(project)
       await this.updateRoles?.()
       return exportPath
     })
@@ -293,9 +294,9 @@ export function submitTask(project: Project, raw: unknown): void {
 
 export interface FeedbackItem { taskId: string; kind: 'acceptance' | 'decision' | 'blocked'; itemId: string; itemRevision?: number; reviewTotal?: number; fingerprint?: string; result?: string; answer?: string; note?: string }
 export function feedback(project: Project, raw: unknown, source?: string): void {
-  project.deliveries.push(applyFeedback(project, project.tasks, object(raw).items, source))
+  applyFeedback(project, project.tasks, object(raw).items, source)
 }
-function applyFeedback(project: Project, tasks: Task[], items: unknown, source?: string, withdrawal = false): Project['deliveries'][number] {
+function applyFeedback(project: Project, tasks: Task[], items: unknown, source?: string, withdrawal = false): void {
   if (!Array.isArray(items) || items.length > 100) fail('反馈条目格式不正确')
   if (!items.length) fail('请至少提交一条反馈')
   const seen = new Set<string>()
@@ -352,8 +353,9 @@ function applyFeedback(project: Project, tasks: Task[], items: unknown, source?:
     const actor = source ?? (v.discarded ? '主人' : undefined)
     v.item.history.push({ at, revision: v.revision, result: v.result, note: v.note, ...(actor ? { source: actor } : {}) })
   }
+  if (withdrawal) return
   const body = validated.map(v => `[项目 ${project.ref.id} / 任务 ${v.task.id}]\n${v.task.title}\n${v.title}\n${v.item ? (v.discarded ? '已丢弃' : v.subject + '：' + v.result) + '\n' : ''}${v.note}`).join('\n\n')
-  return { id: randomUUID(), subject: `${withdrawal ? '项目主会话撤下' : '用户反馈'} · ${validated.length} 条`, body: source ? `${source}\n\n${body}` : body, state: 'pending' }
+  project.deliveries.push({ id: randomUUID(), subject: `用户反馈 · ${validated.length} 条`, body: source ? `${source}\n\n${body}` : body, state: 'pending' })
 }
 
 function recordSource(project: Project, event: SourceEvent) {

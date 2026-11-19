@@ -30,7 +30,11 @@ export const pluginKey = installed ? path.basename(keyDir) : release ? releasePl
 const stableRoot = () => path.resolve(activeUserDataPath(), 'agentboat-current');
 const clientScript = 'coordinator/scripts/client.mjs';
 export const stableClientPath = () => path.join(stableRoot(), clientScript);
-export const clientPath = installed ? stableClientPath() : fileURLToPath(new URL(workerRelease ? './coordinator/scripts/client.mjs' : '../scripts/client.mjs', import.meta.url));
+export const clientPath = path.join(versionDir, clientScript);
+export function promptClientPath() {
+  if (installed) try { return path.join(installationRoot(), clientScript); } catch { /* Keep using this worker's own release. */ }
+  return clientPath;
+}
 export const pluginDataPath = (root = activeUserDataPath()) => path.join(root, 'plugins-data', pluginKey);
 export const roleRegistryPath = (...profile) => path.join(pluginDataPath(profile.length ? userDataPath(...profile) : undefined), 'roles.json');
 

@@ -95,6 +95,9 @@ test('entry refuses occupied files, directories and foreign directory links', as
   rmSync(stable, { recursive: true });
   symlinkSync(other, stable, process.platform === 'win32' ? 'junction' : 'dir');
   await assert.rejects(run([install]), /固定入口已有其他内容/);
+  const cli = path.join(path.dirname(install), '../coordinator/scripts/orca-cli.mjs');
+  const { promptClientPath } = await import(pathToFileURL(cli));
+  assert.equal(promptClientPath(), path.resolve(path.dirname(install), '..', client));
   assert.equal(realpathSync(stable), other);
 });
 

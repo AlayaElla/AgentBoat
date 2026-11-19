@@ -4,7 +4,7 @@ import path from 'node:path'
 import { realpath, stat } from 'node:fs/promises'
 import { Connections } from './connections'
 import type { OrcaWorkerApi } from 'orca/worker'
-import { agents, type AgentSession, type LeadSwitch, type Project, type ProjectLead, type ProjectRef, type Snapshot, type SourceEvent, type Delivery, type MessagingSnapshot } from './model'
+import { actingMain, agents, type AgentSession, type LeadSwitch, type Project, type ProjectLead, type ProjectRef, type Snapshot, type SourceEvent, type Delivery, type MessagingSnapshot } from './model'
 import { FeishuSources, notifyFeishu, type MessageTransport } from './feishu'
 import { OrcaRuntime, defaultExecutable, type CoordinatorRuntime } from './runtime'
 import { ProjectStore, artifactUrl, fail, feedback, fingerprint, fresh, maxMessageLength, notifyWorkspace, object, overview, receiveEvent, submitTask, strings, text, revision, mergeProjects, feishuConfig, takeoverActive, verifyTakeover } from './store'
@@ -14,11 +14,11 @@ import { LinkFiles } from './link-files'
 import { groupedAttention, isProjectShared, isRunNotice, type OwnerQuestion } from './model'
 import { mainAgent, roleReminder, switchLead, takeoverView, recoverTakeover } from './main-agent'
 import { projectLeadDefaults } from '../../workspace/agent-launch.mjs'
-import { clientPath, installationRoot, release, roleRegistryPath } from '../scripts/orca-cli.mjs'
+import { promptClientPath, installationRoot, release, roleRegistryPath } from '../scripts/orca-cli.mjs'
 import { cliBridge } from '../scripts/cli-bridge.mjs'
 import { applyDelta, type Sheets } from './feedback-drafts'
 import { roleRegistry } from './role-registry'
-import { escalationWait, projectSubmissions, reportSubmitted } from '../scripts/worker-reports.mjs'
+import { escalationWait } from '../scripts/worker-reports.mjs'
 
 const activityInterval = 60_000
 
@@ -63,7 +63,7 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
     if (result.done && (input.action === 'take' || input.action === 'resume')) deferBackupCheck()
     return result
   })
-  const main = mainAgent(orca, store, runtime, changed, () => { deferMailbox(); deferBackupCheck() }, async () => (await availableProjectRecords()).list, d => backups.send('', d))
+  const main = mainAgent(orca, store, runtime, changed, () => { deferMailbox(); deferBackupCheck() }, async () => (await availableProjectRecords()).list, backups)
   let statusUpdates: Promise<unknown> = Promise.resolve()
   let live: import('./agents').AgentsSnapshot = { ok: false, at: 0, agents: [] }
   let agentsDirty = true, refreshingAgents: Promise<typeof live> | undefined
@@ -75,7 +75,7 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
       do {
         const { list } = await availableProjectRecords()
         agentsDirty = false
-        try { live = await runtime.agents(list, orca.host, (await store.workspace()).session) }
+        try { live = await runtime.agents(list, orca.host, actingMain(await store.workspace())) }
         catch { live = { ok: false, at: Date.now(), agents: [], error: 'agent 状态读不到' } }
         await updateStatus()
       } while (agentsDirty)
@@ -110,24 +110,16 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
   let actionableRunMail = new Set<string>()
   const mailKey = (item: OwnerQuestion) => fingerprint([item.runId, item.id])
   const unsubmitted = async (items: OwnerQuestion[], list: Project[]) => {
-    const projects = new Map(list.filter(p => !p.hidden).map(p => [p.ref.id, p]))
-    const proofs = new Map<string, ReturnType<typeof projectSubmissions>>()
-    const remaining = items.filter(item => {
-      const project = projects.get(item.projectId)
-      if (!project || project.runId !== item.runId) return false
-      if (!item.report) return true
-      if (!proofs.has(item.projectId)) proofs.set(item.projectId, projectSubmissions(project))
-      return !proofs.get(item.projectId)!.some(proof => reportSubmitted(item.report!, proof))
-    })
-    const archived = new Set<OwnerQuestion>()
-    for (const id of proofs.keys()) {
-      const rows = remaining.filter(q => q.projectId === id && q.report)
-      const submitted = await store.archive.submittedReports(projects.get(id)!, rows.map(q => q.report!))
-      for (const q of rows) if (submitted.has(q.report!.id)) archived.add(q)
+    if (!items.length) return []
+    const pending = new Set<OwnerQuestion>()
+    for (const p of list) {
+      if (p.hidden) continue
+      const rows = items.filter(q => q.projectId === p.ref.id && q.runId === p.runId)
+      const submitted = await store.archive.submittedReports(p, rows.flatMap(q => q.report ? [q.report] : []))
+      for (const q of rows) if (!q.report || !submitted.has(q.report.id)) pending.add(q)
     }
-    return remaining.filter(q => !archived.has(q))
+    return items.filter(q => pending.has(q))
   }
-  const visibleQuestions = (list: Project[]) => unsubmitted(questions, list)
   type Waiting = NonNullable<Awaited<ReturnType<CoordinatorRuntime['mail']>>['waiting']>
   let waitingByRun = new Map<string, Waiting>()
   function refreshQuestions() {
@@ -325,6 +317,9 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
   }
   async function requireProject(id: string) { return (await projectEntry(id)).ref }
   async function ensure(id: string): Promise<Project> { return store.register(await requireProject(id)) }
+  function projectView({ takeover, backup, ...project }: Project): Project {
+    return backup ? { ...project, backup: backupView(backup) } : project
+  }
   async function snapshot(id: string, written?: Project): Promise<Snapshot> {
     const { refs, error: runtimeError } = await availableProjects(), ref = refs.find(p => p.id === id)
     if (!ref) fail(runtimeError ?? '项目已从 Orca 移除或不在工作间项目列表')
@@ -332,9 +327,7 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
       : (await store.all()).find(p => p.ref.id === id) ?? fresh(ref))
     const sessions = project.mainAgentHandle && !runtimeError ? await runtime.targets().then(t => t.sessions).catch(() => undefined) : undefined
     const lead = projectBinding(project, sessions), agent = projectAgentKind(project)
-    const { takeover, ...visible } = project
-    if (visible.backup) visible.backup = backupView(visible.backup)
-    return { projects: refs, project: visible, lead,
+    return { projects: refs, project: projectView(project), lead,
       ...(agent && Object.hasOwn(agents, agent) ? { mainAgent: agent as Snapshot['mainAgent'] } : {}), workspaceTarget: runtimeError ? { error: runtimeError } : await projectWorkspace(ref, lead.session),
       ...(runtimeError ? { runtimeError } : {}) }
   }
@@ -396,14 +389,14 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
       changed: () => changed(id),
       launch: selectedAgent === agent ? defaults : { surface: defaults.surface },
       subject: '【项目协作】请接管项目主会话',
-      prompt: (token, expiresAt) => `主人请当前会话接管项目「${ref.name}」（projectId: ${id}）。开启项目协作，先读 $orca-project-coordinator 和桥接说明，自己创建新的协调 Run。接管脚本绝对路径：${JSON.stringify(clientPath)}\n用 node 调用此脚本的 read ${id} 取得最新 revision，再调用 project-lead-bind，从标准输入传入 {projectId,revision,requestId,runId,token}。启动回执未确认时稍后重读再试。一次性接管凭据：${token}\n有效至：${expiresAt}\n凭据仅用于本次接管，不保存或转发。绑定成功后读该项目记录，接手任务、执行记录和待处理项；保留已有分工和用户决定。`
+      prompt: (token, expiresAt) => `主人请当前会话接管项目「${ref.name}」（projectId: ${id}）。开启项目协作，先读 $orca-project-coordinator 和桥接说明，自己创建新的协调 Run。接管脚本绝对路径：${JSON.stringify(promptClientPath())}\n用 node 调用此脚本的 read ${id} 取得最新 revision，再调用 project-lead-bind，从标准输入传入 {projectId,revision,requestId,runId,token}。启动回执未确认时稍后重读再试。一次性接管凭据：${token}\n有效至：${expiresAt}\n凭据仅用于本次接管，不保存或转发。绑定成功后读该项目记录，接手任务、执行记录和待处理项；保留已有分工和用户决定。`
     })
     defer(id)
     return readProjectLead(id)
   }
   function rememberProjectCaller(project: Project, input: { runId?: string; caller?: string }) {
     // Self-reported identity is display/navigation metadata, never authorization evidence.
-    if (project.runId && input.runId === project.runId && input.caller && (!project.backup || project.backup.primary === input.caller)) project.mainAgentHandle = text(input.caller, '调用会话', 500)
+    if (project.runId && input.runId === project.runId && input.caller && (!project.backup?.primary || project.backup.primary === input.caller)) project.mainAgentHandle = text(input.caller, '调用会话', 500)
   }
   async function ingest(appId: string, event: SourceEvent): Promise<void> {
     const work = inbound.then(() => ingestOne(appId, event))
@@ -524,7 +517,7 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
         while (true) {
           const p = await store.get(id)
           const f = (await store.messaging()).feishu
-          const allowed = (d: Delivery, p: Project) => (!d.control || !takeoverActive(p.takeover)) &&
+          const allowed = (d: Delivery, p: Project) => backups.canSend(p, d) &&
             (!p.hidden || !d.control && !d.external && (!d.targetRunId || d.id.startsWith('retired:'))) &&
             (d.external ? f.enabled && d.external.appId === f.appId && f.chatIds.includes(d.external.chatId) : d.targetRunId || p.runId)
           const delivery = p.deliveries.find(x => x.state === 'pending' && allowed(x, p))
@@ -608,7 +601,7 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
   orca.panels.handle('workspace.overview', async () => {
     const { list, error } = await availableProjectRecords()
     // Orca registration defines membership. A project can be registered without a workspace.
-    const inbox = await visibleQuestions(list)
+    const inbox = await unsubmitted(questions, list)
     return { ...overview(list, await store.workspace(), error), questions: inbox.filter(item => !item.report), reports: inbox.filter(item => item.report), workspace: await main.read(live), links: await links.snapshot(), connections: await connections.list(), machines: [{ id: 'local', name: os.hostname(), role: 'host' as const, online: true }] }
   })
   orca.panels.handle('workspace.message', async input => {
@@ -667,7 +660,7 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
   })
   orca.panels.handle('project.archive', async input => {
     const p = await ensure(input.projectId)
-    const { batch } = await store.archive.page(p, input.end)
+    const batch = await store.archive.page(p, input.end)
     return { end: input.end ?? p.archive!.end, ...(batch.previous && { previousEnd: batch.previous.end }), tasks: batch.tasks ?? [],
       deliveries: batch.deliveries.length, events: batch.events?.length ?? 0, requests: batch.requests.length,
       history: batch.history?.reduce((count, part) => count + part.rows.length, 0) ?? 0 }
@@ -715,8 +708,7 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
   orca.panels.handle('project.feedback', async input => {
     const expected = input.revision === undefined ? undefined : revision(input.revision)
     const { refs } = await projectEntry(input.projectId)
-    const { takeover, ...project } = await recordFeedback(input, expected)
-    return { projects: refs, project }
+    return { projects: refs, project: projectView(await recordFeedback(input, expected)) }
   })
   orca.panels.handle('project.agent', async input => {
     const id = text(input.projectId, '项目编号', 200)
@@ -788,7 +780,7 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
   })
   orca.panels.handle('project.openArtifact', async input => {
     const ref = await requireProject(input.projectId), p = await store.register(ref)
-    const tasks = input.archiveEnd === undefined ? p.tasks : (await store.archive.page(p, input.archiveEnd)).batch.tasks
+    const tasks = input.archiveEnd === undefined ? p.tasks : (await store.archive.page(p, input.archiveEnd)).tasks
     const a = tasks?.find(x => x.id === input.taskId)?.artifacts.find(x => x.id === input.artifactId)
     if (!a || /^https?:/i.test(a.url)) fail('请选择本项目的本机成果')
     if (!ref.workspace) fail('这个项目当前没有工作区')
@@ -838,9 +830,8 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
       if (r.backup?.handle) {
         const mail = project ? waitingByRun.get(r.runId) ?? [] : await runtime.mail(r.runId).then(m => [...m.waiting ?? [], ...m.questions.map(q => ({ at: q.at, title: q.subject }))] as Waiting).catch(() => [])
         const reports = mail.flatMap(m => m.report ? [m.report] : [])
-        const proofs = project ? projectSubmissions(project) : []
-        const archived = project && reports.length ? await store.archive.submittedReports(project, reports) : new Set<string>()
-        pending.push(...mail.filter(m => !m.report || (project ? !archived.has(m.report.id) && !proofs.some(p => reportSubmitted(m.report!, p)) : !m.read)))
+        const submitted = project && await store.archive.submittedReports(project, reports)
+        pending.push(...mail.filter(m => !m.report || (submitted ? !submitted.has(m.report.id) : !m.read)))
         if (project) {
           pending.push(...questions.filter(q => q.runId === r.runId))
           const submitted = new Map(project.tasks.map(t => [t.id, Date.parse(t.submittedAt ?? t.updatedAt)]))
@@ -861,7 +852,6 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
       }
       const context = (project ? [project] : projects).flatMap(p => p.tasks.filter(t => t.phase === 'working').map(t =>
         [t.title, ...t.executions.map(e => e.agent + ' ' + e.dispatchId)].join(' · '))).slice(0, 12).join('；')
-      if (project && !await requireProject(project.ref.id).catch(() => undefined)) continue
       if (r.backup && ('ref' in r ? r.deliveries : r.retired)?.some(d => d.control && d.state === 'pending')) {
         if (project) defer(project.ref.id)
         else void main.flushRetired().catch(() => {})

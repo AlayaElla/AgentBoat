@@ -2,7 +2,7 @@ import { closeSync, fstatSync, lstatSync, openSync, readFileSync, readSync, real
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { roleRegistryPath, clientPath } from '../../coordinator/scripts/orca-cli.mjs';
+import { roleRegistryPath, stableClientPath, clientPath } from '../../coordinator/scripts/orca-cli.mjs';
 import { readRoleCard } from '../../coordinator/scripts/main-role-card.mjs';
 import { workerReport, reportSubmitted } from '../../coordinator/scripts/worker-reports.mjs';
 
@@ -108,11 +108,11 @@ function nodeAllowed(args, cwd, bash) {
   if (!script) return false;
   const requested = shellPath(cwd, script, bash);
   // Resolve only the published entry; arbitrary user-created script aliases stay outside the allowlist.
-  const entryRoot = path.resolve(path.dirname(clientPath), '../..');
+  const entryRoot = path.resolve(path.dirname(stableClientPath()), '../..');
   const relative = path.relative(entryRoot, requested);
   const file = inside(entryRoot, requested) ? path.resolve(workspaceDir, '..', relative) : requested;
   if (!same(file, requested) && !same(file, canonical(requested))) return false;
-  if (same(file, path.resolve(workspaceDir, '../coordinator/scripts/client.mjs'))) return !!operation && !operation.startsWith('-');
+  if (same(file, clientPath)) return !!operation && !operation.startsWith('-');
   return [...rules.scripts].some(([entry, operations]) => same(file, entry) && operations.has(operation));
 }
 function readAllowed(name, args) {

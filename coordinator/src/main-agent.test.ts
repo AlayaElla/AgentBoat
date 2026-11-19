@@ -198,6 +198,8 @@ test('unknown takeover send and old-agent notification are durable and never aut
     await c.start(); await c.start(); assert.equal(requests, 1)
     const bound = await worker.request('workspace.agent', { operation: 'bind', revision: t.revision, requestId: 'test', caller: session.handle, runId: 'run_new', token: tokenFrom(prompt) })
     assert.equal(bound.previousNotice, 'uncertain'); assert.equal(bound.runId, 'run_new')
+    await c.store.mutateWorkspace(w => { w.retired!.push({ id: 'lead-control:fixture', subject: '探测', body: '', state: 'sent' }) })
+    assert.equal((await worker.request('workspace.agent', { operation: 'read' })).previousNotice, 'uncertain')
     await c.start(); assert.equal(sends, 1)
   } finally { c.stop(); await worker.deactivate() }
 })

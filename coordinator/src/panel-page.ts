@@ -1,6 +1,6 @@
 import type {} from 'orca/frame'
 import type { ArchivePage } from './protocol'
-import { backupInCharge, blockedRevision, attention, projectSummary, agents, agentName, compareAgentActivity, groupedAttention, isProjectShared, isRecentAgent, labels, taskState, scopes, statuses, connectionStates, roles, mainStatus, mainAgentStates } from './model'
+import { actingMain, backupInCharge, blockedRevision, attention, projectSummary, agents, agentName, compareAgentActivity, groupedAttention, isProjectShared, isRecentAgent, labels, taskState, scopes, statuses, connectionStates, roles, mainStatus, mainAgentStates } from './model'
 import type { Acceptance, AgentSession, Artifact, Attention, LeadSwitch, MainTakeover, Overview, Project, ProjectLead, ProjectWorkspace, WorkspaceBinding } from './model'
 import type { FeedbackItem } from './store'
 import type { AgentActivity, AgentsSnapshot, MainAgentActivity } from './model'
@@ -459,7 +459,8 @@ function mainAgentInfo(agent: MainAgentActivity | null | undefined, bound = !!ag
   return { title, tone }
 }
 function mainAgentLine(agent: MainAgentActivity | null | undefined, open?: () => void, bound = !!agent, showLabel = true) {
-  const { title: primary, tone } = mainAgentInfo(agent, bound, open ? mainStatus(all.workspace.session, live) : agent?.activity)
+  const active = open ? actingMain(all.workspace) : undefined
+  const { title: primary, tone } = mainAgentInfo(active ?? agent, bound, open ? mainStatus(active, live) : agent?.activity)
   const title = open && all.workspace.backup ? primary + ' · ' + backupDescription(all.workspace) : primary
   return el(open ? 'button' : 'div', { class: 'lead', type: open ? 'button' : undefined, 'aria-label': open ? showLabel ? '主 agent' : '管理主 agent' : undefined, onclick: open }, dot(tone), showLabel ? el('span', { class: 't' }, '主 agent') : null, el('span', { class: 'grow trunc xs muted', title }, title), open ? icon('chevron') : null)
 }

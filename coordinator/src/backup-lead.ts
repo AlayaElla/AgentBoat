@@ -1,7 +1,7 @@
 import { randomBytes, randomUUID } from 'node:crypto'
 import { backupDefaults } from '../../workspace/agent-launch.mjs'
-import { clientPath } from '../scripts/orca-cli.mjs'
-import type { AgentSession, BackupLead, ContactRoutes, Delivery, LeadAction, Project, Workspace } from './model'
+import { promptClientPath } from '../scripts/orca-cli.mjs'
+import { backupInCharge, type AgentSession, type BackupLead, type ContactRoutes, type Delivery, type LeadAction, type Project, type Workspace } from './model'
 import type { CoordinatorRuntime } from './runtime'
 import { fail, fingerprint, ProjectStore, takeoverActive, text } from './store'
 
@@ -42,7 +42,7 @@ export class BackupLeads {
   private routes: ContactRoutes = {}
   async syncContacts(rows: Binding[], sessions?: AgentSession[], workspaces?: string[]) {
     const wanted = rows.flatMap(row => row.runId && !('ref' in row && row.hidden) && row.backup?.contact &&
-      ['active', 'handoff', 'returning'].includes(row.backup.phase) ? [{ ...row.backup.contact, online: sessions?.some(s => s.handle === row.backup!.primary && s.online === 'online') }] : [])
+      backupInCharge(row.backup) ? [{ ...row.backup.contact, online: sessions?.some(s => s.handle === row.backup!.primary && s.online === 'online') }] : [])
     this.routes = await this.runtime.syncContacts(wanted, workspaces)
     return this.routes
   }
@@ -54,18 +54,39 @@ export class BackupLeads {
     return id ? this.store.mutate(id, revision, update) : this.store.mutateWorkspace(update, revision)
   }
 
+  private async updateBinding(r: Binding, update: (row: Binding) => void) {
+    const id = key(r)
+    if (id) await this.visible(id)
+    return this.mutate(id, update, r.revision)
+  }
+
+  private controlTarget(b: BackupLead | undefined, c: NonNullable<Delivery['control']>) {
+    if (b?.cycle === c.cycle && expectedPhases[c.action].includes(b.phase)) {
+      if (backupInCharge(b) && c.handle === b.primary) {
+        const dispatch = b.contact && this.routes[b.contact.id]?.dispatch
+        return dispatch && 'dispatch:' + dispatch
+      }
+      if (c.action === 'take' && b.standbyRunId) return 'run:' + b.standbyRunId
+    }
+    return c.handle
+  }
+
+  canSend(r: Binding, d: Delivery) {
+    return !d.control || !takeoverActive(r.takeover) && !!this.controlTarget(r.backup, d.control)
+  }
+
   async missing(r: Binding, reason: string, ownerRun: string, single = false) {
     if (!unopened(r.backup)) return
     const phase = single ? 'single' : 'unavailable'
     const notify = !single && !!ownerRun && !r.backup?.notified?.includes(reason)
     if (r.backup?.phase === phase && r.backup.problem === (single ? undefined : reason) && !notify) return
-    await this.mutate(key(r), row => {
+    await this.updateBinding(r, row => {
       const b = row.backup ??= { primary: ('ref' in row ? row.mainAgentHandle : row.session?.handle) ?? '', agent: '', phase, since: Date.now(), cycle: randomUUID(), history: [] }
       b.phase = phase
       if (single) delete b.problem
       else b.problem = reason
       if (notify) { (b.notified ??= []).push(reason); record(row, '没有备用：' + reason, ownerRun) }
-    }, r.revision)
+    })
     this.changed(key(r))
   }
 
@@ -101,11 +122,11 @@ export class BackupLeads {
         return this.missing(r, run ? 'Run 归属与已绑定的主会话不符' : '无法读取已绑定的 Run', ownerRun)
       }
       const cycle = randomUUID()
-      await this.mutate(id, row => {
+      await this.updateBinding(r, row => {
         if ('ref' in row) { row.mainSession = session; row.mainAgentHandle = session.handle }
         else row.session = session
         row.backup = { primary: session.handle, agent, cycle, phase: 'opening', since: now, history: b?.history ?? [], ...(b?.notified ? { notified: b.notified } : {}), generation: run.generation }
-      }, r.revision)
+      })
       let handle: string | undefined
       try {
         handle = await this.runtime.launchMain(session.workspace, agent, `你是「${label(r)}」主会话的备用。平时待命；收到接管通知后先读插件记录。`, options)
@@ -119,8 +140,8 @@ export class BackupLeads {
       return
     }
     if (!b) return
-    if ((!b.contact || this.routes[b.contact.id]?.closed) && ['active', 'handoff', 'returning'].includes(b.phase)) {
-      await this.mutate(id, row => { row.backup!.contact = { id: randomUUID(), projectId: id, workspace: session.workspace, primary: b.primary } }, r.revision)
+    if ((!b.contact || this.routes[b.contact.id]?.closed) && backupInCharge(b)) {
+      await this.updateBinding(r, row => { row.backup!.contact = { id: randomUUID(), projectId: id, workspace: session.workspace, primary: b.primary } })
       this.changed(id)
       return
     }
@@ -128,25 +149,25 @@ export class BackupLeads {
       const target = b.phase === 'taking' ? b.handle : b.primary
       const run = await this.runtime.runBinding(r.runId)
       if (target && chat(target) && run.owner === null && b.generation !== undefined && run.generation > b.generation && b.receiptGeneration !== run.generation) {
-        await this.mutate(id, row => {
+        await this.updateBinding(r, row => {
           row.backup!.receiptGeneration = run.generation
           queue(row).push({ id: 'lead-recheck:' + b.cycle + ':' + run.generation, subject: '请确认 Run 接手回执',
             body: '如在本会话执行过最近一次接管或交回命令，请重新执行原命令，核对本会话的 Run 回执。', targetRunId: r.runId, state: 'pending' })
-        }, r.revision)
+        })
         this.changed(id)
         return
       }
-      if (target && run.owner === target) {
-        await this.mutate(id, row => this.finishTransfer(row, ownerRun, run.generation), r.revision)
+      if (target && run.owner === target && Number.isSafeInteger(run.generation)) {
+        await this.updateBinding(r, row => this.finishTransfer(row, ownerRun, run.generation))
         this.changed(id)
         return
       }
     }
     if (b.phase === 'opening') {
-      await this.mutate(id, row => this.launchFailure(row, ownerRun), r.revision)
+      await this.updateBinding(r, row => this.launchFailure(row, ownerRun))
     } else if (b.phase === 'failed') {
       if (!ownerRun || !b.problem || b.notified?.includes(b.problem)) return
-      await this.mutate(id, row => this.launchFailure(row, ownerRun), r.revision)
+      await this.updateBinding(r, row => this.launchFailure(row, ownerRun))
     }
     else {
       const standby = inventory.sessions.find(s => s.handle === b.handle && s.workspace === session.workspace)
@@ -164,27 +185,27 @@ export class BackupLeads {
       const expired = b.phase === 'probing' && b.lastProbe !== undefined && now - b.lastProbe >= probeWait
       const stillWaiting = oldest !== undefined && b.lastProbe !== undefined && oldest <= b.lastProbe
       if (b.phase === 'standby' && !missing && reason && standby?.online === 'online') {
-        await this.mutate(id, row => {
+        await this.updateBinding(r, row => {
           const b = row.backup!
           b.phase = 'probing'; b.cycle = randomUUID(); delete b.lastProbe; delete b.problem
           control(row, 'ready', '如能继续处理，请在 10 分钟内确认。')
-        }, r.revision)
+        })
       } else if (primaryInCharge && reason && standby?.online === 'online' &&
         (missing || expired && stillWaiting)) {
         const cause = missing ? reason : reason + '，主用探测已超过 10 分钟未确认'
-        await this.mutate(id, row => {
+        await this.updateBinding(r, row => {
           const b = row.backup!
           b.phase = 'taking'; b.since = now; b.cycle = randomUUID(); delete b.problem
           control(row, 'take', `${cause}。先用 ${id ? 'read ' + id : 'overview --brief'} 读插件记录，接管后核对原 Run 收件箱。待处理：${pending.slice(0, 12).map(p => p.title).join('、') || '暂无'}。进行中的任务和执行者：${context || '暂无已登记任务'}。`)
           b.history.push({ at: now, text: `请求 ${b.handle} 接管：${cause}` })
-        }, r.revision)
+        })
       } else if (expired && !missing && !stillWaiting) {
-        await this.mutate(id, row => { row.backup!.phase = 'standby'; delete row.backup!.credential }, r.revision)
+        await this.updateBinding(r, row => { row.backup!.phase = 'standby'; delete row.backup!.credential })
       } else if (b.phase === 'active' && (!b.contact || route?.dispatch) && now - (b.lastProbe ?? b.since) >= hour && live?.online === 'online' &&
         !queue(r).some(d => d.control?.cycle === b.cycle && d.control.action === 'ready' && (d.state === 'pending' || d.state === 'sending'))) {
-        await this.mutate(id, row => { row.backup!.lastProbe = now; control(row, 'ready', '额度已恢复请确认。') }, r.revision)
+        await this.updateBinding(r, row => { row.backup!.lastProbe = now; control(row, 'ready', '额度已恢复请确认。') })
       } else if (problem !== b.problem) {
-        await this.mutate(id, row => { row.backup!.problem = problem; if (problem) record(row, problem, ownerRun) }, r.revision)
+        await this.updateBinding(r, row => { row.backup!.problem = problem; if (problem) record(row, problem, ownerRun) })
       } else return
     }
     this.changed(id)
@@ -220,15 +241,11 @@ export class BackupLeads {
     await this.mutate(id, r => {
       const b = r.backup
       if (!available(r) || !b || b.cycle !== c.cycle || !expectedPhases[c.action].includes(b.phase) || r.runId !== d.targetRunId) return
-      if (b.contact && c.handle === b.primary && (c.action === 'ready' || c.action === 'resume')) {
-        const dispatch = this.routes[b.contact.id]?.dispatch
-        if (!dispatch) fail('主用的联络 Dispatch 尚未就绪')
-        target = 'dispatch:' + dispatch
-      } else if (c.action === 'take' && b.standbyRunId) target = 'run:' + b.standbyRunId
+      target = this.controlTarget(b, c) || fail('主用的联络 Dispatch 尚未就绪')
       b.credential = fingerprint(token)
       probing = b.phase === 'probing'
       if (c.action === 'ready' && !probing) b.lastProbe = Date.now()
-      const command = `node ${JSON.stringify(clientPath)} lead-${c.action} ${r.runId} ${token}`
+      const command = `node ${JSON.stringify(promptClientPath())} lead-${c.action} ${r.runId} ${token}`
       body = d.body + '\n' + command + (c.action === 'handoff' ? ' "已做事项和剩余工作"' : '')
     })
     if (body) await this.runtime.requestTakeover(target, body, d.subject)
@@ -256,11 +273,12 @@ export class BackupLeads {
     let transferGeneration: number | undefined
     if (action === 'take' || action === 'resume') {
       const { owner, generation } = await this.runtime.runBinding(runId)
+      if (!Number.isSafeInteger(generation)) fail('Run 接管回执缺少代次')
       const previous = action === 'take' ? b.primary : b.handle
       if (owner !== caller) {
         if (input.confirm) {
           // A chat supplies its own run-current receipt. run-show independently corroborates its generation.
-          if (owner !== null || !chat(caller) || input.currentRunId !== runId || !Number.isSafeInteger(generation) ||
+          if (owner !== null || !chat(caller) || input.currentRunId !== runId ||
             input.generation !== generation || (b.generation !== undefined && generation <= b.generation)) fail('Run 接管回执不符')
         } else {
           if (owner === null && chat(caller) && b.generation !== undefined && b.generation !== generation) return { checkRun: runId }

@@ -488,6 +488,11 @@ test('the first write archives whole completed tasks and submit restores their h
     assert.deepEqual(result.task, old)
     const report = { id: 'm', from: '', body: '', at: Date.parse(old.submittedAt!) }
     assert.deepEqual(await c.store.archive.submittedReports({ ...saved, tasks: [] }, [report]), new Set(['m']))
+    // An in-memory version supersedes its archived proof even when the cursor is unchanged.
+    const newer = { ...report, at: Date.parse(old.submittedAt!) + 1 }
+    assert.deepEqual(await c.store.archive.submittedReports({ ...saved, tasks: [] }, [newer]), new Set())
+    const shadow = { ...old, submittedAt: '2000-01-01', updatedAt: '2000-01-01' }
+    assert.deepEqual(await c.store.archive.submittedReports({ ...saved, tasks: [shadow] }, [report]), new Set())
     const archive = await worker.request('project.archive', { projectId: 'p1' })
     assert.deepEqual(archive, { end: saved.archive!.end, tasks: [old], deliveries: 0, events: 1, requests: 0, history: 0 })
     const input = { operation: 'submit' as const, projectId: 'p1', revision: 1, requestId: 'reopen',
@@ -522,7 +527,20 @@ test('each pressure stage stops as soon as the write fits and old feedback remai
       assert.equal(saved.requests.length, stage < 2 ? 100 : 1)
       assert.equal(saved.tasks.length, stage < 3 ? 2 : 1)
       assert.equal(saved.archive?.last?.history, stage === 4 ? 2 : 0)
-      assert.deepEqual(await new ProjectStore(storage, dir).archive.task(saved, active.id), active)
+      const reopened = new ProjectStore(storage, dir)
+      assert.deepEqual(await reopened.archive.task(saved, active.id), active)
+      if (stage === 4) {
+        const archived = await reopened.mutate('p1', saved.revision, p => {
+          const t = p.tasks[0]
+          t.phase = 'completed'; t.progress = ''; t.updatedAt = '2000-01-01'
+          t.decisions[0].answer = '甲'; t.acceptance[0].status = 'passed'
+          for (let i = 0; i < 20; i++) submitTask(p, { ...deliverable, id: 'done-' + i, phase: 'completed', acceptance: [] })
+        })
+        assert.ok(!archived.tasks.some(t => t.id === active.id))
+        await reopened.archive.restore(archived, active.id, [])
+        assert.equal(archived.tasks.at(-1)!.acceptance[0].archivedHistory, 1)
+        assert.deepEqual((await reopened.archive.task(archived, active.id))!.acceptance[0].history, active.acceptance[0].history)
+      }
     }
   } finally { await rm(dir, { recursive: true, force: true }) }
 })
@@ -545,7 +563,7 @@ test('uncommitted task versions are invisible after a failed storage write and a
     const next = await store.mutate('p1', 1, project => { project.requests = Array.from({ length: 129 }, (_, i) => ({ id: String(i), fingerprint: fingerprint(i) })) })
     const restarted = new ProjectStore(storage, dir)
     assert.deepEqual(await restarted.archive.task(next, '0'), p.tasks[0])
-    assert.equal((await restarted.archive.page(next)).batch.previous!.end, saved.archive!.end)
+    assert.equal((await restarted.archive.page(next)).previous!.end, saved.archive!.end)
     await assert.rejects(() => store.mutate('p1', 2, project => {
       project.tasks[0].phase = 'paused'; project.tasks[0].goal = 'x'.repeat(205000)
     }), /剩余记录用于当前工作.*成果文件/)

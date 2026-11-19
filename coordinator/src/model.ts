@@ -91,6 +91,10 @@ export interface AgentSession {
   state?: string; stateStartedAt?: number
   online: 'online' | 'offline' | 'unknown'
 }
+export function actingMain(binding?: Pick<WorkspaceBinding, 'session' | 'backup'>): AgentSession | undefined {
+  const s = binding?.session, b = binding?.backup
+  return s && b?.handle && backupInCharge(b) ? { ...s, handle: b.handle, agent: b.agent, title: '备用主会话', online: 'unknown' } : s
+}
 export interface MainTakeover {
   id: string; target: AgentSession; expiresAt: string; state: 'sending' | 'waiting' | 'uncertain' | 'expired'
   error?: string
