@@ -35,7 +35,10 @@ test('Claude role hooks scope actions by Orca identity and fail open', () => {
   const assistant = (id, command) => ({ type: 'assistant', cwd: main, message: { role: 'assistant', content: [{ type: 'tool_use', name: 'Bash', id, input: { command } }] } });
   const result = (id, content, is_error = false) => ({ type: 'user', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: id, is_error, content }] } });
   const setTranscript = (...rows) => writeFileSync(transcript, rows.map(row => JSON.stringify(row)).join('\n') + '\n');
-  const receipt = (phase, projectId = 'p1', pendingAcceptance = phase === 'ready', pendingDecision = false) => JSON.stringify({ submission: { phase, projectId, pendingAcceptance, pendingDecision, requestId: 'request' }, ok: true });
+  const receipt = (phase, projectId = 'p1', pendingAcceptance = phase === 'ready', pendingDecision = false) => JSON.stringify({
+    submission: { projectId, revision: 2, requestId: 'request', taskId: 't1', phase, pendingAcceptance, pendingDecision }, ok: true,
+    result: { result: { projectId, revision: 2, project: { ref: { id: projectId }, revision: 2, runId: 'run_fixture' } } }
+  });
   try {
     for (const dir of [main, project, path.join(home, 'memory'), path.dirname(registry)]) mkdirSync(dir, { recursive: true });
     assert.equal(run('claude_workspace', '{}').stderr.trim().split('\n').length, 1);
@@ -139,7 +142,7 @@ test('Claude role hooks scope actions by Orca identity and fail open', () => {
     assert.equal(stop(false, 'claude_workspace'), undefined);
     assert.equal(stop(false, 'claude_worker'), undefined);
     const submit = assistant('call', 'node "' + client + '" submit input.json');
-    for (const reply of [receipt('ready', 'p2'), '{"ok":false}']) {
+    for (const reply of [receipt('ready', 'p2'), '{"ok":false}', '提交回执待核对，请用 read "p1" --task "t1" 核对。']) {
       setTranscript(done, submit, result('call', reply));
       assert.equal(stop(), 'block');
     }
@@ -149,7 +152,7 @@ test('Claude role hooks scope actions by Orca identity and fail open', () => {
     assert.equal(stop(), 'block');
     setTranscript(done, submit, result('call', receipt('ready')));
     assert.equal(stop(), undefined);
-    setTranscript(done, submit, result('call', 'Exit code 0\n' + receipt('completed').slice(0, -1) + ',"result":{... truncated ...'));
+    setTranscript(done, submit, result('call', 'Exit code 0\n' + receipt('completed').split(',"result":')[0] + ',"result":{... truncated ...'));
     assert.equal(stop(), undefined);
     setTranscript(done, submit, result('call', receipt('ready')), { ...done, uuid: 'new-message-uuid' });
     assert.equal(stop(), 'block');
@@ -204,8 +207,8 @@ test('Claude role hooks scope actions by Orca identity and fail open', () => {
     const structuredMail = codexResult('codex-check', JSON.stringify({ ok: true, result: { messages: [report] } }));
     const codexSubmit = rollout({ type: 'function_call', name: 'exec_command', call_id: 'codex-submit', arguments: JSON.stringify({ cmd: 'prefix; node client.mjs submit fixture.json' }) });
     const codexReceipt = (taskId, submittedAt, phase = 'working') => codexResult('codex-submit', JSON.stringify({ submission: {
-      projectId: 'p1', requestId: 'req-1', phase, submittedAt, executions: [{ runId: 'run_fixture', taskId, dispatchId: 'ctx_fixture' }]
-    }, ok: true }));
+      projectId: 'p1', revision: 2, requestId: 'req-1', taskId, phase, submittedAt, pendingAcceptance: false, pendingDecision: false
+    }, ok: true, result: { result: { projectId: 'p1', revision: 2, project: { ref: { id: 'p1' }, revision: 2, runId: 'run_fixture' } } } }));
     setTranscript(codexMail);
     assert.equal(stop(false, 'codex_project'), 'block');
     setTranscript(codexCheck, structuredMail, codexSubmit, codexReceipt('other-task', '2026-11-19T00:01:00.000Z'));

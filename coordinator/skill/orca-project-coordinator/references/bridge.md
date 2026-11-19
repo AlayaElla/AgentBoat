@@ -1,6 +1,6 @@
 # client.mjs 命令
 
-从 skill 标出的 AgentBoat 入口调用 `coordinator/scripts/client.mjs`。写命令的 JSON 放进文件（UTF-8，可带 BOM），文件路径作参数；标 stdin 的从标准输入读，这类输入不落文件。回执在 `result.result`。
+从 skill 标出的 AgentBoat 入口调用 `coordinator/scripts/client.mjs`。写命令的 JSON 放进文件（UTF-8，可带 BOM），文件路径作参数。标 stdin 的从标准输入读。回执在 `result.result`。提交任务、本机反馈、项目消息、绑定和显隐操作返回最新 revision 和精简的 project（ref、revision、runId）。`submit` 核对成功还会在开头返回 submission，直接保留原始输出供 Stop hook 识别。
 
 ## 备用接管
 
@@ -17,7 +17,7 @@
 
 - `projects`：项目列表，不含工作间主 agent 自己所在的目录。
 - `overview`：读取绑定、待处理、项目和连接全量。attention 是待决定、待验收、受阻、返修；questions 是仍在执行的 Orca 执行者在最近 24 小时发出、超过 10 分钟未回复的问题。执行记录不代表 agent 在线。
-- `overview --brief`：日常核对待办，返回 `{attention,questions,reports,projects:[{id,name,counts}]}`。questions 和 reports 是供管理员核对的项目 Run 邮件，插件先提醒项目主会话，再按超时情况提醒工作间主 agent。项目目录和连接设置在全量总览里。
+- `overview --brief`：日常核对待办，返回 `{attention,questions,reports,projects:[{id,name,counts,revision,bound}]}`。questions 和 reports 是供管理员核对的项目 Run 邮件，插件先提醒项目主会话，再按超时情况提醒工作间主 agent。全量总览另有项目目录、执行记录数（agents）和连接设置。
 - `read <projectId>`：`{project,lead}`，project 含 revision、runId、roles、tasks、events、deliveries。主备状态中的 history 给出最近 3 条接管记录，historyTotal 是当前保留的总条数。
 - `read <projectId> --task <taskId>`：核对单项任务及完整反馈历史，返回 `{projectId,revision,task}`。从归档找到时还返回 `archiveStatus: "已归档"`。再次 submit 同一编号会恢复并合并原任务。任务不存在时返回错误。
 - `lead-history [projectId] [--end <previousEnd>]`：按角色查接管记录，省略项目编号查工作间；用返回的 previousEnd 翻到更早一批。
@@ -41,7 +41,7 @@
  "executions":[{"runId":"…","taskId":"…","dispatchId":"…","agent":"codex"}],"sourceIds":[]}}
 ```
 
-- phase：working、blocked、paused、ready、completed。
+- 新建任务必填 id、title、goal、phase。更新同一 id 时，省略 title 或 goal 会保留原值。phase 取 working、blocked、paused、ready、completed。
 - 数组按 id 合并，省略的保留。任务、验收和来源的编号保持不变。成果 id 不能改写，每个新的成果版本用新 id；问题变了用新的决定 id。登记执行者成果时，在对应任务的 executions 保留 Orca Run、任务和派工编号。
 - 验收的 revision、status、history 由插件维护；核对内容或关联成果变了，自动出新版本。
 - 在 acceptance 或 decisions 中用 `{"id":"旧项编号","discarded":true,"reason":"已由新版取代"}` 撤下已有待处理项。沿用同一验收编号提交有变化的核对内容或成果，会开启新一版并保留旧版历史。
@@ -62,7 +62,7 @@
 - 验收用 `passed` 或 `changes_requested`，需要修改时必须写意见。丢弃验收或决定用 `"result":"discarded"`，原因选填在 `note`，决定省略 `answer`。
 - 答复受阻项用 `{"taskId":"任务编号","kind":"blocked","itemId":"任务编号","itemRevision":1,"note":"主人原话"}`。itemRevision 取任务的 blockedRevision，旧记录省略该字段时取 0。可以继续补充；丢弃时加 `"result":"discarded"`，原因选填在 `note`。项目主会话重新提交任务后，按新状态和版本处理。
 - requestId 可省略。带上时，原样重放不会重复写入。
-- 代处理已开放的对方项目，在顶层加连接编号 `id`，并提供对方的 projectId、revision 和唯一 requestId。离线或回执未确认时保留原请求编号核对。
+- 代处理已开放的对方项目，在顶层加连接编号 `id`，并提供对方的 projectId、revision 和唯一 requestId。成功回执含逐项状态，对方的最新 revision 从同步后的项目报告读取。离线或回执未确认时保留原请求编号核对。
 - 只给项目主 agent 发一条消息，后续由它跟进。
 
 ## 工作间主 agent

@@ -74,11 +74,12 @@ function fakeWorkspace(t) {
   const ref = { id: 'p1', repoId: 'repo1', name: '现有项目', path: projectDir, workspace: 'identity:demo-project', hostId: 'local' };
   const state = { ref, repos: [{ id: ref.repoId, path: projectDir, kind: 'git', worktreeBasePath: directory }],
     main: { runId: 'run_main', session: { handle: 'orca_session_id:demo-main', path: mainDir } },
-    project: { ref, revision: 0, runId: '', roles: { design: 'codex', code: 'claude', review: 'codex' }, messages: [], tasks: [] } };
+    project: { ref, revision: 0, runId: '', roles: { design: 'codex', code: 'claude', review: 'codex' }, messages: [], tasks: [], requests: [] } };
   const set = (value = state) => writeFileSync(data, JSON.stringify(value));
   const read = () => JSON.parse(readFileSync(data));
   set();
   writeFileSync(fixture, `import cp from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { syncBuiltinESMExports } from 'node:module';
 import { readFileSync, writeFileSync, appendFileSync } from 'node:fs';
 const real = cp.execFileSync;
@@ -114,6 +115,7 @@ cp.execFileSync = (executable, args, options) => {
         if (input.revision !== s.project.revision) {
           const error = Error('stale revision'); error.stdout = JSON.stringify({ ok: false, error: { code: 'plugin_request_failed', data: { requestCode: 'invalid_request' }, message: '项目已更新，请刷新后再提交' } }); throw error;
         }
+        s.project.requests.push({ id: input.requestId, fingerprint: createHash('sha256').update(arg('--data')).digest('hex') });
         s.project.tasks.push(input.task); s.project.revision++; save();
       }
       return plugin({ project: s.project, lead: s.lead });

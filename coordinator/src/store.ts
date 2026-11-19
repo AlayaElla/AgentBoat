@@ -232,8 +232,8 @@ export function submitTask(project: Project, raw: unknown): void {
   const phase = input.phase
   if (!['working', 'ready', 'completed', 'blocked', 'paused'].includes(phase)) fail('任务阶段不正确')
   const task: Task = old ? structuredClone(old) : { id, title: '', goal: '', progress: '', phase, executions: [], artifacts: [], acceptance: [], decisions: [], sourceIds: [], updatedAt: '' }
-  task.title = text(input.title, '任务标题', 200)
-  task.goal = text(input.goal, '任务目标', 16000)
+  task.title = text(input.title === undefined ? old?.title : input.title, '任务标题', 200)
+  task.goal = text(input.goal === undefined ? old?.goal : input.goal, '任务目标', 16000)
   task.progress = typeof input.progress === 'string' ? input.progress.slice(0, 16000) : task.progress
   task.phase = phase
   delete task.blockedStatus

@@ -685,6 +685,21 @@ test('acceptance keeps user conclusions and resets only changed items', () => {
   assert.throws(() => submitTask(p, { ...deliverable, artifacts: [{ ...deliverable.artifacts[0], url: 'D:\\Other\\secret.txt' }] }))
 })
 
+test('task updates preserve omitted titles and goals and validate supplied values', () => {
+  const p = fresh(refs[0]), update = { id: deliverable.id, phase: 'working' }
+  assert.throws(() => submitTask(p, update), /任务标题/)
+  assert.throws(() => submitTask(p, { ...update, title: '标题' }), /任务目标/)
+  submitTask(p, deliverable)
+  submitTask(p, update)
+  assert.equal(p.tasks[0].title, deliverable.title)
+  assert.equal(p.tasks[0].goal, deliverable.goal)
+  submitTask(p, { ...update, title: '新标题' })
+  assert.equal(p.tasks[0].title, '新标题')
+  assert.equal(p.tasks[0].goal, deliverable.goal)
+  assert.throws(() => submitTask(p, { ...update, title: null }), /任务标题/)
+  assert.throws(() => submitTask(p, { ...update, goal: '' }), /任务目标/)
+})
+
 test('blocked replies record owner words, allow supplements and discard, and expire on task submission', () => {
   const p = sample().project!, task = p.tasks[1], id = task.id
   delete task.blockedRevision // Existing blocked task from before reply support.

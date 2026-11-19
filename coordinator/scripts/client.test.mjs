@@ -159,20 +159,21 @@ test('submit emits the hook receipt only for the exact saved write and preserves
       const fingerprint=process.env.TEST_UNMATCHED?'wrong':createHash('sha256').update(raw).digest('hex');
       const archived=!!process.env.TEST_ARCHIVED, task={...input.task,acceptance:archived?[]:[{status:'pending'}]};
       return JSON.stringify({ok:true,result:{result:{submitted:archived?{id:task.id,phase:task.phase,pendingAcceptance:false,pendingDecision:false}:undefined,project:{
-        ref:{id:input.projectId},revision:2,archive:archived?{last:{revision:2,tasks:1}}:undefined,
+        ref:{id:input.projectId},revision:2,runId:'run_self',archive:archived?{last:{revision:2,tasks:1}}:undefined,
         tasks:archived?[]:[task],requests:[{id:input.requestId,fingerprint}]
       }}}});
     };syncBuiltinESMExports();`);
   writeFileSync(input, JSON.stringify({ projectId: 'p1', revision: 1, runId: 'run_self', requestId: 'one', task: { id: 't1', phase: 'ready' } }));
   try {
-    const call = (unmatched, archived = false) => JSON.parse(execFileSync(process.execPath, ['--import', pathToFileURL(fixture).href, 'scripts/client.mjs', 'submit', input], {
-      encoding: 'utf8', windowsHide: true, env: { ...process.env, TEST_UNMATCHED: unmatched ? '1' : '', TEST_ARCHIVED: archived ? '1' : '' }
-    }));
-    const reply = call(false);
-    assert.deepEqual(reply.submission, { projectId: 'p1', requestId: 'one', taskId: 't1', phase: 'ready', pendingAcceptance: true, pendingDecision: false });
-    assert.equal(reply.result.result.project.ref.id, 'p1');
-    assert.equal(call(true).submission, undefined);
-    const archived = call(false, true);
+    const call = (unmatched, archived = false) => execFileSync(process.execPath, ['--import', pathToFileURL(fixture).href, 'scripts/client.mjs', 'submit', input], {
+      encoding: 'utf8', windowsHide: true, stdio: ['ignore','pipe','pipe'], env: { ...process.env, TEST_UNMATCHED: unmatched ? '1' : '', TEST_ARCHIVED: archived ? '1' : '' }
+    });
+    const raw = call(false), reply = JSON.parse(raw);
+    assert.match(raw, /^\{"submission":\{[^\n]+?\},"ok":true,/);
+    assert.deepEqual(reply.submission, { projectId: 'p1', revision: 2, requestId: 'one', taskId: 't1', phase: 'ready', pendingAcceptance: true, pendingDecision: false });
+    assert.deepEqual(reply.result.result.project, { ref: { id: 'p1' }, revision: 2, runId: 'run_self' });
+    assert.throws(() => call(true), e => e.status === 1 && !e.stdout && /^[^\n]*read "p1" --task "t1"[^\n]*\n$/.test(e.stderr));
+    const archived = JSON.parse(call(false, true));
     assert.deepEqual(archived.submission, { ...reply.submission, pendingAcceptance: false });
     assert.equal(archived.result.result.submitted, undefined);
     assert.equal(archived.result.result.project.archive, undefined);
@@ -186,7 +187,7 @@ const ref={id:'p1',name:'示例',path:'/private/path'}, counts={working:2};
 const hidden='history-marker', backup={phase:'taking',history:[hidden.repeat(4096),'a','b','c']};
 const project={ref, revision:3, archive:{id:hidden}, backup, requests:[], deliveries:[{state:'sent',body:'live'}],
   tasks:[{id:'t1',title:'一',decisions:[{id:'d',history:['current'],archivedHistory:12}]},{id:'t2',title:'二'}],events:[]};
-const overview={workspace:{runId:'main',backup},links:['private'],attention:[{title:'待决定'}],questions:[{id:'msg_1'}],projects:[{ref,counts}]};
+const overview={workspace:{runId:'main',backup},links:['private'],attention:[{title:'待决定',fingerprint:'digest'}],questions:[{id:'msg_1'}],projects:[{ref,counts,revision:3,bound:false,agents:[{runId:'r'}]}]};
 cp.execFileSync=(_exe,args)=>{const archived=args.includes('--data')&&JSON.parse(args[args.indexOf('--data')+1]).taskId==='old';
 return JSON.stringify({ok:true,id:'fixture',result:{result:args[4]==='workspace.overview'?overview:args[4]==='lead.history'?{history:[hidden]}:args[4]==='workspace.agent'?overview.workspace:args[4]==='project.lead'?{binding:{backup}}:{project,lead:{backup},...(archived?{task:{id:'old',goal:'archived-body'},archiveStatus:'已归档'}:{})}}});};
 syncBuiltinESMExports();`);
@@ -194,9 +195,12 @@ syncBuiltinESMExports();`);
     { encoding: 'utf8', windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] }));
   try {
     assert.deepEqual(call('overview', '--brief'), { ok: true, id: 'fixture', result: { result: {
-      attention: [{ title: '待决定' }], questions: [{ id: 'msg_1' }], projects: [{ id: 'p1', name: '示例', counts: { working: 2 } }]
+      attention: [{ title: '待决定' }], questions: [{ id: 'msg_1' }], projects: [{ id: 'p1', name: '示例', counts: { working: 2 }, revision: 3, bound: false }]
     } } });
-    assert.equal(call('overview').result.result.workspace.runId, 'main');
+    const full = call('overview').result.result;
+    assert.equal(full.workspace.runId, 'main');
+    assert.equal(full.projects[0].agents, 1);
+    assert.equal(full.attention[0].fingerprint, 'digest');
     assert.deepEqual(call('read', 'p1', '--task', 't2').result.result, { projectId: 'p1', revision: 3, task: { id: 't2', title: '二' } });
     assert.equal(call('read', 'p1').result.result.project.tasks.length, 2);
     assert.deepEqual(call('read', 'p1', '--task', 'old').result.result, { projectId: 'p1', revision: 3, task: { id: 'old', goal: 'archived-body' }, archiveStatus: '已归档' });
@@ -212,6 +216,57 @@ syncBuiltinESMExports();`);
     assert.deepEqual(read.project.deliveries, [{state:'sent',body:'live'}]);
     assert.deepEqual(call('lead-history','p1','--end','42').result.result.history, ['history-marker']);
     assert.throws(() => call('read', 'p1', '--task', 'absent'), /找不到任务 absent/);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('write receipts identify the affected project or message and omit unrelated records', () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'write-receipt-'));
+  const fixture = path.join(dir, 'host.mjs'), file = path.join(dir, 'request.json');
+  writeFileSync(fixture, `import cp from 'node:child_process'; import {syncBuiltinESMExports} from 'node:module';
+cp.execFileSync=(_exe,args)=>args[0]==='orchestration'?'{"ok":true,"result":{"run":{"id":"run_self"}}}':process.env.TEST_RECEIPT;
+syncBuiltinESMExports();`);
+  const call = (command, view, input, stdin = false) => {
+    writeFileSync(file, JSON.stringify(input));
+    const raw = execFileSync(process.execPath, ['--import', pathToFileURL(fixture).href, 'scripts/client.mjs', command, ...(stdin ? [] : [file])], {
+      encoding: 'utf8', windowsHide: true, input: JSON.stringify(input),
+      env: { ...process.env, ORCA_AGENT_SESSION_ID: 'test', TEST_RECEIPT: JSON.stringify({ ok: true, result: { result: view } }) }
+    });
+    assert.doesNotMatch(raw, /private-marker/);
+    return JSON.parse(raw).result.result;
+  };
+  try {
+    const project = { ref: { id: 'p1', name: 'Example' }, revision: 3, runId: 'run_self' };
+    const session = { handle: 'handle' };
+    const view = { project: { ...project, tasks: ['private-marker'] }, projects: ['private-marker'], lead: { session } };
+    const base = { project, projectId: 'p1', revision: 3 };
+    const request = { projectId: 'p1', requestId: 'req', token: 'fixture' };
+    for (const op of ['bind', 'project-lead-bind', 'restore', 'hide']) {
+      view.project.hidden = op === 'hide';
+      assert.deepEqual(call(op, view, request, op === 'project-lead-bind'), { ...base, bound: true, hidden: view.project.hidden, session });
+    }
+    const items = [{ taskId: 't', kind: 'decision', itemId: 'd', answer: 'private-marker' },
+      { taskId: 't', kind: 'acceptance', itemId: 'a', result: 'passed' }];
+    const statuses = [{ taskId: 't', kind: 'decision', itemId: 'd', status: 'answered' }, { taskId: 't', kind: 'acceptance', itemId: 'a', status: 'passed' }];
+    assert.deepEqual(call('feedback', view, { ...request, items }), { ...base, items: statuses });
+    const delegated = { ...request, id: 'peer', items };
+    for (const state of ['submitted', 'uncertain', 'rejected']) {
+      const peerReply = { requestId: request.requestId, state };
+      assert.deepEqual(call('feedback', peerReply, delegated), state === 'submitted' ? { ...peerReply, projectId: 'p1', items: statuses } : peerReply);
+    }
+    const message = call('message', view, request);
+    assert.equal(message.revision, 3);
+    assert.equal(message.queued, false);
+    assert.equal(message.autoLaunch.status, 'already-bound');
+    assert.deepEqual(call('links-send', { revision: 3, peers: [{ id: 'private-marker' }, { id: 'peer', pendingMessages: 0 }] },
+      { id: 'peer', requestId: 'req' }, true), { id: 'peer', requestId: 'req', revision: 3, pendingMessages: 0 });
+    const mailbox = { revision: 4, inbox: ['private-marker'], deliveries: [{ id: 'other', state: 'sent' }, { id: 'agent-reply:req', state: 'uncertain' }] };
+    assert.deepEqual(call('feishu-reply', mailbox, { eventId: 'event', requestId: 'req' }), { eventId: 'event', requestId: 'req', revision: 4, state: 'uncertain' });
+    const task = { id: 't', contextId: 'c', status: { state: 'TASK_STATE_COMPLETED' }, history: ['private-marker'] };
+    const a2a = { revision: 6, entries: [{ id: 'req', direction: 'outgoing', task }, { id: 'in', direction: 'incoming', replyId: 'req', task: { ...task, id: 'in' } }] };
+    for (const op of ['connection-send', 'connection-reply']) {
+      assert.deepEqual(call(op, { a2a }, { requestId: 'req', id: 'in' }, true),
+        { revision: 6, requestId: 'req', taskId: op === 'connection-send' ? 't' : 'in', contextId: 'c', state: 'TASK_STATE_COMPLETED' });
+    }
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 

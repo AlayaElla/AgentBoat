@@ -101,77 +101,97 @@ try {
       stdout = await request();
     }
   }
-  if (release) {
-    const reply = JSON.parse(stdout);
-    if (!reply.ok) throw Object.assign(new Error(reply.error.message), { code: reply.error.code });
-  }
-  const envelope = JSON.parse(stdout), view = envelope.result?.result;
-  if (envelope.ok && view && !singleTask && !brief) {
-    for (const binding of [view, view.binding, view.workspace, view.lead, view.project]) {
-      const backup = binding?.backup;
-      if (Array.isArray(backup?.history)) {
-        backup.historyTotal = backup.history.length;
-        backup.history = backup.history.slice(-3);
-      }
-    }
-    if (view.project) {
-      delete view.project.archive;
-      for (const task of view.project.tasks ?? []) {
-        for (const item of [...task.acceptance ?? [], ...task.decisions ?? []]) delete item.archivedHistory;
-      }
-    }
-    stdout = JSON.stringify(envelope) + '\n';
-  }
-  if (operation === 'main-bind' && !input.checkOnly) {
-    const reply = JSON.parse(stdout), binding = reply.result?.result;
-    if (reply.ok && binding?.runId === input.runId && binding.session?.handle === caller) {
-      try { writeMainRoleCards(binding.session.path); }
-      catch (error) { binding.roleCardWarning = `绑定已成功，角色卡未完整写入：${error.message}。修正后用原请求重试。`; }
-    }
-    process.stdout.write(JSON.stringify(reply, null, 2) + '\n');
-  } else if (operation === 'submit') {
-    const reply = JSON.parse(stdout), result = reply.result?.result, project = result?.project;
-    const task = project?.tasks?.find(t => t.id === input.task?.id) ?? result?.submitted ?? result?.task;
-    if (result) { delete result.submitted; delete result.task; delete result.archiveStatus; }
+  const reply = JSON.parse(stdout), view = reply.result?.result;
+  if (release && !reply.ok) throw Object.assign(new Error(reply.error.message), { code: reply.error.code });
+  const success = reply.ok && reply.result?.ok !== false;
+  let submission;
+  if (operation === 'submit' && success) {
+    const project = view?.project;
+    const task = project?.tasks?.find(t => t.id === input.task?.id) ?? view?.submitted ?? view?.task;
     const fingerprint = createHash('sha256').update(JSON.stringify(input)).digest('hex');
-    if (reply.ok && project?.ref?.id === input.projectId && task && task.id === input.task?.id && project.requests?.some(r => r.id === input.requestId && r.fingerprint === fingerprint)) {
-      const submission = { projectId: project.ref.id, requestId: input.requestId, taskId: task.id, phase: task.phase, pendingAcceptance: task.pendingAcceptance ?? task.acceptance?.some(a => a.status === 'pending') ?? false, pendingDecision: task.pendingDecision ?? task.decisions?.some(d => d.answer === undefined) ?? false,
-        submittedAt: task.submittedAt };
-      process.stdout.write(JSON.stringify({ submission, ...reply }) + '\n');
-    } else {
-      process.stdout.write(JSON.stringify(reply) + '\n');
+    if (!project?.ref || project.ref.id !== input.projectId || !task || task.id !== input.task?.id ||
+        !project.requests?.some(r => r.id === input.requestId && r.fingerprint === fingerprint)) {
+      process.stderr.write(`提交回执待核对，请用 read ${JSON.stringify(input.projectId)} --task ${JSON.stringify(input.task?.id)} 核对。\n`);
+      process.exit(1);
     }
-  } else if (brief || singleTask) {
-    const reply = JSON.parse(stdout), result = reply.result?.result;
-    if (reply.ok && reply.result?.ok !== false && result) {
-      if (brief) {
-        const { attention, questions, reports, projects, error } = result;
-        reply.result.result = { attention, questions, reports, projects: projects.map(({ ref, counts }) => ({ id: ref.id, name: ref.name, counts })), error };
-      } else {
-        const { project } = result, task = result.task ?? project.tasks.find(task => task.id === taskId);
-        if (!task) {
-          process.stderr.write(`项目 ${project.ref.id} 中找不到任务 ${taskId}。\n`);
-          process.exit(1);
+    submission = { projectId: project.ref.id, revision: project.revision, requestId: input.requestId, taskId: task.id, phase: task.phase,
+      pendingAcceptance: task.pendingAcceptance ?? task.acceptance?.some(a => a.status === 'pending') ?? false,
+      pendingDecision: task.pendingDecision ?? task.decisions?.some(d => d.answer === undefined) ?? false, submittedAt: task.submittedAt };
+  }
+  if (success && view) {
+    const project = view.project;
+    if (project && ['submit', 'feedback', 'message', 'bind', 'project-lead-bind', 'hide', 'restore'].includes(operation)) {
+      const { ref, revision, runId } = project;
+      const receipt = { project: { ref, revision, runId }, projectId: ref.id, revision };
+      if (operation === 'message') {
+        receipt.queued = view.queued ?? false;
+        if (view.queued) {
+          try {
+            const { autoProjectLead } = await import('../../workspace/workspace.mjs');
+            receipt.autoLaunch = autoProjectLead(input.projectId, input.runId);
+          } catch (error) {
+            receipt.autoLaunch = { status: 'not-confirmed', projectName: ref.name, reason: error.message };
+          }
+        } else receipt.autoLaunch = { status: 'already-bound', projectName: ref.name, reason: '项目已绑定主 agent' };
+      } else if (operation !== 'submit' && operation !== 'feedback') {
+        receipt.hidden = !!project.hidden;
+        receipt.bound = !!runId;
+        receipt.session = view.lead?.session;
+      }
+      reply.result.result = receipt;
+    } else if (operation === 'links-send') {
+      const peer = view.peers.find(p => p.id === input.id.trim());
+      reply.result.result = { id: input.id, requestId: input.requestId, revision: view.revision, pendingMessages: peer?.pendingMessages ?? null };
+    } else if (operation === 'feishu-reply') {
+      const delivery = view.deliveries.find(d => d.id === `agent-reply:${input.requestId.trim()}`);
+      reply.result.result = { eventId: input.eventId, requestId: input.requestId, revision: view.revision, state: delivery?.state ?? 'uncertain', error: delivery?.error };
+    } else if (operation === 'connection-send' || operation === 'connection-reply') {
+      const entry = view.a2a.entries.find(e => operation === 'connection-send'
+        ? e.direction === 'outgoing' && e.id === input.requestId.trim()
+        : e.direction === 'incoming' && e.task.id === input.id.trim() && e.replyId === input.requestId.trim());
+      reply.result.result = { requestId: input.requestId, revision: view.a2a.revision, taskId: entry?.task.id, contextId: entry?.task.contextId,
+        state: entry?.task.status.state ?? 'uncertain', error: entry?.error };
+    } else if (brief) {
+      const { attention, questions, reports, projects, error } = view;
+      reply.result.result = { attention: attention.map(({ fingerprint, ...item }) => item), questions, reports,
+        projects: projects.map(({ ref, counts, revision, bound }) => ({ id: ref.id, name: ref.name, counts, revision, bound })), error };
+    } else if (singleTask) {
+      const task = view.task ?? project.tasks.find(task => task.id === taskId);
+      if (!task) {
+        process.stderr.write(`项目 ${project.ref.id} 中找不到任务 ${taskId}。\n`);
+        process.exit(1);
+      }
+      reply.result.result = { projectId: project.ref.id, revision: project.revision, task, ...(view.archiveStatus ? { archiveStatus: view.archiveStatus } : {}) };
+    } else {
+      if (operation === 'overview') for (const p of view.projects) p.agents = p.agents.length;
+      for (const binding of [view, view.binding, view.workspace, view.lead, project]) {
+        const backup = binding?.backup;
+        if (Array.isArray(backup?.history)) {
+          backup.historyTotal = backup.history.length;
+          backup.history = backup.history.slice(-3);
         }
-        reply.result.result = { projectId: project.ref.id, revision: project.revision, task, ...(result.archiveStatus ? { archiveStatus: result.archiveStatus } : {}) };
+      }
+      if (project) {
+        delete project.archive;
+        for (const task of project.tasks ?? []) {
+          for (const item of [...task.acceptance ?? [], ...task.decisions ?? []]) delete item.archivedHistory;
+        }
+      }
+      if (operation === 'main-bind' && !input.checkOnly && view.runId === input.runId && view.session?.handle === caller) {
+        try { writeMainRoleCards(view.session.path); }
+        catch (error) { view.roleCardWarning = `绑定已成功，角色卡未完整写入：${error.message}。修正后用原请求重试。`; }
       }
     }
-    process.stdout.write(JSON.stringify(reply) + '\n');
-  } else if (operation !== 'message') process.stdout.write(stdout);
-  else {
-    const reply = JSON.parse(stdout), result = reply.result?.result;
-    if (reply.ok && result?.project) {
-      if (result.queued) {
-        try {
-          const { autoProjectLead } = await import('../../workspace/workspace.mjs');
-          result.autoLaunch = autoProjectLead(input.projectId, input.runId);
-        } catch (error) {
-          result.autoLaunch = { status: 'not-confirmed', projectName: result.project.ref.name, reason: error.message };
-        }
-      } else result.autoLaunch = { status: 'already-bound', projectName: result.project.ref.name, reason: '项目已绑定主 agent' };
+    if (operation === 'feedback' && (project || view.state === 'submitted')) {
+      const receipt = reply.result.result;
+      receipt.projectId = input.projectId;
+      receipt.items = input.items.map(({ taskId, kind, itemId, result }) => ({
+        taskId, kind, itemId, status: result || (kind === 'decision' ? 'answered' : 'replied')
+      }));
     }
-    process.stdout.write(JSON.stringify(reply, null, 2) + '\n');
   }
+  const output = submission ? { submission, ok: true, ...reply } : reply;
+  process.stdout.write(JSON.stringify(output, null, operation === 'main-bind' && !input.checkOnly ? 2 : undefined) + '\n');
 } catch (e) {
   let error = e;
   for (const output of [e.stdout, e.stderr]) {
