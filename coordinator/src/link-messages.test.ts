@@ -194,7 +194,7 @@ test('files stream through sync in both directions and verified local paths reac
     assert.ok(rejection.delivery.body.includes('1 GB 接收上限'))
     await until(async () => (await a.read()).peers[0].recentMessages?.some(m => m.requestId === 'over-incoming-quota' && m.state === 'failed'))
     assert.equal((await readdir(path.join(root, 'b', 'received', (await a.read()).workspaceId))).length, 1)
-  } finally { await b.close(); await a.close(); await rm(root, { recursive: true, force: true }) }
+  } finally { await b.close(); await a.close(); await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }) }
 })
 
 test('attachment disk offsets survive restarts, unsafe names are cleaned and revocation keeps finalized files', async () => {
@@ -226,7 +226,7 @@ test('attachment disk offsets survive restarts, unsafe names are cleaned and rev
     await assert.rejects(() => stat(path.join(root, 'outgoing', 'peer')), /ENOENT/)
     await assert.rejects(() => stat(path.join(root, 'receiving', 'peer')), /ENOENT/)
     assert.equal(sha(await readFile(done.files[0].path)), file.sha256)
-  } finally { await rm(root, { recursive: true, force: true }) }
+  } finally { await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }) }
 })
 
 test('the disk journal preserves existing text deduplication and grows past the host per-key limit', async () => {
@@ -245,7 +245,7 @@ test('the disk journal preserves existing text deduplication and grows past the 
     assert.deepEqual((await restarted.receive('peer-0', { messages: [{ requestId: 'message-0', text: body }], received: [] }, queue)).received, ['message-0'])
     assert.equal(delivered, 500)
     assert.equal((await restarted.data()).length, 500)
-  } finally { await rm(root, { recursive: true, force: true }) }
+  } finally { await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }) }
 })
 
 test('both main agents exchange messages on one listener, with durable offline delivery and replay protection', async () => {
