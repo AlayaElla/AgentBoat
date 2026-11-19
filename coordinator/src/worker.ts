@@ -12,7 +12,7 @@ import { ProjectStore, artifactUrl, fail, feedback, fingerprint, fresh, maxMessa
 import { WorkspaceLinks } from './links'
 import { fileErrorText, incomingHash, linkMessageHistory } from './link-messages'
 import { LinkFiles } from './link-files'
-import { taskState, groupedAttention, isProjectShared, isRunNotice, type OwnerQuestion } from './model'
+import { groupedAttention, isProjectShared, isRunNotice, type OwnerQuestion } from './model'
 import { mainAgent, roleReminder, switchLead, takeoverView, recoverTakeover } from './main-agent'
 import { projectLeadDefaults } from '../../workspace/agent-launch.mjs'
 import { promptClientPath, installationRoot, release, roleRegistryPath } from '../scripts/orca-cli.mjs'
@@ -599,12 +599,11 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
     })
     await flushMailbox(); return messagingSnapshot()
   })
-  orca.panels.handle('workspace.overview', async input => {
+  orca.panels.handle('workspace.overview', async () => {
     const { list, error } = await availableProjectRecords()
     // Orca registration defines membership. A project can be registered without a workspace.
     const inbox = await unsubmitted(questions, list)
-    const records = input?.agent ? list.map(p => ({ ...p, archive: undefined })) : list
-    return { ...overview(records, await store.workspace(), error), questions: inbox.filter(item => !item.report), reports: inbox.filter(item => item.report), workspace: await main.read(live), links: await links.snapshot(), connections: await connections.list(), machines: [{ id: 'local', name: os.hostname(), role: 'host' as const, online: true }] }
+    return { ...overview(list, await store.workspace(), error), questions: inbox.filter(item => !item.report), reports: inbox.filter(item => item.report), workspace: await main.read(live), links: await links.snapshot(), connections: await connections.list(), machines: [{ id: 'local', name: os.hostname(), role: 'host' as const, online: true }] }
   })
   orca.panels.handle('workspace.message', async input => {
     const id = text(input.projectId, '项目编号', 200)
@@ -720,11 +719,7 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
     const id = text(input.projectId, '项目编号', 200)
     if (input.operation === 'read') {
       const result = await snapshot(id)
-      if (!result.project) return result
-      if (input.taskId === undefined) {
-        if (input.agent) result.project.tasks = result.project.tasks.map(t => ({ ...t, state: taskState(t) }))
-        return result
-      }
+      if (input.taskId === undefined || !result.project) return result
       const taskId = text(input.taskId, '任务编号', 200)
       const task = await store.archive.task(result.project, taskId)
       return { ...result, task, ...(task && !result.project.tasks.some(t => t.id === taskId) ? { archiveStatus: '已归档' as const } : {}) }

@@ -31,8 +31,8 @@ function readInput(file) {
   const raw = file === 0 ? (stdin = readFileSync(0, 'utf8')) : readFileSync(file, 'utf8');
   return JSON.parse(raw.replace(/^\uFEFF/, ''));
 }
-const input = history ? { projectId: historyProject, end: historyArgs.length ? Number(historyArgs[1]) : undefined } : leadAction ? { runId: argument, action: operation.slice(5), caller, token: flag, ...(taskId ? { note: taskId } : {}) } : operation === 'connections' ? { operation: 'read' } : operation.startsWith('connection-') ? { ...(['connection-read','connection-check'].includes(operation) ? { name: argument } : readInput(0)), operation: operation.slice(11) } : operation.startsWith('links-') ? { ...(['links-join', 'links-configure', 'links-rename', 'links-share', 'links-relate', 'links-revoke', 'links-send'].includes(operation) ? readInput(0) : {}), operation: operation.slice(6) } : operation === 'overview' ? { agent: true } : operation === 'projects' ? null : operation === 'main-read' ? { operation: 'read' } : operation === 'read'
-  ? { operation, projectId: argument, ...(singleTask ? { taskId } : { agent: true }) }
+const input = history ? { projectId: historyProject, end: historyArgs.length ? Number(historyArgs[1]) : undefined } : leadAction ? { runId: argument, action: operation.slice(5), caller, token: flag, ...(taskId ? { note: taskId } : {}) } : operation === 'connections' ? { operation: 'read' } : operation.startsWith('connection-') ? { ...(['connection-read','connection-check'].includes(operation) ? { name: argument } : readInput(0)), operation: operation.slice(11) } : operation.startsWith('links-') ? { ...(['links-join', 'links-configure', 'links-rename', 'links-share', 'links-relate', 'links-revoke', 'links-send'].includes(operation) ? readInput(0) : {}), operation: operation.slice(6) } : ['projects', 'overview'].includes(operation) ? null : operation === 'main-read' ? { operation: 'read' } : operation === 'read'
+  ? { operation, projectId: argument, ...(singleTask ? { taskId } : {}) }
   : operation === 'project-lead' ? { projectId: argument }
   : operation === 'main-targets' ? null
   : { ...readInput(operation === 'main-bind' || leadBind || leadSwitch ? 0 : argument), ...(['message', 'feedback', 'feishu-reply', 'project-lead-switch'].includes(operation) ? {} : { operation: operation === 'main-bind' || leadBind ? 'bind' : operation }) };
@@ -105,86 +105,73 @@ try {
     const reply = JSON.parse(stdout);
     if (!reply.ok) throw Object.assign(new Error(reply.error.message), { code: reply.error.code });
   }
-  const reply = JSON.parse(stdout), result = reply.result?.result, project = result?.project;
-  if (reply.ok && reply.result?.ok !== false && result) {
-    if (operation === 'main-bind' && !input.checkOnly && result.runId === input.runId && result.session?.handle === caller) {
-      try { writeMainRoleCards(result.session.path); }
-      catch (error) { result.roleCardWarning = `绑定已成功，角色卡未完整写入：${error.message}。修正后用原请求重试。`; }
-    }
-    if (operation === 'submit') {
-      const task = project?.tasks?.find(t => t.id === input.task?.id) ?? result.submitted ?? result.task;
-      const fingerprint = createHash('sha256').update(JSON.stringify(input)).digest('hex');
-      if (project?.ref?.id === input.projectId && task && task.id === input.task?.id && project.requests?.some(r => r.id === input.requestId && r.fingerprint === fingerprint)) {
-        reply.submission = { projectId: project.ref.id, requestId: input.requestId, taskId: task.id, phase: task.phase,
-          pendingAcceptance: task.pendingAcceptance ?? task.acceptance?.some(a => a.status === 'pending') ?? false,
-          pendingDecision: task.pendingDecision ?? task.decisions?.some(d => d.answer === undefined) ?? false, submittedAt: task.submittedAt };
+  const envelope = JSON.parse(stdout), view = envelope.result?.result;
+  if (envelope.ok && view && !singleTask && !brief) {
+    for (const binding of [view, view.binding, view.workspace, view.lead, view.project]) {
+      const backup = binding?.backup;
+      if (Array.isArray(backup?.history)) {
+        backup.historyTotal = backup.history.length;
+        backup.history = backup.history.slice(-3);
       }
-      delete result.submitted;
-      delete result.task;
-      delete result.archiveStatus;
     }
-    if (operation === 'message' && project) {
+    if (view.project) {
+      delete view.project.archive;
+      for (const task of view.project.tasks ?? []) {
+        for (const item of [...task.acceptance ?? [], ...task.decisions ?? []]) delete item.archivedHistory;
+      }
+    }
+    stdout = JSON.stringify(envelope) + '\n';
+  }
+  if (operation === 'main-bind' && !input.checkOnly) {
+    const reply = JSON.parse(stdout), binding = reply.result?.result;
+    if (reply.ok && binding?.runId === input.runId && binding.session?.handle === caller) {
+      try { writeMainRoleCards(binding.session.path); }
+      catch (error) { binding.roleCardWarning = `绑定已成功，角色卡未完整写入：${error.message}。修正后用原请求重试。`; }
+    }
+    process.stdout.write(JSON.stringify(reply, null, 2) + '\n');
+  } else if (operation === 'submit') {
+    const reply = JSON.parse(stdout), result = reply.result?.result, project = result?.project;
+    const task = project?.tasks?.find(t => t.id === input.task?.id) ?? result?.submitted ?? result?.task;
+    if (result) { delete result.submitted; delete result.task; delete result.archiveStatus; }
+    const fingerprint = createHash('sha256').update(JSON.stringify(input)).digest('hex');
+    if (reply.ok && project?.ref?.id === input.projectId && task && task.id === input.task?.id && project.requests?.some(r => r.id === input.requestId && r.fingerprint === fingerprint)) {
+      const submission = { projectId: project.ref.id, requestId: input.requestId, taskId: task.id, phase: task.phase, pendingAcceptance: task.pendingAcceptance ?? task.acceptance?.some(a => a.status === 'pending') ?? false, pendingDecision: task.pendingDecision ?? task.decisions?.some(d => d.answer === undefined) ?? false,
+        submittedAt: task.submittedAt };
+      process.stdout.write(JSON.stringify({ submission, ...reply }) + '\n');
+    } else {
+      process.stdout.write(JSON.stringify(reply) + '\n');
+    }
+  } else if (brief || singleTask) {
+    const reply = JSON.parse(stdout), result = reply.result?.result;
+    if (reply.ok && reply.result?.ok !== false && result) {
+      if (brief) {
+        const { attention, questions, reports, projects, error } = result;
+        reply.result.result = { attention, questions, reports, projects: projects.map(({ ref, counts }) => ({ id: ref.id, name: ref.name, counts })), error };
+      } else {
+        const { project } = result, task = result.task ?? project.tasks.find(task => task.id === taskId);
+        if (!task) {
+          process.stderr.write(`项目 ${project.ref.id} 中找不到任务 ${taskId}。\n`);
+          process.exit(1);
+        }
+        reply.result.result = { projectId: project.ref.id, revision: project.revision, task, ...(result.archiveStatus ? { archiveStatus: result.archiveStatus } : {}) };
+      }
+    }
+    process.stdout.write(JSON.stringify(reply) + '\n');
+  } else if (operation !== 'message') process.stdout.write(stdout);
+  else {
+    const reply = JSON.parse(stdout), result = reply.result?.result;
+    if (reply.ok && result?.project) {
       if (result.queued) {
         try {
           const { autoProjectLead } = await import('../../workspace/workspace.mjs');
           result.autoLaunch = autoProjectLead(input.projectId, input.runId);
         } catch (error) {
-          result.autoLaunch = { status: 'not-confirmed', projectName: project.ref.name, reason: error.message };
+          result.autoLaunch = { status: 'not-confirmed', projectName: result.project.ref.name, reason: error.message };
         }
-      } else result.autoLaunch = { status: 'already-bound', projectName: project.ref.name, reason: '项目已绑定主 agent' };
+      } else result.autoLaunch = { status: 'already-bound', projectName: result.project.ref.name, reason: '项目已绑定主 agent' };
     }
-    if (brief) {
-      const { attention, questions, reports, projects, error } = result;
-      reply.result.result = { attention, questions, reports, projects: projects.map(({ ref, counts }) => ({ id: ref.id, name: ref.name, counts })), error };
-    } else if (singleTask) {
-      const task = result.task ?? project.tasks.find(task => task.id === taskId);
-      if (!task) { process.stderr.write(`项目 ${project.ref.id} 中找不到任务 ${taskId}。\n`); process.exit(1); }
-      reply.result.result = { projectId: project.ref.id, revision: project.revision, task, ...(result.archiveStatus ? { archiveStatus: result.archiveStatus } : {}) };
-    } else {
-      for (const binding of [result, result.binding, result.workspace, result.lead, project]) {
-        if (binding?.backup) delete binding.backup.history;
-      }
-      const mailbox = operation === 'feishu-reply' ? result : result.feishu;
-      if (mailbox?.inbox && mailbox.deliveries) {
-        const answered = new Set(mailbox.deliveries.filter(d => d.state === 'sent' && d.external?.replyTo)
-          .map(d => d.external.appId + '/' + d.external.replyTo));
-        mailbox.inbox = mailbox.inbox.filter(entry => operation === 'feishu-reply'
-          ? entry.event.id === input.eventId : !answered.has(entry.event.sourceId));
-        mailbox.deliveries = mailbox.deliveries.filter(d => operation === 'feishu-reply'
-          ? d.id === 'agent-reply:' + input.requestId : d.state !== 'sent');
-      }
-      if (result.a2a?.entries) {
-        const entries = result.a2a.entries;
-        result.a2a.entries = entries.filter((e, i) => e.id === input.requestId || e.task.id === input.id ||
-          i === entries.length - 1 || e.error || !['sent', 'none'].includes(e.notification) ||
-          !['TASK_STATE_COMPLETED', 'TASK_STATE_CANCELED', 'TASK_STATE_FAILED', 'TASK_STATE_REJECTED'].includes(e.task.status.state));
-      }
-      if (result.projects && operation === 'overview') {
-        for (const p of result.projects) if (p.agents) p.agents = p.agents.filter(a => a.state !== 'completed');
-      }
-      if (project && operation !== 'read') {
-        result.project = { ref: project.ref, runId: project.runId, revision: project.revision };
-      } else if (project) {
-        const closed = new Set(project.tasks?.filter(t => t.state === 'completed').map(t => t.id));
-        if (closed.size) {
-          project.tasks = project.tasks.map(t => closed.has(t.id)
-            ? { id: t.id, title: t.title, phase: t.phase, state: t.state, updatedAt: t.updatedAt } : t);
-          project.events = project.events.filter(e => !closed.has(e.taskId));
-        }
-        delete project.archive;
-        delete project.requests;
-        if (project.deliveries) project.deliveries = project.deliveries.filter(d => d.state !== 'sent');
-        for (const task of project.tasks ?? []) {
-          for (const item of [...task.acceptance ?? [], ...task.decisions ?? []]) {
-            delete item.archivedHistory;
-            if (item.history) item.history = item.history.slice(-1);
-          }
-        }
-      }
-    }
+    process.stdout.write(JSON.stringify(reply, null, 2) + '\n');
   }
-  // The Stop hook recognizes the verified submission receipt at the beginning of the line.
-  process.stdout.write(JSON.stringify(reply.submission ? { submission: reply.submission, ...reply } : reply) + '\n');
 } catch (e) {
   let error = e;
   for (const output of [e.stdout, e.stderr]) {

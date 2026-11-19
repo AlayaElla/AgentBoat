@@ -65,7 +65,7 @@ macOS 默认插件数据目录为 `~/Library/Application Support/orca/plugins-da
 
 归档追加到插件数据目录的 `exports/project-<archive.id>.jsonl`，落盘后才移出项目。从项目「任务」列表底部打开归档，可按批翻阅任务，查看归档时的进度、成果、验收和决定。每批还列出通知、来源消息、请求凭证和历史的条数。`read <projectId> --task <taskId>` 支持查归档，再次提交相同编号会恢复任务和来源后合并。备份或还原时请将工作间、项目记录和 `exports` 一起保存。
 
-工作间和每个项目各保留最近 50 条接管记录，更早的先写入对应归档。工作间使用 `exports/workspace-<archive.id>.jsonl`，更换绑定时保留该角色的最近记录。工作间已发送的状态探测保留最近一次，正在等待回执的控制消息继续保留。`lead-history [projectId]` 查看最近记录，再加 `--end <previousEnd>` 按批查更早的记录。
+工作间和每个项目各保留最近 50 条接管记录，更早的先写入对应归档。面板显示当前保留的记录，agent 的常规读取只带最近 3 条和当前保留总数。工作间使用 `exports/workspace-<archive.id>.jsonl`，更换绑定时保留该角色的最近记录。工作间已发送的状态探测保留最近一次，正在等待回执的控制消息继续保留。`lead-history [projectId]` 查看最近记录，再加 `--end <previousEnd>` 按批查更早的记录。
 
 ## 本地开发
 
