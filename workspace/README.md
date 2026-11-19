@@ -12,9 +12,9 @@ node workspace/workspace.mjs templates
 
 `AGENTBOAT_HOME` 默认 `~/.agentboat`；init 保留已有模板和记忆，不覆盖定制。目录有 templates、memory、projects（立项日志）、assignments（派活日志）、requests（插件请求原文）。记忆有独立 Git 仓库，脚本只暂存不提交；主人的明确内容和推断分开，外部工作间单独目录。所有来源与日志可能含用户原话，按本机私有资料保管，不放凭据。
 
-## 模板与立项
+`client.mjs` 的命令和输入见 [桥接说明](../coordinator/skill/orca-project-coordinator/references/bridge.md)，其中代录主人结论用 `feedback`。工作间连接在插件「设置 → 工作间连接」中管理，`links-*` 命令见 [工作间连接](../coordinator/LINKS.md)。
 
-工作间互联在插件“设置 → 其他工作间”中管理；现读命令是 `node coordinator/scripts/client.mjs links-refresh` 与 `links-read`。工作间主 agent 互发消息用 `links-send`，从标准输入接收 `{id,runId,requestId,text}`，其中 runId 为本工作间已绑定的主 agent Run。外部记忆按 workspaceId 独立保存。输入格式和验证边界见 [工作间连接](../coordinator/LINKS.md)。
+## 模板与立项
 
 默认 [templates/code.json](templates/code.json) 使用 Claude Opus 5.5、`xhigh` 和 `chat` 启动项目主 agent。设计由 Claude 负责，代码和审查由 Codex 负责，来源为 `empty`。模板可设置 `agent`、`model`、`effort` 和 `surface`，其中 `effort` 需要 `model`。手动立项和自动开项目主会话共用模板的启动参数。
 
@@ -96,36 +96,9 @@ node workspace/workspace.mjs dispatch dispatch.json
 
 工作间主 agent 用 `client.mjs message` 转话时，插件先保存原话和待投递记录。项目尚未绑定时，回执显示「项目还没有主会话，已排队」，脚本用默认 `code` 模板开主会话。派活时使用 `dispatch` 输入中指定的模板。自动启动保留项目名、文件、Git 和项目已有分工。缺少工作间脚本目录时会先 `init`，保留已有模板和记忆。
 
-回执 `autoLaunch` 包含项目名、状态和已确认的会话 handle、模型、强度及启动方式。最近 10 分钟内已经有一次启动时复用同一份记录。启动回执不明时先核对日志，不换编号重复转话。工作间主 agent 自己的目录、重复登记、远端项目和已绑定项目都不会自动开。缺少工作区时，先在 Orca 准备工作区，排队的消息仍保留。
+回执 `autoLaunch` 包含项目名、状态和已确认的会话 handle、模型、强度及启动方式。最近 10 分钟内已经有一次启动时复用同一份记录。启动回执不明时先核对日志，不换编号重复转话。工作间主 agent 自己的目录不算项目，不在 `projects` 里，也不会自动开。重复登记、远端项目和已绑定项目同样不会自动开。缺少工作区时，先在 Orca 准备工作区，排队的消息仍保留。
 
 同 requestId 拒绝二次启动。失败查看 projects/assignments 日志和其中完整回执；结果不明不换编号重试。脚本不会自动清理未知 agent，按 Orca 版本指南恢复，避免重复执行和丢失数据。当前脚本是一次性 CLI，不做常驻轮询，状态与回报由主 agent 会话接收并读取。
-
-## 代记主人结论
-
-仅记录主人已经明确说出的结论。先 read 当前项目，确认任务和验收版本。决定输入：
-
-```json
-{
-  "projectId": "精确项目编号",
-  "revision": 3,
-  "items": [{
-    "taskId": "task-id",
-    "kind": "decision",
-    "itemId": "decision-id",
-    "answer": "采用方案 A",
-    "note": "用户原话、会话或消息编号、日期"
-  }]
-}
-```
-
-同项目的全部结论放进 items 一次提交，先校验再同版本写入，一项无效则整批拒绝。验收条目 kind=acceptance，带 taskId/itemId，附 itemRevision（当前验收版本）、result=passed 或 changes_requested，note 保留用户原话和来源。changes_requested 必须填写修改意见。
-
-```powershell
-node coordinator/scripts/client.mjs feedback feedback.json
-node coordinator/scripts/client.mjs read <projectId>
-```
-
-feedback 调用 project.feedback，不发起新任务、不带虚构 requestId。超时读 history 确认，不能盲重发；冲突重新读取。项目完成状态仍由项目主 agent 跟进。主 agent 用 overview 现读状态，用 message 转达用户原话，输入详见现有项目协作 skill 的 references/bridge.md。
 
 ## 长期记忆
 
@@ -144,7 +117,7 @@ node workspace/workspace.mjs remember memory.json
 git -C "$env:AGENTBOAT_HOME/memory" diff --cached
 ```
 
-kind=inference 存 inferences.md；kind=external 要加 workspaceId，存 external/<workspaceId>.md。来源可包含检索链接、证据和外部开放范围，重复 id 拒绝追加。脚本不自行判断一段话是否为主人授权，由主 agent 按 skill 核实；项目状态留在插件，对话原文用 Orca search。
+kind=inference 存 inferences.md；kind=external 要加 workspaceId，存 external/<workspaceId>.md。来源可包含检索链接、证据和外部开放范围，重复 id 拒绝追加。脚本不自行判断一段话是否为主人授权，由主 agent 按 skill 核实。
 
 ## 开发和验证
 

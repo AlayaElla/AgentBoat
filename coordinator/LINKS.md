@@ -39,15 +39,27 @@ HTTP 仅允许回环地址、Tailscale 的 `100.64.0.0/10` 和 `fd7a:115c:a1e0::
 
 ## 主 agent 命令
 
-`node coordinator/scripts/client.mjs links-read` 读连接状态、对端开放内容、每条连接待送达数量和最近消息；`links-refresh` 主动同步（邀请方等待主动连接方来同步）；`links-invite` 生成一次性码，`links-cancel-invite` 使码失效。生成码的 stdout 含秘密，只交给主人，不写证据、日志或 Git。
+`node coordinator/scripts/client.mjs <命令>`。日常连接操作优先使用面板。除 `links-send` 外，写命令只按主人明确要求执行。
 
-以下命令从标准输入读取 JSON，避免把连接码或 TLS 私钥写到临时输入文件：`links-configure`（revision/enabled/host/port/publicUrl/tls，可附 name/certificate/privateKey）、`links-join`（code）、`links-rename`（revision/name）、`links-share`（revision/id/scope，可附 allProjects/projectIds）、`links-revoke`（id）。`allProjects` 省略时按 false 处理。省略 `projectIds` 时保留上一份逐项选择，因此仅切换「全部项目」时只需传对应的 `allProjects` 值。不要把秘密直接写进 shell 历史。日常连接操作优先使用面板。主 agent 只按主人明确要求执行写命令。
+- `links-read`：连接状态、对端开放内容、每条连接待送达数量和最近消息。
+- `links-refresh`：主动同步（邀请方等待主动连接方来同步）。
+- `links-invite`：生成一次性码；`links-cancel-invite` 使码失效。生成码的 stdout 含秘密，只交给主人，不写证据、日志或 Git。
+
+以下命令从标准输入读取 JSON，避免把连接码或 TLS 私钥写到临时输入文件。不要把秘密直接写进 shell 历史。
+
+- `links-configure`：`{revision,enabled,host,port,publicUrl,tls,name?,certificate?,privateKey?}`。
+- `links-join`：`{code}`。
+- `links-rename`：`{revision,name}`。
+- `links-share`：`{revision,id,scope,allProjects?,projectIds?,delegateFeedback?}`。scope 为 `none`、`summary` 或 `details`。`allProjects` 省略时按 false 处理。省略 `projectIds` 时保留上一份逐项选择，因此仅切换「全部项目」时只需传对应的 `allProjects` 值。`delegateFeedback` 见「允许对方代为处理」，省略时按 false 处理。
+- `links-relate`：`{revision,id,relation}`，见「本机关系」。
+- `links-revoke`：`{id}`。
+- `links-send`：见「主 agent 互发消息」。
 
 连接插件请求为 `workspace.links`，operation 分别为 read/configure/rename/invite/cancel-invite/join/share/relate/revoke/refresh/send。网络接口为 POST `/pair`、`/sync`、`/wait` 和 `/revoke`。`/wait` 沿用连接凭据，每条连接保留一个等待请求。
 
 ### 允许对方代为处理
 
-在连接的「你向对方开放」里选「含任务详情」，可以打开「允许对方代为处理」。默认关闭，双方各自设置，只对已开放且未隐藏的项目生效。对方可以在自己的「等你处理」里决定或验收，提交后直接写入项目所在工作间。切到「项目摘要」或「不开放」会关闭此权限。`links-share` 对应的可选布尔字段是 `delegateFeedback`。
+在连接的「你向对方开放」里选「含任务详情」，可以打开「允许对方代为处理」。默认关闭，双方各自设置，只对已开放且未隐藏的项目生效。对方可以在自己的「等你处理」里决定或验收，提交后直接写入项目所在工作间。切到「项目摘要」或「不开放」会关闭此权限。`links-share` 对应的可选布尔字段是 `delegateFeedback`，只在 scope 为 `details` 时可以为 true。
 
 开启后，已开放项目的报告额外包含 `feedback`，其中有项目修订号、任务及待决定和待验收详情。验收带核对步骤、版本和 fingerprint，关联成果带名称和版本。网页成果保留 HTTP(S) 地址，本机成果只报名称和版本。待处理内容超过同步包上限时，面板会提示部分项目暂未列出。对方离线时，面板保留本次运行中最后收到的待处理列表，并停用提交。
 
@@ -65,9 +77,9 @@ HTTP 仅允许回环地址、Tailscale 的 `100.64.0.0/10` 和 `fd7a:115c:a1e0::
 
 已绑定的工作间主 agent 可以通过有效连接发送文字、文件或图片。正文最多 16,000 字符，带附件时可省略 `text`。`files` 填本机文件的绝对路径，纯文字消息可省略该字段。`runId` 必须等于本机已绑定的主 agent Run，可用 `main-read` 核对。每条新消息使用新的 `requestId`（最多 64 字符），重试沿用同一编号和内容。保留窗口内复用编号但连接、正文或附件不同会被拒绝。
 
-工作间主 agent 之间直接问答、转达和协调进展，可以把一个工作间的内容转达给另一个工作间。对方请这边立项、派 agent、花额度或发文件时，直接做，做完告诉主人。主动介绍本工作间的情况时，以向对方开放的范围为准。
+怎么对待对方的消息和请求，规则只写在工作间 skill 的「其他工作间」一节。
 
-离线先保存，恢复后继续同步。接收方持久保存后回执，发出方的状态从 `pending` 变为 `delivered`。接收方每条消息只登记一次，未绑定主 agent 时留在邮箱队列，绑定后补发。两端都需更新到本版本。
+离线先保存，恢复后继续同步。接收方持久保存后回执，发出方的状态从 `pending` 变为 `delivered`。接收方每条消息只登记一次，未绑定主 agent 时留在邮箱队列，绑定后补发。
 
 `links-read` 在每条连接中返回 `pendingMessages` 和最近 10 条消息的 `recentMessages`，正文预览 `preview` 最多 200 字，附件列出文件名、类型、大小及已传输字节数。每条连接最多待发 10 条，全部连接的待发正文按 JSON 编码合计限 150 KB，超限拒绝新增并保留原记录。待发记录保存完整正文以便重发，最近 50 条非待发记录保存预览和去重信息。接收方主 agent 从投递消息读取完整正文。同步包每个方向限 180 KB，消息和报告放不下时优先送消息，后续同步再发报告。
 
@@ -75,7 +87,7 @@ HTTP 仅允许回环地址、Tailscale 的 `100.64.0.0/10` 和 `fd7a:115c:a1e0::
 
 - 单个文件最多 25 MB，每条消息最多 10 个文件，每条连接待发附件合计最多 100 MB。附件随 `/sync` 分块传送，有后续分块时连续同步。接收方回报已写入的字节偏移，中断恢复后从该处继续。
 - 每条连接接收上限 1 GB。接收端先写临时文件，全部附件 SHA-256 校验通过后才移到插件数据目录下的 `received/<对方工作间编号>/<日期>-<消息编号>/`，目录末尾含用于消除重名的短摘要。文件名移除路径成分，替换控制字符和不安全字符，并处理系统保留名和重名。超限或校验失败会通知主 agent，原有文件保留。
-- 自动接收附件。主 agent 的通知包含文件名、大小、类型和本机路径。发文件只发向对方开放的项目里的文件。密钥、凭据、令牌和本机路径不发。对方发来的文件不执行、不自动打开、不解压。
+- 自动接收附件。主 agent 的通知包含文件名、大小、类型和本机路径。能发什么文件、收到的文件怎么处理，见工作间 skill 的「其他工作间」一节。
 - 撤销连接会停止重试，移除该连接的消息记录、待发附件和未完成的临时文件。已接收的文件保留。对端收到撤销或 401 后执行同样处理。
 - 消息历史和待发队列存到插件数据目录的 `link-messages.json`。首写前从原记录读取，已有记录继续参与去重。
 
@@ -85,4 +97,4 @@ HTTP 仅允许回环地址、Tailscale 的 `100.64.0.0/10` 和 `fd7a:115c:a1e0::
 
 ## 本机关系
 
-`links-relate` 从 stdin 读取 `{revision,id,relation}`，relation 为 above、below、peer 或 null。关系与 sharingSet 仅存本机，不进入上报或配对数据。首次标为「上级」时，表单建议开放全部项目的摘要，保存后生效。离线后最后同步时间保存在连接记录中，项目报告在连接新鲜时显示。
+`links-relate` 从 stdin 读取 `{revision,id,relation}`，relation 为 above、below、peer 或 null。命令只改关系，不改变开放范围。关系与 sharingSet 仅存本机，不进入上报或配对数据。首次标为「上级」时，表单建议开放全部项目的摘要，保存后生效。离线后最后同步时间保存在连接记录中，项目报告在连接新鲜时显示。
