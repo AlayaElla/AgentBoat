@@ -269,14 +269,7 @@ export function createCoordinator(api: OrcaWorkerApi, runtime: CoordinatorRuntim
       default: return fail('不支持的工作间连接操作')
     }
   })
-  orca.panels.handle('workspace.linkArtifact', async input => {
-    let timer: ReturnType<typeof setTimeout> | undefined
-    try {
-      // Let the panel join the same transfer again before Orca's request deadline.
-      return await Promise.race([links.openArtifact(text(input.id, '连接编号', 64), input),
-        new Promise<{ pending: true }>(resolve => { timer = setTimeout(() => resolve({ pending: true }), 25_000) })])
-    } finally { clearTimeout(timer) }
-  })
+  orca.panels.handle('workspace.linkArtifact', input => links.openArtifact(text(input.id, '连接编号', 64), input))
   orca.panels.handle('workspace.readLinkArtifact', input => links.readArtifact(text(input.id, '连接编号', 64), input.key, input.offset))
   orca.panels.handle('workspace.linkFeedback', input => links.submitFeedback(text(input.id, '连接编号', 64), input))
   const secret = (id: string) => orca.secrets.get(`feishu:${id}`)

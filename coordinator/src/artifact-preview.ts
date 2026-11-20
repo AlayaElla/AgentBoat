@@ -1,4 +1,5 @@
 import type {} from 'orca/frame'
+import type { ArtifactRef } from './link-artifacts'
 
 type FileInfo = { name: string; type: string; size: number; key: string }
 
@@ -38,21 +39,24 @@ async function showPdf(bytes: Uint8Array, body: HTMLElement, dialog: HTMLDialogE
   await draw()
 }
 
-export async function previewArtifact(label: string, getFile: () => Promise<FileInfo | { pending: true }>, read: (key: string, offset: number) => Promise<string>) {
+export async function previewArtifact(label: string, ref: ArtifactRef & { id: string }, getFile: () => Promise<FileInfo>, read: (key: string, offset: number) => Promise<string>) {
   const dialog = document.createElement('dialog'), body = document.createElement('div')
   dialog.className = 'artifact-preview'
   dialog.setAttribute('aria-label', label)
   const title = document.createElement('h2'), close = document.createElement('button')
   title.textContent = label; close.textContent = '关闭'; close.onclick = () => dialog.close()
   const status = document.createElement('p')
-  status.setAttribute('role', 'status'); status.textContent = '正在获取成果…'
+  status.setAttribute('role', 'status'); status.textContent = '正在从对方取文件…'
   dialog.append(title, close, body, status)
   dialog.addEventListener('keydown', e => { if (e.key === 'Escape') e.stopPropagation() })
   dialog.addEventListener('close', () => dialog.remove(), { once: true })
   document.body.append(dialog); dialog.showModal()
+  const progress = orca.plugin.on('workspace.artifactProgress', p => {
+    if (p.id === ref.id && p.projectId === ref.projectId && p.taskId === ref.taskId && p.artifactId === ref.artifactId)
+      status.textContent = `正在从对方取文件 ${(p.received / 1e6).toFixed(1)}/${(p.size / 1e6).toFixed(1)} MB`
+  })
   try {
-    let file = await getFile()
-    while ('pending' in file) { if (!dialog.open) return; file = await getFile() }
+    const file = await getFile().finally(() => progress.dispose())
     if (!dialog.open) return
     const bytes = new Uint8Array(file.size)
     for (let offset = 0; offset < bytes.length;) {
@@ -87,5 +91,12 @@ export async function previewArtifact(label: string, getFile: () => Promise<File
       const pre = document.createElement('pre')
       pre.textContent = new TextDecoder().decode(bytes); body.append(pre)
     }
-  } catch (e) { status.textContent = e instanceof Error ? e.message : '暂时无法查看此成果' }
+  } catch (e) {
+    if (!dialog.open) return
+    status.textContent = e instanceof Error ? e.message : '暂时无法查看此成果'
+    const retry = document.createElement('button')
+    retry.textContent = '重试'
+    retry.onclick = () => { dialog.close(); void previewArtifact(label, ref, getFile, read) }
+    body.replaceChildren(retry)
+  }
 }

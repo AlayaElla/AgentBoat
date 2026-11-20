@@ -229,6 +229,10 @@ async function setup(options = {}, hub) {
       }
       if (name === 'workspace.linkArtifact') {
         if (window.fixture.artifactError) throw Error(window.fixture.artifactError);
+        if (window.fixture.delayArtifact) {
+          events['workspace.artifactProgress']({ ...input, received: 1200000, size: 3100000 });
+          await new Promise(resolve => { window.fixture.finishArtifact = resolve; });
+        }
         const f = window.fixture.peerFile;
         return { key: 'test-file', name: f.name, size: atob(f.data).length, type: f.type };
       }
@@ -1267,7 +1271,10 @@ try {
       await artifacts.getByRole('button', { name: '设计原稿 · v1' }).click();
       return page.getByRole('dialog', { name: '设计原稿 · v1' });
     };
+    await page.evaluate(() => { fixture.delayArtifact = true; });
     const image = await openFile('design.png', 'image/png', 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a82kAAAAASUVORK5CYII=');
+    await image.getByRole('status').filter({ hasText: '正在从对方取文件 1.2/3.1 MB' }).waitFor();
+    await page.evaluate(() => { fixture.delayArtifact = false; fixture.finishArtifact(); });
     await image.getByRole('img').waitFor();
     await page.waitForFunction(() => document.querySelector('dialog img')?.naturalWidth === 1);
     await image.getByRole('button', { name: '关闭' }).click();
@@ -1299,8 +1306,10 @@ try {
     const offline = page.getByRole('dialog');
     await offline.getByRole('status').filter({ hasText: '对方离线' }).waitFor();
     assert.equal(await offline.getByRole('alert').count(), 0);
-    await offline.getByRole('button', { name: '关闭' }).click();
     await page.evaluate(() => { delete fixture.artifactError; });
+    await offline.getByRole('button', { name: '重试' }).click();
+    await page.getByRole('dialog').locator('canvas').waitFor();
+    await page.getByRole('button', { name: '关闭', exact: true }).last().click();
     await artifacts.getByRole('button', { name: '网页预览 · v1' }).click();
     assert.equal(await page.evaluate(() => fixture.calls.filter(c => c.name === 'shell.openExternal').at(-1).input), 'https://example.com/preview');
     await currentLayer().getByText('来自「工作间 up」，可代为处理').waitFor();

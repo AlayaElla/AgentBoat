@@ -1,9 +1,11 @@
 import { assert, test, mockHost, mountWorker } from 'orca/testing'
 import path from 'node:path'
 import os from 'node:os'
+import { setTimeout as delay } from 'node:timers/promises'
 import { mkdtemp, mkdir, rm, writeFile, truncate, symlink } from 'node:fs/promises'
-import { fileChunkBytes, maxLinkFileBytes } from './link-files'
+import { artifactChunkBytes, fileChunkBytes, maxLinkFileBytes } from './link-files'
 import type { OrcaWorkerApi } from 'orca/worker'
+import type { ArtifactProgress } from './link-artifacts'
 import { WorkspaceLinks, endpoint, invitationHost, report } from './links'
 import { refs, sample } from './fixtures'
 import { fingerprint, fresh, type FeedbackItem } from './store'
@@ -12,17 +14,19 @@ import { testCoordinator as createCoordinator, testFiles } from './test-runtime'
 
 async function instance(name: string, configured = true, chooseHost = () => '127.0.0.1', files = testFiles()) {
   const storage = new Map<string, any>(), secrets = new Map<string, string>()
-  const api = { storage: { get: async (k: string) => structuredClone(storage.get(k) ?? null), set: async (k: string, v: any) => { storage.set(k, structuredClone(v)) } },
+  const logs: string[] = [], progress: ArtifactProgress[] = []
+  const api = { log: (line: string) => logs.push(line), panels: { post: (_: string, value: ArtifactProgress) => { progress.push(value) } },
+    storage: { get: async (k: string) => structuredClone(storage.get(k) ?? null), set: async (k: string, v: any) => { storage.set(k, structuredClone(v)) } },
     secrets: { get: async (k: string) => secrets.get(k) ?? null, set: async (k: string, v: string) => { secrets.set(k, v) }, delete: async (k: string) => { secrets.delete(k) } } }
   const projects = structuredClone([sample().project!, fresh(refs[1])])
   projects[0].ref.name = name + ' private project'
-  const create = () => new WorkspaceLinks(api as OrcaWorkerApi, async () => projects, () => {}, chooseHost, undefined, undefined, files)
+  const create = () => new WorkspaceLinks(api as unknown as OrcaWorkerApi, async () => projects, () => {}, chooseHost, undefined, undefined, files)
   const links = create()
   if (configured) {
     const initial = await links.snapshot()
     await links.configure({ revision: initial.revision, name, enabled: true, host: '127.0.0.1', port: 0, publicUrl: '', tls: false })
   }
-  return { links, storage, secrets, projects, create }
+  return { links, storage, secrets, projects, create, logs, progress }
 }
 async function post(url: string, route: string, body: any, token = '') {
   const r = await fetch(url + route, { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', Connection: 'close' }, body: JSON.stringify(body) })
@@ -171,7 +175,7 @@ test('peer artifacts use authenticated loopback in both directions, cache comple
       assert.ok(part.length); parts.push(part); offset += part.length
     }
     assert.deepEqual(Buffer.concat(parts), bytes)
-    const sent = Math.ceil(bytes.length / fileChunkBytes)
+    const sent = Math.ceil(bytes.length / artifactChunkBytes)
     assert.equal(chunks, sent)
     assert.deepEqual(await get(), first)
     assert.equal(chunks, sent)
@@ -202,6 +206,67 @@ test('peer artifacts use authenticated loopback in both directions, cache comple
     await assert.rejects(get, /25 MB/)
     await rm(file); await assert.rejects(get, e => e instanceof Error && /不存在/.test(e.message) && !e.message.includes(dir))
     a.links.stop(); await b.links.refresh(); await assert.rejects(get, /离线/)
+  } finally { a.links.stop(); b.links.stop(); await rm(root, { recursive: true, force: true }) }
+})
+
+test('3 MiB peer artifact over a single listener with the production watch and refresh timers', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'artifact-speed-'))
+  const a = await instance('listener'), b = await instance('dialer', false)
+  const file = path.join(root, 'image.png'), bytes = Buffer.alloc(3 * 1024 ** 2, 73)
+  try {
+    await writeFile(file, bytes)
+    for (const side of [a, b]) {
+      const p = side.projects[0], t = p.tasks[0]
+      p.ref.path = root
+      t.artifacts.push({ id: 'drawing', label: '图', url: file, version: 'v1' })
+      t.acceptance[0].artifactIds.push('drawing')
+      await side.links.start()
+    }
+    const { id } = (await b.links.join((await a.links.invite()).invitation!.code)).peers[0]
+    for (const side of [a, b]) await side.links.share({ id, revision: (await side.links.snapshot()).revision, scope: 'details', projectIds: ['p1'], delegateFeedback: true })
+    assert.equal((await a.links.snapshot()).peers[0].endpoint, '')
+    assert.equal((await b.links.snapshot()).enabled, false)
+    // Count actual HTTP syncs, including ordinary traffic, with a controlled 30 ms round-trip cost.
+    const client = b.links as any, sync = client.syncOne.bind(client)
+    let rounds = 0
+    client.syncOne = async (...args: unknown[]) => { rounds++; await delay(30); return sync(...args) }
+    for (const side of [a, b]) {
+      const started = performance.now(), initial = rounds
+      const result = await side.links.openArtifact(id, { projectId: 'p1', taskId: 'task-1', artifactId: 'drawing' })
+      const parts = []
+      for (let offset = 0; offset < bytes.length;) {
+        const part = Buffer.from(await side.links.readArtifact(id, result.key, offset), 'base64')
+        assert.ok(part.length); parts.push(part); offset += part.length
+      }
+      const ms = Math.round(performance.now() - started)
+      assert.deepEqual(Buffer.concat(parts), bytes)
+      assert.ok(rounds - initial < 35, 'expected fewer than 35 syncs for a cold 3 MiB file')
+      assert.ok(side.progress.some(p => p.received > 0 && p.received < bytes.length && p.size === bytes.length))
+      console.log('T87 loopback 3 MiB', side === a ? 'from dialer' : 'from listener', { ms, syncs: rounds - initial })
+    }
+    await b.links.refresh() // Flush the final verification receipt before inspecting sender logs.
+    for (const side of [a, b]) {
+      assert.equal(side.logs.length, 4)
+      assert.ok(side.logs.every(line => /^peer artifact (send|receive) (start|complete) id=[a-f0-9]{12} bytes=(unknown|3145728) ms=\d+$/.test(line)))
+      for (const direction of ['send', 'receive']) assert.ok(side.logs.some(s => s.includes(direction + ' complete') && s.includes('bytes=3145728')))
+    }
+
+    // A message too large to share a frame with a bulk chunk and a feedback reply both pass mid-transfer.
+    a.projects[0].tasks[0].artifacts.at(-1)!.version = 'v2'
+    b.progress.length = 0
+    let complete = false
+    const transfer = b.links.openArtifact(id, { projectId: 'p1', taskId: 'task-1', artifactId: 'drawing' }).then(() => { complete = true })
+    const until = async (condition: () => Promise<boolean> | boolean) => {
+      const end = Date.now() + 5000
+      while (!await condition()) { assert.ok(Date.now() < end, 'timed out waiting for concurrent traffic'); await delay(10) }
+    }
+    await until(() => b.progress.some(p => p.received > 0))
+    await a.links.send({ id, requestId: 'during-transfer', text: '图'.repeat(15000) })
+    const feedback = await b.links.submitFeedback(id, { projectId: 'p1', revision: 1, requestId: 'feedback-during-transfer', items: [] })
+    assert.equal(feedback.state, 'rejected') // This fixture has no feedback handler.
+    await until(async () => !!(await b.links.snapshot(true)).peers[0].recentMessages?.some(m => m.requestId === 'during-transfer'))
+    assert.equal(complete, false)
+    await transfer
   } finally { a.links.stop(); b.links.stop(); await rm(root, { recursive: true, force: true }) }
 })
 

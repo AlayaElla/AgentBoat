@@ -706,8 +706,9 @@ function organization() {
 function openArtifact(projectId: string, taskId: string, artifact: Artifact, archiveEnd?: number) {
   if (!artifact.url && isRemote(projectId)) {
     const [id, remoteProject] = JSON.parse(projectId)
-    return previewArtifact(artifactTitle(artifact),
-      () => req('workspace.linkArtifact', { id, projectId: remoteProject, taskId, artifactId: artifact.id }),
+    const ref = { id, projectId: remoteProject, taskId, artifactId: artifact.id }
+    return previewArtifact(artifactTitle(artifact), ref,
+      () => req('workspace.linkArtifact', ref, 120_000),
       (key, offset) => req('workspace.readLinkArtifact', { id, key, offset }))
   }
   return act(async () => {

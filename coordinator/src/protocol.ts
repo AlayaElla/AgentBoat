@@ -14,7 +14,7 @@ declare module 'orca' {
     'project.visibility': { input: { projectId: string; revision: number; hidden: boolean; runId?: string; caller?: string }; output: Snapshot }
     'project.delete': { input: { projectId: string; revision: number; confirm: string }; output: { deleted: string; exportPath: string } }
     'workspace.links': { input: { operation: 'read' | 'configure' | 'rename' | 'invite' | 'cancel-invite' | 'join' | 'share' | 'revoke' | 'refresh' | 'relate' | 'send'; runId?: string; requestId?: string; text?: string; files?: string[]; relation?: 'above' | 'below' | 'peer' | null; revision?: number; id?: string; code?: string; name?: string; enabled?: boolean; host?: string; port?: number; publicUrl?: string; tls?: boolean; certificate?: string; privateKey?: string; scope?: Sharing['scope']; allProjects?: boolean; projectIds?: string[]; delegateFeedback?: boolean }; output: LinksSnapshot }
-    'workspace.linkArtifact': { input: import('./link-artifacts').ArtifactRef & { id: string }; output: { pending: true } | { name: string; size: number; type: string; key: string } }
+    'workspace.linkArtifact': { input: import('./link-artifacts').ArtifactRef & { id: string }; output: { name: string; size: number; type: string; key: string } }
     'workspace.readLinkArtifact': { input: { id: string; key: string; offset: number }; output: string }
     'workspace.linkFeedback': { input: DelegatedFeedback & { id: string }; output: FeedbackReply }
     'workspace.reply': { input: { runId: string; eventId: string; requestId: string; text: string }; output: MessagingSnapshot }
@@ -41,5 +41,5 @@ declare module 'orca' {
     'project.openArtifact': { input: { projectId: string; taskId: string; artifactId: string; archiveEnd?: number }; output: { opened: boolean } }
     'project.agent': { input: { operation: 'read' | 'bind' | 'submit'; projectId: string; revision?: number; requestId?: string; runId?: string; caller?: string; currentRunId?: string; token?: string; task?: unknown; taskId?: string }; output: Snapshot & { task?: import('./model').Task; submitted?: Pick<import('./model').Task, 'id' | 'phase' | 'submittedAt'> & { pendingAcceptance: boolean; pendingDecision: boolean }; archiveStatus?: '已归档' } }
   }
-  interface PluginPanelEvents { 'project.changed': { projectId: string }; 'panel.draftsChanged': {}; 'workspace.open': { switching: boolean } }
+  interface PluginPanelEvents { 'workspace.artifactProgress': import('./link-artifacts').ArtifactProgress; 'project.changed': { projectId: string }; 'panel.draftsChanged': {}; 'workspace.open': { switching: boolean } }
 }

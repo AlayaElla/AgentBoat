@@ -248,13 +248,11 @@ function feedbackRequest(raw: unknown): DelegatedFeedback {
   if (!Array.isArray(r.items) || r.items.length > 100) fail('反馈条目格式不正确')
   return { projectId: id(r.projectId), revision: revision(r.revision), requestId: id(r.requestId), items: r.items }
 }
-function syncPacket(report: SharedReport, pending: WireMessage[], receipts: Receipts, feedback: FeedbackExchange, artifact: ArtifactExchange | undefined, id?: string, version?: string) {
+function syncPacket(report: SharedReport | undefined, pending: WireMessage[], receipts: Receipts, feedback: FeedbackExchange, id?: string, version?: string) {
   const exchange: MessageExchange = { messages: [], ...receipts }
-  const packet = { id, version, artifact, report: report as SharedReport | undefined, exchange, feedback: feedback.request || feedback.reply ? feedback : undefined }
+  const packet = { id, version, artifact: undefined as ArtifactExchange | undefined, report, exchange, feedback: feedback.request || feedback.reply ? feedback : undefined }
   const fits = () => Buffer.byteLength(JSON.stringify(packet)) <= LIMIT
-  if ((packet.feedback || packet.artifact) && !fits()) packet.report = undefined
-  // A pending artifact offset is requested again. Keep feedback and message receipts deliverable.
-  if (packet.artifact && !fits()) packet.artifact = undefined
+  if (packet.feedback && !fits()) packet.report = undefined
   for (const m of pending) {
     exchange.messages.push(m)
     // Let the oldest message through when a large report would crowd it out.
@@ -263,6 +261,9 @@ function syncPacket(report: SharedReport, pending: WireMessage[], receipts: Rece
   }
   if (hasReceipts(receipts) && !fits()) packet.report = undefined
   return packet
+}
+function panelChanged(packet: ReturnType<typeof syncPacket>) {
+  return !packet.artifact || packet.report || packet.feedback || packet.exchange.messages.length || hasReceipts(packet.exchange)
 }
 async function jsonBody(stream: AsyncIterable<Buffer>): Promise<any> {
   const chunks: Buffer[] = []; let size = 0
@@ -305,6 +306,7 @@ export class WorkspaceLinks {
   private watchers = new Map<string, AbortController>()
   private running = false
   private signaling = false
+  private lastReport = new Map<string, number>()
   private recentActivity?: { at: number; result: Promise<LocalActivity> }
   private initial: LinkData = { version: 1, revision: 0, workspaceId: randomUUID(), name: '我的工作间', enabled: false, host: '127.0.0.1', port: 0, publicUrl: '', tls: false, peers: [] }
   private server?: http.Server | https.Server
@@ -318,7 +320,7 @@ export class WorkspaceLinks {
   private syncing = new Map<string, Promise<string | undefined>>()
   private listening = ''
   private error = ''
-  constructor(private orca: Pick<OrcaWorkerApi, 'storage' | 'secrets'>, private projects: () => Promise<Project[]>, private changed: () => void, private chooseHost = invitationHost, private enqueue?: (peer: Peer, messages: IncomingMessage[]) => Promise<void>, private activity?: () => Promise<LocalActivity>, files = new LinkFiles(), private checkCatalog?: () => Promise<unknown>, private applyFeedback?: (peer: Peer, input: DelegatedFeedback) => Promise<string | undefined>) { this.messages = new LinkMessages(files); this.artifacts = new LinkArtifacts(files) }
+  constructor(private orca: Pick<OrcaWorkerApi, 'storage' | 'secrets'> & Partial<Pick<OrcaWorkerApi, 'log' | 'panels'>>, private projects: () => Promise<Project[]>, private changed: () => void, private chooseHost = invitationHost, private enqueue?: (peer: Peer, messages: IncomingMessage[]) => Promise<void>, private activity?: () => Promise<LocalActivity>, files = new LinkFiles(), private checkCatalog?: () => Promise<unknown>, private applyFeedback?: (peer: Peer, input: DelegatedFeedback) => Promise<string | undefined>) { this.messages = new LinkMessages(files); this.artifacts = new LinkArtifacts(files, line => orca.log?.(line), progress => orca.panels?.post('workspace.artifactProgress', progress)) }
   private serial<T>(fn: () => Promise<T>): Promise<T> { const p = this.chain.then(fn); this.chain = p.catch(() => {}); return p }
   private async data(): Promise<LinkData> {
     const raw = await this.orca.storage.get('workspace.links')
@@ -613,6 +615,7 @@ export class WorkspaceLinks {
     await this.messages.revoke(connectionId)
     this.waiters.get(connectionId)?.(401)
     this.watchers.get(connectionId)?.abort()
+    this.lastReport.delete(connectionId)
     this.versions.delete(connectionId)
     this.receipts.delete(connectionId)
     this.feedbackReplies.delete(connectionId)
@@ -627,6 +630,9 @@ export class WorkspaceLinks {
     return this.messages.receive(peer.id, exchange, messages => this.enqueue?.(peer, messages) ?? Promise.resolve(), peer.workspaceId)
   }
   private async localReport(p: Peer, d: LinkData) {
+    // Most bulk rounds only carry bytes. Refresh the report periodically on longer transfers.
+    if (this.artifacts.hasData(p.id) && Date.now() - (this.lastReport.get(p.id) ?? 0) < 5000) return
+    this.lastReport.set(p.id, Date.now())
     let activity: LocalActivity | undefined
     if (p.scope === 'details' && this.activity) {
       if (!this.recentActivity || Date.now() - this.recentActivity.at >= 2000)
@@ -681,10 +687,10 @@ export class WorkspaceLinks {
     })().catch(() => {}).finally(() => { if (this.watchers.get(p.id) === state) this.watchers.delete(p.id) })
   }
   async refresh() { const d = await this.serial(() => this.data()); const peers = d.peers.filter(p => p.endpoint); await Promise.all(peers.map(p => this.sync(p.id))); if (peers.length) this.changed(); return this.snapshot() }
-  private async packet(p: Peer, outgoing: SharedReport, receipts: Receipts, request = false, reply = this.feedbackReplies.get(p.id)) {
+  private async packet(p: Peer, outgoing: SharedReport | undefined, receipts: Receipts, request = false, reply = this.feedbackReplies.get(p.id)) {
     const pending = this.feedbackPending.get(p.id), sending = pending && !pending.sent ? pending : undefined
     const artifact = await this.artifacts.packet(p.id, ref => this.artifactSource(p, ref))
-    const packet = syncPacket(outgoing, await this.messages.pending(p.id), receipts, { request: sending?.request, reply }, artifact, request ? p.id : undefined, request ? undefined : this.version(p.id))
+    const packet = syncPacket(outgoing, await this.messages.pending(p.id), receipts, { request: sending?.request, reply }, request ? p.id : undefined, request ? undefined : this.version(p.id))
     const m = packet.exchange.messages.find(m => m.files)
     if (m) {
       const chunk = await this.messages.chunk(p.id, m)
@@ -694,6 +700,15 @@ export class WorkspaceLinks {
         if (tooLarge()) packet.report = undefined
         while (tooLarge() && packet.exchange.messages.at(-1) !== m) packet.exchange.messages.pop()
         if (tooLarge()) delete m.chunk
+      }
+    }
+    packet.artifact = artifact
+    if (artifact && Buffer.byteLength(JSON.stringify(packet)) > LIMIT) {
+      packet.report = undefined
+      if (Buffer.byteLength(JSON.stringify(packet)) > LIMIT) {
+        // The receiver repeats its offset. Messages, file attachments and feedback go first.
+        packet.artifact = { request: artifact.request, receipt: artifact.receipt, deferred: artifact.reply?.requestId }
+        if (Buffer.byteLength(JSON.stringify(packet)) > LIMIT) packet.artifact = undefined
       }
     }
     if (sending) sending.sent = true
@@ -735,13 +750,14 @@ export class WorkspaceLinks {
         if (current.state === 'pending') { current.state = 'active'; now.revision++; await this.save(now) }
         if (incoming) await this.recordIncoming(now, current, incoming)
         if (this.feedbackReplies.get(p.id) === packet.feedback?.reply) this.feedbackReplies.delete(p.id)
+        this.artifacts.sent(p.id, packet.artifact)
         const reply = await this.receiveFeedback(current, result.feedback)
         if (reply) this.feedbackReplies.set(p.id, reply)
         const nextReceipt = hasReceipts(acknowledgements) && JSON.stringify(acknowledgements) !== JSON.stringify(this.exchangeReceipts(packet.exchange))
         const nextArtifact = await this.artifacts.receive(p.id, p.workspaceId, result.artifact)
         return nextArtifact || !!reply || more || nextReceipt && (this.running || !!acknowledgements.progress?.length)
       })
-      if (this.running) this.changed()
+      if (this.running && panelChanged(result)) this.changed()
       return { version, more }
     } catch (e) {
       if (!signal?.aborted) await this.syncFailed(connectionId, e)
@@ -807,7 +823,9 @@ export class WorkspaceLinks {
         if ((await this.data()).revision !== sync.d.revision) fail('工作间连接已更新')
         const response = await this.packet(sync.p, outgoing, sync.acknowledgements, false, sync.feedback)
         if (Buffer.byteLength(JSON.stringify(response)) > LIMIT) fail('工作间上报过大')
-        reply(200, response); this.changed()
+        reply(200, response)
+        this.artifacts.sent(sync.p.id, response.artifact)
+        if (panelChanged(body)) this.changed()
       })
     } catch { if (!res.headersSent) reply(400, { error: 'Invalid workspace request' }); req.resume() }
   }

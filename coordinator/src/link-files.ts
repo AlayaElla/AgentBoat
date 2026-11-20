@@ -8,6 +8,8 @@ import { artifactUrl, fail, fingerprint, object } from './store'
 export const maxLinkFileBytes = 25 * 1024 ** 2, maxLinkFiles = 10
 const maxOutgoingFiles = 100 * 1024 ** 2, maxReceivedFiles = 1024 ** 3
 export const fileChunkBytes = 48_000
+// 160 KB of base64 leaves room for control fields in the 180 KB sync envelope.
+export const artifactChunkBytes = 120_000
 const manifestName = '.agentboat-transfer.json'
 export type LinkFile = { name: string; size: number; sha256: string; type: string }
 export type FileChunk = { index: number; offset: number; data: string }
@@ -59,16 +61,16 @@ export function wireFiles(raw: unknown): LinkFile[] | undefined {
   })
 }
 
-export function wireChunk(raw: unknown): FileChunk | undefined {
+export function wireChunk(raw: unknown, limit = fileChunkBytes): FileChunk | undefined {
   if (raw === undefined) return
   const c = object(raw)
   if (!Number.isSafeInteger(c.index) || c.index < 0 || c.index >= maxLinkFiles || !Number.isSafeInteger(c.offset) || c.offset < 0 || c.offset >= maxLinkFileBytes ||
-    typeof c.data !== 'string' || !c.data || c.data.length > Math.ceil(fileChunkBytes / 3) * 4) fail('工作间文件分块不正确')
+    typeof c.data !== 'string' || !c.data || c.data.length > Math.ceil(limit / 3) * 4) fail('工作间文件分块不正确')
   return { index: c.index, offset: c.offset, data: c.data }
 }
 
-async function readChunk(input: Awaited<ReturnType<typeof open>>, size: number, index: number, offset: number) {
-  const data = Buffer.alloc(Math.min(fileChunkBytes, size - offset))
+async function readChunk(input: Awaited<ReturnType<typeof open>>, size: number, index: number, offset: number, limit = fileChunkBytes) {
+  const data = Buffer.alloc(Math.min(limit, size - offset))
   const { bytesRead } = await input.read(data, 0, data.length, offset)
   if (bytesRead !== data.length) fail('读取过程中附件已变化，请重试')
   return { index, offset, data: data.toString('base64') }
@@ -92,7 +94,7 @@ async function openContained(root: string, file: string) {
   } catch (e) { await input.close(); throw e }
 }
 
-export async function artifactPart(root: string, file: string, offset: number) {
+export async function artifactPart(root: string, file: string, offset: number, bulk: boolean) {
   const { input, size } = await openContained(root, file)
   try {
     if (offset === -1) {
@@ -102,7 +104,7 @@ export async function artifactPart(root: string, file: string, offset: number) {
       return { files: [{ name, size, type: fileType(name), sha256: hash.digest('hex') }] }
     }
     if (!Number.isSafeInteger(offset) || offset < 0 || offset >= size) fail('工作间文件分块不正确')
-    return { chunk: await readChunk(input, size, 0, offset) }
+    return { chunk: await readChunk(input, size, 0, offset, bulk ? artifactChunkBytes : fileChunkBytes) }
   } finally { await input.close() }
 }
 
@@ -302,7 +304,7 @@ export class LinkFiles {
     const offsets = await this.offsets(directory, files)
     if (chunk) {
       const { index, offset, data } = chunk, f = files[index], bytes = Buffer.from(data, 'base64')
-      if (!f || !bytes.length || bytes.length > fileChunkBytes || bytes.toString('base64') !== data || offset + bytes.length > f.size) fail('工作间文件分块不正确')
+      if (!f || !bytes.length || bytes.length > (isArtifactTransfer(requestId) ? artifactChunkBytes : fileChunkBytes) || bytes.toString('base64') !== data || offset + bytes.length > f.size) fail('工作间文件分块不正确')
       if (offset === offsets[index]) {
         const file = path.join(directory, names[index])
         await writeFile(file, bytes, { flag: 'a', mode: 0o600, flush: true })
