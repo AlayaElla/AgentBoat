@@ -1,3 +1,6 @@
+import { taskState } from './task-state.mjs'
+export { taskState }
+
 export interface ProjectRef {
   id: string
   name: string
@@ -148,15 +151,6 @@ export interface Overview {
     agents: (Task['executions'][number] & { projectTaskId: string; state: TaskState })[]
   }[]
   error?: string
-}
-
-export function taskState(task: { phase: Task['phase']; decisions: Pick<Decision, 'answer'>[]; acceptance: Pick<Acceptance, 'status'>[] }): keyof typeof labels {
-  if (task.phase === 'paused') return 'paused'
-  if (task.decisions.some(x => x.answer === undefined)) return 'decision'
-  if (task.acceptance.some(x => x.status === 'changes_requested')) return 'rework'
-  if (task.phase === 'ready' && task.acceptance.some(x => x.status === 'pending')) return 'review'
-  if (task.phase === 'ready') return 'completed'
-  return task.phase
 }
 
 export function blockedRevision(task: Pick<Task, 'phase' | 'blockedStatus' | 'blockedRevision'>) {

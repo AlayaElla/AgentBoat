@@ -3,6 +3,7 @@ import { testCoordinator as createCoordinator } from './test-runtime'
 import { refs, deliverable, sample } from './fixtures'
 import { fresh, feedback, fingerprint, submitTask, ProjectStore, overview, notifyWorkspace } from './store'
 import { report } from './links'
+import { notifyFeishu } from './feishu'
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
@@ -789,6 +790,25 @@ test('project withdraws pending items together, and only changed acceptance reop
   assert.deepEqual(attention(p).map(i => i.itemId), ['page-check'])
   assert.equal(p.tasks[0].acceptance[0].revision, 2)
   assert.equal(p.tasks[0].acceptance[0].history[0].result, 'discarded')
+})
+
+test('lead withdrawal clears rework without reopening a review or notifying itself', () => {
+  const p = fresh(refs[0])
+  const other = { ...deliverable.acceptance[0], id: 'other' }
+  submitTask(p, { ...deliverable, acceptance: [...deliverable.acceptance, other] })
+  const item = { taskId: deliverable.id, kind: 'acceptance', itemId: 'page-check', itemRevision: 1 }
+  feedback(p, { items: [{ ...item, result: 'changes_requested', note: '需要调整' }] })
+  assert.equal(taskState(p.tasks[0]), 'rework')
+  assert.throws(() => feedback(p, { items: [{ ...item, result: 'discarded' }] }), /不在待验收状态/)
+  const before = structuredClone(p)
+  submitTask(p, { id: deliverable.id, phase: 'ready', acceptance: [{ id: item.itemId, discarded: true, reason: '该项已被取代' }] })
+  notifyWorkspace(before, p, 'workspace-run')
+  notifyFeishu(before, p, { enabled: true, appId: 'app', chatIds: ['chat'], senderIds: [] })
+  assert.deepEqual(p.deliveries, before.deliveries)
+  assert.equal(p.tasks[0].acceptance[0].status, 'discarded')
+  assert.deepEqual(p.tasks[0].acceptance[0].history.map(h => [h.revision, h.result]), [[1, 'changes_requested'], [1, 'discarded']])
+  assert.equal(taskState(p.tasks[0]), 'review')
+  assert.deepEqual(attention(p).map(i => i.itemId), [other.id])
 })
 
 test('restart preserves an in-flight notification without resending', async () => {

@@ -35,7 +35,7 @@ function bridge(operation, input) {
   }
   // Orca reads ORCA_ENVIRONMENT as a saved remote's name, so drop it to reach this machine's Orca.
   const { ORCA_ENVIRONMENT, ORCA_PAIRING_CODE, ...env } = process.env;
-  const reply = JSON.parse(run(process.execPath, [client, operation, ...(argument ? [argument] : [])], root, env));
+  const reply = JSON.parse(run(process.execPath, [client, operation, ...(argument ? [argument] : []), ...(operation === 'read' ? ['--full'] : [])], root, env));
   if (!reply.ok) throw new Error(JSON.stringify(reply.error));
   return reply.result.result;
 }

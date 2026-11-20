@@ -183,13 +183,17 @@ test('submit emits the hook receipt only for the exact saved write and preserves
 test('brief and single-task reads preserve the bridge envelope and omit unrelated state', () => {
   const dir = mkdtempSync(path.join(os.tmpdir(), 'compact-client-')), fixture = path.join(dir, 'orca-fixture.mjs');
   writeFileSync(fixture, `import cp from 'node:child_process'; import {syncBuiltinESMExports} from 'node:module';
-const ref={id:'p1',name:'示例',path:'/private/path'}, counts={working:2};
+const ref={id:'p1',name:'示例',path:'/private/path',repoId:'repo'}, counts={working:2};
 const hidden='history-marker', backup={phase:'taking',history:[hidden.repeat(4096),'a','b','c']};
 const project={ref, revision:3, archive:{id:hidden}, backup, requests:[], deliveries:[{state:'sent',body:'live'}],
-  tasks:[{id:'t1',title:'一',decisions:[{id:'d',history:['current'],archivedHistory:12}]},{id:'t2',title:'二'}],events:[]};
+  tasks:[{id:'t1',title:'一',phase:'ready',updatedAt:'today',decisions:[{id:'d',history:['current'],archivedHistory:12},{id:'closed',answer:null}],
+    acceptance:[{id:'a',status:'pending',artifactIds:['1']},{id:'old',status:'discarded',artifactIds:['2']}],
+    artifacts:['1','2','3','4','5','6'].map(id=>({id})),executions:[1,2,3,4]},
+    {id:'t2',title:'二',phase:'working',acceptance:[],decisions:[],artifacts:[],executions:[]}],
+  events:[{id:'unlinked',text:'x'.repeat(200)},{id:'linked',taskId:'t1',text:'linked text'}]};
 const overview={workspace:{runId:'main',backup},links:['private'],attention:[{title:'待决定',fingerprint:'digest'}],questions:[{id:'msg_1'}],projects:[{ref,counts,revision:3,bound:false,agents:[{runId:'r'}]}]};
 cp.execFileSync=(_exe,args)=>{const archived=args.includes('--data')&&JSON.parse(args[args.indexOf('--data')+1]).taskId==='old';
-return JSON.stringify({ok:true,id:'fixture',result:{result:args[4]==='workspace.overview'?overview:args[4]==='lead.history'?{history:[hidden]}:args[4]==='workspace.agent'?overview.workspace:args[4]==='project.lead'?{binding:{backup}}:{project,lead:{backup},...(archived?{task:{id:'old',goal:'archived-body'},archiveStatus:'已归档'}:{})}}});};
+return JSON.stringify({ok:true,id:'fixture',result:{result:args[4]==='workspace.overview'?overview:args[4]==='lead.history'?{history:[hidden]}:args[4]==='workspace.agent'?overview.workspace:args[4]==='project.lead'?{binding:{backup}}:{project,lead:{backup},...(archived?{task:{...project.tasks[0],id:'old',goal:'archived-body'},archiveStatus:'已归档'}:{})}}});};
 syncBuiltinESMExports();`);
   const call = (...args) => JSON.parse(execFileSync(process.execPath, ['--import', pathToFileURL(fixture).href, 'scripts/client.mjs', ...args],
     { encoding: 'utf8', windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] }));
@@ -201,15 +205,32 @@ syncBuiltinESMExports();`);
     assert.equal(full.workspace.runId, 'main');
     assert.equal(full.projects[0].agents, 1);
     assert.equal(full.attention[0].fingerprint, 'digest');
-    assert.deepEqual(call('read', 'p1', '--task', 't2').result.result, { projectId: 'p1', revision: 3, task: { id: 't2', title: '二' } });
-    assert.equal(call('read', 'p1').result.result.project.tasks.length, 2);
-    assert.deepEqual(call('read', 'p1', '--task', 'old').result.result, { projectId: 'p1', revision: 3, task: { id: 'old', goal: 'archived-body' }, archiveStatus: '已归档' });
-    for (const args of [['overview'], ['overview','--brief'], ['read','p1'], ['main-read'], ['project-lead','p1']]) {
+    const summary = call('read', 'p1').result.result;
+    assert.deepEqual(summary.project, { ref:{id:'p1',name:'示例',path:'/private/path'}, revision:3, tasks:[
+      {id:'t1',title:'一',state:'decision',updatedAt:'today',pendingAcceptance:['a'],pendingDecisions:['d']},
+      {id:'t2',title:'二',state:'working',pendingAcceptance:[],pendingDecisions:[]}
+    ], events:[{id:'unlinked',text:'x'.repeat(120)}] });
+    assert.match(summary.hint, /read p1 --task .*--full/);
+    for (const id of ['t1', 'old']) {
+      const detail = call('read', 'p1', '--task', id).result.result;
+      assert.equal(detail.revision, 3);
+      assert.equal(detail.task.id, id);
+      assert.equal(detail.archiveStatus, id === 'old' ? '已归档' : undefined);
+      assert.deepEqual(detail.task.artifacts.map(a => a.id), ['1','4','5','6']);
+      assert.equal(detail.task.omittedArtifacts, 2);
+      assert.deepEqual(detail.task.executions, [2,3,4]);
+      assert.equal(detail.task.omittedExecutions, 1);
+      const all = call('read', 'p1', '--task', id, '--full').result.result.task;
+      assert.deepEqual(all.artifacts.map(a => a.id), ['1','2','3','4','5','6']);
+      assert.deepEqual(all.executions, [1,2,3,4]);
+    }
+    for (const args of [['overview'], ['overview','--brief'], ['read','p1'], ['read','p1','--full'], ['main-read'], ['project-lead','p1']]) {
       const output = JSON.stringify(call(...args));
       assert.doesNotMatch(output, /history-marker|archived-body|archivedHistory/);
     }
-    const read = call('read','p1').result.result;
-    for (const binding of [read.project, read.lead, call('overview').result.result.workspace,
+    const read = call('read','p1','--full').result.result;
+    assert.equal(read.project.archive, undefined);
+    for (const binding of [read.project, read.lead, summary.lead, call('overview').result.result.workspace,
       call('main-read').result.result, call('project-lead','p1').result.result.binding]) {
       assert.deepEqual(binding.backup, {phase:'taking',history:['a','b','c'],historyTotal:4});
     }
