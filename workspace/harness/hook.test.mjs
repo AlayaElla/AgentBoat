@@ -13,6 +13,8 @@ test('Claude role hooks scope actions by Orca identity and fail open', () => {
   const env = { ...process.env, ORCA_USER_DATA_PATH: temp, AGENTBOAT_HOME: home, TEMP: temp, NODE_OPTIONS: '' };
   const registry = roleRegistryPath(process.platform, env);
   const sessions = {
+    'orca_session_id:10000000-0000-4000-9000-000000000001': { role: 'workspace-main', directory: main, bot: true },
+    'orca_session_id:10000000-0000-4000-9000-000000000002': { role: 'workspace-main', directory: main },
     'orca_session_id:claude_workspace': { role: 'workspace-main', directory: main, summary: '工作间待处理 1 组' },
     'orca_session_id:claude_project': { role: 'project-lead', projectId: 'p1', summary: '待验收 1 项' },
     'orca_session_id:codex_workspace': { role: 'workspace-main', directory: main, summary: '工作间待处理 1 组' },
@@ -46,6 +48,10 @@ test('Claude role hooks scope actions by Orca identity and fail open', () => {
     writeFileSync(registry, 'broken');
     assert.equal(run('claude_workspace', '{}').decision, null);
     writeFileSync(registry, JSON.stringify({ version: 1, sessions }));
+    for (const command of ['orca bot item list', 'orca automations list', 'orca bot reply', 'orca computer list-apps']) {
+      assert.equal(pre('Bash', { command }, '10000000-0000-4000-9000-000000000001'), 'deny');
+      assert.equal(pre('Bash', { command }, '10000000-0000-4000-9000-000000000002'), undefined);
+    }
     for (const source of ['startup', 'resume', 'compact', 'clear']) {
       const session = id => run(id, { hook_event_name: 'SessionStart', source }).decision?.hookSpecificOutput?.additionalContext;
       assert.match(session('claude_workspace'), /工作间管理员.*[\s\S]+工作间待处理 1 组/);

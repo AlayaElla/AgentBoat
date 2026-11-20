@@ -1,3 +1,4 @@
+import { LocalBots, quotaReceipt } from './bot-runtime'
 import { LeadContacts } from '../scripts/lead-contact.mjs'
 import type { LeadContact, ContactRoutes } from './model'
 import { execFile } from 'node:child_process'
@@ -17,6 +18,8 @@ import { activeUserDataPath, pluginKey, release } from '../scripts/orca-cli.mjs'
 export const readTimeout = 5000
 const execute = promisify(execFile)
 export interface CoordinatorRuntime {
+  bots?: Pick<LocalBots, 'list' | 'find' | 'home' | 'original' | 'update' | 'newHome'>
+  botMail?(target: string, subject: string, body: string, type: 'handoff' | 'status', home?: string): Promise<{ recipient: string; quota?: ReturnType<typeof quotaReceipt> }>
   projects(host: HostApi<'worker'>): Promise<ProjectRef[]>
   runBinding(id: string): Promise<{ owner: string | null; generation: number; objective?: string }>
   syncContacts(wanted: LeadContact[], workspaces?: string[]): Promise<ContactRoutes>
@@ -35,6 +38,13 @@ export interface CoordinatorRuntime {
 }
 export class OrcaRuntime implements CoordinatorRuntime {
   constructor(private executable: () => Promise<string>) {}
+  bots = new LocalBots(args => this.call(args, readTimeout))
+  async botMail(target: string, subject: string, body: string, type: 'handoff' | 'status', home?: string) {
+    const result = await this.call(['orchestration', 'send', '--from', `plugin:${pluginKey}`, '--to', target, '--type', type, '--subject', subject, '--body', body])
+    const recipient = result.message?.to_handle
+    if (typeof recipient !== 'string' || !recipient || !result.message.id) fail('bot 投递回执待核对')
+    return { recipient, quota: quotaReceipt(result, home ?? recipient) }
+  }
   private async call(args: string[], timeout = 25000): Promise<any> {
     let stdout: string
     try {

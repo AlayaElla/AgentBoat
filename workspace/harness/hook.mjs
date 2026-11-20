@@ -319,12 +319,13 @@ function stopBlocker(input, role, codex) {
 function run() {
   const codex = process.argv.includes('--codex');
   const id = process.env.ORCA_AGENT_SESSION_ID?.replace(/^orca_session_id:/, '');
-  const valid = codex ? /^(?:codex_[\w-]+|[\da-f]{8}(?:-[\da-f]{4}){3}-[\da-f]{12})$/i : /^claude_[\w-]+$/;
-  if (!id || !valid.test(id)) return;
+  const uuid = /^[\da-f]{8}(?:-[\da-f]{4}){3}-[\da-f]{12}$/i.test(id ?? '');
+  const valid = codex ? /^codex_[\w-]+$/ : /^claude_[\w-]+$/;
+  if (!id || !uuid && !valid.test(id)) return;
   const data = JSON.parse(readFileSync(roleRegistryPath(), 'utf8'));
   if (data?.version !== 1 || !data.sessions || typeof data.sessions !== 'object' || Array.isArray(data.sessions)) throw Error('角色表格式不正确');
   const role = data.sessions['orca_session_id:' + id];
-  if (!role) return;
+  if (!role || uuid && !codex && !(role.role === 'workspace-main' && role.bot === true)) return;
   if (!(role.role === 'workspace-main' && typeof role.directory === 'string' && path.isAbsolute(role.directory)) &&
     !(role.role === 'project-lead' && typeof role.projectId === 'string' && role.projectId)) throw Error('角色表条目格式不正确');
   const input = JSON.parse(readFileSync(0, 'utf8'));

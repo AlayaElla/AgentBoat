@@ -1,9 +1,10 @@
+import { botHomeHandle } from './bot-runtime'
 import { randomUUID } from 'node:crypto'
 import path from 'node:path'
 import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { actingMain, backupInCharge, attention, groupedAttention, labels, projectCounts, type Messaging, type Project, type Workspace } from './model'
 
-type Role = { standby?: boolean; role: 'workspace-main'; directory: string; summary?: string } | { standby?: boolean; role: 'project-lead'; projectId: string; runId: string; summary?: string }
+type Role = { bot?: boolean; standby?: boolean; role: 'workspace-main'; directory: string; summary?: string } | { standby?: boolean; role: 'project-lead'; projectId: string; runId: string; summary?: string }
 const chat = (value?: string, agent?: string) => /^orca_session_id:(?:claude|codex)_[\w-]+$/.test(value ?? '') ||
   agent === 'codex' && /^orca_session_id:[\da-f]{8}(?:-[\da-f]{4}){3}-[\da-f]{12}$/i.test(value ?? '')
 const line = (value: string) => value.replace(/\s+/g, ' ').slice(0, 200)
@@ -18,9 +19,11 @@ export function roleRegistry(file: string, read: () => Promise<{
       const visible = current?.filter(p => !p.hidden)
       const sessions: Record<string, Role> = {}
       const spare = workspace.backup
-      if (spare?.handle && workspace.session && chat(spare.handle, spare.agent)) sessions[spare.handle] = { role: 'workspace-main', directory: workspace.session.path, standby: true }
+      if (spare?.handle && workspace.session && chat(spare.handle, spare.agent)) sessions[spare.handle] = { role: 'workspace-main', directory: workspace.bot?.standbyPath ?? workspace.session.path, standby: true }
       const main = actingMain(workspace)
-      if (workspace.runId && main && chat(main.handle, main.agent)) {
+      const botHome = workspace.bot && botHomeHandle(workspace.session?.handle) ? workspace.session : undefined
+      if (workspace.runId && botHome) sessions[botHome.handle] = { bot: true, role: 'workspace-main', directory: botHome.path, standby: backupInCharge(spare) }
+      if (workspace.runId && main && (chat(main.handle, main.agent) || botHome?.handle === main.handle)) {
         const summary = visible && [
           `工作间待处理 ${groupedAttention(visible.flatMap(attention)).length} 组`,
           ...visible.slice(0, 30).map(p => {
@@ -30,8 +33,8 @@ export function roleRegistry(file: string, read: () => Promise<{
           ...(visible.length > 30 ? [`另有 ${visible.length - 30} 个项目，读 overview 查看`] : []),
           ...(mailbox ? [`工作间消息待交付 ${mailbox.inbox.filter(m => m.state === 'pending').length + mailbox.deliveries.filter(m => !m.external && m.state === 'pending').length} 条，送达待核对 ${mailbox.deliveries.filter(m => !m.external && m.state === 'uncertain').length} 条`] : [])
         ].join('\n')
-        if (workspace.session && workspace.session.handle !== main.handle) sessions[workspace.session.handle] = { role: 'workspace-main', directory: main.path, standby: true }
-        sessions[main.handle] = { role: 'workspace-main', directory: main.path, ...(summary ? { summary } : {}) }
+        if (!botHome && workspace.session && workspace.session.handle !== main.handle) sessions[workspace.session.handle] = { role: 'workspace-main', directory: main.path, standby: true }
+        sessions[main.handle] = { role: 'workspace-main', directory: main.path, ...(botHome?.handle === main.handle ? { bot: true } : {}), ...(summary ? { summary } : {}) }
       }
       for (const p of projects) {
         if (!p.runId) continue

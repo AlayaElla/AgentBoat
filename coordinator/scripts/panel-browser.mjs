@@ -121,6 +121,7 @@ async function setup(options = {}, hub) {
     if (options.twoWaitingAgents) live.agents.push({ id: 'agent-chat', projectId: 'p1', agent: 'claude', role: 'session', state: 'need', title: '等待设计决定', since: now - 120000, workspaceId: 'identity:chat-workspace' });
     const workspace = { revision: 1, runId: options.unbound ? '' : 'run_main', ...(!options.unbound ? { session: { handle: 'main', agent: 'claude', title: '统筹会话', online: 'online' } } : {}) };
     const hermes = { id: 'hermes', type: 'a2a', name: 'Hermes', enabled: true, state: 'unchecked', message: '' };
+    if (options.bot) workspace.bot = { id: 'current', name: '当前 bot', agent: 'codex', reason: 'Claude 额度已用完', recoveryAt: now + 3600000 };
     if (options.coldMain) workspace.session.online = 'unknown';
     const sessions = ['甲', '乙'].map((name, i) => ({ handle: 'session-' + i, title: name + '会话', workspace: 'identity:test', workspaceName: '示例工作区', path: '/test/工作区 with spaces', agent: i ? 'codex' : 'claude', online: 'online' }));
     const projectSessions = [{ ...sessions[0], handle: 'project-session-0', title: '当前设计会话' },
@@ -313,11 +314,12 @@ async function setup(options = {}, hub) {
       if (name === 'workspace.connections' && options.hermes && input.operation === 'read') {
         return { connection: hermes, a2a: { url: 'http://127.0.0.1:1234', port: 5678, revision: 1, entries: [] } };
       }
-      if (name === 'workspace.agent.targets') return { sessions: clone(sessions), workspaces: [{ workspace: 'identity:test', name: '示例工作区', path: '/test/工作区 with spaces' }] };
+      if (name === 'workspace.agent.targets') return { ...(options.bot ? { bots: [{ id: 'new-bot', name: '备用管家', agent: 'claude', paused: false }] } : {}), sessions: clone(sessions), workspaces: [{ workspace: 'identity:test', name: '示例工作区', path: '/test/工作区 with spaces' }] };
       if (name === 'workspace.agent.switch') {
         if (input.revision !== workspace.revision) throw Error('工作间已更新');
         workspace.revision++;
-        if (input.mode === 'cancel') delete workspace.takeover;
+        if (input.mode === 'bot') workspace.takeover = { id: 'selection', target: { title: '备用管家' }, state: 'waiting', expiresAt: new Date(Date.now() + 600000).toISOString() };
+        else if (input.mode === 'cancel') delete workspace.takeover;
         else workspace.takeover = { id: String(workspace.revision), target: input.mode === 'new' ? { title: '新的 ' + input.agent + ' 会话' } : sessions.find(s => s.handle === input.handle), state: 'waiting', expiresAt: new Date(Date.now() + 600000).toISOString() };
         if (window.fixture.delaySwitch) { window.fixture.delaySwitch = false; window.fixture.emit(); await new Promise(r => { window.fixture.finishSwitch = r; }); }
         return clone(workspace);
@@ -479,6 +481,17 @@ try {
       assert.equal((await lead.locator('.dot').getAttribute('class')).trim(),('dot '+tone).trim());
       if (state==='work') {await page.getByRole('button',{name:'设置',exact:true}).click();await currentLayer().locator('.lead').getByText(/工作中 · 5 分钟前开始/).waitFor();await home();}
     }
+  });
+  await test('设置主 agent 显示 bot 与恢复时间，选择已有 bot 时传本机 ID 和待命工作区', async () => {
+    await setup({ bot: true });
+    await page.getByRole('button', { name: '设置', exact: true }).click();
+    const manage = page.getByRole('button', { name: '管理主 agent' });
+    assert.match(await manage.innerText(), /当前 bot · Codex.*预计恢复/);
+    await manage.click();
+    await currentLayer().getByRole('button', { name: '设为主 bot' }).click();
+    await currentLayer().getByText(/正在等 备用管家 接管/).waitFor();
+    const choice = await page.evaluate(() => fixture.calls.find(c => c.name === 'workspace.agent.switch').input);
+    assert.deepEqual(choice, { revision: 1, mode: 'bot', botId: 'new-bot', workspace: 'identity:test' });
   });
   await test('settings details show available data while reads are pending and recover locally', async () => {
     await setup({ coldMain: true, holdAgents: true, hermes: true });

@@ -1,10 +1,12 @@
+import path from 'node:path'
+import { botHomeHandle } from './bot-runtime'
 import { needsLeadCompaction } from './project-archive'
 import { backupView, type BackupLeads } from './backup-lead'
 import { randomBytes, randomUUID } from 'node:crypto'
 import { existsSync } from 'node:fs'
 import { promptClientPath } from '../scripts/orca-cli.mjs'
 import type { OrcaWorkerApi } from 'orca/worker'
-import { agents, type AgentSession, type LeadSwitch, type MainTakeover, type Project, type StoredTakeover, type WorkspaceBinding } from './model'
+import { agents, backupInCharge, type AgentSession, type Delivery, type LeadSwitch, type MainTakeover, type Project, type StoredTakeover, type WorkspaceBinding } from './model'
 import type { CoordinatorRuntime } from './runtime'
 import type { AgentLaunch } from '../../workspace/agent-launch.mjs'
 import { ProjectStore, fail, fingerprint, takeoverActive, text, revision } from './store'
@@ -44,10 +46,14 @@ export async function switchLead(runtime: CoordinatorRuntime, input: LeadSwitch,
     changed()
     return
   }
-  if (input.mode !== 'existing' && input.mode !== 'new') fail('请选择切换方式')
+  const bot = input.mode === 'bot' && options.role === 'workspace' && input.botId ? await runtime.bots?.find(input.botId) : undefined
+  if (input.mode === 'bot' && (!bot || bot.paused || !['claude','codex'].includes(bot.agent))) fail('所选 bot 不可用')
+  if (!bot && input.mode !== 'existing' && input.mode !== 'new') fail('请选择切换方式')
   const targets = await options.targets()
   const existing = input.mode === 'existing', agent = input.agent ?? ''
-  const target = existing ? targets.sessions.find(s => s.handle === input.handle && s.online === 'online') : (() => {
+  const standby = bot && targets.workspaces.find(w => w.workspace === input.workspace)
+  if (bot && !standby) fail('请选择待命会话的独立工作区')
+  const target = bot ? { handle: '', title: bot.name, workspace: '', workspaceName: '', path: '', agent: bot.agent, online: 'unknown' as const } : existing ? targets.sessions.find(s => s.handle === input.handle && s.online === 'online') : (() => {
     const w = targets.workspaces.find(w => w.workspace === input.workspace)
     if (!w || !Object.hasOwn(agents, agent)) return
     return { handle: '', title: `新的 ${agents[agent as keyof typeof agents]} 会话`, workspace: w.workspace, workspaceName: w.name, path: w.path, agent, online: 'unknown' as const }
@@ -59,15 +65,18 @@ export async function switchLead(runtime: CoordinatorRuntime, input: LeadSwitch,
     if (target.handle && (w.session?.handle ?? w.mainAgentHandle) === target.handle) fail('该会话已经是主会话')
     const prior = w.takeover
     if (prior && takeoverActive(prior) &&
-      (existing ? prior.target.handle === target.handle : prior.mode === input.mode && prior.target.workspace === target.workspace && prior.target.agent === target.agent)) fail('该会话的接管请求已发起')
-    w.takeover = { id, target, expiresAt, tokenHash: fingerprint(token), state: 'sending', mode: existing ? 'existing' : 'new' }
+      (bot ? prior.bot?.id === bot.id : existing ? prior.target.handle === target.handle : prior.mode === input.mode && prior.target.workspace === target.workspace && prior.target.agent === target.agent)) fail('该会话的接管请求已发起')
+    w.takeover = { id, target, expiresAt, tokenHash: fingerprint(token), state: 'sending', mode: bot ? 'bot' : existing ? 'existing' : 'new',
+      ...(bot && standby ? { bot: { id: bot.id, standbyWorkspace: standby.workspace, standbyPath: standby.path } } : {}) }
   }, expected)
   changed()
   const prompt = `${options.prompt(token, expiresAt)}\n\n${roleReminder[options.role]}`
   let handle: string
   try {
-    handle = existing ? (await runtime.requestTakeover(target.handle, prompt, options.subject), target.handle)
+    handle = bot ? (await runtime.botMail!('bot:' + bot.id, '请接管工作间主 agent', prompt, 'handoff')).recipient
+      : existing ? (await runtime.requestTakeover(target.handle, prompt, options.subject), target.handle)
       : await runtime.launchMain(target.workspace, target.agent, prompt, options.launch)
+    if (bot && !botHomeHandle(handle)) fail('未确认 bot 收件地址')
   } catch {
     await mutate(w => {
       if (w.takeover?.id !== id) return
@@ -93,12 +102,31 @@ export function mainAgent(orca: OrcaWorkerApi, store: ProjectStore, runtime: Coo
     const s = w.session
     const activity = sample?.ok && sample.main?.handle === s?.handle ? sample.main?.status : undefined
     const online = sample ? activity?.state === 'offline' ? 'offline' : activity && activity.state !== 'unknown' ? 'online' : 'unknown' : s ? await runtime.targets().then(t => t.sessions.find(x => x.handle === s.handle)?.online ?? 'offline' as const).catch(() => 'unknown' as const) : 'unknown'
-    return { revision: w.revision, runId: w.runId,
+    const current = w.bot && await runtime.bots?.find(w.bot.id).catch(() => undefined)
+    return { revision: w.revision, runId: w.runId, ...(w.bot ? { bot: { ...w.bot, ...current } } : {}),
       ...(w.backup ? { backup: backupView(w.backup) } : {}), securityBoundary: mainSecurityBoundary,
-      ...(s ? { session: { ...s, online } } : {}), ...(w.boundAt ? { boundAt: w.boundAt } : {}),
+      ...(s ? { session: { ...s, online: w.botSwitch ? 'unknown' : online } } : {}), ...(w.boundAt ? { boundAt: w.boundAt } : {}),
       ...(w.runId ? { projectNames: (await projects()).filter(p => !p.hidden && p.runId === w.runId).map(p => p.ref.name) } : {}),
       ...(previous ? { previousNotice: previous.state } : {}),
       ...(takeover ? { takeover } : {}) }
+  }
+  const waitingForBot = (w: import('./model').Workspace) => !!(w.botSwitch || w.botQuota || w.botHandoff || w.backup?.phase === 'taking')
+  async function deliver(run: string, d: Delivery, fromQueue = false): Promise<{ requestId?: string }> {
+    const w = await store.workspace()
+    if (!w.bot || w.runId !== run) return runtime.send(run, d)
+    const waiting = waitingForBot(w)
+    if (!waiting && backupInCharge(w.backup)) return runtime.send(run, d)
+    if (!fromQueue && (d.informational || waiting)) {
+      await store.mutateWorkspace(row => {
+        if (row.runId !== run) fail('工作间绑定已变化')
+        const queue = row.retired ??= [], id = 'bot-mail:' + d.id
+        if (!queue.some(x => x.id === id)) queue.push({ ...d, id, createdAt: Date.now(), targetRunId: run, state: 'pending' })
+      })
+      return {}
+    }
+    const receipt = await runtime.botMail!('run:' + run, d.subject, d.body, d.informational ? 'status' : 'handoff', w.session?.handle)
+    if (receipt.quota) await backups.saveQuota(run, receipt.quota)
+    return {}
   }
   let flushing: Promise<void> | undefined
   function flushRetired(): Promise<void> {
@@ -106,12 +134,31 @@ export function mainAgent(orca: OrcaWorkerApi, store: ProjectStore, runtime: Coo
     flushing = (async () => {
       while (true) {
         const w = await store.workspace()
-        const d = w.retired?.find(d => d.state === 'pending' && backups.canSend(w, d))
+        const waiting = waitingForBot(w)
+        const eligible = (d: Delivery) => d.state === 'pending' && backups.canSend(w, d) &&
+          !(w.bot && waiting && !d.control && !d.ownerAlert && d.targetRunId === w.runId)
+        const d = w.retired?.find(d => eligible(d) && (!d.informational || Date.now() - (d.createdAt ?? 0) >= 5 * 60_000))
         if (!d) break
-        await store.mutateWorkspace(w => { w.retired!.find(x => x.id === d.id)!.state = 'sending' })
+        const batch = d.informational ? w.retired!.filter(x => x.informational && x.targetRunId === d.targetRunId && eligible(x)).slice(0, 20) : [d]
+        const ids = new Set(batch.map(x => x.id))
+        await store.mutateWorkspace(w => { for (const x of w.retired!) if (ids.has(x.id)) x.state = 'sending' })
         let state: 'sent' | 'uncertain' = 'sent'
-        try { if (d.control) await backups.send('', d); else await runtime.send(d.targetRunId!, d) } catch { state = 'uncertain' }
-        await store.mutateWorkspace(w => { w.retired!.find(x => x.id === d.id)!.state = state })
+        try {
+          if (d.ownerAlert) {
+            await store.mutateMessaging(m => {
+              if (m.feishu.enabled) for (const chatId of m.feishu.chatIds) {
+                const id = d.id + ':' + chatId
+                if (!m.deliveries.some(x => x.id === id)) m.deliveries.push({ ...d, id, external: { channel: 'feishu', appId: m.feishu.appId, chatId } })
+              }
+            })
+            bound()
+          } else if (d.control) await backups.send('', d)
+          else await deliver(d.targetRunId!, d.informational ? { ...d, subject: '工作间进展摘要', body: batch.map(x => x.subject).join('\n') } : d, true)
+        } catch { state = 'uncertain' }
+        await store.mutateWorkspace(w => {
+          for (const x of w.retired!) if (ids.has(x.id)) x.state = state
+          if (state === 'sent') w.retired = w.retired!.filter(x => !ids.has(x.id) || !x.id.startsWith('bot-mail:'))
+        })
       }
     })().finally(() => { flushing = undefined })
     return flushing
@@ -122,6 +169,13 @@ export function mainAgent(orca: OrcaWorkerApi, store: ProjectStore, runtime: Coo
       if (input.checkOnly !== undefined && typeof input.checkOnly !== 'boolean') fail('checkOnly 必须是布尔值；检查请用 main-bind --check')
       await runtime.verifyRun(runId, caller)
       const session = await runtime.identify(caller, runId, input.currentRunId)
+      const pending = (await store.workspace()).takeover?.bot
+      if (pending) {
+        const current = await runtime.bots?.find(pending.id)
+        if (!current || current.paused || current.agent !== session.agent || await runtime.bots!.home(current) !== caller) fail('当前会话不是所选 bot 的主对话')
+        const relative = path.relative(session.path, pending.standbyPath)
+        if (!relative || !path.isAbsolute(relative) && relative !== '..' && !relative.startsWith('..' + path.sep)) fail('待命工作区必须在 bot 的家目录之外')
+      }
       await store.bindWorkspace(revision(input.revision), runId, { id: text(input.requestId, '请求编号', 200), input }, session, input.token, input.checkOnly)
       if (input.checkOnly) return { ...await read(), check: { canTakeOver: true, message: '可以接管；本次只核实，凭据和绑定均未改变', runId, session } }
       bound()
@@ -131,7 +185,8 @@ export function mainAgent(orca: OrcaWorkerApi, store: ProjectStore, runtime: Coo
   })
   orca.panels.handle('workspace.agent.targets', async () => {
     const t = await runtime.targets('display')
-    return { ...t, sessions: t.sessions.filter(s => s.online === 'online') }
+    const bots = await runtime.bots?.list().catch(() => undefined)
+    return { ...t, ...(bots ? { bots } : {}), sessions: t.sessions.filter(s => s.online === 'online') }
   })
   orca.panels.handle('workspace.agent.switch', async input => {
     await switchLead(runtime, input, {
@@ -150,5 +205,5 @@ export function mainAgent(orca: OrcaWorkerApi, store: ProjectStore, runtime: Coo
     })
     void flushRetired().catch(() => {})
   }
-  return { read, recover, flushRetired }
+  return { read, recover, flushRetired, deliver }
 }

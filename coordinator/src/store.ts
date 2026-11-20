@@ -28,7 +28,7 @@ export function verifyTakeover(t: StoredTakeover | undefined, token: unknown, se
   if (!t || !takeoverActive(t) || typeof token !== 'string' || !token || t.tokenHash !== fingerprint(token)) fail('替换主会话需要有效的一次性接管凭据；请让主人重新发起切换')
   if (!t.target.handle) fail('启动回执尚未确认目标会话；请稍后重读绑定状态再试')
   if (t.target.handle !== session.handle) fail('接管凭据不属于当前会话；请在选中的目标会话调用')
-  if (t.target.workspace !== session.workspace || t.target.agent !== session.agent) fail('目标会话的工作区或 agent 已变化；请重新发起切换')
+  if ((!t.bot && t.target.workspace !== session.workspace) || t.target.agent !== session.agent) fail('目标会话的工作区或 agent 已变化；请重新发起切换')
   if (oldRun === newRun) fail('接管会话必须创建自己的新 Run')
   return t
 }
@@ -71,7 +71,7 @@ export function notifyWorkspace(before: Project, after: Project, runId: string):
   const prior = new Set(workspaceNotices(before).map(n => fingerprint(n.key)))
   const notices = workspaceNotices(after).filter(n => !prior.has(fingerprint(n.key)) && !after.deliveries.some(d => d.noticeKeys?.includes(fingerprint(n.key))))
   if (!notices.length) return
-  after.deliveries.push({ id: randomUUID(), noticeKeys: notices.map(n => fingerprint(n.key)), targetRunId: runId, subject: `${after.ref.name} · ${notices.map(n => n.task.title).filter((v, i, all) => all.indexOf(v) === i).join('、')}`.slice(0, 200),
+  after.deliveries.push({ id: randomUUID(), ...(notices.every(n => n.key[1] === 'completed') ? { informational: true } : {}), noticeKeys: notices.map(n => fingerprint(n.key)), targetRunId: runId, subject: `${after.ref.name} · ${notices.map(n => n.task.title).filter((v, i, all) => all.indexOf(v) === i).join('、')}`.slice(0, 200),
     body: notices.map(n => `[项目 ${after.ref.id} / 任务 ${n.task.id}]\n${n.action.replace(/\s+/g, ' ').slice(0, 500)}`).join('\n\n') + '\n请读取工作间总览和项目记录后处理，决定与验收由用户作出。', state: 'pending' })
 }
 
@@ -158,6 +158,9 @@ export class ProjectStore {
           body: `你已不再是工作间主 agent。新的主 agent：${session.title || session.handle}\n工作区：${session.workspaceName || session.workspace}\n目录：${session.path}\nAgent：${session.agent}\nRun：${runId}\n请停止承担工作间主 agent。已发送的通知不会补发；新的主 agent 会读取总览补齐事项。`, state: 'pending' })
       }
       if (checkOnly) return w
+      if (w.takeover?.bot) w.bot = w.takeover.bot
+      else delete w.bot
+      delete w.originalBot; delete w.botSwitch; delete w.botQuota; delete w.botHandoff
       resetBackup(w, session.handle)
       await this.archive.compactLead(w)
       w.session = session; w.boundAt = new Date().toISOString(); delete w.takeover

@@ -42,6 +42,8 @@ export interface Delivery {
   id: string; subject: string; body: string
   noticeKeys?: string[]
   runNotice?: { stage: 'project' | 'workspace'; projectId: string; runId: string; attemptedAt?: number }
+  informational?: boolean
+  ownerAlert?: boolean
   receiptHash?: string
   linkMessageHash?: string
   control?: { action: LeadAction; cycle: string; handle: string }
@@ -82,7 +84,7 @@ export type LeadAction = 'take' | 'ready' | 'handoff' | 'resume'
 export interface LeadContact { id: string; projectId?: string; online?: boolean; workspace: string; primary: string }
 export type ContactRoutes = Record<string, { dispatch?: string; error?: string; closing?: boolean; closed?: boolean; projectId?: string }>
 export interface BackupLead {
-  primary: string; agent: string; handle?: string
+  primary: string; agent: string; handle?: string; previousOwner?: string
   phase: 'unavailable' | 'single' | 'opening' | 'failed' | 'standby' | 'probing' | 'taking' | 'active' | 'handoff' | 'returning'
   since: number; cycle: string; generation?: number; receiptGeneration?: number; contact?: LeadContact; standbyRunId?: string; notified?: string[]; lastProbe?: number; confirmedAt?: number; problem?: string
   history: { at: number; text: string }[]
@@ -99,9 +101,9 @@ export interface AgentSession {
   state?: string; stateStartedAt?: number
   online: 'online' | 'offline' | 'unknown'
 }
-export function actingMain(binding?: Pick<WorkspaceBinding, 'session' | 'backup'>): AgentSession | undefined {
+export function actingMain(binding?: Pick<WorkspaceBinding, 'session' | 'backup' | 'bot'>): AgentSession | undefined {
   const s = binding?.session, b = binding?.backup
-  return s && b?.handle && backupInCharge(b) ? { ...s, handle: b.handle, agent: b.agent, title: '备用主会话', online: 'unknown' } : s
+  return s && b?.handle && backupInCharge(b) ? { ...s, ...(binding?.bot ? { workspace: binding.bot.standbyWorkspace, path: binding.bot.standbyPath } : {}), handle: b.handle, agent: b.agent, title: '备用主会话', online: 'unknown' } : s
 }
 export interface MainTakeover {
   id: string; target: AgentSession; expiresAt: string; state: 'sending' | 'waiting' | 'uncertain' | 'expired'
@@ -111,8 +113,14 @@ export const takeoverActive = (t?: MainTakeover) => !!t && t.state !== 'expired'
 export function waitingForProjectLead(binding?: WorkspaceBinding) {
   return !binding?.runId && takeoverActive(binding?.takeover) ? binding?.takeover : undefined
 }
-export type StoredTakeover = MainTakeover & { tokenHash: string; mode?: 'existing' | 'new' }
-export type LeadSwitch = { revision: number; mode: 'existing' | 'new' | 'cancel'; handle?: string; workspace?: string; agent?: string }
+export interface BotTarget { id: string; name: string; agent: string; paused: boolean }
+export interface BotBinding {
+  id: string; name?: string; agent?: string; paused?: boolean
+  standbyWorkspace: string; standbyPath: string
+  reason?: string; recoveryAt?: number; result?: string
+}
+export type StoredTakeover = MainTakeover & { tokenHash: string; mode?: 'existing' | 'new' | 'bot'; bot?: BotBinding }
+export type LeadSwitch = { revision: number; mode: 'existing' | 'new' | 'bot' | 'cancel'; botId?: string; handle?: string; workspace?: string; agent?: string }
 export interface ProjectLead {
   binding: WorkspaceBinding
   sessions: AgentSession[]
@@ -122,6 +130,7 @@ export interface ProjectLead {
 export interface WorkspaceBinding {
   revision: number; runId: string; session?: AgentSession; boundAt?: string
   backup?: BackupLead
+  bot?: BotBinding
   projectNames?: string[]; takeover?: MainTakeover
   previousNotice?: Delivery['state']
   securityBoundary?: string
@@ -129,6 +138,11 @@ export interface WorkspaceBinding {
 }
 export interface Workspace extends WorkspaceBinding {
   version: 1; requests: { id: string; fingerprint: string }[]
+  botHandoff?: string
+  originalBot?: { agent: string; launch?: Record<string, unknown> }
+  botSwitch?: { cycle: string; oldHome: string; agent: string; until: number; credential: string; generation: number; recipient?: string; returning: boolean }
+  botQuota?: { home: string; recoveryAt?: number }
+
   takeover?: StoredTakeover
   archive?: Pick<NonNullable<Project['archive']>, 'id' | 'start' | 'end'>
   retired?: Delivery[]

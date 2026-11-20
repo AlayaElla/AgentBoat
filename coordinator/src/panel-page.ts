@@ -503,10 +503,15 @@ function mainAgentInfo(agent: MainAgentActivity | null | undefined, bound = !!ag
   const title = agent ? [agentName(agent.agent), agent.title, label].filter(Boolean).join(' · ') : bound ? '已绑定' : '未绑定'
   return { title, tone }
 }
+function botStatus(bot: WorkspaceBinding['bot']) {
+  if (!bot) return ''
+  return [bot.name || bot.id, bot.agent ? agentName(bot.agent) : 'bot 状态未知', bot.paused && '已暂停', bot.reason,
+    bot.recoveryAt ? '预计恢复 ' + new Date(bot.recoveryAt).toLocaleString() : bot.reason?.includes('额度') ? '恢复时间未知' : '', bot.result].filter(Boolean).join(' · ')
+}
 function mainAgentLine(agent: MainAgentActivity | null | undefined, open?: () => void, bound = !!agent, showLabel = true) {
   const active = open ? actingMain(all.workspace) : undefined
   const { title: primary, tone } = mainAgentInfo(active ?? agent, bound, open ? localMainStyle(active) : undefined)
-  const title = open && all.workspace.backup ? primary + ' · ' + backupDescription(all.workspace) : primary
+  const title = [primary, open && all.workspace.backup && backupDescription(all.workspace), open && botStatus(all.workspace.bot)].filter(Boolean).join(' · ')
   return el(open ? 'button' : 'div', { class: 'lead', type: open ? 'button' : undefined, 'aria-label': open ? showLabel ? '主 agent' : '管理主 agent' : undefined, onclick: open }, dot(tone), showLabel ? el('span', { class: 't' }, '主 agent') : null, el('span', { class: 'grow trunc xs muted', title }, title), open ? icon('chevron') : null)
 }
 const activityNote = (activity: SharedReport['projects'][number]['activity']) => activity === null ? 'agent 状态读不到' : activity?.truncated ? 'agent 未全部列出' : undefined
@@ -1296,7 +1301,11 @@ function mainPage() {
     catch (e) { error = (e as Error).message }
     await refresh()
   }
-  return [el('p', { class: 'any' }, leadDescription(w, '主 agent')), backupHistory(w), leadChoices(w, targets?.sessions, switchMain),
+  const bots = (targets?.bots ?? []).filter((b: import('./model').BotTarget) => !b.paused && ['codex','claude'].includes(b.agent))
+  return [el('p', { class: 'any' }, leadDescription(w, '主 agent')), w.bot ? el('p', {}, botStatus(w.bot)) : null, backupHistory(w), leadChoices(w, targets?.sessions, switchMain),
+    bots.length ? section('已有 bot', select('Bot', Object.fromEntries(bots.map((b: import('./model').BotTarget) => [b.id, b.name])), bots[0].id),
+      select('待命工作区', Object.fromEntries(workspaces.map((s: any) => [s.workspace, s.name + ' · ' + s.path])), w.bot?.standbyWorkspace || w.session?.workspace || workspaces[0]?.workspace || ''),
+      button('设为主 bot', () => switchMain({ mode: 'bot', botId: form.Bot, workspace: form['待命工作区'] }), 'primary', !workspaces.length)) : null,
     active.error && targets ? detailReadState('在线会话') : null,
     targets ? section('新会话', select('工作区', Object.fromEntries(workspaces.map((s: any) => [s.workspace, `${s.name} · ${s.path}`])), workspaces[0]?.workspace ?? ''), select('Agent', { claude: 'Claude', codex: 'Codex' }, 'claude'), button('新开一个主 agent', () => switchMain({ mode: 'new', workspace: form['工作区'], agent: form.Agent }), 'primary', !workspaces.length)) : null,
     fold(active.key + '-binding', '绑定详情', () => el('dl', { class: 'kv' }, Object.entries({ Run: w.runId || '未绑定', 会话: w.session?.handle || '未知', 目录: w.session?.path || '未知', 绑定时间: w.boundAt || '未知', 授权边界: w.securityBoundary || '未知' }).map(([k, v]) => [el('dt', {}, k), el('dd', {}, v)])))]

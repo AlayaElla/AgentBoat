@@ -493,7 +493,8 @@ export function createCoordinator(api: OrcaWorkerApi, runtime: CoordinatorRuntim
   async function sendDelivery(d: Delivery, role: keyof typeof roleReminder, fallbackRunId = '') {
     if (d.external) return { messageId: await sources.send(d) }
     const body = role === 'project' && !d.id.startsWith('retired:') ? `${d.body}\n\n${roleReminder.project}` : d.body
-    return runtime.send(d.targetRunId || fallbackRunId, { ...d, body })
+    const run = d.targetRunId || fallbackRunId
+    return role === 'workspace' ? main.deliver(run, { ...d, body }) : runtime.send(run, { ...d, body })
   }
   function deferMailbox() { setImmediate(() => { void flushMailbox().catch(() => {}) }) }
   const needsWorkspaceRun = (d: Delivery) => d.linkMessageHash || isRunNotice(d.id) || d.id.startsWith('setup-hooks:')
@@ -857,11 +858,14 @@ export function createCoordinator(api: OrcaWorkerApi, runtime: CoordinatorRuntim
   async function inspectBindings(records?: Awaited<ReturnType<typeof availableProjectRecords>>) {
     const { list, error } = records ?? await availableProjectRecords()
     if (stoppedChecks) return
-    const w = await store.workspace(), projects = list.filter(p => !p.hidden && p.runId && p.ref.hostId === 'local')
+    let w = await store.workspace()
+    const projects = list.filter(p => !p.hidden && p.runId && p.ref.hostId === 'local')
     const inventory = (w.runId || projects.length) && !error ? await runtime.targets('sample').catch(() => undefined) : undefined
     lastInventory = inventory ? { at: Date.now(), sessions: inventory.sessions } : undefined
+    if (await backups.inventoryStatus(w, !!inventory)) w = await store.workspace()
     const known = error ? await store.all() : list
     await backups.syncContacts([w, ...known], inventory?.sessions, inventory?.workspaces.map(s => s.workspace) ?? list.map(p => p.ref.workspace).filter(Boolean))
+    if (w.retired?.some(d => !d.control && d.state === 'pending')) void main.flushRetired().catch(() => {})
     if (error || (!w.runId && !projects.length)) return
     const mailbox = await store.messaging()
     for (const r of [w, ...projects]) {
@@ -877,14 +881,14 @@ export function createCoordinator(api: OrcaWorkerApi, runtime: CoordinatorRuntim
         continue
       }
       const session = inventory.sessions.find(s => s.handle === handle) ?? (project ? projectBinding({ ...project, mainAgentHandle: handle }).session : w.session)
-      if (!session || !inventory.workspaces.some(w => w.workspace === session.workspace)) {
+      if (!session || (!w.bot || project) && !inventory.workspaces.some(w => w.workspace === session.workspace)) {
         await backups.missing(r, '找不到已绑定主会话的工作区', w.runId).catch(() => {})
         continue
       }
       const pending: { at: number; title: string }[] = []
       if (r.backup?.handle) {
         const mail = project ? waitingByRun.get(r.runId) : await runtime.mail(r.runId).then(m => [...m.waiting ?? [], ...m.questions.map(q => ({ at: q.at, title: q.subject }))] as Waiting).catch(() => null)
-        if (mail === null || !mail && r.backup.phase === 'probing') continue
+        if ((mail === null || !mail && r.backup.phase === 'probing') && !(w.bot && !project)) continue
         const reports = (mail ?? []).flatMap(m => m.report ? [m.report] : [])
         const submitted = project && await store.archive.submittedReports(project, reports)
         pending.push(...(mail ?? []).filter(m => !m.report || (submitted ? !submitted.has(m.report.id) : !m.read)))
