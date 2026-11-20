@@ -3,14 +3,15 @@ import { installedRequest } from './cli-bridge.mjs';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
+import { parseArgs } from 'node:util';
 import { createHash } from 'node:crypto';
 import { writeMainRoleCards } from './main-role-card.mjs';
 
 const [operation, argument, flag, taskId, extra] = process.argv.slice(2);
 const brief = operation === 'overview' && argument === '--brief';
-const singleTask = operation === 'read' && flag === '--task';
+const readOptions = operation === 'read' ? parseArgs({ args: process.argv.slice(4), options: { full: { type: 'boolean' }, task: { type: 'string' } } }).values : {};
 if (operation === 'overview' && (argument && !brief || flag)) throw new Error('用法：node client.mjs overview [--brief]');
-if (operation === 'read' && (!argument || flag && (!singleTask || !taskId || extra))) throw new Error('用法：node client.mjs read <projectId> [--task <taskId>]');
+if (operation === 'read' && (!argument || argument.startsWith('--') || readOptions.task === '')) throw new Error('用法：node client.mjs read <projectId> [--task <taskId>] [--full]');
 const history = operation === 'lead-history';
 const historyArgs = history ? process.argv.slice(3) : [];
 const historyProject = historyArgs[0] && historyArgs[0] !== '--end' ? historyArgs.shift() : undefined;
@@ -32,7 +33,7 @@ function readInput(file) {
   return JSON.parse(raw.replace(/^\uFEFF/, ''));
 }
 const input = history ? { projectId: historyProject, end: historyArgs.length ? Number(historyArgs[1]) : undefined } : leadAction ? { runId: argument, action: operation.slice(5), caller, token: flag, ...(taskId ? { note: taskId } : {}) } : operation === 'connections' ? { operation: 'read' } : operation.startsWith('connection-') ? { ...(['connection-read','connection-check'].includes(operation) ? { name: argument } : readInput(0)), operation: operation.slice(11) } : operation.startsWith('links-') ? { ...(['links-join', 'links-configure', 'links-rename', 'links-share', 'links-relate', 'links-revoke', 'links-send'].includes(operation) ? readInput(0) : {}), operation: operation.slice(6) } : ['projects', 'overview'].includes(operation) ? null : operation === 'main-read' ? { operation: 'read' } : operation === 'read'
-  ? { operation, projectId: argument, ...(singleTask ? { taskId } : {}) }
+  ? { operation, projectId: argument, taskId: readOptions.task }
   : operation === 'project-lead' ? { projectId: argument }
   : operation === 'main-targets' ? null
   : { ...readInput(operation === 'main-bind' || leadBind || leadSwitch ? 0 : argument), ...(['message', 'feedback', 'feishu-reply', 'project-lead-switch'].includes(operation) ? {} : { operation: operation === 'main-bind' || leadBind ? 'bind' : operation }) };
@@ -155,11 +156,22 @@ try {
       const { attention, questions, reports, projects, error } = view;
       reply.result.result = { attention: attention.map(({ fingerprint, ...item }) => item), questions, reports,
         projects: projects.map(({ ref, counts, revision, bound }) => ({ id: ref.id, name: ref.name, counts, revision, bound })), error };
-    } else if (singleTask) {
-      const task = view.task ?? project.tasks.find(task => task.id === taskId);
+    } else if (readOptions.task) {
+      const task = view.task ?? project?.tasks.find(task => task.id === input.taskId);
       if (!task) {
-        process.stderr.write(`项目 ${project.ref.id} 中找不到任务 ${taskId}。\n`);
+        process.stderr.write(`项目 ${argument} 中找不到任务 ${input.taskId}。\n`);
         process.exit(1);
+      }
+      if (!readOptions.full) {
+        const recent = 3;
+        const { artifactVersions } = await import(release ? '../../src/artifact-versions.mjs' : '../src/artifact-versions.mjs');
+        const keep = new Set(task.acceptance.filter(a => a.status !== 'discarded').flatMap(a => a.artifactIds));
+        for (const [latest] of artifactVersions(task.artifacts).slice(0, recent)) keep.add(latest.id);
+        const artifacts = task.artifacts.filter(a => keep.has(a.id));
+        task.omittedArtifacts = task.artifacts.length - artifacts.length;
+        task.artifacts = artifacts;
+        task.omittedExecutions = Math.max(0, task.executions.length - recent);
+        task.executions = task.executions.slice(-recent);
       }
       reply.result.result = { projectId: project.ref.id, revision: project.revision, task, ...(view.archiveStatus ? { archiveStatus: view.archiveStatus } : {}) };
     } else {
@@ -176,6 +188,16 @@ try {
         for (const task of project.tasks ?? []) {
           for (const item of [...task.acceptance ?? [], ...task.decisions ?? []]) delete item.archivedHistory;
         }
+      }
+      if (operation === 'read' && !readOptions.full && project) {
+        const { taskState } = await import(release ? '../../src/task-state.mjs' : '../src/task-state.mjs');
+        const { ref: { id, name, path }, revision, runId, roles } = project;
+        const tasks = project.tasks.map(t => ({ id: t.id, title: t.title, state: taskState(t), updatedAt: t.updatedAt,
+          pendingAcceptance: t.acceptance.filter(a => a.status === 'pending').map(a => a.id),
+          pendingDecisions: t.decisions.filter(d => d.answer === undefined).map(d => d.id) }));
+        const events = project.events.filter(e => !e.taskId).map(({ id, source, receivedAt, text }) => ({ id, source, receivedAt, text: text.slice(0, 120) }));
+        reply.result.result = { project: { ref: { id, name, path }, revision, runId, roles, tasks, events }, lead: view.lead,
+          runtimeError: view.runtimeError, hint: `详情用 read ${id} --task <任务>，全量用 --full。` };
       }
       if (operation === 'main-bind' && !input.checkOnly && view.runId === input.runId && view.session?.handle === caller) {
         try { writeMainRoleCards(view.session.path); }

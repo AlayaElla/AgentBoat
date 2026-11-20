@@ -770,7 +770,7 @@ try {
     await test(`settings shows ${versionLabel} at ${width}px`, async () => {
       await page.getByRole('button', { name: '设置', exact: true }).click();
       const label = currentLayer().getByText(versionLabel, { exact: true });
-      await label.waitFor();
+      await (await label.elementHandle()).waitForElementState('stable');
       const box = await label.boundingBox();
       assert.ok(box.x >= 0 && box.x + box.width <= width && box.y >= 0 && box.y + box.height <= page.viewportSize().height);
     });

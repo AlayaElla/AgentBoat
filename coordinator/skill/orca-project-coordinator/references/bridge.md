@@ -18,8 +18,8 @@
 - `projects`：项目列表，不含工作间主 agent 自己所在的目录。
 - `overview`：读取绑定、待处理、项目和连接全量。attention 是待决定、待验收、受阻、返修；questions 是仍在执行的 Orca 执行者在最近 24 小时发出、超过 10 分钟未回复的问题。执行记录不代表 agent 在线。
 - `overview --brief`：日常核对待办，返回 `{attention,questions,reports,projects:[{id,name,counts,revision,bound}]}`。questions 和 reports 是供管理员核对的项目 Run 邮件，插件先提醒项目主会话，再按超时情况提醒工作间主 agent。全量总览另有项目目录、执行记录数（agents）和连接设置。
-- `read <projectId>`：`{project,lead}`，project 含 revision、runId、roles、tasks、events、deliveries。主备状态中的 history 给出最近 3 条接管记录，historyTotal 是当前保留的总条数。
-- `read <projectId> --task <taskId>`：核对单项任务及完整反馈历史，返回 `{projectId,revision,task}`。从归档找到时还返回 `archiveStatus: "已归档"`。再次 submit 同一编号会恢复并合并原任务。任务不存在时返回错误。
+- `read <projectId>` 返回项目摘要。project 含 ref（编号、名称、路径）、revision、runId、roles、每项任务的状态和待验收／待决定编号，以及未关联消息的前 120 个字符。lead 给出主备绑定，history 取最近 3 条，historyTotal 是保留的总条数。加 `--full` 读取完整项目，接管历史仍取最近 3 条，省略归档游标。
+- `read <projectId> --task <taskId>` 返回 `{projectId,revision,task}`，保留完整反馈历史、未丢弃验收项引用的成果，以及最近更新的 3 个不同名称成果的最新版本和最近 3 条执行记录。omittedArtifacts 和 omittedExecutions 分别是省略条数。加 `--full` 返回完整任务。归档任务另带 `archiveStatus: "已归档"`，再次 submit 同一编号会恢复并合并原任务。任务不存在时返回错误。
 - `lead-history [projectId] [--end <previousEnd>]`：按角色查接管记录，省略项目编号查工作间；用返回的 previousEnd 翻到更早一批。
 - `project-lead <projectId>`：项目的主会话（`binding`）、待接管状态和在线目标会话。
 - `main-read`：工作间主 agent 的绑定；`main-targets`：可接管的在线会话。
@@ -44,13 +44,13 @@
 - 新建任务必填 id、title、goal、phase。更新同一 id 时，省略 title 或 goal 会保留原值。phase 取 working、blocked、paused、ready、completed。
 - 数组按 id 合并，省略的保留。任务、验收和来源的编号保持不变。成果 id 不能改写，每个新的成果版本用新 id；问题变了用新的决定 id。登记执行者成果时，在对应任务的 executions 保留 Orca Run、任务和派工编号。
 - 验收的 revision、status、history 由插件维护；核对内容或关联成果变了，自动出新版本。
-- 在 acceptance 或 decisions 中用 `{"id":"旧项编号","discarded":true,"reason":"已由新版取代"}` 撤下已有待处理项。沿用同一验收编号提交有变化的核对内容或成果，会开启新一版并保留旧版历史。
+- 在 acceptance 或 decisions 中用 `{"id":"旧项编号","discarded":true,"reason":"已由新版取代"}` 撤下待验收、需要修改的验收项或待决定项。沿用同一验收编号提交有变化的核对内容或成果，会开启新一版并保留旧版历史。
 - sourceIds 用本项目 events 的 id，一个来源只关联一个任务。
 - 一次 submit 带出多条新事项时，插件只给工作间主 agent 发一条汇总通知。未绑定时不发，之后绑定也不补发。
 
 ## 代录用户结论
 
-先 `read`，确认任务和验收的当前版本。`feedback`：
+先用 `read <projectId> --task <taskId>` 确认任务和验收的当前版本，再用 `feedback` 代录。
 
 ```json
 {"projectId":"…","revision":3,"requestId":"唯一编号","items":[

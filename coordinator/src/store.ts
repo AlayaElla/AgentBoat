@@ -330,7 +330,8 @@ function applyFeedback(project: Project, tasks: Task[], items: unknown, source?:
       }
       if (input.kind === 'acceptance') {
         const item = task.acceptance.find(x => x.id === input.itemId)
-        if (!item || item.revision !== input.itemRevision || (!withdrawal && task.phase !== 'ready') || item.status !== 'pending') fail('验收项已更新或不在待验收状态，请刷新后确认')
+        const withdrawingRework = withdrawal && item?.status === 'changes_requested'
+        if (!item || item.revision !== input.itemRevision || (!withdrawal && task.phase !== 'ready') || (item.status !== 'pending' && !withdrawingRework)) fail('验收项已更新或不在待验收状态，请刷新后确认')
         if (input.reviewTotal !== undefined && input.reviewTotal !== task.acceptance.filter(a => a.status === 'pending').length) fail('待验收项已更新，请刷新后确认')
         if (input.fingerprint !== undefined && input.fingerprint !== item.fingerprint) fail('验收内容已更新')
         if (!['passed', 'changes_requested', 'discarded'].includes(input.result)) fail('验收结论不正确')
