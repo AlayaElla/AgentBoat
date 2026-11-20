@@ -314,7 +314,7 @@ async function setup(options = {}, hub) {
       if (name === 'workspace.connections' && options.hermes && input.operation === 'read') {
         return { connection: hermes, a2a: { url: 'http://127.0.0.1:1234', port: 5678, revision: 1, entries: [] } };
       }
-      if (name === 'workspace.agent.targets') return { ...(options.bot ? { bots: [{ id: 'new-bot', name: '备用管家', agent: 'claude', paused: false }] } : {}), sessions: clone(sessions), workspaces: [{ workspace: 'identity:test', name: '示例工作区', path: '/test/工作区 with spaces' }] };
+      if (name === 'workspace.agent.targets') return { ...(options.bot || options.availableBot ? { bots: [{ id: 'new-bot', name: '备用管家', agent: 'claude', paused: false }] } : options.emptyBots ? { bots: [] } : {}), sessions: clone(sessions), workspaces: [{ workspace: 'identity:test', name: '示例工作区', path: '/test/工作区 with spaces' }] };
       if (name === 'workspace.agent.switch') {
         if (input.revision !== workspace.revision) throw Error('工作间已更新');
         workspace.revision++;
@@ -482,7 +482,7 @@ try {
       if (state==='work') {await page.getByRole('button',{name:'设置',exact:true}).click();await currentLayer().locator('.lead').getByText(/工作中 · 5 分钟前开始/).waitFor();await home();}
     }
   });
-  await test('设置主 agent 显示 bot 与恢复时间，选择已有 bot 时传本机 ID 和待命工作区', async () => {
+  await test('主 agent 默认选 bot，两种表单互斥，选择已有 bot 只传本机 ID', async () => {
     await setup({ bot: true });
     await page.getByRole('button', { name: '设置', exact: true }).click();
     const manage = page.getByRole('button', { name: '管理主 agent' });
@@ -490,10 +490,31 @@ try {
     await manage.click();
     await currentLayer().getByText('已写入职责说明', { exact: false }).waitFor();
     assert.match(await currentLayer().innerText(), /备份位置：\/fixture\/plugin-data\/bot-soul-backups\/original.md/);
-    await currentLayer().getByRole('button', { name: '设为主 bot' }).click();
+    const layer = currentLayer(), botTab = layer.getByRole('tab', { name: 'bot', exact: true });
+    assert.equal(await botTab.getAttribute('aria-selected'), 'true');
+    await layer.getByLabel('Bot', { exact: true }).waitFor();
+    for (const label of ['工作区', '待命工作区', 'Agent']) assert.equal(await layer.getByLabel(label, { exact: true }).count(), 0);
+    assert.equal(await layer.getByRole('button', { name: '新开一个主 agent' }).count(), 0);
+    await layer.getByRole('tab', { name: '新会话' }).click();
+    await layer.getByLabel('工作区', { exact: true }).waitFor();
+    await layer.getByLabel('Agent', { exact: true }).waitFor();
+    await layer.getByRole('button', { name: '新开一个主 agent' }).waitFor();
+    assert.equal(await layer.getByLabel('Bot', { exact: true }).count(), 0);
+    assert.equal(await layer.getByRole('button', { name: '设为主 bot' }).count(), 0);
+    await botTab.click();
+    await layer.getByRole('button', { name: '设为主 bot' }).click();
     await currentLayer().getByText(/正在等 备用管家 接管/).waitFor();
     const choice = await page.evaluate(() => fixture.calls.find(c => c.name === 'workspace.agent.switch').input);
-    assert.deepEqual(choice, { revision: 1, mode: 'bot', botId: 'new-bot', workspace: 'identity:test' });
+    assert.deepEqual(choice, { revision: 1, mode: 'bot', botId: 'new-bot' });
+  });
+  await test('普通主会话默认选新会话，可切换到本机 bot', async () => {
+    await setup({ availableBot: true });
+    await page.getByRole('button', { name: '设置', exact: true }).click();
+    await page.getByRole('button', { name: '管理主 agent' }).click();
+    const tab = currentLayer().getByRole('tab', { name: '新会话' });
+    await tab.waitFor();
+    assert.equal(await tab.getAttribute('aria-selected'), 'true');
+    assert.equal(await currentLayer().getByRole('button', { name: '设为主 bot' }).count(), 0);
   });
   await test('settings details show available data while reads are pending and recover locally', async () => {
     await setup({ coldMain: true, holdAgents: true, hermes: true });
@@ -1120,13 +1141,15 @@ try {
     assert.equal(await page.evaluate(() => fixture.calls.filter(c => c.name === 'lead.retry').length), 1);
   });
   for (const unbound of [true, false]) {
-    await setup({ unbound, width: 300 });
+    await setup({ unbound, emptyBots: unbound, width: 300 });
     await test(`main agent one-click ${unbound ? 'set' : 'replace'}, pending cancel/reselect, expiry/failure and new Claude/Codex`, async () => {
       await page.getByRole('button', { name: '设置', exact: true }).click();
       await page.getByRole('button', { name: '管理主 agent', exact: true }).click();
       const action = unbound ? '设为主 agent' : '换成它';
       assert.equal(await page.getByRole('checkbox').count(), 0);
+      await currentLayer().getByRole('button', { name: '新开一个主 agent' }).waitFor();
       assert.equal(await page.getByLabel('切换方式', { exact: true }).count(), 0);
+      assert.equal(await currentLayer().getByLabel('Bot', { exact: true }).count(), 0);
       await page.evaluate(() => { fixture.delaySwitch = true; });
       await page.getByRole('button', { name: action, exact: true }).nth(0).click();
       await page.getByText('正在等 甲会话 接管，还剩 10 分钟', { exact: true }).waitFor();

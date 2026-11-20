@@ -165,14 +165,18 @@ export class ProjectStore {
           }
         }
         w.retired ??= []
+        if (w.botStopped) for (const d of w.retired) {
+          if (d.id.startsWith('bot-mail:') && d.state === 'pending' && d.targetRunId === w.runId) d.targetRunId = runId
+        }
         if (w.runId) w.retired.push({ id: `retired:${t.id}`, targetRunId: w.runId, subject: '工作间主 agent 已切换',
           body: `你已不再是工作间主 agent。新的主 agent：${session.title || session.handle}\n工作区：${session.workspaceName || session.workspace}\n目录：${session.path}\nAgent：${session.agent}\nRun：${runId}\n请停止承担工作间主 agent。已发送的通知不会补发；新的主 agent 会读取总览补齐事项。`, state: 'pending' })
       }
       if (checkOnly) return w
       if (w.takeover?.bot) w.bot = w.takeover.bot
       else delete w.bot
-      delete w.originalBot; delete w.botSwitch; delete w.botQuota; delete w.botHandoff
-      resetBackup(w, session.handle)
+      delete w.originalBot; delete w.botSwitch; delete w.botQuota; delete w.botStopped; delete w.botReceipt
+      if (w.bot) delete w.backup
+      else resetBackup(w, session.handle)
       await this.archive.compactLead(w)
       w.session = session; w.boundAt = new Date().toISOString(); delete w.takeover
       w.runId = runId; w.revision++; w.requests.push({ id: request.id, fingerprint: hash })

@@ -12,11 +12,6 @@ type Rpc = (method: 'bots.list' | 'bots.update', params?: object) => Promise<any
 export const botHomeHandle = (value: unknown): value is string =>
   typeof value === 'string' && /^orca_session_id:[\da-f]{8}(?:-[\da-f]{4}){3}-[\da-f]{12}$/i.test(value)
 
-export function checkStandbyPath(home: string, standby: string) {
-  const relative = path.relative(home, standby)
-  if (!relative || !path.isAbsolute(relative) && relative !== '..' && !relative.startsWith('..' + path.sep)) throw Error('待命工作区必须在 bot 的家目录之外')
-}
-
 async function localRpc(method: Parameters<Rpc>[0], params?: object) {
   let metadata
   try { metadata = JSON.parse(await readFile(path.join(activeUserDataPath(), 'orca-runtime.json'), 'utf8')) }
@@ -71,13 +66,12 @@ export class LocalBots {
     const bot = await this.record(id)
     return bot ? target(bot) : undefined
   }
-  async writeSoul(bot: BotTarget, spaces: { botHomeKey?: string; path: string }[], standby: string, prior?: BotBinding['soul']) {
+  async writeSoul(bot: BotTarget, spaces: { botHomeKey?: string; path: string }[], prior?: BotBinding['soul']) {
     const row = await this.record(bot.id)
     if (!row || row.paused || row.agent !== bot.agent || !row.folderWorkspaceId) throw Error('无法核对 bot 家目录，请刷新本机 bot 列表')
     const homes = spaces.filter(s => s.botHomeKey === 'folder:' + row.folderWorkspaceId)
     if (homes.length !== 1) throw Error('找不到唯一的 bot 家目录，请检查 Orca 中该 bot 的工作区')
     const home = homes[0].path
-    checkStandbyPath(home, standby)
     return updateBotSoul(bot.id, home, this.data, target(row).name, prior)
   }
   async removeSoul(bot: BotBinding, home?: string) {

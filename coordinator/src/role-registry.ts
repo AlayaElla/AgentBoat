@@ -18,11 +18,10 @@ export function roleRegistry(file: string, read: () => Promise<{
       const { workspace, projects, current, mailbox } = await read()
       const visible = current?.filter(p => !p.hidden)
       const sessions: Record<string, Role> = {}
-      const spare = workspace.backup
-      if (spare?.handle && workspace.session && chat(spare.handle, spare.agent)) sessions[spare.handle] = { role: 'workspace-main', directory: workspace.bot?.standbyPath ?? workspace.session.path, standby: true }
+      const spare = !workspace.bot && workspace.backup
+      if (spare && spare.handle && workspace.session && chat(spare.handle, spare.agent)) sessions[spare.handle] = { role: 'workspace-main', directory: workspace.session.path, standby: true }
       const main = actingMain(workspace)
       const botHome = workspace.bot && botHomeHandle(workspace.session?.handle) ? workspace.session : undefined
-      if (workspace.runId && botHome) sessions[botHome.handle] = { bot: true, role: 'workspace-main', directory: botHome.path, standby: backupInCharge(spare) }
       if (workspace.runId && main && (chat(main.handle, main.agent) || botHome?.handle === main.handle)) {
         const summary = visible && [
           `工作间待处理 ${groupedAttention(visible.flatMap(attention)).length} 组`,

@@ -232,18 +232,21 @@ function projectTabs(projectId: string, views: Partial<Record<'inbox' | 'tasks' 
   const names = { inbox: '待处理', tasks: '任务', artifacts: '成果', agents: 'Agent', messages: '消息' }
   const entries = Object.entries(views) as [keyof typeof names, ProjectTab][]
   const [selected, view] = entries.find(([id]) => id === tabOf(projectId)) ?? entries[0]
-  return [el('div', { class: 'tabs', role: 'tablist', 'aria-label': '项目页面', style: `--n:${entries.length};--i:${entries.findIndex(([id]) => id === selected)}`, onkeydown: (e: KeyboardEvent) => {
+  return [tabButtons('项目页面', entries.map(([id, { count }]) => ({ id, name: names[id], count })), selected, id => { tabsOf[projectId] = id; remember(); render() }),
+    el('div', { role: 'tabpanel', id: active.key + '-tab', class: 'stack g3 fade', 'data-key': selected }, view.body())]
+}
+function tabButtons(label: string, entries: { id: string; name: string; count?: number }[], selected: string, choose: (id: string) => void) {
+  return el('div', { class: 'tabs', role: 'tablist', 'aria-label': label, style: `--n:${entries.length};--i:${entries.findIndex(({ id }) => id === selected)}`, onkeydown: (e: KeyboardEvent) => {
     if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(e.key)) return
     const tablist = e.currentTarget as HTMLElement
     const buttons = Array.from(tablist.querySelectorAll<HTMLButtonElement>('[role=tab]')), at = buttons.indexOf(document.activeElement as HTMLButtonElement)
     e.preventDefault()
     const next = buttons[e.key === 'Home' ? 0 : e.key === 'End' ? buttons.length - 1 : (at + (e.key === 'ArrowRight' ? 1 : -1) + buttons.length) % buttons.length]
     next?.click(); next?.focus()
-  } }, el('span', { class: 'ind', 'aria-hidden': 'true' }), entries.map(([id, { count }]) => el('button', {
+  } }, el('span', { class: 'ind', 'aria-hidden': 'true' }), entries.map(({ id, name, count }) => el('button', {
     type: 'button', role: 'tab', class: 'tab', tabindex: selected === id ? 0 : -1, 'aria-selected': String(selected === id), 'aria-controls': active.key + '-tab',
-    onclick: () => { tabsOf[projectId] = id; remember(); render() }
-  }, names[id], count ? el('span', { class: 'n', 'aria-hidden': 'true' }, count) : null))),
-    el('div', { role: 'tabpanel', id: active.key + '-tab', class: 'stack g3 fade', 'data-key': selected }, view.body())]
+    onclick: () => choose(id)
+  }, name, count ? el('span', { class: 'n', 'aria-hidden': 'true' }, count) : null)))
 }
 function dismiss() {
   clearTimeout(toastTimer)
@@ -1302,14 +1305,20 @@ function mainPage() {
     await refresh()
   }
   const bots = (targets?.bots ?? []).filter((b: import('./model').BotTarget) => !b.paused && ['codex','claude'].includes(b.agent))
+  const mode = bots.length ? form.mainMode ?? (w.bot ? 'bot' : 'new') : 'new'
   return [el('p', { class: 'any' }, leadDescription(w, '主 agent')), w.bot ? el('p', {}, botStatus(w.bot)) : null,
     w.bot?.soul ? el('p', { class: 'any' }, '已写入职责说明', el('br'), w.bot.soul.backup ? '备份位置：' + w.bot.soul.backup : '原文件不存在，无需备份') : null,
+    w.bot?.standbyRetired ? callout('原来的待命会话已不再使用，可以自己关掉') : null,
     backupHistory(w), leadChoices(w, targets?.sessions, switchMain),
-    bots.length ? section('已有 bot', select('Bot', Object.fromEntries(bots.map((b: import('./model').BotTarget) => [b.id, b.name])), bots[0].id),
-      select('待命工作区', Object.fromEntries(workspaces.map((s: any) => [s.workspace, s.name + ' · ' + s.path])), w.bot?.standbyWorkspace || w.session?.workspace || workspaces[0]?.workspace || ''),
-      button('设为主 bot', () => switchMain({ mode: 'bot', botId: form.Bot, workspace: form['待命工作区'] }), 'primary', !workspaces.length)) : null,
     active.error && targets ? detailReadState('在线会话') : null,
-    targets ? section('新会话', select('工作区', Object.fromEntries(workspaces.map((s: any) => [s.workspace, `${s.name} · ${s.path}`])), workspaces[0]?.workspace ?? ''), select('Agent', { claude: 'Claude', codex: 'Codex' }, 'claude'), button('新开一个主 agent', () => switchMain({ mode: 'new', workspace: form['工作区'], agent: form.Agent }), 'primary', !workspaces.length)) : null,
+    bots.length ? tabButtons('切换方式', [{ id: 'bot', name: 'bot' }, { id: 'new', name: '新会话' }], mode, id => { form.mainMode = id; render() }) : null,
+    targets ? el('div', { class: 'sec', role: bots.length ? 'tabpanel' : undefined, id: active.key + '-tab' }, mode === 'bot'
+      ? [select('Bot', Object.fromEntries(bots.map((b: import('./model').BotTarget) => [b.id, b.name])), bots[0].id),
+        button('设为主 bot', () => switchMain({ mode: 'bot', botId: form.Bot }), 'primary')]
+      : [bots.length ? null : el('h2', { class: 'h2' }, '新会话'),
+        select('工作区', Object.fromEntries(workspaces.map((s: any) => [s.workspace, s.name + ' · ' + s.path])), workspaces[0]?.workspace ?? ''),
+        select('Agent', { claude: 'Claude', codex: 'Codex' }, 'claude'),
+        button('新开一个主 agent', () => switchMain({ mode: 'new', workspace: form['工作区'], agent: form.Agent }), 'primary', !workspaces.length)]) : null,
     fold(active.key + '-binding', '绑定详情', () => el('dl', { class: 'kv' }, Object.entries({ Run: w.runId || '未绑定', 会话: w.session?.handle || '未知', 目录: w.session?.path || '未知', 绑定时间: w.boundAt || '未知', 授权边界: w.securityBoundary || '未知' }).map(([k, v]) => [el('dt', {}, k), el('dd', {}, v)])))]
 }
 function settingsPage() {

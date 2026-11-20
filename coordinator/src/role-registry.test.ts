@@ -53,9 +53,13 @@ test('role registry mirrors active bindings, replaces old roles and drops delete
     main = { ...main, handle: 'orca_session_id:10000000-0000-4000-9000-000000000001' }
     await c.store.mutateWorkspace(w => { w.session = main })
     assert.equal(read()[main.handle], undefined)
-    await c.store.mutateWorkspace(w => { w.bot = { id: 'bot-1', name: '测试', agent: 'claude', paused: false, standbyWorkspace: 'standby', standbyPath: dir } })
+    const spare = 'orca_session_id:codex_old_standby'
+    await c.store.mutateWorkspace(w => { w.backup = { primary: main.handle, handle: spare, agent: 'codex', phase: 'standby', cycle: 'old', since: 1, history: [] } })
+    assert.equal(read()[spare].standby, true)
+    await c.store.mutateWorkspace(w => { w.bot = { id: 'bot-1', name: '测试', agent: 'claude', paused: false } })
     assert.equal(read()[main.handle].bot, true)
-    await c.store.mutateWorkspace(w => { w.runId = ''; delete w.session; delete w.bot })
+    assert.equal(read()[spare], undefined)
+    await c.store.mutateWorkspace(w => { w.runId = ''; delete w.session; delete w.backup; delete w.bot })
     assert.equal(read()[main.handle], undefined)
     await c.checkBackups(); await c.flush('p1')
     const ref = await c.store.get('p1')

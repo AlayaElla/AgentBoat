@@ -886,9 +886,9 @@ export function createCoordinator(api: OrcaWorkerApi, runtime: CoordinatorRuntim
         continue
       }
       const pending: { at: number; title: string }[] = []
-      if (r.backup?.handle) {
+      if (r.backup?.handle || (!project && w.bot)) {
         const mail = project ? waitingByRun.get(r.runId) : await runtime.mail(r.runId).then(m => [...m.waiting ?? [], ...m.questions.map(q => ({ at: q.at, title: q.subject }))] as Waiting).catch(() => null)
-        if ((mail === null || !mail && r.backup.phase === 'probing') && !(w.bot && !project)) continue
+        if ((mail === null || !mail && r.backup?.phase === 'probing') && !(w.bot && !project)) continue
         const reports = (mail ?? []).flatMap(m => m.report ? [m.report] : [])
         const submitted = project && await store.archive.submittedReports(project, reports)
         pending.push(...(mail ?? []).filter(m => !m.report || (submitted ? !submitted.has(m.report.id) : !m.read)))
@@ -908,7 +908,7 @@ export function createCoordinator(api: OrcaWorkerApi, runtime: CoordinatorRuntim
         }
         const deliveries = project ? project.deliveries : [...mailbox.deliveries, ...projects.flatMap(p => p.deliveries.filter(d => d.targetRunId === w.runId))]
         for (const d of deliveries) if (!d.control && !d.external && !d.id.startsWith('retired:') && (!d.targetRunId || d.targetRunId === r.runId) &&
-          ['pending', 'uncertain'].includes(d.state)) pending.push({ at: d.createdAt ?? r.backup.confirmedAt ?? r.backup.since, title: d.subject })
+          ['pending', 'uncertain'].includes(d.state)) pending.push({ at: d.createdAt ?? r.backup?.confirmedAt ?? r.backup?.since ?? Date.parse(w.boundAt ?? ''), title: d.subject })
       }
       const context = (project ? [project] : projects).flatMap(p => p.tasks.filter(t => t.phase === 'working').map(t =>
         [t.title, ...t.executions.slice(-3).map(e => e.agent + ' ' + e.dispatchId)].join(' · ').slice(0, 300))).slice(0, 12).join('；')

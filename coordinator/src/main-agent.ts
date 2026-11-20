@@ -1,4 +1,4 @@
-import { botHomeHandle, checkStandbyPath } from './bot-runtime'
+import { botHomeHandle } from './bot-runtime'
 import { needsLeadCompaction } from './project-archive'
 import { backupView, type BackupLeads } from './backup-lead'
 import { randomBytes, randomUUID } from 'node:crypto'
@@ -59,8 +59,6 @@ export async function switchLead(runtime: CoordinatorRuntime, input: LeadSwitch,
   if (!bot && input.mode !== 'existing' && input.mode !== 'new') fail('请选择切换方式')
   const targets = await options.targets()
   const existing = input.mode === 'existing', agent = input.agent ?? ''
-  const standby = bot && targets.workspaces.find(w => w.workspace === input.workspace)
-  if (bot && !standby) fail('请选择待命会话的独立工作区')
   const target = bot ? { handle: '', title: bot.name, workspace: '', workspaceName: '', path: '', agent: bot.agent, online: 'unknown' as const } : existing ? targets.sessions.find(s => s.handle === input.handle && s.online === 'online') : (() => {
     const w = targets.workspaces.find(w => w.workspace === input.workspace)
     if (!w || !Object.hasOwn(agents, agent)) return
@@ -77,11 +75,11 @@ export async function switchLead(runtime: CoordinatorRuntime, input: LeadSwitch,
       (bot ? prior.bot?.id === bot.id : existing ? prior.target.handle === target.handle : prior.mode === input.mode && prior.target.workspace === target.workspace && prior.target.agent === target.agent)) fail('该会话的接管请求已发起')
     await clearPendingSoul(w, bot?.id)
     let binding: WorkspaceBinding['bot']
-    if (bot && standby) {
+    if (bot) {
       const priorBot = prior?.bot?.id === bot.id ? prior.bot : w.bot
       try {
-        const soul = await runtime.bots!.writeSoul(bot, targets.workspaces, standby.path, priorBot?.id === bot.id ? priorBot.soul : undefined)
-        binding = { id: bot.id, standbyWorkspace: standby.workspace, standbyPath: standby.path, soul }
+        const soul = await runtime.bots!.writeSoul(bot, targets.workspaces, priorBot?.id === bot.id ? priorBot.soul : undefined)
+        binding = { id: bot.id, name: bot.name, soul }
       } catch (e) {
         if (!prior || w.takeover) throw e
         // The previous pending bot was already cleaned up. Persist its cancellation.
@@ -136,12 +134,11 @@ export function mainAgent(orca: OrcaWorkerApi, store: ProjectStore, runtime: Coo
       ...(previous ? { previousNotice: previous.state } : {}),
       ...(takeover ? { takeover } : {}) }
   }
-  const waitingForBot = (w: import('./model').Workspace) => !!(w.botSwitch || w.botQuota || w.botHandoff || w.backup?.phase === 'taking')
+  const waitingForBot = (w: import('./model').Workspace) => !!(w.botSwitch || w.botQuota || w.botStopped)
   async function deliver(run: string, d: Delivery, fromQueue = false): Promise<{ requestId?: string }> {
     const w = await store.workspace()
     if (!w.bot || w.runId !== run) return runtime.send(run, d)
     const waiting = waitingForBot(w)
-    if (!waiting && backupInCharge(w.backup)) return runtime.send(run, d)
     if (!fromQueue && (d.informational || waiting)) {
       await store.mutateWorkspace(row => {
         if (row.runId !== run) fail('工作间绑定已变化')
@@ -200,7 +197,6 @@ export function mainAgent(orca: OrcaWorkerApi, store: ProjectStore, runtime: Coo
         if (!pending.soul) fail('此接管请求尚未写入职责说明，请在面板重新选择 bot')
         const current = await runtime.bots?.find(pending.id)
         if (!current || current.paused || current.agent !== session.agent || await runtime.bots!.home(current) !== caller) fail('当前会话不是所选 bot 的主对话')
-        checkStandbyPath(session.path, pending.standbyPath)
       }
       await store.bindWorkspace(revision(input.revision), runId, { id: text(input.requestId, '请求编号', 200), input }, session, input.token, input.checkOnly, runtime.bots)
       if (input.checkOnly) return { ...await read(), check: { canTakeOver: true, message: '可以接管；本次只核实，凭据和绑定均未改变', runId, session } }
@@ -225,7 +221,23 @@ export function mainAgent(orca: OrcaWorkerApi, store: ProjectStore, runtime: Coo
   })
   async function recover() {
     const w = await store.workspace()
-    if (needsLeadCompaction(w) || w.takeover?.state === 'sending' || w.retired?.some(d => d.state === 'sending')) await store.mutateWorkspace(w => {
+    const legacyBot = (bot: WorkspaceBinding['bot']) => bot && ('standbyWorkspace' in bot || 'standbyPath' in bot)
+    if (legacyBot(w.bot) || legacyBot(w.takeover?.bot) || (w.bot && w.backup) || needsLeadCompaction(w) || w.takeover?.state === 'sending' || w.retired?.some(d => d.state === 'sending')) await store.mutateWorkspace(w => {
+      for (const bot of [w.bot, w.takeover?.bot]) {
+        if (bot && 'standbyWorkspace' in bot) delete bot.standbyWorkspace
+        if (bot && 'standbyPath' in bot) delete bot.standbyPath
+      }
+      if (w.bot && w.backup) {
+        if (w.backup.handle) w.bot.standbyRetired = true
+        if (backupInCharge(w.backup) || w.backup.phase === 'taking') {
+          w.botStopped = true
+          w.bot.result = '原待命会话的接管状态需要核对。请在面板重新选择主 agent。'
+          delete w.botSwitch; delete w.botQuota
+        }
+        delete w.backup
+        if ('botHandoff' in w) delete w.botHandoff
+        w.retired = w.retired?.filter(d => !d.control && !d.id.startsWith('lead-recheck:'))
+      }
       recoverTakeover(w.takeover)
       for (const d of w.retired ?? []) if (d.state === 'sending') d.state = 'uncertain'
     })

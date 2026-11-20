@@ -26,8 +26,8 @@ test('按本机工作区与磁盘 ID 更新 SOUL，备份原字节，保留主�
   const homes = mainTargets([['two', home], ['one', old]].map(([id, folder]) => ({
     botHome: true, worktreeId: 'folder:' + id, path: folder, address: { environment: 'local', worktree: id }
   })), []).workspaces
-  const binding = { id: row.id, standbyWorkspace: 'spare', standbyPath: path.join(root, 'spare') }
-  const write = () => api.writeSoul(row, homes, binding.standbyPath)
+  const binding = { id: row.id }
+  const write = () => api.writeSoul(row, homes)
   const get = () => readFile(soul, 'utf8')
   const heading = '## AgentBoat 工作间管理员', start = '<!-- agentboat:workspace-main:start -->', end = '<!-- agentboat:workspace-main:end -->'
   const block = [heading, start, '', workspaceSoul, '', end].join('\r\n')
@@ -36,8 +36,7 @@ test('按本机工作区与磁盘 ID 更新 SOUL，备份原字节，保留主�
     await writeFile(path.join(old, 'bot.json'), JSON.stringify({ id: 'retired', name: row.name }))
     await writeFile(path.join(old, 'SOUL.md'), '旧 bot')
     await writeFile(diskId, JSON.stringify(row))
-    await assert.rejects(() => api.writeSoul(row, [], binding.standbyPath), /家目录/)
-    await assert.rejects(() => api.writeSoul(row, homes, home), /待命工作区/)
+    await assert.rejects(() => api.writeSoul(row, []), /家目录/)
     const created = await write()
     assert.equal(created.backup, undefined)
     assert.equal(await get(), '# 新名字\n\n' + block.replaceAll('\r\n', '\n') + '\n')
@@ -74,7 +73,7 @@ test('按本机工作区与磁盘 ID 更新 SOUL，备份原字节，保留主�
     }
     await writeFile(soul, '主人新内容')
     const unavailable = new LocalBots(async () => assert.fail('CLI'), async () => ({ bots: [row] }), true, diskId)
-    await assert.rejects(() => unavailable.writeSoul(row, homes, binding.standbyPath), /SOUL.md/)
+    await assert.rejects(() => unavailable.writeSoul(row, homes), /SOUL.md/)
     assert.equal(await get(), '主人新内容')
     await writeFile(diskId, JSON.stringify({ ...row, id: 'other' }))
     await assert.rejects(write, /ID/)
@@ -174,7 +173,7 @@ async function setup() {
     identify: async (handle: string) => env.sessions.find(s => s.handle === handle),
     verifyRun: async () => {}, targets: async () => inventory(), installedAgents: async () => ['codex','claude'],
     launchMain: async (ws: string) => { env.launches.push(ws); return standby.handle },
-    send: async () => ({})
+    send: async (target: string, d: { body: string }) => { env.sends.push({ target, body: d.body, type: 'run' }); return {} }
   } as unknown as CoordinatorRuntime
   let store!: ProjectStore, backups!: BackupLeads, main!: ReturnType<typeof mainAgent>
   const worker = await mountWorker({ default: orca => {
@@ -189,7 +188,7 @@ async function setup() {
   }
   const bind = async () => {
     env.next = first
-    const choice = await worker.request('workspace.agent.switch', { mode: 'bot', revision: 0, botId: initial.id, workspace: standby.workspace })
+    const choice = await worker.request('workspace.agent.switch', { mode: 'bot', revision: 0, botId: initial.id })
     await worker.request('workspace.agent', { operation: 'bind', revision: choice.revision, requestId: 'bind', runId: 'run_bot',
       currentRunId: 'run_bot', caller: first, token: /一次性接管凭据：([^\n]+)/.exec(env.sends[0].body)![1] })
     await store.mutateMessaging(m => { m.feishu = { enabled: true, appId: 'fake', chatIds: ['owner'], senderIds: [] } })
@@ -201,7 +200,7 @@ async function setup() {
 
 test('先写职责再开主对话、投递并核对收件地址，准备失败时允许取消', async () => {
   const { env, worker, store } = await setup()
-  const choose = async () => worker.request('workspace.agent.switch', { mode: 'bot', revision: (await store.workspace()).revision, botId: initial.id, workspace: standby.workspace })
+  const choose = async () => worker.request('workspace.agent.switch', { mode: 'bot', revision: (await store.workspace()).revision, botId: initial.id })
   const cancel = async () => worker.request('workspace.agent.switch', { mode: 'cancel', revision: (await store.workspace()).revision })
   try {
     env.soulError = '请修复 SOUL.md 标记'
@@ -231,7 +230,7 @@ test('从原 bot 换到另一个 bot，正式接管通过才清理原职责', as
     env.current = { ...initial, id: 'bot-2' }
     env.resetTo = env.next = env.home = second
     env.sessions = [{ ...primary, handle: second }, standby]
-    await worker.request('workspace.agent.switch', { mode: 'bot', botId: 'bot-2', workspace: standby.workspace, revision: (await store.workspace()).revision })
+    await worker.request('workspace.agent.switch', { mode: 'bot', botId: 'bot-2', revision: (await store.workspace()).revision })
     const input = { operation: 'bind' as const, revision: (await store.workspace()).revision, runId: 'run_two', currentRunId: 'run_two',
       caller: second, requestId: 'second-bot', token: /一次性接管凭据：([^\n]+)/.exec(env.sends.at(-1)!.body)![1] }
     await worker.request('workspace.agent', { ...input, checkOnly: true })
@@ -251,11 +250,11 @@ test('从原 bot 换到另一个 bot，正式接管通过才清理原职责', as
   } finally { await worker.deactivate() }
 })
 
-test('面板绑定、独立备用、切换宽限、凭据接回原 Run、到点空闲切回和飞书队列', async () => {
+test('面板绑定、无需备用、切换宽限、凭据接回原 Run、到点空闲切回和飞书队列', async () => {
   const { env, worker, store, backups, main, poll, bind } = await setup()
   try {
     await bind()
-    assert.deepEqual(env.launches, [standby.workspace])
+    assert.deepEqual(env.launches, [])
     assert.equal((await store.workspace()).bot?.id, initial.id)
     await main.deliver('run_bot', { id: 'q', body: '请处理', subject: '待决定', state: 'pending' })
     assert.equal(env.sends.at(-1)?.type, 'handoff')
@@ -267,7 +266,7 @@ test('面板绑定、独立备用、切换宽限、凭据接回原 Run、到点�
     assert.deepEqual(env.sends.filter(s => s.type === 'status').map(s => s.body), ['a\nb'])
     await backups.saveQuota('run_bot', { home: first, recoveryAt: Date.now() - 1 })
     await poll(); await poll()
-    assert.equal((await store.workspace()).backup?.phase, 'standby')
+    assert.equal((await store.workspace()).backup, undefined)
     const confirm = async (handle: string, agent: string) => {
       const token = env.sends.at(-1)!.body.split(' ').at(-1)!
       const input = { action: 'take' as const, caller: handle, runId: 'run_bot', token }
@@ -299,7 +298,7 @@ test('同名和改名按 ID 识别，额度恢复时间未知时等主人，面�
     env.current!.name = '新名字'
     const read = () => worker.request('workspace.agent', { operation: 'read' })
     assert.equal((await read()).bot?.name, '新名字')
-    assert.equal((await store.workspace()).bot?.name, undefined)
+    assert.equal((await store.workspace()).bot?.name, initial.name)
     env.warning = 'Queued. ' + first + ' stopped at its usage limit and Orca has no reset time to promise; delivery waits until the chat continues.'
     await main.deliver('run_bot', { id: 'request', subject: '请处理', body: '请处理', state: 'pending' })
     env.warning = ''
@@ -315,7 +314,7 @@ test('同名和改名按 ID 识别，额度恢复时间未知时等主人，面�
     assert.equal(env.updates.length, 1)
     assert.match((await read()).bot!.result!, /恢复时间未知/)
     env.current = { ...initial, name: '新名字', id: 'different' }
-    assert.equal((await read()).bot?.name, undefined)
+    assert.equal((await read()).bot?.name, initial.name)
     const choice = await worker.request('workspace.agent.switch', { mode: 'existing', handle: standby.handle, revision: (await read()).revision })
     await worker.request('workspace.agent', { operation: 'bind', revision: choice.revision, requestId: 'rollback', runId: 'run_old_session', currentRunId: 'run_old_session', caller: standby.handle,
       token: /一次性接管凭据：([^\n]+)/.exec(env.sends.at(-1)!.body)![1] })
@@ -325,73 +324,72 @@ test('同名和改名按 ID 识别，额度恢复时间未知时等主人，面�
   } finally { await worker.deactivate() }
 })
 
-test('待命会话提交交接后，在空闲 bot 上重开主对话接回 Run', async () => {
-  const { env, worker, store, backups, poll, bind } = await setup()
+test('迁移只清理旧待命记录与控制命令，保留会话和未送达消息', async () => {
+  const { env, worker, store, main, bind } = await setup()
   try {
     await bind()
-    await store.mutateWorkspace(w => { w.backup!.phase = 'active'; w.backup!.since = 1 })
-    env.owner = standby.handle
-    await poll()
-    const msg = env.sends.at(-1)!
-    assert.match(msg.body, /lead-handoff run_bot/)
-    const token = /lead-handoff run_bot (\S+)/.exec(msg.body)![1]
-    await backups.command({ caller: standby.handle, action: 'handoff', token, note: '两项待验收', runId: 'run_bot' })
-    await poll()
-    assert.deepEqual(env.resets, ['bot-1', 'bot-1'])
-    assert.match(env.sends.at(-1)!.body, /两项待验收/)
-    env.home = second; env.sessions = [{ ...primary, handle: second }, standby]
-    const request = { caller: second, action: 'take' as const, token: /lead-take run_bot (\S+)/.exec(env.sends.at(-1)!.body)![1], runId: 'run_bot' }
-    assert.deepEqual(await backups.command(request), { useRun: 'run_bot' })
-    env.owner = second; env.generation++
-    await backups.command(request)
-    assert.equal((await store.workspace()).backup?.phase, 'standby')
-    assert.equal((await store.workspace()).botHandoff, undefined)
+    await store.mutateWorkspace(w => {
+      Object.assign(w.bot!, { standbyWorkspace: standby.workspace, standbyPath: standby.path })
+      w.backup = { primary: first, agent: standby.agent, handle: standby.handle, cycle: 'old', phase: 'standby', since: 1, history: [] }
+      w.retired = [{ id: 'old-take', subject: '', body: '', state: 'pending', control: { cycle: 'old', action: 'take', handle: standby.handle } },
+        { id: 'bot-mail:keep', subject: '消息', body: '消息', informational: true, createdAt: Date.now(), state: 'pending' }]
+    })
+    await main.recover(); await main.flushRetired()
+    const w = await store.workspace()
+    assert.equal(w.backup, undefined)
+    assert.ok(w.bot?.standbyRetired)
+    assert.ok(!('standbyWorkspace' in w.bot) && !('standbyPath' in w.bot))
+    assert.equal(w.session?.handle, first)
+    assert.deepEqual(w.retired?.map(d => d.id), ['bot-mail:keep'])
+    assert.deepEqual(env.launches, [])
+    await main.recover()
+    assert.equal((await store.workspace()).revision, w.revision)
   } finally { await worker.deactivate() }
 })
 
-test('不明回执等探测超时，运行时掉线期间只排队，恢复后备用接管', async () => {
-  const { env, worker, store, backups, main, bind } = await setup()
-  try {
-    await bind()
-    env.warning = 'Queued. unexpected response'
-    const overdue = [{ at: Date.now() - 16 * 60000, title: '等待处理' }]
-    const inspect = async (now: number) => backups.inspect(await store.workspace(), primary,
-      { sessions: env.sessions, workspaces: [] }, overdue, '', 'run_bot', now)
-    await inspect(Date.now()); await main.flushRetired()
-    assert.equal((await store.workspace()).backup?.phase, 'probing')
-    await inspect(Date.now() + 11 * 60000)
-    assert.equal((await store.workspace()).backup?.phase, 'taking')
-    assert.equal(env.updates.length, 0)
-    await backups.inventoryStatus(await store.workspace(), false)
-    await main.flushRetired()
-    assert.equal(env.sends.some(s => s.target === standby.handle), false)
-    assert.equal((await store.messaging()).deliveries.filter(d => d.external?.chatId === 'owner').length, 1)
-    await backups.inventoryStatus(await store.workspace(), true)
-    await main.flushRetired()
-    assert.equal(env.sends.filter(s => s.target === standby.handle).length, 1)
-  } finally { await worker.deactivate() }
-})
-
-for (const issue of ['拒绝','旧地址','超时','删除','暂停']) test('bot ' + issue + ' 时，备用拿到原 Run 的一次性接管命令', async () => {
-  const { env, worker, store, backups, poll, bind } = await setup()
+for (const [issue, reason] of [
+  ['拒绝', '切换失败'], ['旧地址', '回执无法核对'], ['超时', '切换超时'], ['二次停住', '再次用完额度'],
+  ['删除', '找不到已绑定的 bot'], ['暂停', 'bot 已暂停'], ['原因不明', '未收到额度用完的回执']
+]) test('bot ' + issue + ' 时通知主人一次并暂停处理', async () => {
+  const { env, worker, store, backups, main, poll, bind } = await setup()
   try {
     await bind()
     if (issue === '删除') env.current = undefined
     else if (issue === '暂停') env.current!.paused = true
-    else {
+    else if (issue === '原因不明') {
+      const w = await store.workspace()
+      await backups.inspect(w, primary, { sessions: env.sessions, workspaces: [] }, [{ at: 1, title: '等待处理' }], '', w.runId)
+    } else {
       env.reject = issue === '拒绝'
       if (issue === '旧地址') env.next = first
+      if (issue === '二次停住') await store.mutateWorkspace(w => { w.originalBot = { agent: 'codex' } })
       await backups.saveQuota('run_bot', { home: first })
     }
     await poll()
-    if (issue === '超时') await store.mutateWorkspace(w => { w.botSwitch!.until = 0 })
-    await poll()
-    assert.equal((await store.workspace()).backup?.phase, 'taking')
-    const msg = env.sends.find(s => s.target === standby.handle)!
-    assert.match(msg.body, /lead-take run_bot/)
-    env.owner = standby.handle
-    await backups.command({ action: 'take', caller: standby.handle, token: msg.body.split(' ').at(-1)!, runId: 'run_bot' })
-    assert.equal((await store.workspace()).backup?.phase, 'active')
-    assert.equal(env.updates.length, ['删除','暂停'].includes(issue) ? 0 : 1)
+    if (issue === '超时') {
+      await store.mutateWorkspace(w => { w.botSwitch!.until = 0 })
+      await backups.inventoryStatus(await store.workspace(), false)
+    }
+    await poll(); await poll()
+    const { bot, botStopped, backup, botSwitch } = await store.workspace()
+    assert.equal(backup, undefined)
+    assert.equal(botSwitch, undefined)
+    assert.equal(botStopped, true)
+    assert.match(bot!.result!, new RegExp(reason))
+    assert.match(bot!.result!, /等待主人.*设置 → Bots → 统筹 → Agent.*面板切回普通会话/)
+    assert.deepEqual((await store.messaging()).deliveries.filter(d => d.external?.chatId === 'owner').map(d => d.body), [bot!.result])
+    const count = env.sends.length
+    await main.deliver('run_bot', { id: 'later', body: '新事项', subject: '待处理', state: 'pending' })
+    await main.flushRetired()
+    assert.equal(env.sends.length, count)
+    assert.ok((await store.workspace()).retired?.some(d => d.id === 'bot-mail:later' && d.state === 'pending'))
+    assert.ok(!env.sends.some(s => s.target === standby.handle))
+    assert.deepEqual(env.launches, [])
+    if (issue === '暂停') {
+      const choice = await worker.request('workspace.agent.switch', { mode: 'existing', handle: standby.handle, revision: (await store.workspace()).revision })
+      const token = /一次性接管凭据：([^\n]+)/.exec(env.sends.at(-1)!.body)![1]
+      await worker.request('workspace.agent', { operation: 'bind', revision: choice.revision, requestId: 'manual', runId: 'run_manual', caller: standby.handle, token })
+      assert.equal(env.sends.find(s => s.body === '新事项')?.target, 'run_manual')
+    }
   } finally { await worker.deactivate() }
 })
