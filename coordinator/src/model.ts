@@ -105,7 +105,11 @@ export function actingMain(binding?: Pick<WorkspaceBinding, 'session' | 'backup'
 }
 export interface MainTakeover {
   id: string; target: AgentSession; expiresAt: string; state: 'sending' | 'waiting' | 'uncertain' | 'expired'
-  error?: string
+  error?: string; backupAgent?: string
+}
+export const takeoverActive = (t?: MainTakeover) => !!t && t.state !== 'expired' && Date.parse(t.expiresAt) > Date.now()
+export function waitingForProjectLead(binding?: WorkspaceBinding) {
+  return !binding?.runId && takeoverActive(binding?.takeover) ? binding?.takeover : undefined
 }
 export type StoredTakeover = MainTakeover & { tokenHash: string; mode?: 'existing' | 'new' }
 export type LeadSwitch = { revision: number; mode: 'existing' | 'new' | 'cancel'; handle?: string; workspace?: string; agent?: string }

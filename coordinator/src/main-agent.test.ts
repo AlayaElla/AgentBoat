@@ -117,8 +117,10 @@ test('project lead new uses the shared template and an unavailable workspace blo
     'workspace.list': { workspaces: [testWorkspace], truncated: false }, 'agents.list': { agents: [] }
   } })
   let c!: ReturnType<typeof createCoordinator>, ref = projectRef
+  let installed = ['claude', 'codex']
   const worker = await mountWorker({ default: api => { c = createCoordinator(api, {
     projects: async () => [ref], launchMain: fakeCli.launchMain.bind(fakeCli),
+    installedAgents: async workspace => { assert.equal(workspace, projectWorkspaceId); return installed },
     targets: async () => ({ sessions: [], workspaces: [{ workspace: projectWorkspaceId, name: '本项目', path: ref.path }] })
   }) } }, { host })
   const read = () => worker.request('project.lead', { projectId: ref.id })
@@ -129,6 +131,7 @@ test('project lead new uses the shared template and an unavailable workspace blo
       const result = await launch(choice)
       assert.equal(result.binding.takeover?.target.handle, 'orca_session_id:fake-' + launches.length)
       assert.equal(result.binding.takeover?.state, 'waiting')
+      assert.equal(result.binding.takeover?.backupAgent, choice === 'codex' ? 'claude' : 'codex')
       const argv = launches.at(-1)!, agent = choice ?? projectLeadDefaults.agent
       const flag = (k: string) => argv.includes('--' + k) ? argv[argv.indexOf('--' + k) + 1] : undefined
       assert.equal(flag('agent'), agent)
@@ -138,6 +141,9 @@ test('project lead new uses the shared template and an unavailable workspace blo
       assert.equal(flag('worktree'), projectWorkspaceId)
       await assert.rejects(() => launch(choice), /已发起/)
     }
+    installed = ['codex']
+    assert.equal((await read()).binding.takeover?.backupAgent, undefined)
+    assert.equal((await worker.request('project.read', { projectId: ref.id })).lead?.takeover?.backupAgent, undefined)
     await c.store.mutate(ref.id, undefined, project => { project.takeover!.state = 'sending' })
     await c.start()
     assert.equal((await read()).binding.takeover?.state, 'uncertain')

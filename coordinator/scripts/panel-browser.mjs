@@ -35,6 +35,7 @@ const test = async (name, work) => { try { await work(); } catch (e) { console.e
 let page;
 async function setup(options = {}, hub) {
   await page?.close(); page = await browser.newPage({ viewport: { width: options.width ?? 400, height: 900 } });
+  if (options.clock) await page.clock.install();
   page.on('pageerror', e => errors.push(e.message));
   page.setDefaultTimeout(4500);
   await page.route('**/*', route => {
@@ -202,7 +203,7 @@ async function setup(options = {}, hub) {
           p.revision++;
           if (input.mode === 'cancel') delete p.takeover;
           else p.takeover = { id: String(p.revision), target: input.mode === 'new' ? { title: '新的 ' + input.agent + ' 会话' } : projectSessions.find(s => s.handle === input.handle),
-            state: 'waiting', expiresAt: new Date(Date.now() + 600000).toISOString() };
+            state: 'waiting', backupAgent: options.backupAgent, expiresAt: new Date(Date.now() + 600000).toISOString() };
         }
         const workspaceError = window.fixture.workspaceTarget.error;
         return clone({ binding: binding(p), defaultAgent: 'claude', sessions: workspaceError ? [] : projectSessions, ...(workspaceError ? { workspaceError } : {}) });
@@ -891,7 +892,7 @@ try {
   await setup({ projectLead: true });
   await test('project main session opens once and project settings retain switch and cancel', async () => {
     await project();
-    await currentLayer().getByText('Claude · 当前设计会话 · 在线', { exact: true }).waitFor();
+    await currentLayer().getByText('Claude · 当前设计会话 · 在线 · 备用正在启动', { exact: true }).waitFor();
     await currentLayer().getByRole('button', { name: '打开会话', exact: true }).click();
     await page.getByRole('status').filter({ hasText: '点一下主会话的标签' }).waitFor();
     await page.getByRole('button', { name: '项目设置', exact: true }).click();
@@ -920,6 +921,60 @@ try {
     assert.equal(await currentLayer().getByRole('button', { name: '绑定已有会话', exact: true }).count(), 2);
     await currentLayer().getByRole('button', { name: '绑定已有会话', exact: true }).first().click();
     await currentLayer().getByRole('heading', { name: '在线会话', exact: true }).waitFor();
+  });
+  await test('waiting project offers only cancellation in both lead views and restores actions after cancellation or expiry', async () => {
+    await setup({ projectUnbound: true, clock: true, backupAgent: 'codex' });
+    await page.getByRole('button', { name: /^还没有任务的项目/ }).click();
+    await project();
+    await page.getByRole('button', { name: '项目设置', exact: true }).click();
+    const layer = currentLayer(), cancel = layer.getByRole('button', { name: '取消', exact: true });
+    const create = () => layer.getByRole('button', { name: '新开一个主会话', exact: true }).click();
+    const checkWaiting = async () => {
+      await layer.getByText(/正在等 新的 claude 会话 接管，还剩 \d+ 分钟/i).waitFor();
+      await layer.getByText('接管后会自动配一个 Codex 备用', { exact: true }).waitFor();
+      assert.equal(await cancel.count(), 1);
+      assert.equal(await layer.getByText(/还没有主会话/).count(), 0);
+      assert.equal(await layer.getByRole('button', { name: /新建主会话|绑定已有会话|新开一个主会话|换成它/ }).count(), 0);
+    };
+    await create();
+    await checkWaiting();
+    await page.evaluate(() => { fixture.delayProject = 'p1'; });
+    await back();
+    await checkWaiting();
+    await page.waitForFunction(() => !!fixture.finishRead);
+    await page.evaluate(() => fixture.finishRead());
+    await cancel.click();
+    await layer.getByText('这个项目还没有主会话').waitFor();
+    assert.equal(await layer.getByRole('button', { name: '绑定已有会话' }).first().isEnabled(), true);
+    await layer.getByRole('button', { name: '新建主会话' }).first().click();
+    await create();
+    await checkWaiting();
+    await back();
+    await page.evaluate(() => {
+      delete fixture.project.takeover.backupAgent;
+      fixture.project.takeover.expiresAt = new Date(Date.now() + 60000).toISOString();
+      fixture.emit();
+    });
+    await layer.getByText(/接管后会自动配/).waitFor({ state: 'hidden' });
+    await cancel.waitFor();
+    await page.clock.fastForward(90000);
+    await layer.getByText('这个项目还没有主会话').waitFor();
+    await layer.getByRole('button', { name: '新建主会话' }).first().click();
+    await layer.getByRole('button', { name: '新开一个主会话' }).waitFor();
+    await layer.getByRole('button', { name: '换成它' }).first().waitFor();
+  });
+  await test('bound project displays backup startup through the opening phase', async () => {
+    await setup({ projectLead: true });
+    await project();
+    const card = currentLayer().locator('.project-lead');
+    await card.getByText(/备用正在启动/).waitFor();
+    for (const phase of ['unavailable', 'opening']) {
+      await home();
+      await page.evaluate(phase => { fixture.project.backup = { agent: 'codex', phase, history: [] }; }, phase);
+      await project();
+      await card.getByText(/主用 Claude.*备用正在启动/).waitFor();
+      assert.equal(await card.getByText(/没有备用/).count(), 0);
+    }
   });
   await setup();
   await test('workspace error after opening is visible and a removed workspace disables the action', async () => {

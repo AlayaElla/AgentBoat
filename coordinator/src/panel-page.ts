@@ -1,7 +1,7 @@
 import type {} from 'orca/frame'
 import type { ArchivePage } from './protocol'
 import { artifactTitle, latestArtifacts } from './artifact-versions.mjs'
-import { actingMain, backupInCharge, blockedRevision, attention, projectSummary, agents, agentName, compareAgentActivity, groupedAttention, isProjectShared, isRecentAgent, labels, taskState, scopes, statuses, connectionStates, roles, mainStatus, mainAgentStates } from './model'
+import { actingMain, backupInCharge, blockedRevision, attention, projectSummary, agents, agentName, compareAgentActivity, groupedAttention, isProjectShared, isRecentAgent, labels, taskState, scopes, statuses, connectionStates, roles, mainStatus, mainAgentStates, waitingForProjectLead } from './model'
 import type { Acceptance, AgentSession, Artifact, Attention, LeadSwitch, MainTakeover, Overview, Project, ProjectLead, ProjectWorkspace, WorkspaceBinding } from './model'
 import type { FeedbackItem } from './store'
 import type { AgentActivity, AgentsSnapshot, MainAgentActivity } from './model'
@@ -1011,6 +1011,7 @@ function projectPage() {
   const unboundActions = () => row(button('新建主会话', manage('新会话'), 'primary sm', !!reason, reason),
     button('绑定已有会话', manage('在线会话'), 'sm', !!reason, reason))
   const empty = !inboxRows(p.ref.id).length, emptyUnbound = !p.runId && empty
+  const waiting = waitingProjectCard(p.ref.id, projectLead)
   const openMain = button('打开会话', () => act(async () => {
     notice = ''
     try {
@@ -1018,13 +1019,15 @@ function projectPage() {
       notice = result.multipleConversations ? '已打开项目所在的工作区；如果有多个对话，点一下主会话的标签' : '已打开项目所在的工作区'
     } catch (e) { await loadPage(); throw e }
   }), 'text sm', !!reason, reason)
-  return [projectLeadRow('主会话', projectLead?.session?.online === 'online' ? 'ok' : '', p.runId ? leadDescription(projectLead, '主会话') : undefined,
+  return [waiting ?? projectLeadRow('主会话', projectLead?.session?.online === 'online' ? 'ok' : '', p.runId ? leadDescription(projectLead, '主会话') : undefined,
       p.runId ? openMain : unboundActions()),
-    pendingLead(projectLead?.takeover), reason ? callout(reason) : null,
+    waiting ? null : pendingLead(projectLead?.takeover), reason ? callout(reason) : null,
     !live.ok && tabOf(p.ref.id) !== 'agents' ? small(agentStatusText()) : null,
     projectTabs(p.ref.id, {
-      inbox: { count: projectCount(p.ref.id), body: () => emptyUnbound ? card(el('p', {}, '这个项目还没有主会话'), unboundActions())
-        : empty && !p.tasks.length ? small('还没有任务。跟主 agent 说要做什么，它会在这里立项。') : inbox(p.ref.id) },
+      inbox: { count: projectCount(p.ref.id), body: () => {
+        if (emptyUnbound) return waiting ? null : card(el('p', {}, '这个项目还没有主会话'), unboundActions())
+        return empty && !p.tasks.length ? small('还没有任务。跟主 agent 说要做什么，它会在这里立项。') : inbox(p.ref.id)
+      } },
       tasks: { count: p.tasks.length, body: () => [listTasks(p.tasks), p.archive?.taskCount ?
         button(`更早的 ${p.archive.taskCount} 项已归档`, () => go({ kind: 'archive', projectId: p.ref.id, end: p.archive?.end }), 'text sm') : null] },
       agents: { count: projectAgents(p.ref.id).length, body: () => agentsPage(p.ref.id) },
@@ -1183,10 +1186,11 @@ function connectionPage() {
     c ? [check('确认删除这个连接的设置、凭据和往来记录', !!form.delete, v => { form.delete = v; render() }), button('删除连接', () => act(async () => { await req('workspace.connections', { operation: 'delete', connectionId: c.id, confirm: true }); back(false, true); await refresh() }), 'danger', !form.delete)] : null]
 }
 function backupDescription(binding: WorkspaceBinding) {
-  const b = binding.backup!
+  const b = binding.backup
+  if (!b || b.phase === 'opening' || (b.phase === 'unavailable' && !b.problem)) return '备用正在启动'
   if (b.phase === 'single') return '只有一种 agent，不配备用'
   if (b.phase === 'unavailable' || b.phase === 'failed') return '没有备用' + (b.problem ? '：' + b.problem : '')
-  const phase = { opening: '启动中', standby: '待命', probing: '等待主用确认', taking: '正在接管', active: '处理中', handoff: '正在交接', returning: '等待主用接回' }[b.phase]
+  const phase = { standby: '待命', probing: '等待主用确认', taking: '正在接管', active: '处理中', handoff: '正在交接', returning: '等待主用接回' }[b.phase]
   return `备用 ${agentName(b.agent)} · ${phase} · 当前${backupInCharge(b) ? '备用' : '主用'}负责`
 }
 function backupHistory(w: WorkspaceBinding, projectId?: string) {
@@ -1204,17 +1208,19 @@ function backupHistory(w: WorkspaceBinding, projectId?: string) {
 }
 function leadDescription(binding: WorkspaceBinding | undefined, label: string) {
   const s = binding?.session
-  if (!s) return binding?.runId ? ['已绑定' + label, binding.backup && backupDescription(binding)].filter(Boolean).join(' · ') : `还没有${label}`
+  const backup = binding && (binding.backup || (binding.runId && label === '主会话')) ? backupDescription(binding) : ''
+  if (!s) return binding?.runId ? ['已绑定' + label, backup].filter(Boolean).join(' · ') : `还没有${label}`
   const status = label === '主 agent' ? activityStyle(mainStatus(s, live)).label
     : s.online !== 'unknown' ? mainAgentStates[s.online] : live.ok || page.kind === 'project-settings' ? agentStatusText() : ''
-  return [binding?.backup ? '主用 ' + agentName(s.agent) : agentName(s.agent), s.title, status, binding?.backup ? backupDescription(binding) : ''].filter(Boolean).join(' · ')
+  return [binding?.backup ? '主用 ' + agentName(s.agent) : agentName(s.agent), s.title, status, backup].filter(Boolean).join(' · ')
 }
 type SwitchChoice = Omit<LeadSwitch, 'revision'>
 function pendingLead(t: MainTakeover | undefined, cancel?: () => unknown) {
   if (!t) return null
-  const minutes = Math.max(0, Math.ceil((Date.parse(t.expiresAt) - Date.now()) / 60000))
-  return card(callout(minutes ? t.error || `正在等 ${t.target.title || agentName(t.target.agent)} 接管，还剩 ${minutes} 分钟` : '对方没在有效期内完成绑定',
-    !minutes || t.error ? 'danger' : ''), cancel ? button('取消', cancel) : null)
+  const minutes = t.state === 'expired' ? 0 : Math.max(0, Math.ceil((Date.parse(t.expiresAt) - Date.now()) / 60000))
+  const status = t.error || `正在等 ${t.target.title || agentName(t.target.agent)} 接管`
+  return card(callout(minutes ? `${status}，还剩 ${minutes} 分钟` : '对方没在有效期内完成绑定', !minutes || t.error ? 'danger' : ''),
+    minutes && t.backupAgent ? small(`接管后会自动配一个 ${agentName(t.backupAgent)} 备用`) : null, cancel ? button('取消', cancel) : null)
 }
 function leadChoices(w: WorkspaceBinding, sessions: AgentSession[], choose: (input: SwitchChoice) => unknown, project = false) {
   const label = project ? '主会话' : '主 agent'
@@ -1224,14 +1230,26 @@ function leadChoices(w: WorkspaceBinding, sessions: AgentSession[], choose: (inp
     small(project ? agentName(s.agent) : `${agentName(s.agent)} · ${s.workspaceName} · ${s.path}`))),
     !sessions.length ? small('没有可接管的在线会话') : null)]
 }
+function chooseProjectLead(id: string, revision: number, input: SwitchChoice) {
+  return act(async () => {
+    const { binding }: ProjectLead = await req('project.lead', { projectId: id, revision, ...input })
+    for (const f of stack) {
+      if (f.page.kind === 'project' && f.page.projectId === id && f.data?.current?.runId === binding.runId) f.data.lead = binding
+    }
+    markSaved(); await loadPage()
+  }, false)
+}
+function waitingProjectCard(id: string, binding?: WorkspaceBinding) {
+  const t = waitingForProjectLead(binding)
+  return binding && t ? pendingLead(t, () => chooseProjectLead(id, binding.revision, { mode: 'cancel' })) : null
+}
 function projectLeadSettings(id: string) {
   const data = projectLeadPanel
   if (!data) return section('主会话', callout('正在读取主会话…'))
   const w = data.binding
-  const choose = (input: SwitchChoice) => act(async () => {
-    await req('project.lead', { projectId: id, revision: w.revision, ...input })
-    markSaved(); await loadPage()
-  }, false)
+  const waiting = waitingProjectCard(id, w)
+  if (waiting) return section('主会话', waiting)
+  const choose = (input: SwitchChoice) => chooseProjectLead(id, w.revision, input)
   return section('主会话', el('p', { class: 'any' }, leadDescription(w, '主会话')), backupHistory(w, id), leadChoices(w, data.sessions, choose, true),
     section('新会话', select('Agent', agents, data.defaultAgent),
       button('新开一个主会话', () => choose({ mode: 'new', agent: form.Agent }), 'primary', !!data.workspaceError),

@@ -4,7 +4,7 @@ import { pluginDataPath } from '../scripts/orca-cli.mjs'
 import { mkdir, writeFile } from 'node:fs/promises'
 import type { StorageApi } from 'orca'
 import { ProjectArchive } from './project-archive'
-import { blockedRevision, attention, projectSummary, taskState, type Acceptance, type Artifact, type Project, type ProjectRef, type SourceEvent, type Task, type Workspace, type Overview, type Messaging, type AgentSession, type StoredTakeover } from './model'
+import { takeoverActive, blockedRevision, attention, projectSummary, taskState, type Acceptance, type Artifact, type Project, type ProjectRef, type SourceEvent, type Task, type Workspace, type Overview, type Messaging, type AgentSession, type StoredTakeover } from './model'
 
 export const maxMessageLength = 16000
 export function fail(message: string): never { throw Object.assign(new Error(message), { code: 'invalid_request' }) }
@@ -23,7 +23,7 @@ export function strings(value: unknown, label: string, max = 100): string[] {
 export function fingerprint(value: unknown): string {
   return createHash('sha256').update(JSON.stringify(value)).digest('hex')
 }
-export const takeoverActive = (t?: StoredTakeover) => !!t && Date.parse(t.expiresAt) > Date.now()
+export { takeoverActive }
 export function verifyTakeover(t: StoredTakeover | undefined, token: unknown, session: AgentSession, oldRun: string, newRun: string): StoredTakeover {
   if (!t || !takeoverActive(t) || typeof token !== 'string' || !token || t.tokenHash !== fingerprint(token)) fail('替换主会话需要有效的一次性接管凭据；请让主人重新发起切换')
   if (!t.target.handle) fail('启动回执尚未确认目标会话；请稍后重读绑定状态再试')
