@@ -156,6 +156,9 @@ async function setup(options = {}, hub) {
       }
       if (name === 'workspace.overview' && window.fixture.delayOverview) await new Promise(resolve => { window.fixture.finishOverview = resolve; });
       if (name === 'workspace.overview') return clone({ workspace, versionLabel: options.versionLabel ?? '开发版', projects: [...registered().map(p => ({ ref: p.ref, revision:p.revision, counts: { review: p.tasks.filter(t => t.phase === 'ready' && t.acceptance.some(a => a.status === 'pending')).length }, agents: [], bound: true, updatedAt: '' })), ...(options.manyProjects ? Array.from({ length: 13 }, (_, i) => ({ ref: { ...project.ref, id: 'p' + (i + 2), name: '项目 ' + (i + 2) }, counts: { working: options.idleProjects ? 0 : 1 }, agents: [], bound: true, updatedAt: '' })) : [])], hidden: [], attention: attention(), questions: window.fixture.questions ?? [], reports: window.fixture.reports ?? [], links, connections: [], machines: [{ id: 'local', name: '主机', role: 'host' }] });
+      if (name === 'workspace.agents' && options.holdAgents) await new Promise((resolve, reject) => {
+        window.fixture.agentTimeout = () => reject(Error('workspace.agents timed out after 30000ms'));
+      });
       if (name === 'workspace.agents') return clone({ ...live, agents: live.agents.filter(a => !window.fixture.removedProjects?.includes(a.projectId)) });
       if (name === 'workspace.agent.open') {
         const agent = live.agents.find(a => a.id === input.id && a.state === 'need');
@@ -1337,7 +1340,7 @@ try {
     assert.deepEqual(await page.evaluate(() => fixture.calls.filter(c => c.input?.operation === 'share').map(c => [c.input.allProjects, c.input.projectIds])), [[true, ['p1']], [false, ['p1']]]);
   });
   await setup();
-  await test('host agents distinguish need/work and show one unreadable notice', async () => { await page.getByRole('button', { name: '全部 agent', exact: true }).click(); assert.equal(await page.locator('[data-st=need]').count(), 1); assert.equal(await page.locator('[data-st=work]').count(), 1); assert.ok(!(await page.locator('[data-st=work]').innerText()).includes('未核实')); await page.evaluate(() => { fixture.live.ok = false; fixture.live.agents = []; fixture.emit(); }); await page.getByText(/agent 状态读不到/).waitFor(); assert.equal(await currentLayer().getByText('agent 状态读不到', { exact: true }).count(), 1); });
+  await test('host agents distinguish need/work and show one unreadable notice', async () => { await page.getByRole('button', { name: '全部 agent', exact: true }).click(); assert.equal(await page.locator('[data-st=need]').count(), 1); assert.equal(await page.locator('[data-st=work]').count(), 1); assert.ok(!(await page.locator('[data-st=work]').innerText()).includes('未核实')); await page.evaluate(() => { fixture.live.ok = false; fixture.live.agents = []; fixture.emit(); }); await page.getByText(/agent 状态暂时读不到/).waitFor(); assert.equal(await currentLayer().getByText('agent 状态暂时读不到', { exact: true }).count(), 1); });
   await setup({ inboxBatch: true });
   await test('home drops removed projects and stale details while showing registered projects without workspaces', async () => {
     const local = page.locator('[data-workspace=self]');
@@ -1375,20 +1378,31 @@ try {
     assert.equal(await rail().getByRole('button', { name: '等批准', exact: true }).count(), 0);
     if (process.env.PANEL_EVIDENCE_DIR) await page.screenshot({ path: path.join(process.env.PANEL_EVIDENCE_DIR, 'main-directory-hidden.png'), animations: 'disabled' });
   });
+  await setup({ holdAgents: true });
+  await test('project opens while agent status is pending and stays usable after timeout', async () => {
+    await project();
+    await page.getByRole('tab', { name: '任务', exact: true }).click();
+    await page.getByRole('button', { name: '页面交付', exact: true }).waitFor();
+    await page.evaluate(() => fixture.agentTimeout());
+    await currentLayer().getByText('agent 状态暂时读不到', { exact: true }).waitFor();
+    assert.equal(await page.locator('.dock .toast:visible').count(), 0);
+    await page.getByRole('button', { name: '页面交付', exact: true }).click();
+    await currentLayer().getByText('已交付', { exact: true }).waitFor();
+  });
   await setup({ manyProjects: true });
   await test('agent failure and truncation each render once across home, project and task pages', async () => {
     await page.evaluate(() => { fixture.live.ok = false; fixture.emit(); });
-    await page.getByText(/agent 状态读不到/).waitFor();
+    await page.getByText(/agent 状态暂时读不到/).waitFor();
     await project();
-    assert.equal(await currentLayer().getByText('agent 状态读不到', { exact: true }).count(), 1);
+    assert.equal(await currentLayer().getByText('agent 状态暂时读不到', { exact: true }).count(), 1);
     await page.getByRole('tab', { name: 'Agent', exact: true }).click();
-    assert.equal(await currentLayer().getByText('agent 状态读不到', { exact: true }).count(), 1);
+    assert.equal(await currentLayer().getByText('agent 状态暂时读不到', { exact: true }).count(), 1);
     await page.getByRole('tab', { name: '任务', exact: true }).click();
     await page.getByRole('button', { name: '页面交付', exact: true }).click();
-    assert.equal(await currentLayer().getByText('agent 状态读不到', { exact: true }).count(), 1);
+    assert.equal(await currentLayer().getByText('agent 状态暂时读不到', { exact: true }).count(), 1);
     await page.evaluate(() => { fixture.live.ok = true; fixture.live.truncated = true; fixture.emit(); });
     await currentLayer().getByText('agent 状态未全部读取', { exact: true }).waitFor();
-    assert.equal(await currentLayer().getByText('agent 状态读不到', { exact: true }).count(), 0);
+    assert.equal(await currentLayer().getByText('agent 状态暂时读不到', { exact: true }).count(), 0);
   });
   await setup({ manyProjects: true });
   await test('fourteen projects keep up to three agent rows and one completion count; empty cards have only a header', async () => {
@@ -1415,7 +1429,7 @@ try {
     assert.equal(await page.locator('[data-project=p3] .arow').count(), 1);
     await search.fill(''); await page.waitForFunction(() => document.querySelectorAll('[data-project]').length === 14);
     await page.evaluate(() => { fixture.live.ok = false; fixture.emit(); });
-    await page.getByText(/agent 状态读不到/).waitFor();
+    await page.getByText(/agent 状态暂时读不到/).waitFor();
     assert.equal(await rail().locator('.pill').innerText(), '1');
     assert.equal(await page.locator('[data-project] .pcard-b').count(), 0);
   });
@@ -1436,7 +1450,7 @@ try {
     await page.locator('.fold-b [data-project=p2]').waitFor();
     assert.equal(await page.locator('[data-project=p3]').isVisible(), true);
     await page.evaluate(() => { fixture.live.ok = false; fixture.emit(); });
-    await page.getByText(/agent 状态读不到/).waitFor();
+    await page.getByText(/agent 状态暂时读不到/).waitFor();
     assert.equal(await page.locator('.fold-b [data-project=p3]').count(), 1);
     assert.equal(await page.locator('[data-project=p1]').isVisible(), true);
   });

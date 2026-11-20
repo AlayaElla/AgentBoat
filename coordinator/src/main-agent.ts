@@ -85,7 +85,7 @@ export async function switchLead(runtime: CoordinatorRuntime, input: LeadSwitch,
   changed()
 }
 
-export function mainAgent(orca: OrcaWorkerApi, store: ProjectStore, runtime: CoordinatorRuntime, changed: () => void, bound: () => void, projects: () => Promise<Project[]>, backups: BackupLeads) {
+export function mainAgent(orca: OrcaWorkerApi, store: ProjectStore, runtime: CoordinatorRuntime, changed: () => void, bound: () => void, projects: () => Promise<Project[]>, backups: BackupLeads, sample: () => import('./model').AgentsSnapshot) {
   async function read(sample?: import('./model').AgentsSnapshot): Promise<WorkspaceBinding> {
     const w = await store.workspace()
     const takeover = takeoverView(w.takeover)
@@ -127,7 +127,7 @@ export function mainAgent(orca: OrcaWorkerApi, store: ProjectStore, runtime: Coo
       bound()
       await flushRetired(); changed()
     } else if (input.operation !== 'read') fail('不支持的工作间操作')
-    return read()
+    return read(input.operation === 'read' ? sample() : undefined)
   })
   orca.panels.handle('workspace.agent.targets', async () => {
     const t = await runtime.targets()
@@ -148,7 +148,7 @@ export function mainAgent(orca: OrcaWorkerApi, store: ProjectStore, runtime: Coo
       recoverTakeover(w.takeover)
       for (const d of w.retired ?? []) if (d.state === 'sending') d.state = 'uncertain'
     })
-    await flushRetired()
+    void flushRetired().catch(() => {})
   }
   return { read, recover, flushRetired }
 }

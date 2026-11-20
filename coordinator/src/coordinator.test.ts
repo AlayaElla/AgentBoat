@@ -15,6 +15,32 @@ import { inboxLimit, openRunMail, questionWait, questionMaxAge } from '../script
 import { escalationWait, projectSubmissions, reportSubmitted, reportWait, workerReport } from '../scripts/worker-reports.mjs'
 const mainSession = { handle: 'orca_session_id:test-main', title: '测试主会话', workspace: 'id:test', workspaceName: '测试工作区', path: '/test', agent: 'claude', online: 'online' as const }
 
+test('project content and client receipts return while background session inventory is slow', async () => {
+  const p = { ...fresh(refs[0]), runId: 'run_project', mainAgentHandle: mainSession.handle }
+  const host = mockHost({ storage: { 'project:p1': p as any } })
+  let c!: ReturnType<typeof createCoordinator>, entered!: () => void, release!: () => void
+  const started = new Promise<void>(resolve => { entered = resolve })
+  const inventory = new Promise<void>(resolve => { release = resolve })
+  const worker = await mountWorker({ default: api => { c = createCoordinator(api, {
+    projects: async () => refs,
+    targets: async () => { entered(); await inventory; throw Error('inventory timed out') }
+  }) } }, { host })
+  const background = c.checkBackups()
+  await started
+  const timer = setTimeout(release, 800), start = performance.now()
+  try {
+    const [panel, receipt] = await Promise.all([
+      worker.request('project.read', { projectId: 'p1' }),
+      worker.request('project.agent', { operation: 'submit', projectId: 'p1', requestId: 'slow', revision: 0, task: deliverable })
+    ])
+    const elapsed = Math.round(performance.now() - start)
+    console.log('slow inventory / project.read + submit receipt:', elapsed, 'ms')
+    assert.equal(panel.project?.ref.id, 'p1')
+    assert.equal(receipt.project?.requests.at(-1)?.id, 'slow')
+    assert.ok(elapsed < 500)
+  } finally { clearTimeout(timer); release(); await background; c.stop(); await worker.deactivate() }
+})
+
 test('overdue Run questions remind the project once and clear on a matching reply', async () => {
   const p = fresh(refs[0]); p.runId = 'run_fake'
   const host = mockHost({ storage: { 'project:p1': p as any, workspace: { version: 1, revision: 0, runId: 'run_main', session: mainSession, requests: [] } } })

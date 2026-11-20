@@ -14,6 +14,7 @@ import { inboxLimit, openRunMail, type OrcaQuestion, type OrcaWorkerRecord } fro
 import { workerReport, type WorkerReport } from '../scripts/worker-reports.mjs'
 import { activeUserDataPath, pluginKey, release } from '../scripts/orca-cli.mjs'
 
+export const readTimeout = 5000
 const execute = promisify(execFile)
 export interface CoordinatorRuntime {
   projects(host: HostApi<'worker'>): Promise<ProjectRef[]>
@@ -21,24 +22,24 @@ export interface CoordinatorRuntime {
   syncContacts(wanted: LeadContact[], workspaces?: string[]): Promise<ContactRoutes>
   installedAgents(workspace: string): Promise<string[]>
   verifyRun(id: string, caller?: string): Promise<void>
-  targets(): Promise<{ sessions: AgentSession[]; workspaces: { workspace: string; name: string; path: string }[] }>
+  targets(sample?: boolean): Promise<{ sessions: AgentSession[]; workspaces: { workspace: string; name: string; path: string }[] }>
   identify(handle: string, runId: string, currentRunId?: string): Promise<AgentSession>
   requestTakeover(handle: string, prompt: string, subject?: string): Promise<void>
   launchMain(workspace: string, agent: string, prompt: string, options?: Omit<AgentLaunch, 'agent'>): Promise<string>
   openOverview(): Promise<void>
   removeProject(ref: ProjectRef, host: HostApi<'worker'>): Promise<void>
   agents(projects: Project[], host: HostApi<'worker'>, main?: AgentSession): Promise<AgentsSnapshot>
-  mail(runId: string): Promise<{ questions: OrcaQuestion[]; reports: WorkerReport[]; waiting?: { at: number; title: string; read?: boolean; report?: WorkerReport }[] }>
+  mail(runId: string, submitted?: (reports: WorkerReport[]) => Promise<Set<string>>): Promise<{ questions: OrcaQuestion[]; reports: WorkerReport[]; waiting?: { at: number; title: string; read?: boolean; report?: WorkerReport }[] }>
   hermesApprovalMode(): Promise<string>
   send(runId: string, delivery: Delivery): Promise<{ requestId?: string }>
 }
 export class OrcaRuntime implements CoordinatorRuntime {
   constructor(private executable: () => Promise<string>) {}
-  private async call(args: string[]): Promise<any> {
+  private async call(args: string[], timeout = 25000): Promise<any> {
     let stdout: string
     try {
       ({ stdout } = await execute(await this.executable(), [...args, '--environment', 'local', '--json', ...(args[0] === 'orchestration' ? ['--full'] : [])], {
-        timeout: 25000, maxBuffer: 8 * 1024 * 1024, windowsHide: true,
+        timeout, maxBuffer: 8 * 1024 * 1024, windowsHide: true,
         env: { ...process.env, ...(release ? { ORCA_USER_DATA_PATH: activeUserDataPath() } : {}), ...(process.platform === 'win32' ? {
           APPDATA: process.env.APPDATA || path.join(os.homedir(), 'AppData', 'Roaming'),
           LOCALAPPDATA: process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local')
@@ -54,8 +55,20 @@ export class OrcaRuntime implements CoordinatorRuntime {
     if (!reply.ok) throw new Error(reply.error?.message ?? 'Orca 请求未成功')
     return reply.result
   }
+  // Display and polling reads may share a recent list. Identity checks and mutations always call Orca directly.
+  private lists = new Map<string, { until: number; pending: boolean; result: Promise<any> }>()
+  private list(args: string[], ttl = readTimeout, fresh = false) {
+    const now = Date.now(), key = JSON.stringify(args)
+    for (const [id, item] of this.lists) if (item.until <= now) this.lists.delete(id)
+    const saved = this.lists.get(key)
+    if (saved && (!fresh || saved.pending)) return saved.result
+    const item = { until: now + ttl, pending: true, result: this.call(args, readTimeout).finally(() => { item.pending = false }) }
+    this.lists.set(key, item)
+    return item.result
+  }
   async projects(host: HostApi<'worker'>): Promise<ProjectRef[]> {
-    const [list, spaces] = await Promise.all([host.call('project.list', {}), host.call('workspace.list', {}).catch(() => undefined)])
+    const options = { signal: AbortSignal.timeout(readTimeout) }
+    const [list, spaces] = await Promise.all([host.call('project.list', {}, options), host.call('workspace.list', {}, options).catch(() => undefined)])
     if (list.truncated) fail('Orca 项目列表未完整返回，请先缩小工作区范围')
     return list.projects.filter(p => (p.hostId ?? 'local') === 'local').map(p => {
       const candidates = spaces?.workspaces.filter(w => w.projectId === p.id && (w.hostId ?? 'local') === 'local') ?? []
@@ -66,7 +79,7 @@ export class OrcaRuntime implements CoordinatorRuntime {
   }
   async runBinding(id: string) {
     if (!/^run_[\w-]+$/.test(id)) fail('Run 编号格式不正确')
-    const { run } = await this.call(['orchestration', 'run-show', '--id', id])
+    const { run } = await this.call(['orchestration', 'run-show', '--id', id], readTimeout)
     if (run?.id !== id) fail('Orca 未返回对应 Run')
     if (run.coordinator_handle !== null && typeof run.coordinator_handle !== 'string') fail('Orca 未返回协调者类型')
     return { owner: run.coordinator_handle as string | null, generation: run.consumer_generation as number, objective: run.objective as string | undefined }
@@ -76,7 +89,7 @@ export class OrcaRuntime implements CoordinatorRuntime {
     return this.contacts.sync(wanted, await this.executable(), (args: string[]) => this.call(args), workspaces)
   }
   async installedAgents(workspace: string): Promise<string[]> {
-    const { agents } = await this.call(['agent', 'installed', '--worktree', workspace])
+    const { agents } = await this.list(['agent', 'installed', '--worktree', workspace], 60_000)
     if (!Array.isArray(agents) || agents.some(a => typeof a?.id !== 'string')) fail('Orca 的可启动 agent 列表无效')
     return agents.map(a => a.id)
   }
@@ -84,11 +97,13 @@ export class OrcaRuntime implements CoordinatorRuntime {
     const { owner } = await this.runBinding(id)
     if (caller && owner && owner !== caller) fail('Orca 返回的 Run 协调者与当前会话不符；请在目标会话创建自己的新 Run')
   }
-  async targets() {
+  async targets(sample = false) {
+    const read = (args: string[]) => sample ? this.list(args, readTimeout, true) : this.call(args, readTimeout)
     // agents.list has no liveness/parent evidence; takeover still requires these exact CLI identities.
-    const [ps, list] = await Promise.all([this.call(['worktree', 'ps', '--limit', '10000', '--agent-wait']), this.call(['terminal', 'list', '--limit', '10000'])])
+    const [ps, list] = await Promise.all([read(['worktree', 'ps', '--limit', '10000', '--agent-wait']), read(['terminal', 'list', '--limit', '10000'])])
     if (!Array.isArray(ps.worktrees) || !Array.isArray(list.terminals) || list.hostScope?.omittedHostIds?.includes('local') || ps.truncated || list.truncated || ps.hostScope?.omittedHostIds?.includes('local')) fail('会话列表不完整，请恢复 Orca 后重试')
-    return mainTargets(ps.worktrees ?? [], list.terminals ?? [])
+    if (ps.worktrees.some((w: any) => w.address?.environment === 'local' && !w.isArchived && !Array.isArray(w.agents))) fail('会话列表缺少 agent 状态')
+    return mainTargets(ps.worktrees, list.terminals)
   }
   async identify(handle: string, runId: string, currentRunId?: string) {
     if (currentRunId !== runId) fail('当前会话自报的 Run 与申请不一致；请在目标会话创建自己的 Run，再用 client.mjs main-bind 调用')
@@ -105,20 +120,23 @@ export class OrcaRuntime implements CoordinatorRuntime {
     return launchReceipt(launch)
   }
   async openOverview() { await this.call(['plugin', 'open', pluginKey, '--panel', 'project-coordinator']) }
-  async agents(projects: Project[], host: HostApi<'worker'>, main?: AgentSession) { return readAgents(host, args => this.call(args), projects, main) }
-  async mail(runId: string) {
+  async agents(projects: Project[], host: HostApi<'worker'>, main?: AgentSession) { return readAgents(host, args => this.list(args), projects, main) }
+  async mail(runId: string, submitted?: (reports: WorkerReport[]) => Promise<Set<string>>) {
     // shortcut: Orca inbox has no pagination; scan the newest bounded window.
-    const result = await this.call(['orchestration', 'inbox', '--run', runId, '--limit', String(inboxLimit)])
+    const result = await this.call(['orchestration', 'inbox', '--run', runId, '--limit', String(inboxLimit)], readTimeout)
     if (!Array.isArray(result.messages) || result.messages.some((m: any) => !m || m.run_id !== runId)) fail('Orca 运行邮件无法核对')
-    const actionable = await openRunMail(result.messages, runId, async ids => {
+    const reports = result.messages.map(workerReport).filter((r: WorkerReport | undefined): r is WorkerReport => !!r)
+    const done = await submitted?.(reports)
+    const pending = done?.size ? result.messages.filter((m: any) => !done.has(m.id)) : result.messages
+    const actionable = await openRunMail(pending, runId, async ids => {
       const [taskList, workers] = await Promise.all([
-        this.call(['orchestration', 'task-list', '--run', runId]),
+        this.call(['orchestration', 'task-list', '--run', runId], readTimeout),
         this.questionWorkers(runId, ids)
       ])
       if (!Array.isArray(taskList.tasks) || taskList.runId !== runId) fail('Orca 项目任务状态无法核对')
       return { tasks: taskList.tasks, workers }
     })
-    const waiting = result.messages.flatMap((m: any) => {
+    const waiting = pending.flatMap((m: any) => {
       if (m.to_handle !== 'run:' + runId || !Number.isFinite(Date.parse(m.created_at))) return []
       if (m.type === 'worker_done') {
         const report = workerReport(m)
@@ -132,7 +150,7 @@ export class OrcaRuntime implements CoordinatorRuntime {
     const workers: OrcaWorkerRecord[] = [], visited = new Set<string>()
     let cursor: string | undefined
     do {
-      const page = await this.call(['orchestration', 'worker-list', '--run', runId, ...(cursor ? ['--cursor', cursor] : [])])
+      const page = await this.list(['orchestration', 'worker-list', '--run', runId, ...(cursor ? ['--cursor', cursor] : [])])
       if (!Array.isArray(page.workers) || !page.page) fail('Orca 执行者状态无法核对')
       for (const worker of page.workers) if (worker?.runId === runId && ids.delete(worker.dispatchId)) workers.push(worker)
       if (!page.page.hasMore || !ids.size) break

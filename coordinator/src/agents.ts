@@ -10,7 +10,8 @@ export const maxAgentWorkspaces = 256, maxAgents = 2000
 export async function readAgents(host: HostApi<'worker'>, read: Read, projects: Project[], main?: AgentSession): Promise<AgentsSnapshot> {
   const at = Date.now()
   try {
-    const list = await host.call('workspace.list', {})
+    const signal = AbortSignal.timeout(12_000)
+    const list = await host.call('workspace.list', {}, { signal })
     const visible = new Map(projects.filter(p => !p.hidden).map(p => [p.ref.id, p]))
     const workspaceId = main?.workspace.replace(/^id:/, '')
     const mainWorkspace = list.workspaces.find(w => (w.hostId ?? 'local') === 'local' && w.id === workspaceId)
@@ -37,7 +38,8 @@ export async function readAgents(host: HostApi<'worker'>, read: Read, projects: 
     const workers = new Map<string, any[]>(), agents: LiveAgent[] = []
     workspaces: for (const w of local.slice(0, maxAgentWorkspaces)) {
       const projectId = projectKey('local', w.projectId!), project = visible.get(projectId)
-      const result = await host.call('agents.list', { workspaceId: w.id }).catch(error => {
+      signal.throwIfAborted()
+      const result = await host.call('agents.list', { workspaceId: w.id }, { signal }).catch(error => {
         if (w === mainWorkspace && !project) return { agents: [] }
         throw error
       })

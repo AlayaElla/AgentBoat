@@ -23,13 +23,16 @@ test('在线主用存在超过十五分钟的待办且已知不在工作时才�
 
 async function fixture(project: Project, workspace?: Workspace, exports?: string) {
   const host = mockHost({ storage: { ['project:' + project.ref.id]: project as any, ...(workspace ? { workspace: workspace as any } : {}) } })
-  const env = { sessions: [primary], available: true, failLaunch: false, owner: primary.handle as string | null, generation: 1, installed: ['claude', 'codex'], spaces: [{ workspace: primary.workspace, name: '项目', path: primary.path }], launches: [] as { workspace: string; agent: string; options: unknown; prompt: string }[],
+  const env = { sessions: [primary], inventoryFailed: false, available: true, failLaunch: false, owner: primary.handle as string | null, generation: 1, installed: ['claude', 'codex'], spaces: [{ workspace: primary.workspace, name: '项目', path: primary.path }], launches: [] as { workspace: string; agent: string; options: unknown; prompt: string }[],
     catalogReads: 0, contacts: [] as string[], mailRuns: [] as string[], controls: [] as { handle: string; prompt: string }[], deliveries: [] as string[], reports: [] as any[] }
   let c!: ReturnType<typeof testCoordinator>
   const worker = await mountWorker({ default: api => {
     c = testCoordinator(api, {
       projects: async () => { env.catalogReads++; return env.available ? [project.ref] : [] },
-      targets: async () => ({ sessions: env.sessions, workspaces: env.spaces }),
+      targets: async () => {
+        if (env.inventoryFailed) throw Error('inventory timed out')
+        return { sessions: env.sessions, workspaces: env.spaces }
+      },
       runBinding: async id => ({ owner: env.owner, generation: id === 'run_park' ? 1 : env.generation, objective: id === 'run_park' ? 'AgentBoat 备用待命 ' + (await c.store.get(project.ref.id)).backup?.cycle : undefined }),
       syncContacts: async jobs => { env.contacts = jobs.map(j => j.id); return Object.fromEntries(jobs.map(j => [j.id, { dispatch: 'ctx_contact' }])) },
       installedAgents: async () => env.installed,
@@ -315,11 +318,16 @@ test('空闲项目每轮只读取一次项目目录', async () => {
   } finally { await close() }
 })
 
-test('完整清单中找不到主用时直接通知备用接管', async () => {
-  const p = bound(), { env, poll, close } = await fixture(p)
+test('清单超时保持待命，完整清单确认主用消失后才接管', async () => {
+  const p = bound(), { c, env, poll, close } = await fixture(p)
   try {
     await poll()
     env.sessions = env.sessions.filter(s => s.handle !== primary.handle)
+    env.inventoryFailed = true
+    await poll()
+    assert.equal(env.controls.length, 0)
+    assert.equal((await c.store.get(p.ref.id)).backup?.phase, 'standby')
+    env.inventoryFailed = false
     await poll()
     assert.deepEqual(env.controls.map(m => m.handle), ['orca_session_id:backup'])
     assert.ok(env.controls[0].prompt.includes('lead-take'))

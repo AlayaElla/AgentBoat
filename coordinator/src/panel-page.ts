@@ -308,6 +308,7 @@ async function go(next: Page, reset = false, keyboard = false) {
   const f = reset && next.kind === 'home' ? homeFrame : frameFor(next)
   f.opener = opener ?? undefined
   const ready = loadPage(f)
+  if (next.kind === 'project' && Date.now() - live.at >= 60_000) loadAgents(false)
   opener?.setAttribute('data-navigating', '')
   if (!next.inboxRow) await Promise.race([ready, wait(150)])
   opener?.removeAttribute('data-navigating')
@@ -355,14 +356,22 @@ async function refreshOverview() {
   try { const next = await req('workspace.overview'); if (seq === refreshSeq) { all = next; render(); void reconcileFeedback() } }
   catch { /* The confirmed write does not depend on the background overview. */ }
 }
+let readingAgents: Promise<void> | undefined
+function loadAgents(force: boolean) {
+  if (readingAgents) return
+  readingAgents = req('workspace.agents', { refresh: force }, 15_000)
+    .then(agents => { live = agents }, () => { live = { ok: false, at: Date.now(), agents: [] } })
+    .finally(() => { readingAgents = undefined; if (all) render() })
+}
 async function refresh(forceAgents = false) {
   const n = ++refreshSeq
   if (forceAgents) { refreshing = true; render() }
   try {
     if (forceAgents && !pendingEdits && !busy) { await readSheets(); draftFailure = '' }
-    const [overview, agents] = await Promise.all([req('workspace.overview'), req('workspace.agents', { refresh: forceAgents })])
+    loadAgents(forceAgents)
+    const overview = await req('workspace.overview')
     if (n !== refreshSeq) return
-    all = overview; live = agents
+    all = overview
     opened = Object.fromEntries(Object.entries(opened).filter(([id]) => id === 'self' || peers().some(p => p.id === id)))
     const shown = new Set(inboxRows().map(r => r.id))
     for (const [id, f] of inlineRows) if (f !== active && !shown.has(f.page.inboxRow!)) {
@@ -430,10 +439,11 @@ function agentColumns<T extends AgentActivity>(list: T[], projectName: (a: T) =>
     return el('section', { class: 'acol', 'aria-label': ({ need: '需要你', work: '工作中', done: '已完成' } as any)[state] }, row(el('h2', { class: 'h2' }, ({ need: '需要你', work: '工作中', done: '已完成' } as any)[state]), tag(String(selected.length))), visible.map(a => agentRow(a, projectName(a))), !selected.length ? small('暂无') : null, selected.length > visible.length ? small(`另有 ${selected.length - visible.length} 条未列出`) : null)
   }))
 }
-const agentsPage = (id?: string) => live.ok ? [agentColumns(projectAgents(id), a => all.projects.find(p => p.ref.id === a.projectId)?.ref.name || '其他项目'), live.truncated ? small('agent 状态未全部读取') : null] : small('agent 状态读不到')
+const agentStatusText = () => live.at || !readingAgents ? 'agent 状态暂时读不到' : '正在读取 agent 状态…'
+const agentsPage = (id?: string) => live.ok ? [agentColumns(projectAgents(id), a => all.projects.find(p => p.ref.id === a.projectId)?.ref.name || '其他项目'), live.truncated ? small('agent 状态未全部读取') : null] : small(agentStatusText())
 const agentContent = () => [agentsPage(), small('已完成的 agent 保留 24 小时。')]
 function agentNeedContent(id?: string) {
-  if (!live.ok) return small('agent 状态读不到')
+  if (!live.ok) return small(agentStatusText())
   const agent = live.agents.find(a => agentInboxKey(a.id) === id)
   if (agent?.state !== 'need') return callout(!agent && live.truncated ? '请刷新后核对这个 Agent' : '已不需要你处理')
   return [agentRow(agent, all.projects.find(p => p.ref.id === agent.projectId)?.ref.name || '其他项目', true),
@@ -650,7 +660,7 @@ function home() {
     all.error ? note(all.error, '重试', () => refresh(true), true) : null,
     all.links?.error ? note(all.links.error, '去核对', () => go({ kind: 'links' }), true) : null,
     all.connections?.filter(c => c.enabled && c.state === 'error').map(c => note(`外部连接「${c.name}」异常`, '去核对', () => go({ kind: 'connection', id: c.id }), true)),
-    !live.ok ? note('agent 状态读不到，可能有 agent 在等你', '重试', () => refresh(true), true) : live.truncated ? note('agent 状态未全部读取，数量仅含已读取的工作区', '重试', () => refresh(true)) : null),
+    !live.ok ? note(agentStatusText(), '重试', () => refresh(true)) : live.truncated ? note('agent 状态未全部读取，数量仅含已读取的工作区', '重试', () => refresh(true)) : null),
     el('div', { class: wideInbox ? 'home wide' : 'home', 'data-key': 'home' }, inbox(),
       el('div', { class: 'organization', inert: wideInbox && active !== homeFrame, 'aria-hidden': wideInbox && active !== homeFrame ? 'true' : undefined }, organization()))]
 }
@@ -960,7 +970,7 @@ function projectPage() {
     return [row(tag(labels[taskState(t)]), small(`${p.ref.name} · ${relative(t.updatedAt)}更新`)),
       archive ? null : feedbackCards(p.ref.id, [t]),
       section('进展', el('p', { class: 'any' }, t.progress), archive ? null : [small('现在谁在做'),
-        !live.ok ? small('agent 状态读不到') : workers.length ? workers.map(a => agentRow(a, p.ref.name)) : small('没有看到 agent 在做这个任务'), live.ok && live.truncated ? small('agent 状态未全部读取') : null]),
+        !live.ok ? small(agentStatusText()) : workers.length ? workers.map(a => agentRow(a, p.ref.name)) : small('没有看到 agent 在做这个任务'), live.ok && live.truncated ? small('agent 状态未全部读取') : null]),
       fold(active.key + '-goal', '目标', () => el('p', { class: 'any' }, t.goal), undefined, true),
       artifacts.length ? fold(active.key + '-artifacts', '成果', () => artifacts, artifacts.length) : null,
       messages.length ? fold(active.key + '-sources', '来源消息', () => messages.map(e => card(e.text)), messages.length) : null,
@@ -987,7 +997,7 @@ function projectPage() {
   return [projectLeadRow('主会话', projectLead?.session?.online === 'online' ? 'ok' : '', p.runId ? leadDescription(projectLead, '主会话') : undefined,
       p.runId ? openMain : unboundActions()),
     pendingLead(projectLead?.takeover), reason ? callout(reason) : null,
-    !live.ok && tabOf(p.ref.id) !== 'agents' ? small('agent 状态读不到') : null,
+    !live.ok && tabOf(p.ref.id) !== 'agents' ? small(agentStatusText()) : null,
     projectTabs(p.ref.id, {
       inbox: { count: projectCount(p.ref.id), body: () => emptyUnbound ? card(el('p', {}, '这个项目还没有主会话'), unboundActions())
         : empty && !p.tasks.length ? small('还没有任务。跟主 agent 说要做什么，它会在这里立项。') : inbox(p.ref.id) },
@@ -1170,8 +1180,10 @@ function backupHistory(w: WorkspaceBinding, projectId?: string) {
 }
 function leadDescription(binding: WorkspaceBinding | undefined, label: string) {
   const s = binding?.session
-  return s ? [binding?.backup ? '主用 ' + agentName(s.agent) : agentName(s.agent), s.title, label === '主 agent' ? activityStyle(mainStatus(s, live)).label : mainAgentStates[s.online], binding?.backup ? backupDescription(binding) : ''].filter(Boolean).join(' · ')
-    : binding?.runId ? ['已绑定' + label, binding.backup && backupDescription(binding)].filter(Boolean).join(' · ') : `还没有${label}`
+  if (!s) return binding?.runId ? ['已绑定' + label, binding.backup && backupDescription(binding)].filter(Boolean).join(' · ') : `还没有${label}`
+  const status = label === '主 agent' ? activityStyle(mainStatus(s, live)).label
+    : s.online !== 'unknown' ? mainAgentStates[s.online] : live.ok || page.kind === 'project-settings' ? agentStatusText() : ''
+  return [binding?.backup ? '主用 ' + agentName(s.agent) : agentName(s.agent), s.title, status, binding?.backup ? backupDescription(binding) : ''].filter(Boolean).join(' · ')
 }
 type SwitchChoice = Omit<LeadSwitch, 'revision'>
 function pendingLead(t: MainTakeover | undefined, cancel?: () => unknown) {

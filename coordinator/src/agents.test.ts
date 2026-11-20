@@ -94,6 +94,25 @@ test('host failures produce one bounded unreadable result and never leak host er
   assert.equal((await snapshot([workspace], { agents: [agent('unexpected')] })).result.ok, false)
 })
 
+test('status shares an inspection list but the next inspection checks liveness again', async () => {
+  const runtime = new OrcaRuntime(async () => 'unused'), calls: string[] = []
+  let incomplete = false
+  ;(runtime as any).call = async (args: string[]) => {
+    calls.push(args[1])
+    return args[1] === 'ps' ? { worktrees: [], truncated: incomplete } : { terminals: [] }
+  }
+  const host = mockHost({ results: { 'workspace.list': { workspaces: [], truncated: false } } })
+  let api!: OrcaWorkerApi
+  const worker = await mountWorker({ default: value => { api = value } }, { host })
+  try {
+    await runtime.targets(true)
+    await runtime.agents([], api.host, { handle: 'orca_session_id:test', workspace: 'id:test', agent: 'claude', path: '', title: '', workspaceName: '', online: 'unknown' })
+    assert.deepEqual(calls, ['ps', 'list'])
+    incomplete = true
+    await assert.rejects(() => runtime.targets(true), /会话列表不完整/)
+  } finally { await worker.deactivate() }
+})
+
 test('workspace and agent caps and host truncation are explicitly reported', async () => {
   const workspaces = Array.from({ length: maxAgentWorkspaces + 1 }, (_, i) => ({ ...workspace, id: 'ws-' + i }))
   const capped = await snapshot(workspaces, { agents: [] })
@@ -124,7 +143,7 @@ for (const selector of ['identity:wt2:local:project', refs[0].workspace]) for (c
     targets: async () => { throw Error('workspace navigation must not read takeover targets') }
   }) } }, { host })
   try {
-    assert.deepEqual((await worker.request('project.read', { projectId: ref.id })).workspaceTarget, { workspaceId, multipleConversations: true })
+    assert.deepEqual((await worker.request('project.read', { projectId: ref.id })).workspaceTarget, { workspaceId })
     assert.deepEqual(await worker.request('project.openMain', { projectId: ref.id }), { opened: true, multipleConversations: true })
     assert.deepEqual(host.callsOf('workspace.open'), [{ workspaceId }]); assert.deepEqual(host.callsOf('agents.list')[0], { workspaceId })
     host.respond('agents.list', { agents: [] })
@@ -176,7 +195,7 @@ test('matching project writes record display identity, resolve its workspace, an
       caller = `orca_session_id:${kind}_project`
       const result = await submit(caller)
       assert.equal(result.project!.mainAgentHandle, caller); assert.equal(result.mainAgent, kind)
-      assert.deepEqual(result.workspaceTarget, { workspaceId: lead.id, multipleConversations: false })
+      assert.deepEqual(result.workspaceTarget, { workspaceId: own.id })
     }
     await worker.request('project.openMain', { projectId: ref.id })
     assert.deepEqual(host.callsOf('workspace.open').at(-1), { workspaceId: lead.id })
@@ -184,7 +203,7 @@ test('matching project writes record display identity, resolve its workspace, an
     caller = 'orca_session_id:uuid-without-agent-prefix'
     assert.equal((await submit(caller)).mainAgent, undefined)
     host.respond('workspace.list', { workspaces: [own], truncated: false })
-    assert.deepEqual((await worker.request('project.read', { projectId: ref.id })).workspaceTarget, { workspaceId: own.id, multipleConversations: false })
+    assert.deepEqual((await worker.request('project.read', { projectId: ref.id })).workspaceTarget, { workspaceId: own.id })
     await assert.rejects(() => worker.request('project.agent', { operation: 'bind', projectId: ref.id, revision: (host.data().storage['project:p1'] as any).revision, requestId: 'refused', runId: 'run_forbidden', caller }), /existing Run check refused/)
     const rebound = await worker.request('project.agent', { operation: 'bind', projectId: ref.id, revision: (host.data().storage['project:p1'] as any).revision, requestId: 'rebind', runId: 'run_next' })
     assert.equal(rebound.project!.mainAgentHandle, undefined); assert.equal(rebound.mainAgent, undefined)

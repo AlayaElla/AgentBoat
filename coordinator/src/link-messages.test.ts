@@ -137,6 +137,25 @@ test('wait replaces the previous request and checks credentials, reconnects and 
   } finally { await b.close(); await a.close() }
 })
 
+test('a slow incoming detail sync releases the panel queue and rechecks sharing before sending', async () => {
+  let release!: () => void, entered!: () => void
+  const gate = new Promise<void>(resolve => { release = resolve }), started = new Promise<void>(resolve => { entered = resolve })
+  const a = await workspace('a', true, [], undefined, { projects: async () => refs, agents: async () => {
+    entered(); await gate; return { ok: true, at: Date.now(), agents: [] }
+  } }), b = await workspace('b', true)
+  try {
+    const id = await pair(a, b)
+    const share = async (scope: string) => a.coordinator.links.share({ id, revision: (await a.read()).revision, scope, projectIds: ['p1'] })
+    await share('details')
+    const pending = b.coordinator.links.refresh()
+    await started
+    await Promise.race([a.worker.request('workspace.overview'), delay(800).then(() => { throw Error('overview waiting for peer sync') })])
+    await share('none')
+    release()
+    assert.ok(!(await pending).peers[0].report?.projects.length)
+  } finally { release(); await a.close(); await b.close() }
+})
+
 test('a waiting peer receives Orca project catalog and agent activity changes before the fallback interval', async () => {
   let catalog = refs.slice(0, 1), live: 'work' | 'need' = 'work'
   const a = await workspace('a', true, [], undefined, { projects: async () => catalog,

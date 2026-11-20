@@ -726,7 +726,7 @@ export class WorkspaceLinks {
     try {
       if (req.method !== 'POST' || !['/pair', '/sync', '/revoke', '/wait'].includes(req.url || '')) { req.resume(); reply(404, { error: 'Not found' }); return }
       const body = await jsonBody(req)
-      await this.serial(async () => {
+      const sync = await this.serial(async () => {
         const d = await this.data()
         if (req.url === '/pair') {
           if (!this.invitation || this.invitation.expires <= Date.now() || typeof body.invite !== 'string' || !equal(body.invite, this.invitation.token)) { reply(401, { error: 'Unauthorized' }); return }
@@ -760,10 +760,15 @@ export class WorkspaceLinks {
         const incoming = body.report === undefined ? undefined : received(body.report, p)
         const { more: _, ...acknowledgements } = await this.receiveMessages(incoming ? { ...p, name: incoming.name } : p, body.exchange)
         const feedback = await this.receiveFeedback(p, body.feedback)
-        const outgoing = await this.localReport(p, d)
-        const response = await this.packet(p, outgoing, acknowledgements, false, feedback)
-        if (Buffer.byteLength(JSON.stringify(response)) > LIMIT) fail('工作间上报过大')
         if (incoming) await this.recordIncoming(d, p, incoming)
+        return { p, d, acknowledgements, feedback }
+      })
+      if (!sync) return
+      const outgoing = await this.localReport(sync.p, sync.d)
+      await this.serial(async () => {
+        if ((await this.data()).revision !== sync.d.revision) fail('工作间连接已更新')
+        const response = await this.packet(sync.p, outgoing, sync.acknowledgements, false, sync.feedback)
+        if (Buffer.byteLength(JSON.stringify(response)) > LIMIT) fail('工作间上报过大')
         reply(200, response); this.changed()
       })
     } catch { if (!res.headersSent) reply(400, { error: 'Invalid workspace request' }); req.resume() }
