@@ -132,18 +132,18 @@ export class ProjectStore {
     if (w.version !== 1 || !Number.isSafeInteger(w.revision) || w.revision < 0 || typeof w.runId !== 'string' || !Array.isArray(w.requests)) fail('工作间记录格式不兼容，请保留数据并检查插件版本')
     return w
   }
-  async mutateWorkspace(fn: (w: Workspace) => void, expected?: number): Promise<Workspace> {
+  async mutateWorkspace(fn: (w: Workspace) => void | Promise<void>, expected?: number): Promise<Workspace> {
     return this.serial(async () => {
       const w = await this.workspace()
       if (expected !== undefined && w.revision !== expected) fail('工作间已更新，请刷新后再提交')
-      fn(w); w.revision++
+      await fn(w); w.revision++
       await this.archive.compactLead(w)
       await this.storage.set('workspace', w as any)
       await this.updateRoles?.()
       return w
     })
   }
-  async bindWorkspace(expected: number, runId: string, request: { id: string; input: unknown }, session: AgentSession, token = '', checkOnly = false): Promise<Workspace> {
+  async bindWorkspace(expected: number, runId: string, request: { id: string; input: unknown }, session: AgentSession, token = '', checkOnly = false, bots?: Pick<import('./bot-runtime').LocalBots, 'removeSoul'>): Promise<Workspace> {
     return this.serial(async () => {
       const w = await this.workspace(), hash = fingerprint(request.input), prior = w.requests.find(r => r.id === request.id)
       if (prior && !checkOnly) { if (prior.fingerprint !== hash) fail('同一个请求编号不能用于不同内容'); return w }
@@ -153,6 +153,17 @@ export class ProjectStore {
       if (w.runId || w.takeover || token) {
         const t = verifyTakeover(w.takeover, token, session, w.runId, runId)
         if (checkOnly) return w
+        if (w.bot && w.bot.id !== t.bot?.id) {
+          try {
+            if (!bots) fail('请核对旧 bot 的 SOUL.md，当前无法清理职责说明')
+            await bots.removeSoul(w.bot, w.session?.path)
+          } catch (e) {
+            t.error = (e as Error).message
+            w.revision++
+            await this.storage.set('workspace', w as any)
+            throw e
+          }
+        }
         w.retired ??= []
         if (w.runId) w.retired.push({ id: `retired:${t.id}`, targetRunId: w.runId, subject: '工作间主 agent 已切换',
           body: `你已不再是工作间主 agent。新的主 agent：${session.title || session.handle}\n工作区：${session.workspaceName || session.workspace}\n目录：${session.path}\nAgent：${session.agent}\nRun：${runId}\n请停止承担工作间主 agent。已发送的通知不会补发；新的主 agent 会读取总览补齐事项。`, state: 'pending' })

@@ -410,7 +410,7 @@ export function createCoordinator(api: OrcaWorkerApi, runtime: CoordinatorRuntim
       targets: async () => ({ sessions: scoped?.sessions ?? [], workspaces: scoped?.workspaces ?? [] }),
       mutate: (update, expected) => store.mutate(id, expected, async project => {
         if (ownerRun !== undefined && (!ownerRun || (await store.workspace()).runId !== ownerRun)) fail('请使用已绑定的工作间主 agent Run')
-        update(project)
+        await update(project)
       }),
       changed: () => changed(id),
       launch: selectedAgent === agent ? defaults : { surface: defaults.surface },

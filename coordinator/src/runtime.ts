@@ -18,14 +18,14 @@ import { activeUserDataPath, pluginKey, release } from '../scripts/orca-cli.mjs'
 export const readTimeout = 5000
 const execute = promisify(execFile)
 export interface CoordinatorRuntime {
-  bots?: Pick<LocalBots, 'list' | 'find' | 'home' | 'original' | 'update' | 'newHome'>
+  bots?: Pick<LocalBots, 'list' | 'find' | 'home' | 'original' | 'update' | 'newHome' | 'writeSoul' | 'removeSoul'>
   botMail?(target: string, subject: string, body: string, type: 'handoff' | 'status', home?: string): Promise<{ recipient: string; quota?: ReturnType<typeof quotaReceipt> }>
   projects(host: HostApi<'worker'>): Promise<ProjectRef[]>
   runBinding(id: string): Promise<{ owner: string | null; generation: number; objective?: string }>
   syncContacts(wanted: LeadContact[], workspaces?: string[]): Promise<ContactRoutes>
   installedAgents(workspace: string): Promise<string[]>
   verifyRun(id: string, caller?: string): Promise<void>
-  targets(mode?: 'sample' | 'display'): Promise<{ sessions: AgentSession[]; workspaces: { workspace: string; name: string; path: string }[] }>
+  targets(mode?: 'sample' | 'display'): Promise<{ sessions: AgentSession[]; workspaces: { workspace: string; name: string; path: string; botHomeKey?: string }[] }>
   identify(handle: string, runId: string, currentRunId?: string): Promise<AgentSession>
   requestTakeover(handle: string, prompt: string, subject?: string): Promise<void>
   launchMain(workspace: string, agent: string, prompt: string, options?: Omit<AgentLaunch, 'agent'>): Promise<string>
@@ -205,11 +205,11 @@ export function assertProjectIdle(ref: ProjectRef, ps: any, list: any) {
 }
 // Only runtime-issued handles and explicit liveness are used; saved activity alone is not online evidence.
 export function mainTargets(rows: any[], terminals: any[]) {
-  const sessions: AgentSession[] = [], workspaces: { workspace: string; name: string; path: string }[] = []
+  const sessions: AgentSession[] = [], workspaces: Awaited<ReturnType<CoordinatorRuntime['targets']>>['workspaces'] = []
   for (const w of rows) {
     if (w.address?.environment !== 'local' || (w.hostId ?? 'local') !== 'local' || !w.address?.worktree || !w.path || w.isArchived) continue
     const workspace = w.address.worktree, name = w.displayName || w.repo || ''
-    workspaces.push({ workspace, name, path: w.path })
+    workspaces.push({ workspace, name, path: w.path, ...(w.botHome === true ? { botHomeKey: w.worktreeId } : {}) })
     for (const a of w.agents ?? []) {
       if (a.parentPaneKey) continue
       const match = /^structured-agent-session-(.+):[^:]+$/.exec(a.paneKey ?? '')

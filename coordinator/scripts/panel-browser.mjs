@@ -121,7 +121,7 @@ async function setup(options = {}, hub) {
     if (options.twoWaitingAgents) live.agents.push({ id: 'agent-chat', projectId: 'p1', agent: 'claude', role: 'session', state: 'need', title: '等待设计决定', since: now - 120000, workspaceId: 'identity:chat-workspace' });
     const workspace = { revision: 1, runId: options.unbound ? '' : 'run_main', ...(!options.unbound ? { session: { handle: 'main', agent: 'claude', title: '统筹会话', online: 'online' } } : {}) };
     const hermes = { id: 'hermes', type: 'a2a', name: 'Hermes', enabled: true, state: 'unchecked', message: '' };
-    if (options.bot) workspace.bot = { id: 'current', name: '当前 bot', agent: 'codex', reason: 'Claude 额度已用完', recoveryAt: now + 3600000 };
+    if (options.bot) workspace.bot = { id: 'current', name: '当前 bot', agent: 'codex', reason: 'Claude 额度已用完', recoveryAt: now + 3600000, soul: { home: '/fixture/bots/current', backup: '/fixture/plugin-data/bot-soul-backups/original.md' } };
     if (options.coldMain) workspace.session.online = 'unknown';
     const sessions = ['甲', '乙'].map((name, i) => ({ handle: 'session-' + i, title: name + '会话', workspace: 'identity:test', workspaceName: '示例工作区', path: '/test/工作区 with spaces', agent: i ? 'codex' : 'claude', online: 'online' }));
     const projectSessions = [{ ...sessions[0], handle: 'project-session-0', title: '当前设计会话' },
@@ -488,6 +488,8 @@ try {
     const manage = page.getByRole('button', { name: '管理主 agent' });
     assert.match(await manage.innerText(), /当前 bot · Codex.*预计恢复/);
     await manage.click();
+    await currentLayer().getByText('已写入职责说明', { exact: false }).waitFor();
+    assert.match(await currentLayer().innerText(), /备份位置：\/fixture\/plugin-data\/bot-soul-backups\/original.md/);
     await currentLayer().getByRole('button', { name: '设为主 bot' }).click();
     await currentLayer().getByText(/正在等 备用管家 接管/).waitFor();
     const choice = await page.evaluate(() => fixture.calls.find(c => c.name === 'workspace.agent.switch').input);

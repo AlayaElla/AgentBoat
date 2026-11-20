@@ -1302,7 +1302,9 @@ function mainPage() {
     await refresh()
   }
   const bots = (targets?.bots ?? []).filter((b: import('./model').BotTarget) => !b.paused && ['codex','claude'].includes(b.agent))
-  return [el('p', { class: 'any' }, leadDescription(w, '主 agent')), w.bot ? el('p', {}, botStatus(w.bot)) : null, backupHistory(w), leadChoices(w, targets?.sessions, switchMain),
+  return [el('p', { class: 'any' }, leadDescription(w, '主 agent')), w.bot ? el('p', {}, botStatus(w.bot)) : null,
+    w.bot?.soul ? el('p', { class: 'any' }, '已写入职责说明', el('br'), w.bot.soul.backup ? '备份位置：' + w.bot.soul.backup : '原文件不存在，无需备份') : null,
+    backupHistory(w), leadChoices(w, targets?.sessions, switchMain),
     bots.length ? section('已有 bot', select('Bot', Object.fromEntries(bots.map((b: import('./model').BotTarget) => [b.id, b.name])), bots[0].id),
       select('待命工作区', Object.fromEntries(workspaces.map((s: any) => [s.workspace, s.name + ' · ' + s.path])), w.bot?.standbyWorkspace || w.session?.workspace || workspaces[0]?.workspace || ''),
       button('设为主 bot', () => switchMain({ mode: 'bot', botId: form.Bot, workspace: form['待命工作区'] }), 'primary', !workspaces.length)) : null,

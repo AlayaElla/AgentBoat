@@ -3,13 +3,19 @@ import { readFile } from 'node:fs/promises'
 import { createConnection } from 'node:net'
 import { isDeepStrictEqual } from 'node:util'
 import path from 'node:path'
-import { activeUserDataPath } from '../scripts/orca-cli.mjs'
-import type { BotTarget } from './model'
+import { activeUserDataPath, pluginDataPath } from '../scripts/orca-cli.mjs'
+import type { BotBinding, BotTarget } from './model'
+import { updateBotSoul } from './bot-soul'
 
 type Call = (args: string[]) => Promise<any>
 type Rpc = (method: 'bots.list' | 'bots.update', params?: object) => Promise<any>
 export const botHomeHandle = (value: unknown): value is string =>
   typeof value === 'string' && /^orca_session_id:[\da-f]{8}(?:-[\da-f]{4}){3}-[\da-f]{12}$/i.test(value)
+
+export function checkStandbyPath(home: string, standby: string) {
+  const relative = path.relative(home, standby)
+  if (!relative || !path.isAbsolute(relative) && relative !== '..' && !relative.startsWith('..' + path.sep)) throw Error('待命工作区必须在 bot 的家目录之外')
+}
 
 async function localRpc(method: Parameters<Rpc>[0], params?: object) {
   let metadata
@@ -50,7 +56,7 @@ function target({ id, name, agent, paused }: BotTarget): BotTarget {
 }
 
 export class LocalBots {
-  constructor(private call: Call, private rpc: Rpc = localRpc, private enabled = process.platform === 'win32') {}
+  constructor(private call: Call, private rpc: Rpc = localRpc, private enabled = process.platform === 'win32', private data = pluginDataPath()) {}
   async list(): Promise<BotTarget[]> {
     if (!this.enabled) throw Error('此机器使用会话绑定')
     const { bots } = await this.call(['bot', 'list'])
@@ -65,6 +71,20 @@ export class LocalBots {
     const bot = await this.record(id)
     return bot ? target(bot) : undefined
   }
+  async writeSoul(bot: BotTarget, spaces: { botHomeKey?: string; path: string }[], standby: string, prior?: BotBinding['soul']) {
+    const row = await this.record(bot.id)
+    if (!row || row.paused || row.agent !== bot.agent || !row.folderWorkspaceId) throw Error('无法核对 bot 家目录，请刷新本机 bot 列表')
+    const homes = spaces.filter(s => s.botHomeKey === 'folder:' + row.folderWorkspaceId)
+    if (homes.length !== 1) throw Error('找不到唯一的 bot 家目录，请检查 Orca 中该 bot 的工作区')
+    const home = homes[0].path
+    checkStandbyPath(home, standby)
+    return updateBotSoul(bot.id, home, this.data, target(row).name, prior)
+  }
+  async removeSoul(bot: BotBinding, home?: string) {
+    const folder = bot.soul?.home ?? home
+    if (!folder) throw Error('请手动核对旧 bot 的家目录和 SOUL.md')
+    await updateBotSoul(bot.id, folder, this.data, undefined, bot.soul)
+  }
   async home(bot: BotTarget) {
     const result = await this.call(['bot', 'chats', '--bot', bot.id])
     if (!Array.isArray(result.chats)) throw Error('bot 主对话无法核对')
@@ -76,7 +96,10 @@ export class LocalBots {
   }
   async newHome(id: string) {
     if (!this.enabled) throw Error('本机不支持 bot 切换')
-    await this.call(['bot', 'new-chat', '--bot', id])
+    const result = await this.call(['bot', 'new-chat', '--bot', id])
+    const handle = 'orca_session_id:' + result.sessionId
+    if (!botHomeHandle(handle)) throw Error('请在 Orca 核对新开的 bot 主对话')
+    return handle
   }
   async original(bot: BotTarget) {
     const full = await this.record(bot.id)

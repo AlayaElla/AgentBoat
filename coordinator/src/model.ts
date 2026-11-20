@@ -117,6 +117,7 @@ export interface BotTarget { id: string; name: string; agent: string; paused: bo
 export interface BotBinding {
   id: string; name?: string; agent?: string; paused?: boolean
   standbyWorkspace: string; standbyPath: string
+  soul?: { home: string; backup?: string; padding?: { prefix: string; length: number } }
   reason?: string; recoveryAt?: number; result?: string
 }
 export type StoredTakeover = MainTakeover & { tokenHash: string; mode?: 'existing' | 'new' | 'bot'; bot?: BotBinding }

@@ -1,5 +1,4 @@
-import path from 'node:path'
-import { botHomeHandle } from './bot-runtime'
+import { botHomeHandle, checkStandbyPath } from './bot-runtime'
 import { needsLeadCompaction } from './project-archive'
 import { backupView, type BackupLeads } from './backup-lead'
 import { randomBytes, randomUUID } from 'node:crypto'
@@ -30,10 +29,10 @@ export function recoverTakeover(t?: StoredTakeover) {
   }
 }
 type Inventory = Awaited<ReturnType<CoordinatorRuntime['targets']>>
-type Binding = { takeover?: StoredTakeover; session?: AgentSession; mainAgentHandle?: string }
+type Binding = { takeover?: StoredTakeover; bot?: WorkspaceBinding['bot']; session?: AgentSession; mainAgentHandle?: string }
 export async function switchLead(runtime: CoordinatorRuntime, input: LeadSwitch, options: {
   targets: () => Promise<Inventory>
-  mutate: (update: (binding: Binding) => void, expected?: number) => Promise<unknown>
+  mutate: (update: (binding: Binding) => void | Promise<void>, expected?: number) => Promise<unknown>
   changed: () => void
   role: keyof typeof roleReminder
   prompt: (token: string, expiresAt: string) => string
@@ -41,8 +40,17 @@ export async function switchLead(runtime: CoordinatorRuntime, input: LeadSwitch,
   launch?: Omit<AgentLaunch, 'agent'>
 }) {
   const expected = revision(input.revision), { mutate, changed } = options
+  async function clearPendingSoul(w: Binding, nextId?: string) {
+    const prior = w.takeover?.bot
+    if (!prior) return
+    if (w.takeover?.state === 'sending') fail('正在准备 bot 的接管通知，请稍后再切换')
+    if (prior.soul && prior.id !== w.bot?.id && prior.id !== nextId) {
+      await runtime.bots!.removeSoul(prior)
+      delete w.takeover
+    }
+  }
   if (input.mode === 'cancel') {
-    await mutate(w => { delete w.takeover }, expected)
+    await mutate(async w => { await clearPendingSoul(w); delete w.takeover }, expected)
     changed()
     return
   }
@@ -61,27 +69,45 @@ export async function switchLead(runtime: CoordinatorRuntime, input: LeadSwitch,
   if (!target) fail('目标会话或工作区已不可用，请刷新后选择')
   if (!existsSync(promptClientPath())) fail('找不到接管脚本，请检查 AgentBoat 安装')
   const token = randomBytes(32).toString('base64url'), id = randomUUID(), expiresAt = new Date(Date.now() + 10 * 60_000).toISOString()
-  await mutate(w => {
+  let preparationError: Error | undefined
+  await mutate(async w => {
     if (target.handle && (w.session?.handle ?? w.mainAgentHandle) === target.handle) fail('该会话已经是主会话')
     const prior = w.takeover
     if (prior && takeoverActive(prior) &&
       (bot ? prior.bot?.id === bot.id : existing ? prior.target.handle === target.handle : prior.mode === input.mode && prior.target.workspace === target.workspace && prior.target.agent === target.agent)) fail('该会话的接管请求已发起')
+    await clearPendingSoul(w, bot?.id)
+    let binding: WorkspaceBinding['bot']
+    if (bot && standby) {
+      const priorBot = prior?.bot?.id === bot.id ? prior.bot : w.bot
+      try {
+        const soul = await runtime.bots!.writeSoul(bot, targets.workspaces, standby.path, priorBot?.id === bot.id ? priorBot.soul : undefined)
+        binding = { id: bot.id, standbyWorkspace: standby.workspace, standbyPath: standby.path, soul }
+      } catch (e) {
+        if (!prior || w.takeover) throw e
+        // The previous pending bot was already cleaned up. Persist its cancellation.
+        preparationError = e as Error
+        return
+      }
+    }
     w.takeover = { id, target, expiresAt, tokenHash: fingerprint(token), state: 'sending', mode: bot ? 'bot' : existing ? 'existing' : 'new',
-      ...(bot && standby ? { bot: { id: bot.id, standbyWorkspace: standby.workspace, standbyPath: standby.path } } : {}) }
+      ...(binding ? { bot: binding } : {}) }
   }, expected)
   changed()
+  if (preparationError) throw preparationError
   const prompt = `${options.prompt(token, expiresAt)}\n\n${roleReminder[options.role]}`
   let handle: string
+  let newHome: string | undefined
   try {
+    if (bot) newHome = await runtime.bots!.newHome(bot.id)
     handle = bot ? (await runtime.botMail!('bot:' + bot.id, '请接管工作间主 agent', prompt, 'handoff')).recipient
       : existing ? (await runtime.requestTakeover(target.handle, prompt, options.subject), target.handle)
       : await runtime.launchMain(target.workspace, target.agent, prompt, options.launch)
-    if (bot && !botHomeHandle(handle)) fail('未确认 bot 收件地址')
+    if (bot && (!botHomeHandle(handle) || handle !== newHome)) fail('未确认新主对话的收件地址')
   } catch {
     await mutate(w => {
       if (w.takeover?.id !== id) return
       w.takeover.state = 'uncertain'
-      w.takeover.error = '接管请求未能确认送达，请核对目标会话后重试'
+      w.takeover.error = bot && !newHome ? '职责说明已写入，新主对话未确认。请核对 bot 主对话后取消并重试' : '接管请求未能确认送达，请核对目标会话后重试'
     })
     changed()
     return
@@ -171,12 +197,12 @@ export function mainAgent(orca: OrcaWorkerApi, store: ProjectStore, runtime: Coo
       const session = await runtime.identify(caller, runId, input.currentRunId)
       const pending = (await store.workspace()).takeover?.bot
       if (pending) {
+        if (!pending.soul) fail('此接管请求尚未写入职责说明，请在面板重新选择 bot')
         const current = await runtime.bots?.find(pending.id)
         if (!current || current.paused || current.agent !== session.agent || await runtime.bots!.home(current) !== caller) fail('当前会话不是所选 bot 的主对话')
-        const relative = path.relative(session.path, pending.standbyPath)
-        if (!relative || !path.isAbsolute(relative) && relative !== '..' && !relative.startsWith('..' + path.sep)) fail('待命工作区必须在 bot 的家目录之外')
+        checkStandbyPath(session.path, pending.standbyPath)
       }
-      await store.bindWorkspace(revision(input.revision), runId, { id: text(input.requestId, '请求编号', 200), input }, session, input.token, input.checkOnly)
+      await store.bindWorkspace(revision(input.revision), runId, { id: text(input.requestId, '请求编号', 200), input }, session, input.token, input.checkOnly, runtime.bots)
       if (input.checkOnly) return { ...await read(), check: { canTakeOver: true, message: '可以接管；本次只核实，凭据和绑定均未改变', runId, session } }
       bound()
       await flushRetired(); changed()

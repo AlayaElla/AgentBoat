@@ -1,9 +1,13 @@
 import { assert, mockHost, mountWorker, test } from 'orca/testing'
 import { LocalBots, quotaReceipt } from './bot-runtime'
+import { workspaceSoul } from './bot-soul'
+import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises'
+import path from 'node:path'
+import { tmpdir } from 'node:os'
 import { BackupLeads } from './backup-lead'
 import { mainAgent } from './main-agent'
 import { ProjectStore } from './store'
-import { OrcaRuntime, type CoordinatorRuntime } from './runtime'
+import { mainTargets, OrcaRuntime, type CoordinatorRuntime } from './runtime'
 import type { AgentSession, BotTarget } from './model'
 
 const first = 'orca_session_id:10000000-0000-4000-9000-000000000001'
@@ -12,6 +16,75 @@ const third = 'orca_session_id:30000000-0000-4000-9000-000000000003'
 const initial: BotTarget = { id: 'bot-1', name: '统筹', agent: 'claude', paused: false }
 const primary: AgentSession = { handle: first, workspace: 'bot-folder', workspaceName: '统筹', title: 'Home', path: '/bots/one', agent: 'claude', online: 'online', state: 'done' }
 const standby = { ...primary, handle: 'orca_session_id:codex_spare', workspace: 'standby', path: '/standby', agent: 'codex' }
+
+test('按本机工作区与磁盘 ID 更新 SOUL，备份原字节，保留主人内容', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'agentboat-soul-'))
+  const home = path.join(root, 'bot-2'), old = path.join(root, 'bot'), data = path.join(root, 'plugin-data')
+  const soul = path.join(home, 'SOUL.md'), diskId = path.join(home, 'bot.json')
+  const row = { ...initial, name: '新名字', folderWorkspaceId: 'two', hostId: 'local' }
+  const api = new LocalBots(async () => assert.fail('CLI'), async () => ({ bots: [row] }), true, data)
+  const homes = mainTargets([['two', home], ['one', old]].map(([id, folder]) => ({
+    botHome: true, worktreeId: 'folder:' + id, path: folder, address: { environment: 'local', worktree: id }
+  })), []).workspaces
+  const binding = { id: row.id, standbyWorkspace: 'spare', standbyPath: path.join(root, 'spare') }
+  const write = () => api.writeSoul(row, homes, binding.standbyPath)
+  const get = () => readFile(soul, 'utf8')
+  const heading = '## AgentBoat 工作间管理员', start = '<!-- agentboat:workspace-main:start -->', end = '<!-- agentboat:workspace-main:end -->'
+  const block = [heading, start, '', workspaceSoul, '', end].join('\r\n')
+  try {
+    await mkdir(old); await mkdir(home)
+    await writeFile(path.join(old, 'bot.json'), JSON.stringify({ id: 'retired', name: row.name }))
+    await writeFile(path.join(old, 'SOUL.md'), '旧 bot')
+    await writeFile(diskId, JSON.stringify(row))
+    await assert.rejects(() => api.writeSoul(row, [], binding.standbyPath), /家目录/)
+    await assert.rejects(() => api.writeSoul(row, homes, home), /待命工作区/)
+    const created = await write()
+    assert.equal(created.backup, undefined)
+    assert.equal(await get(), '# 新名字\n\n' + block.replaceAll('\r\n', '\n') + '\n')
+    const template = '\uFEFF# 旧名\r\n\r\nDescribe 旧名 here: what it is for, how it talks, and what it must never do.\r\n'
+    await writeFile(soul, template)
+    const seeded = await write()
+    assert.equal(path.dirname(seeded.backup!), path.join(data, 'bot-soul-backups'))
+    assert.equal(await readFile(seeded.backup!, 'utf8'), template)
+    assert.equal(await get(), '\uFEFF# 新名字\r\n\r\n' + block + '\r\n')
+    for (const custom of ['', '主人正文', '主人正文\n', '\uFEFF主人正文\r\n\r\n', template + '另有安排']) {
+      await writeFile(soul, custom)
+      const saved = await write()
+      assert.equal(await readFile(saved.backup!, 'utf8'), custom)
+      if (custom) assert.ok((await get()).startsWith(custom))
+      await api.removeSoul({ ...binding, soul: saved })
+      if (custom) assert.equal(await get(), custom)
+      else assert.ok(!(await get()).includes(heading))
+    }
+    const prefix = '\uFEFF# 新名字\r\n\r\n主人前言  \r\n\r\n', suffix = '\r\n\r\n主人后记  '
+    const edited = prefix + block.replace(workspaceSoul, '曾编辑的旧职责') + suffix
+    await writeFile(soul, edited)
+    const replaced = await write()
+    assert.equal(await get(), prefix + block + suffix)
+    assert.equal(await readFile(replaced.backup!, 'utf8'), edited)
+    await writeFile(soul, edited)
+    await api.removeSoul({ ...binding, soul: replaced })
+    assert.equal(await get(), prefix + suffix)
+    assert.equal(await readFile(path.join(old, 'SOUL.md'), 'utf8'), '旧 bot')
+    for (const markers of [start, end, end + '\n' + start, start + '\n' + start + '\n' + end]) {
+      await writeFile(soul, markers)
+      await assert.rejects(write, /标记/)
+      await assert.rejects(() => api.removeSoul({ ...binding, soul: replaced }), /标记/)
+      assert.equal(await get(), markers)
+    }
+    await writeFile(soul, '主人新内容')
+    const unavailable = new LocalBots(async () => assert.fail('CLI'), async () => ({ bots: [row] }), true, diskId)
+    await assert.rejects(() => unavailable.writeSoul(row, homes, binding.standbyPath), /SOUL.md/)
+    assert.equal(await get(), '主人新内容')
+    await writeFile(diskId, JSON.stringify({ ...row, id: 'other' }))
+    await assert.rejects(write, /ID/)
+    await assert.rejects(() => api.removeSoul({ ...binding, soul: replaced }), /ID/)
+    assert.deepEqual((await readdir(home)).sort(), ['SOUL.md', 'bot.json'])
+    await rm(home, { recursive: true })
+    await assert.rejects(write, /家目录|SOUL.md/)
+    await api.removeSoul({ ...binding, soul: replaced })
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
 
 test('额度回执要求对应地址、警告码和 Orca 的额度文字，恢复时间使用本机时钟', () => {
   const now = new Date(2026, 10, 20, 8, 0).getTime(), reset = now + 3 * 3600000
@@ -44,6 +117,7 @@ test('本机 bot 名单与远端隔离；每次更新先读完整记录，仅写
   const cli = async (args: string[]) => {
     if (args[1] === 'list') return { bots: [current, { ...current, server: { name: 'Mac' }, id: 'another' }] }
     assert.equal(args.at(-1), initial.id)
+    if (args[1] === 'new-chat') return { sessionId: second.slice('orca_session_id:'.length) }
     return { bot: '读取之间发生改名', chats: [{ id: 'side', home: false }, { id: first.slice(16), home: true }] }
   }
   const api = new LocalBots(cli, async (method, params: any) => {
@@ -55,6 +129,7 @@ test('本机 bot 名单与远端隔离；每次更新先读完整记录，仅写
   const original = await api.original(initial)
   assert.deepEqual(await api.list(), [initial])
   assert.equal(await api.home(initial), first)
+  assert.equal(await api.newHome(initial.id), second)
   const other = await api.update(initial, 'codex')
   await api.update(other, original.agent, original.launch)
   assert.deepEqual(calls.filter(([m]) => m === 'bots.update').map(([,p]) => p), [
@@ -65,17 +140,32 @@ test('本机 bot 名单与远端隔离；每次更新先读完整记录，仅写
 
 async function setup() {
   const env = { current: { ...initial } as BotTarget | undefined, home: first as string | undefined, owner: null as string | null,
+    soulActions: [] as string[], soulError: '', resetError: false, resetTo: first,
     generation: 2, reject: false, next: second, warning: '', resets: [] as string[], sends: [] as { target: string; body: string; type: string }[], updates: [] as any[], sessions: [primary, standby], launches: [] as string[] }
   const inventory = () => ({ sessions: env.sessions, workspaces: [primary, standby].map(s => ({ workspace: s.workspace, path: s.path, name: s.title })) })
   const runtime = {
     bots: { find: async (id: string) => env.current?.id === id ? env.current : undefined, home: async () => env.home, list: async () => env.current ? [env.current] : [],
-      newHome: async (id: string) => { env.resets.push(id) },
+      writeSoul: async (bot: BotTarget) => {
+        env.soulActions.push('write ' + bot.id)
+        if (env.soulError) throw Error(env.soulError)
+        return { home: primary.path, backup: '/fixture/backup.md' }
+      },
+      removeSoul: async (bot: BotTarget) => {
+        if (env.soulError) throw Error(env.soulError)
+        env.soulActions.push('remove ' + bot.id)
+      },
+      newHome: async (id: string) => {
+        env.soulActions.push('reset ' + id); env.resets.push(id)
+        if (env.resetError) throw Error('reset failed')
+        return env.resetTo
+      },
       original: async () => ({ agent: 'claude', launch: { model: 'saved' } }),
       update: async (_: BotTarget, agent: string, launch?: object) => {
         env.updates.push([agent, launch]); if (env.reject) throw Error('refused')
         return env.current = { ...initial, agent }
       } },
     botMail: async (target: string, subject: string, body: string, type: string) => {
+      env.soulActions.push('mail ' + target)
       env.sends.push({ target, body, type })
       return { recipient: env.next, quota: quotaReceipt({ warnings: [{ code: 'recipient_delivery_held', recipient: first, message: env.warning }] }, first) }
     },
@@ -108,6 +198,58 @@ async function setup() {
   }
   return { env, worker, store, backups, main, poll, bind }
 }
+
+test('先写职责再开主对话、投递并核对收件地址，准备失败时允许取消', async () => {
+  const { env, worker, store } = await setup()
+  const choose = async () => worker.request('workspace.agent.switch', { mode: 'bot', revision: (await store.workspace()).revision, botId: initial.id, workspace: standby.workspace })
+  const cancel = async () => worker.request('workspace.agent.switch', { mode: 'cancel', revision: (await store.workspace()).revision })
+  try {
+    env.soulError = '请修复 SOUL.md 标记'
+    await assert.rejects(choose, /SOUL.md/)
+    assert.equal((await store.workspace()).takeover, undefined)
+    env.soulError = ''; env.resetError = true
+    assert.match((await choose()).takeover!.error!, /新主对话未确认/)
+    assert.equal(env.sends.length, 0)
+    await cancel()
+    env.resetError = false
+    const mismatch = await choose()
+    assert.equal(mismatch.takeover!.state, 'uncertain')
+    assert.equal(mismatch.takeover!.target.handle, '')
+    await cancel()
+    env.soulActions.length = 0; env.next = first
+    assert.equal((await choose()).takeover!.state, 'waiting')
+    assert.deepEqual(env.soulActions, ['write bot-1', 'reset bot-1', 'mail bot:bot-1'])
+    await cancel()
+    assert.equal(env.soulActions.at(-1), 'remove bot-1')
+  } finally { await worker.deactivate() }
+})
+
+test('从原 bot 换到另一个 bot，正式接管通过才清理原职责', async () => {
+  const { env, worker, store, bind } = await setup()
+  try {
+    await bind()
+    env.current = { ...initial, id: 'bot-2' }
+    env.resetTo = env.next = env.home = second
+    env.sessions = [{ ...primary, handle: second }, standby]
+    await worker.request('workspace.agent.switch', { mode: 'bot', botId: 'bot-2', workspace: standby.workspace, revision: (await store.workspace()).revision })
+    const input = { operation: 'bind' as const, revision: (await store.workspace()).revision, runId: 'run_two', currentRunId: 'run_two',
+      caller: second, requestId: 'second-bot', token: /一次性接管凭据：([^\n]+)/.exec(env.sends.at(-1)!.body)![1] }
+    await worker.request('workspace.agent', { ...input, checkOnly: true })
+    assert.ok(!env.soulActions.includes('remove bot-1'))
+    env.soulError = '请核对旧 bot 的 SOUL.md 标记'
+    await assert.rejects(() => worker.request('workspace.agent', input), /SOUL.md/)
+    const unchanged = await worker.request('workspace.agent', { operation: 'read' })
+    assert.equal(unchanged.bot?.id, 'bot-1')
+    assert.equal(unchanged.takeover?.error, env.soulError)
+    env.soulError = ''
+    input.revision = unchanged.revision
+    const result = await worker.request('workspace.agent', input)
+    assert.equal(result.bot?.id, 'bot-2')
+    assert.ok(result.bot?.soul?.backup)
+    await worker.request('workspace.agent', input)
+    assert.equal(env.soulActions.filter(s => s === 'remove bot-1').length, 1)
+  } finally { await worker.deactivate() }
+})
 
 test('面板绑定、独立备用、切换宽限、凭据接回原 Run、到点空闲切回和飞书队列', async () => {
   const { env, worker, store, backups, main, poll, bind } = await setup()
@@ -178,6 +320,7 @@ test('同名和改名按 ID 识别，额度恢复时间未知时等主人，面�
     await worker.request('workspace.agent', { operation: 'bind', revision: choice.revision, requestId: 'rollback', runId: 'run_old_session', currentRunId: 'run_old_session', caller: standby.handle,
       token: /一次性接管凭据：([^\n]+)/.exec(env.sends.at(-1)!.body)![1] })
     assert.equal((await read()).bot, undefined)
+    assert.ok(env.soulActions.includes('remove bot-1'))
     assert.equal((await store.workspace()).originalBot, undefined)
   } finally { await worker.deactivate() }
 })
@@ -194,7 +337,7 @@ test('待命会话提交交接后，在空闲 bot 上重开主对话接回 Run',
     const token = /lead-handoff run_bot (\S+)/.exec(msg.body)![1]
     await backups.command({ caller: standby.handle, action: 'handoff', token, note: '两项待验收', runId: 'run_bot' })
     await poll()
-    assert.deepEqual(env.resets, ['bot-1'])
+    assert.deepEqual(env.resets, ['bot-1', 'bot-1'])
     assert.match(env.sends.at(-1)!.body, /两项待验收/)
     env.home = second; env.sessions = [{ ...primary, handle: second }, standby]
     const request = { caller: second, action: 'take' as const, token: /lead-take run_bot (\S+)/.exec(env.sends.at(-1)!.body)![1], runId: 'run_bot' }
