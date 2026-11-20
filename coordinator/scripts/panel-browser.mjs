@@ -25,6 +25,10 @@ const server = http.createServer(async (req, res) => {
       res.setHeader('Content-Type', 'text/javascript');
       res.end(await fs.readFile('node_modules/pdfjs-dist/build/' + path.basename(url.pathname))); return;
     }
+    if (url.pathname === '/assets/pdf/wasm/openjpeg_nowasm_fallback.js') {
+      res.setHeader('Content-Type', 'text/javascript');
+      res.end(await fs.readFile('node_modules/pdfjs-dist/wasm/openjpeg_nowasm_fallback.js')); return;
+    }
     if (!files[url.pathname]) { res.writeHead(404).end(); return; }
     let data = await fs.readFile(files[url.pathname]);
     if (url.pathname === '/panel') data = data.toString().replace('</head>', `<style>${tokens}</style></head>`);
@@ -1282,9 +1286,13 @@ try {
     assert.deepEqual(await page.evaluate(() => fixture.calls.filter(c => c.name === 'files.saveAs').at(-1).input), { suggestedName: 'design.html', data: html });
     assert.equal(await download.locator('iframe, object, embed, pre, img, canvas, h1').count(), 0);
     await download.getByRole('button', { name: '关闭' }).click();
-    const pdfData = '%PDF-1.4\n1 0 obj <</Type/Catalog/Pages 2 0 R>> endobj\n2 0 obj <</Type/Pages/Kids[3 0 R]/Count 1>> endobj\n3 0 obj <</Type/Page/Parent 2 0 R/MediaBox[0 0 100 80]>> endobj\ntrailer <</Root 1 0 R>>\n%%EOF';
-    const pdf = await openFile('design.pdf', 'application/pdf', Buffer.from(pdfData).toString('base64'));
-    await pdf.locator('canvas[width="200"]').waitFor();
+    const pdfData = await fs.readFile(new URL('./panel-jpeg2000-fixture.pdf', import.meta.url));
+    const pdf = await openFile('design.pdf', 'application/pdf', pdfData.toString('base64'));
+    // A missing decoder can still produce a full-size white canvas.
+    await page.waitForFunction(() => {
+      const pixel = document.querySelector('dialog canvas')?.getContext('2d').getImageData(30, 30, 1, 1).data;
+      return pixel && pixel[0] === 31 && pixel[1] === 211 && pixel[2] === 94;
+    });
     await pdf.getByRole('button', { name: '关闭' }).click();
     await page.evaluate(() => { fixture.artifactError = '对方离线，暂时无法获取成果'; });
     await artifacts.getByRole('button', { name: '设计原稿 · v1' }).click();

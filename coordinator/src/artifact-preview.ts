@@ -8,7 +8,7 @@ async function showPdf(bytes: Uint8Array, body: HTMLElement, dialog: HTMLDialogE
   pdfjs.GlobalWorkerOptions.workerSrc = new URL('pdf.worker.min.mjs', base).href
   const task = pdfjs.getDocument({ data: bytes, cMapUrl: new URL('cmaps/', base).href, cMapPacked: true,
     standardFontDataUrl: new URL('standard_fonts/', base).href, wasmUrl: new URL('wasm/', base).href,
-    maxImageSize: 16_000_000 })
+    useWasm: false, maxImageSize: 16_000_000 })
   const dispose = () => { void task.destroy().catch(() => {}) }
   if (!dialog.open) { dispose(); return }
   dialog.addEventListener('close', dispose, { once: true })
