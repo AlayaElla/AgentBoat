@@ -1,9 +1,9 @@
 import { createHash, randomUUID } from 'node:crypto'
-import { createReadStream } from 'node:fs'
+import { constants, createReadStream } from 'node:fs'
 import { lstat, mkdir, open, readFile, readdir, realpath, rename, rm, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { pluginDataPath } from '../scripts/orca-cli.mjs'
-import { fail, fingerprint, object } from './store'
+import { artifactUrl, fail, fingerprint, object } from './store'
 
 export const maxLinkFileBytes = 25 * 1024 ** 2, maxLinkFiles = 10
 const maxOutgoingFiles = 100 * 1024 ** 2, maxReceivedFiles = 1024 ** 3
@@ -14,10 +14,11 @@ export type FileChunk = { index: number; offset: number; data: string }
 type Manifest = { key: string; requestId: string; hash: string; at: string; files: LinkFile[] }
 export type ReceivedFile = LinkFile & { path: string }
 const mime = new Map(Object.entries({ '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
-  '.webp': 'image/webp', '.gif': 'image/gif', '.pdf': 'application/pdf', '.txt': 'text/plain', '.zip': 'application/zip' }))
+  '.webp': 'image/webp', '.gif': 'image/gif', '.pdf': 'application/pdf', '.txt': 'text/plain', '.svg': 'image/svg+xml', '.md': 'text/markdown', '.markdown': 'text/markdown', '.zip': 'application/zip' }))
 const fileType = (name: string) => mime.get(path.extname(name).toLowerCase()) ?? 'application/octet-stream'
 const hashPattern = /^[a-f0-9]{64}$/
 const segment = (value: string) => /^[\w-]{1,64}$/.test(value) ? value : fail('工作间文件目录编号不正确')
+const isArtifactTransfer = (id: string) => /^artifact:[0-9a-f]{64}$/.test(id)
 const missing = (e: unknown) => (e as NodeJS.ErrnoException).code === 'ENOENT'
 const stat = (file: string) => lstat(file).catch(e => { if (!missing(e)) throw e })
 const sha256 = async (file: string) => {
@@ -64,6 +65,45 @@ export function wireChunk(raw: unknown): FileChunk | undefined {
   if (!Number.isSafeInteger(c.index) || c.index < 0 || c.index >= maxLinkFiles || !Number.isSafeInteger(c.offset) || c.offset < 0 || c.offset >= maxLinkFileBytes ||
     typeof c.data !== 'string' || !c.data || c.data.length > Math.ceil(fileChunkBytes / 3) * 4) fail('工作间文件分块不正确')
   return { index: c.index, offset: c.offset, data: c.data }
+}
+
+async function readChunk(input: Awaited<ReturnType<typeof open>>, size: number, index: number, offset: number) {
+  const data = Buffer.alloc(Math.min(fileChunkBytes, size - offset))
+  const { bytesRead } = await input.read(data, 0, data.length, offset)
+  if (bytesRead !== data.length) fail('读取过程中附件已变化，请重试')
+  return { index, offset, data: data.toString('base64') }
+}
+
+// Check the registered name, its resolved location and the opened file before reading any bytes.
+async function openContained(root: string, file: string) {
+  const target = artifactUrl(file, root)
+  if (!path.isAbsolute(target) || process.platform === 'win32' && (!/^[a-z]:[/\\]/i.test(target) || target.slice(2).includes(':'))) fail('成果路径不属于当前项目')
+  const base = await realpath(root), actual = await realpath(target)
+  artifactUrl(actual, base)
+  const info = await lstat(target)
+  if (!info.isFile() || path.relative(actual, path.resolve(base, path.relative(root, target)))) fail('只可查看项目内的普通文件')
+  if (info.size > maxLinkFileBytes) fail('单个附件不得超过 25 MB')
+  const input = await open(actual, constants.O_RDONLY | (constants.O_NOFOLLOW || 0) | (constants.O_NONBLOCK || 0))
+  try {
+    const [pinned, current] = await Promise.all([input.stat(), lstat(target)])
+    if (!pinned.isFile() || pinned.ino !== info.ino || pinned.dev !== info.dev || pinned.size !== info.size || !current.isFile() || current.ino !== pinned.ino || current.dev !== pinned.dev ||
+      path.relative(actual, await realpath(target))) fail('读取过程中附件已变化，请重试')
+    return { input, size: pinned.size }
+  } catch (e) { await input.close(); throw e }
+}
+
+export async function artifactPart(root: string, file: string, offset: number) {
+  const { input, size } = await openContained(root, file)
+  try {
+    if (offset === -1) {
+      const hash = createHash('sha256')
+      if (size) for await (const bytes of input.createReadStream({ start: 0, end: size - 1, autoClose: false })) hash.update(bytes)
+      const [name] = safeNames([path.basename(file)])
+      return { files: [{ name, size, type: fileType(name), sha256: hash.digest('hex') }] }
+    }
+    if (!Number.isSafeInteger(offset) || offset < 0 || offset >= size) fail('工作间文件分块不正确')
+    return { chunk: await readChunk(input, size, 0, offset) }
+  } finally { await input.close() }
 }
 
 export class LinkFiles {
@@ -159,12 +199,8 @@ export class LinkFiles {
     if (!folder) fail('待发附件未找到')
     const file = path.join(folder, String(index))
     if (!(await stat(file))?.isFile()) fail('待发附件未找到')
-    const input = await open(file, 'r'), data = Buffer.alloc(Math.min(fileChunkBytes, files[index].size - offset))
-    try {
-      const { bytesRead } = await input.read(data, 0, data.length, offset)
-      if (bytesRead !== data.length) fail('待发附件已变化')
-      return { index, offset, data: data.toString('base64') }
-    } finally { await input.close() }
+    const input = await open(file, 'r')
+    try { return await readChunk(input, files[index].size, index, offset) } finally { await input.close() }
   }
 
   async discard(peer: string, spool?: string) {
@@ -197,11 +233,31 @@ export class LinkFiles {
     }))
   }
 
+  async readArtifact(peer: string, workspace: string, key: string, offset: number) {
+    if (typeof key !== 'string' || !/^[\w-]{1,100}$/.test(key) || !Number.isSafeInteger(offset) || offset < 0) fail('未找到已接收的成果')
+    const folder = await this.existingFolder('received', segment(workspace), key)
+    if (!folder) fail('未找到已接收的成果')
+    const manifest = path.join(folder, manifestName)
+    if (!(await stat(manifest))?.isFile()) fail('未找到已接收的成果')
+    const record: Manifest = JSON.parse(await readFile(manifest, 'utf8'))
+    if (!isArtifactTransfer(record.requestId) || record.key !== fingerprint([peer, record.requestId])) fail('此文件不属于本次成果传输')
+    const [f] = safeFiles(record.files)
+    const { input, size } = await openContained(this.root, path.join(folder, f.name))
+    try {
+      if (size !== f.size || offset > size) fail('接收的成果已变化，请重新获取')
+      // Orca limits each JSON panel response to 1 MiB, including base64 encoding.
+      const bytes = Buffer.alloc(Math.min(256 * 1024, size - offset))
+      const { bytesRead } = await input.read(bytes, 0, bytes.length, offset)
+      if (bytesRead !== bytes.length) fail('接收的成果已变化，请重新获取')
+      return bytes.toString('base64')
+    } finally { await input.close() }
+  }
+
   async incomplete(peer: string) {
     const folder = await this.existingFolder('receiving', segment(peer))
     if (!folder) return []
     const rows = await this.manifests(folder)
-    return Promise.all(rows.map(async ({ folder, record }) => ({
+    return Promise.all(rows.filter(({ record }) => !isArtifactTransfer(record.requestId)).map(async ({ folder, record }) => ({
       requestId: record.requestId, at: record.at, files: safeFiles(record.files), offsets: await this.offsets(folder, record.files)
     })))
   }
@@ -226,7 +282,12 @@ export class LinkFiles {
         return attach(existing.folder)
       }
       const amount = (items: LinkFile[]) => items.reduce((n, f) => n + f.size, 0)
-      const partial = await this.manifests(incoming)
+      const partial = []
+      for (const row of await this.manifests(incoming)) {
+        // One artifact pull per peer. Release abandoned reservations when another version starts.
+        if (isArtifactTransfer(requestId) && isArtifactTransfer(row.record.requestId)) await rm(row.folder, { recursive: true, force: true })
+        else partial.push(row)
+      }
       if (partial.length >= 10) fail('此连接正在接收的消息已达上限')
       const reserved = [...done, ...partial].reduce((n, row) => n + amount(row.record.files), 0)
       if (reserved + amount(files) > this.limits.received) return { error: 'capacity' }

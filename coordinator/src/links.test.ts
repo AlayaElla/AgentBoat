@@ -1,5 +1,8 @@
 import { assert, test, mockHost, mountWorker } from 'orca/testing'
 import path from 'node:path'
+import os from 'node:os'
+import { mkdtemp, mkdir, rm, writeFile, truncate, symlink } from 'node:fs/promises'
+import { fileChunkBytes, maxLinkFileBytes } from './link-files'
 import type { OrcaWorkerApi } from 'orca/worker'
 import { WorkspaceLinks, endpoint, invitationHost, report } from './links'
 import { refs, sample } from './fixtures'
@@ -7,13 +10,13 @@ import { fingerprint, fresh, type FeedbackItem } from './store'
 import type { LiveAgent } from './model'
 import { testCoordinator as createCoordinator, testFiles } from './test-runtime'
 
-async function instance(name: string, configured = true, chooseHost = () => '127.0.0.1') {
+async function instance(name: string, configured = true, chooseHost = () => '127.0.0.1', files = testFiles()) {
   const storage = new Map<string, any>(), secrets = new Map<string, string>()
   const api = { storage: { get: async (k: string) => structuredClone(storage.get(k) ?? null), set: async (k: string, v: any) => { storage.set(k, structuredClone(v)) } },
     secrets: { get: async (k: string) => secrets.get(k) ?? null, set: async (k: string, v: string) => { secrets.set(k, v) }, delete: async (k: string) => { secrets.delete(k) } } }
   const projects = structuredClone([sample().project!, fresh(refs[1])])
   projects[0].ref.name = name + ' private project'
-  const create = () => new WorkspaceLinks(api as OrcaWorkerApi, async () => projects, () => {}, chooseHost, undefined, undefined, testFiles())
+  const create = () => new WorkspaceLinks(api as OrcaWorkerApi, async () => projects, () => {}, chooseHost, undefined, undefined, files)
   const links = create()
   if (configured) {
     const initial = await links.snapshot()
@@ -128,6 +131,78 @@ test('delegated feedback applies once in both directions and rechecks sharing on
     await b.c.links.refresh()
     await assert.rejects(() => send(b), /断开/)
   } finally { a.c.stop(); b.c.stop(); await a.worker.deactivate(); await b.worker.deactivate() }
+})
+
+test('peer artifacts use authenticated loopback in both directions, cache complete versions and recheck access', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'peer-artifact-'))
+  const received = testFiles(), receive = received.receive.bind(received)
+  let chunks = 0, afterChunk: (() => void) | undefined
+  received.receive = async (...args) => {
+    const result = await receive(...args)
+    if (args[5]) { chunks++; afterChunk?.() }
+    return result
+  }
+  const a = await instance('甲'), b = await instance('乙', true, undefined, received)
+  await mkdir(path.join(root, 'project'))
+  const bytes = Buffer.alloc(fileChunkBytes * 6 + 31, 122)
+  const dir = path.join(root, 'project'), file = path.join(dir, 'drawing.md')
+  const ref = { projectId: 'p1', taskId: 'task-1', artifactId: 'local' }
+  const add = (side: typeof a) => {
+    const p = side.projects[0], task = p.tasks[0]
+    p.ref.path = dir
+    const artifact = { id: 'local', label: '设计图', version: 'v1', url: file, expired: false }
+    task.artifacts.push(artifact); task.acceptance[0].artifactIds.push('local')
+    return artifact
+  }
+  const local = add(a); add(b)
+  try {
+    await writeFile(file, bytes)
+    await a.links.start(); await b.links.start()
+    const { id } = (await b.links.join((await a.links.invite()).invitation!.code)).peers[0]
+    const share = async (s: typeof a, projectIds: string[]) => s.links.share({ revision: (await s.links.snapshot()).revision, id, scope: 'details', projectIds, delegateFeedback: true })
+    await share(a, ['p1']); await share(b, ['p1'])
+    const get = (s = b) => s.links.openArtifact(id, ref)
+    const [first, concurrent] = await Promise.all([get(), get()])
+    assert.deepEqual(first, concurrent)
+    assert.deepEqual([first.name, first.type, first.size], ['drawing.md', 'text/markdown', bytes.length])
+    const parts = []
+    for (let offset = 0; offset < bytes.length;) {
+      const part = Buffer.from(await b.links.readArtifact(id, first.key, offset), 'base64')
+      assert.ok(part.length); parts.push(part); offset += part.length
+    }
+    assert.deepEqual(Buffer.concat(parts), bytes)
+    const sent = Math.ceil(bytes.length / fileChunkBytes)
+    assert.equal(chunks, sent)
+    assert.deepEqual(await get(), first)
+    assert.equal(chunks, sent)
+    local.version = 'v2'
+    afterChunk = () => { local.expired = true }
+    await assert.rejects(get, /过期/)
+    afterChunk = undefined; local.expired = false
+    const second = await get()
+    assert.notEqual(second.key, first.key)
+    assert.equal(chunks, sent * 2)
+    await assert.rejects(() => b.links.readArtifact(id, '../drawing.md', 0), /未找到/)
+    assert.equal((await get(a)).size, bytes.length)
+    assert.equal((await b.links.snapshot(true)).peers[0].recentMessages?.length, 0)
+    await assert.rejects(() => b.links.openArtifact(id, { ...ref, taskId: 'task-2' }), /没有登记/)
+    local.expired = true; await assert.rejects(get, /过期/)
+    local.expired = false; await share(a, []); await assert.rejects(get, /未开放/)
+    await share(a, ['p1'])
+    a.projects[0].hidden = true; await assert.rejects(get, /未开放/); a.projects[0].hidden = false
+    const outside = path.join(root, 'elsewhere.txt')
+    await writeFile(outside, 'test')
+    local.url = path.join(dir, '..', 'elsewhere.txt'); await assert.rejects(get, /不属于/)
+    local.url = dir; await assert.rejects(get, /普通文件/)
+    const subdir = path.join(dir, 'folder')
+    await mkdir(subdir); await writeFile(path.join(subdir, 'file'), 'test')
+    await symlink(subdir, path.join(dir, 'alias'), 'junction')
+    local.url = path.join(dir, 'alias', 'file'); await assert.rejects(get, /普通文件/)
+    local.url = file; await truncate(file, maxLinkFileBytes + 1)
+    await assert.rejects(get, /25 MB/)
+    await rm(file); await assert.rejects(get, e => e instanceof Error && /不存在/.test(e.message) && !e.message.includes(dir))
+    a.links.stop(); await b.links.refresh(); await assert.rejects(get, /离线/)
+  } finally { a.links.stop(); b.links.stop(); await rm(root, { recursive: true, force: true }) }
 })
 
 test('unexpected peer fields cannot enter panel snapshots or be rewritten', async () => {

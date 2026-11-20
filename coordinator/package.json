@@ -8,7 +8,8 @@
     "typecheck": "tsc --noEmit -p ."
   },
   "dependencies": {
-    "@larksuiteoapi/node-sdk": "1.76.0"
+    "@larksuiteoapi/node-sdk": "1.76.0",
+    "pdfjs-dist": "6.5.438"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

@@ -1,3 +1,10 @@
+.artifact-preview{width:min(52rem,94vw);max-height:90vh;overflow:auto;padding:1rem;background:var(--s-card);color:var(--orca-foreground);border:0;border-radius:var(--r-lg);box-shadow:var(--shadow-sm)}
+.artifact-preview::backdrop{background:#0006}
+.artifact-preview h2{display:inline;margin-right:1rem;overflow-wrap:anywhere}
+.artifact-preview img,.artifact-preview canvas{display:block;max-width:100%;height:auto;margin:1rem auto}
+.artifact-preview pre{white-space:pre-wrap;overflow-wrap:anywhere}
+.artifact-preview button{margin:.25rem;padding:.35rem .7rem;color:inherit;background:var(--fill);border:0;border-radius:var(--r-md);cursor:pointer}
+.artifact-preview p:empty{display:none}
 :root{--ab-font:"Geist",-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
   --ab-need:#f05100;--ab-need-text:#c53c00;--ab-work:#edb200;--ab-done:#00bb7f;--ab-done-text:#007956;--ab-idle:color-mix(in oklab,#737373 50%,transparent);
   --r-sm:calc(var(--orca-radius)*.6);--r-md:calc(var(--orca-radius)*.8);--r-lg:var(--orca-radius);--r-xl:calc(var(--orca-radius)*1.4);

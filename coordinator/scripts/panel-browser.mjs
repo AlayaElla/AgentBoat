@@ -21,6 +21,10 @@ const server = http.createServer(async (req, res) => {
   try {
     const url = new URL(req.url, 'http://localhost');
     const files = { '/panel': 'src/panel.html', '/panel.css': 'src/panel.css', '/assets/Geist.woff2': 'src/assets/Geist.woff2', '/panel-page.ts': '.orca/local-test/panel.js' };
+    if (url.pathname === '/assets/pdf/pdf.min.mjs' || url.pathname === '/assets/pdf/pdf.worker.min.mjs') {
+      res.setHeader('Content-Type', 'text/javascript');
+      res.end(await fs.readFile('node_modules/pdfjs-dist/build/' + path.basename(url.pathname))); return;
+    }
     if (!files[url.pathname]) { res.writeHead(404).end(); return; }
     let data = await fs.readFile(files[url.pathname]);
     if (url.pathname === '/panel') data = data.toString().replace('</head>', `<style>${tokens}</style></head>`);
@@ -145,7 +149,9 @@ async function setup(options = {}, hub) {
       workspace.session.title = '工作间主会话';
       window.fixture.removedProjects = [project.ref.id];
     }
-    window.orca = { shell: { openExternal: async url => { calls.push({ name: 'shell.openExternal', input: url }); return { opened: true }; } }, storage: { get: async k => clone(stored[k] ?? null), set: async (k, v) => { stored[k] = clone(v); }, delete: async k => { delete stored[k]; } }, plugin: { on: (name, callback) => { events[name] = callback; return { dispose() {} }; }, request: async (name, input) => {
+    window.orca = { files: { saveAs: async ({ suggestedName, data }) => {
+      calls.push({ name: 'files.saveAs', input: { suggestedName, data: new TextDecoder().decode(data) } }); return { status: 'saved' };
+    } }, shell: { openExternal: async url => { calls.push({ name: 'shell.openExternal', input: url }); return { opened: true }; } }, storage: { get: async k => clone(stored[k] ?? null), set: async (k, v) => { stored[k] = clone(v); }, delete: async k => { delete stored[k]; } }, plugin: { on: (name, callback) => { events[name] = callback; return { dispose() {} }; }, request: async (name, input) => {
       if (input !== undefined && !isJson(input)) throw Error('input: Invalid input');
       calls.push({ name, input: clone(input) });
       if (name === 'panel.feedbackState') {
@@ -217,6 +223,12 @@ async function setup(options = {}, hub) {
         p.revision++;
         return clone({ project: p });
       }
+      if (name === 'workspace.linkArtifact') {
+        if (window.fixture.artifactError) throw Error(window.fixture.artifactError);
+        const f = window.fixture.peerFile;
+        return { key: 'test-file', name: f.name, size: atob(f.data).length, type: f.type };
+      }
+      if (name === 'workspace.readLinkArtifact') return window.fixture.peerFile.data;
       if (name === 'project.openArtifact') {
         const target = input.archiveEnd === 50 && input.projectId === 'p1' && input.taskId === archivedTask.id ? archivedTask :
           projects.find(p => p.ref.id === input.projectId)?.tasks.find(t => t.id === input.taskId);
@@ -1246,7 +1258,41 @@ try {
     const artifacts = currentLayer().getByRole('tabpanel');
     assert.equal(await artifacts.getByText('设计原稿 · v1', { exact: true }).count(), 1);
     assert.equal(await artifacts.getByRole('button', { name: /旧版本|标为过期/ }).count(), 0);
-    assert.equal(await artifacts.getByRole('button', { name: '设计原稿 · v1' }).count(), 0);
+    const openFile = async (name, type, data) => {
+      await page.evaluate(f => { fixture.peerFile = f; }, { name, type, data });
+      await artifacts.getByRole('button', { name: '设计原稿 · v1' }).click();
+      return page.getByRole('dialog', { name: '设计原稿 · v1' });
+    };
+    const image = await openFile('design.png', 'image/png', 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a82kAAAAASUVORK5CYII=');
+    await image.getByRole('img').waitFor();
+    await page.waitForFunction(() => document.querySelector('dialog img')?.naturalWidth === 1);
+    await image.getByRole('button', { name: '关闭' }).click();
+    const svg = await openFile('design.svg', 'image/svg+xml', Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" width="4" height="4"><circle r="2"/></svg>').toString('base64'));
+    await page.waitForFunction(() => document.querySelector('dialog img')?.naturalWidth === 4);
+    assert.equal(await svg.locator('svg, iframe, object').count(), 0);
+    await svg.getByRole('button', { name: '关闭' }).click();
+    const markdown = '# 设计说明\n<em>原文</em>';
+    const doc = await openFile('design.md', 'text/markdown', Buffer.from(markdown).toString('base64'));
+    assert.equal(await doc.locator('pre').textContent(), markdown);
+    assert.equal(await doc.locator('em').count(), 0);
+    await doc.getByRole('button', { name: '关闭' }).click();
+    const html = '<h1>文档</h1>', source = Buffer.from(html).toString('base64');
+    const download = await openFile('design.html', 'application/octet-stream', source);
+    await download.getByRole('button', { name: '保存到本机' }).click();
+    assert.deepEqual(await page.evaluate(() => fixture.calls.filter(c => c.name === 'files.saveAs').at(-1).input), { suggestedName: 'design.html', data: html });
+    assert.equal(await download.locator('iframe, object, embed, pre, img, canvas, h1').count(), 0);
+    await download.getByRole('button', { name: '关闭' }).click();
+    const pdfData = '%PDF-1.4\n1 0 obj <</Type/Catalog/Pages 2 0 R>> endobj\n2 0 obj <</Type/Pages/Kids[3 0 R]/Count 1>> endobj\n3 0 obj <</Type/Page/Parent 2 0 R/MediaBox[0 0 100 80]>> endobj\ntrailer <</Root 1 0 R>>\n%%EOF';
+    const pdf = await openFile('design.pdf', 'application/pdf', Buffer.from(pdfData).toString('base64'));
+    await pdf.locator('canvas[width="200"]').waitFor();
+    await pdf.getByRole('button', { name: '关闭' }).click();
+    await page.evaluate(() => { fixture.artifactError = '对方离线，暂时无法获取成果'; });
+    await artifacts.getByRole('button', { name: '设计原稿 · v1' }).click();
+    const offline = page.getByRole('dialog');
+    await offline.getByRole('status').filter({ hasText: '对方离线' }).waitFor();
+    assert.equal(await offline.getByRole('alert').count(), 0);
+    await offline.getByRole('button', { name: '关闭' }).click();
+    await page.evaluate(() => { delete fixture.artifactError; });
     await artifacts.getByRole('button', { name: '网页预览 · v1' }).click();
     assert.equal(await page.evaluate(() => fixture.calls.filter(c => c.name === 'shell.openExternal').at(-1).input), 'https://example.com/preview');
     await currentLayer().getByText('来自「工作间 up」，可代为处理').waitFor();
@@ -1336,8 +1382,7 @@ try {
     await row('对方等待补建').click();
     await currentLayer().getByRole('textbox', { name:'受阻备注' }).fill('已补建');
     await row('对方页面交付').click();
-    await currentLayer().getByText('设计原稿 · 在对方机器上').waitFor();
-    assert.equal(await currentLayer().getByRole('button', { name: /设计原稿/ }).count(), 0);
+    await currentLayer().getByRole('button', { name: '打开成果 · 设计原稿', exact: true }).waitFor();
     await currentLayer().getByRole('button', { name: '打开成果 · 网页预览', exact: true }).click();
     const remoteRow = row('对方页面交付').locator('..');
     await remoteRow.getByText(/对方示例项目 · 工作间 up/).waitFor();

@@ -1,5 +1,6 @@
 import type {} from 'orca/frame'
 import type { ArchivePage } from './protocol'
+import { previewArtifact } from './artifact-preview'
 import { artifactTitle, latestArtifacts } from './artifact-versions.mjs'
 import { actingMain, backupInCharge, blockedRevision, attention, projectSummary, agents, agentName, compareAgentActivity, groupedAttention, isProjectShared, isRecentAgent, labels, taskState, scopes, statuses, connectionStates, roles, mainStatus, mainAgentStates, waitingForProjectLead } from './model'
 import type { Acceptance, AgentSession, Artifact, Attention, LeadSwitch, MainTakeover, Overview, Project, ProjectLead, ProjectWorkspace, WorkspaceBinding } from './model'
@@ -703,6 +704,12 @@ function organization() {
     el('div', { class: `org-in ${up.length || side.length ? 'l1' : ''} ${up.length ? 'up' : ''}` }, el('div', { class: `org-self ${side.length ? 'sib' : ''}` }, workspaceNode(), down.length ? el('div', { class: 'org-kids', role: 'group', 'aria-label': '下级' }, down.length > 8 ? el('div', { class: 'org-tools' }, input('找工作间', '', 'search', () => render(), undefined, homeFrame.form)) : null, down.filter(p => !homeFrame.form['找工作间'] || p.name.includes(homeFrame.form['找工作间'])).map(p => workspaceNode(p))) : null), side.length ? el('div', { class: 'org-side', role: 'group', 'aria-label': '平级' }, side.map(p => workspaceNode(p))) : null), free.length ? el('div', { class: 'org-free', role: 'group', 'aria-label': '还没标关系' }, free.map(p => workspaceNode(p))) : null))
 }
 function openArtifact(projectId: string, taskId: string, artifact: Artifact, archiveEnd?: number) {
+  if (!artifact.url && isRemote(projectId)) {
+    const [id, remoteProject] = JSON.parse(projectId)
+    return previewArtifact(artifactTitle(artifact),
+      () => req('workspace.linkArtifact', { id, projectId: remoteProject, taskId, artifactId: artifact.id }),
+      (key, offset) => req('workspace.readLinkArtifact', { id, key, offset }))
+  }
   return act(async () => {
     try {
       if (/^https?:\/\//i.test(artifact.url)) {
@@ -759,7 +766,7 @@ function feedbackCards(projectId: string, tasks: FeedbackTask[], title = '要你
     }), acceptance.map(a => {
       const k = key(t.id, 'acceptance', a.id), draft = choices(projectId)[k], base = acceptanceDraft(t.id, a)
       return keyed(card(row(el('h3', { class: 'h2 any grow' }, a.title), tag(`第 ${a.revision} 版`)), el('p', { class: 'any' }, a.details),
-        t.artifacts.filter(ar => a.artifactIds.includes(ar.id)).map(ar => ar.url ? button(`打开成果 · ${ar.label}`, () => openArtifact(projectId, t.id, ar), 'sm') : small(`${ar.label} · 在对方机器上`)),
+        t.artifacts.filter(ar => a.artifactIds.includes(ar.id)).map(ar => button(`打开成果 · ${ar.label}`, () => openArtifact(projectId, t.id, ar), 'sm')),
         row(...Object.keys(feedbackActions).map(result => resultButton(base, draft, result)),
           draft ? button('撤销', () => removeChoice(projectId, k), 'text sm') : null), noteField(k, draft)), k)
     }), blocked ? keyed(card(callout(t.progress || t.goal || '任务受阻', 'danger'),
@@ -967,7 +974,7 @@ function artifactTab(projectId: string, tasks: { id: string; title: string; arti
         delete form.expiring
       }), 'danger sm'), button('取消', () => { delete form.expiring; render() }, 'sm'))
         : button('标为过期', () => { form.expiring = key; render() }, 'text sm')
-      return keyed(card(item(artifactTitle(artifact), summary, artifact.url ? () => openArtifact(projectId, task.id, artifact) : undefined), controls), key)
+      return keyed(card(item(artifactTitle(artifact), summary, artifact.url || isRemote(projectId) ? () => openArtifact(projectId, task.id, artifact) : undefined), controls), key)
     })
   } }
 }

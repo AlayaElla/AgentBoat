@@ -15,6 +15,10 @@ await mkdir('plugin', { recursive: true });
 await cp('dist/worker.mjs', 'plugin/worker.mjs');
 // Generated source copy only; plugin data lives outside this directory.
 await rm(new URL('../plugin/src', import.meta.url), { recursive: true, force: true });
+const pdf = 'node_modules/pdfjs-dist/', assets = 'src/assets/pdf/';
+await mkdir(assets, { recursive: true });
+for (const file of ['pdf.min.mjs', 'pdf.worker.min.mjs']) await cp(pdf + 'build/' + file, assets + file);
+for (const file of ['cmaps', 'standard_fonts', 'wasm', 'LICENSE']) await cp(pdf + file, assets + file, { recursive: true });
 await cp('src', 'plugin/src', { recursive: true });
 const manifest = JSON.parse(await readFile('orca-plugin.json', 'utf8'));
 manifest.main = 'worker.mjs';

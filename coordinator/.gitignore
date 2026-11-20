@@ -2,3 +2,4 @@ node_modules/
 .orca/
 dist/
 plugin/
+src/assets/pdf/
