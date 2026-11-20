@@ -1,9 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, writeFileSync, existsSync, rmSync, mkdirSync, realpathSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync, cpSync, appendFileSync, existsSync, rmSync, mkdirSync, realpathSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { execFileSync } from 'node:child_process';
+import { execFile, execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import { promisify } from 'node:util';
 import { pathToFileURL } from 'node:url';
 
 const sandboxPath = path.resolve(process.env.AGENTBOAT_SANDBOX || path.join(os.tmpdir(), 'agentboat-sandbox'));
@@ -60,6 +62,33 @@ test('初始化不覆盖模板；记忆按来源隔离、带日期、重复记�
   }
 });
 
+function handlePlugin(name, input, s, save) {
+  switch (name) {
+    case 'projects.list': return { projects: [s.ref] };
+    case 'workspace.agent': return s.main;
+    case 'project.settings':
+      if (s.failSettings) throw Error('settings unavailable');
+      s.project.roles = input.roles; s.project.revision++; save(); return { project: s.project };
+    case 'project.agent':
+      if (input.operation === 'submit') {
+        if (s.bindOnReceipt && input.requestId.endsWith('-receipt')) {
+          s.bindOnReceipt = false; s.project.runId = 'run_project'; s.project.revision++; save();
+        }
+        if (input.revision !== s.project.revision) {
+          const error = Object.assign(Error('项目已更新，请刷新后再提交'), { code: 'invalid_request' }); error.stdout = JSON.stringify({ ok: false, error: { code: 'plugin_request_failed', data: { requestCode: 'invalid_request' }, message: '项目已更新，请刷新后再提交' } }); throw error;
+        }
+        s.project.requests.push({ id: input.requestId, fingerprint: createHash('sha256').update(JSON.stringify(input)).digest('hex') });
+        s.project.tasks.push(input.task); s.project.revision++; save();
+      }
+      return { project: s.project, lead: s.lead };
+    case 'workspace.message':
+      if (input.runId !== s.main.runId) throw Error('主 Run 不匹配');
+      if (!s.project.messages.some(m => m.requestId === input.requestId)) { s.project.messages.push(input); s.project.revision++; save(); }
+      return { project: s.project, ...(!s.project.runId ? { queued: '项目还没有主会话，已排队' } : {}) };
+  }
+  throw Error('Unexpected plugin request ' + name);
+}
+
 function fakeWorkspace(t) {
   const directory = mkdtempSync(path.join(sandbox, 'agentboat-demo-t39-'));
   t.after(() => {
@@ -82,6 +111,7 @@ function fakeWorkspace(t) {
 import { createHash } from 'node:crypto';
 import { syncBuiltinESMExports } from 'node:module';
 import { readFileSync, writeFileSync, appendFileSync } from 'node:fs';
+${handlePlugin.toString()}
 const real = cp.execFileSync;
 cp.execFileSync = (executable, args, options) => {
   if (executable === process.execPath || executable === 'git') return real(executable, args, options);
@@ -96,35 +126,18 @@ cp.execFileSync = (executable, args, options) => {
     case 'repo list': return done({ repos: s.repos });
     case 'repo add': return done({ repo: s.repos[0] });
     case 'repo show': return done({ repo: s.repos[0] });
-    case 'project setup-update': s.ref.name = arg('--display-name'); save(); return done({});
+    case 'project setup-update':
+      s.ref.name = arg('--display-name');
+      if (args.includes('--worktree-base-path')) s.repos[0].worktreeBasePath = arg('--worktree-base-path');
+      save(); return done({});
     case 'orchestration run-current': return done({ run: { id: s.main.runId } });
     case 'agent launch': return done({ outcome: { kind: 'structured', sessionId: 'fake-project-lead' }, prompt: { outcome: s.failLaunch ? 'unknown' : 'journaled' } });
     case 'worktree create': return done({ launch: { outcome: { kind: 'terminal', handle: 'fake-worker' }, prompt: { outcome: 'handed-to-terminal' } } });
   }
   if (args.slice(0,3).join(' ') !== 'plugin dev request') throw Error('Unexpected fake request: ' + args.slice(0,3));
   const input = args.includes('--data') ? JSON.parse(arg('--data')) : {};
-  switch (args[4]) {
-    case 'projects.list': return plugin({ projects: [s.ref] });
-    case 'workspace.agent': return plugin(s.main);
-    case 'project.settings': s.project.roles = input.roles; s.project.revision++; save(); return plugin({ project: s.project });
-    case 'project.agent':
-      if (input.operation === 'submit') {
-        if (s.bindOnReceipt && input.requestId.endsWith('-receipt')) {
-          s.bindOnReceipt = false; s.project.runId = 'run_project'; s.project.revision++; save();
-        }
-        if (input.revision !== s.project.revision) {
-          const error = Error('stale revision'); error.stdout = JSON.stringify({ ok: false, error: { code: 'plugin_request_failed', data: { requestCode: 'invalid_request' }, message: '项目已更新，请刷新后再提交' } }); throw error;
-        }
-        s.project.requests.push({ id: input.requestId, fingerprint: createHash('sha256').update(arg('--data')).digest('hex') });
-        s.project.tasks.push(input.task); s.project.revision++; save();
-      }
-      return plugin({ project: s.project, lead: s.lead });
-    case 'workspace.message':
-      if (input.runId !== s.main.runId) throw Error('主 Run 不匹配');
-      if (!s.project.messages.some(m => m.requestId === input.requestId)) { s.project.messages.push(input); s.project.revision++; save(); }
-      return plugin({ project: s.project, ...(!s.project.runId ? { queued: '项目还没有主会话，已排队' } : {}) });
-  }
-  throw Error('Unexpected plugin request ' + args[4]);
+  if (process.env.T83_INSTALLED) throw Error('Installed workspace used the dev plugin');
+  return plugin(handlePlugin(args[4], input, s, save));
 };
 syncBuiltinESMExports();`);
   const env = { ...process.env, NODE_OPTIONS: `--import=${pathToFileURL(fixture).href}`, ORCA_CLI_COMMAND: 't39-fake-orca', ORCA_AGENT_SESSION_ID: 'demo-main', ORCA_TERMINAL_HANDLE: '',
@@ -133,7 +146,32 @@ syncBuiltinESMExports();`);
     writeFileSync(input, JSON.stringify(payload));
     return JSON.parse(execFileSync(process.execPath, [script, subcommand, input], { env, cwd: api.root, encoding: 'utf8', windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] }));
   };
-  return { home, directory, projectDir, state, set, read,
+  async function installedWorkspace() {
+    const profile = path.join(directory, 'profile');
+    const release = path.join(profile, 'plugins', 'alayaella.agentboat', 'a'.repeat(64));
+    for (const file of ['workspace', ...['client', 'cli-bridge', 'orca-cli', 'main-role-card'].map(name => `coordinator/scripts/${name}.mjs`)]) {
+      cpSync(path.join(api.root, file), path.join(release, file), { recursive: true });
+    }
+    for (const file of ['setup.mjs', 'orca-plugin.json']) writeFileSync(path.join(release, file), '{}');
+    const { cliBridge } = await import(pathToFileURL(path.join(release, 'coordinator/scripts/cli-bridge.mjs')));
+    const host = cliBridge({ panels: { handle() {} } });
+    for (const name of ['workspace.agent', 'projects.list', 'project.agent', 'project.settings', 'workspace.message']) {
+      host.api.panels.handle(name, input => {
+        appendFileSync(log, JSON.stringify(['installed', name]) + '\n');
+        const s = read();
+        return handlePlugin(name, input, s, () => set(s));
+      });
+    }
+    await host.start();
+    t.after(() => host.stop());
+    return async (operation, payload) => {
+      writeFileSync(input, JSON.stringify(payload));
+      const { stdout } = await promisify(execFile)(process.execPath, [path.join(release, 'workspace/workspace.mjs'), operation, input],
+        { env: { ...env, T83_INSTALLED: '1', ORCA_USER_DATA_PATH: profile }, windowsHide: true });
+      return JSON.parse(stdout);
+    };
+  }
+  return { home, directory, projectDir, state, set, read, installedWorkspace,
     calls: () => existsSync(log) ? readFileSync(log, 'utf8').trim().split('\n').map(line => JSON.parse(line)) : [],
     message: requestId => command('coordinator/scripts/client.mjs', 'message', { projectId: ref.id, requestId, runId: state.main.runId, text: '模拟主人原话' }).result.result,
     workspace: (subcommand, payload) => command('workspace/workspace.mjs', subcommand, payload) };
@@ -219,4 +257,67 @@ for (const bindOnReceipt of [false, true]) test(`dispatch records its notice whe
   assert.match(launch[launch.indexOf('--prompt') + 1], /绑定后送达/);
   assert.deepEqual(f.read().project.tasks.map(task => task.id), ['direct-dispatch-1', 'direct-dispatch-1']);
   assert.deepEqual(f.read().project.messages.map(m => [m.runId, m.requestId]), [['run_main', 'dispatch-1-notice']]);
+});
+
+test('installed create resumes settings and dispatch records its notice through the local bridge', async t => {
+  const f = fakeWorkspace(t), workspace = await f.installedWorkspace();
+  const input = { requestId: 'installed-create', path: f.projectDir, name: 'agentboat-demo-bridge', source: { kind: 'existing' } };
+  execFileSync('git', ['init', '--quiet'], { cwd: f.projectDir });
+  execFileSync('git', ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '--allow-empty', '-m', 'fixture'], { cwd: f.projectDir });
+  f.state.failSettings = true; f.set();
+  await assert.rejects(workspace('create', input), /settings unavailable/);
+  await assert.rejects(workspace('create', { ...input, name: input.name + '-other' }), /不同的立项输入/);
+  const file = path.join(f.home, 'projects', input.requestId + '.json');
+  const failed = JSON.parse(readFileSync(file));
+  assert.equal(failed.stage, 'needs-inspection');
+  delete failed.projectId; // v0.1.20 recorded only the registration receipt.
+  writeFileSync(file, JSON.stringify(failed));
+  const state = f.read(); state.failSettings = false; state.bindOnReceipt = true; f.set(state);
+  const created = await workspace('create', input);
+  assert.equal(created.stage, 'awaiting-project-binding');
+  assert.deepEqual(await workspace('create', input), created);
+  const task = await workspace('dispatch', { projectId: 'p1', requestId: 'installed-dispatch', name: 'agentboat-demo-worker', text: '模拟派活', source: 'fake source' });
+  assert.equal(task.notification.status, 'recorded');
+  const calls = f.calls().map(args => args.slice(0, 2).join(' '));
+  for (const once of ['repo add', 'project setup-update', 'agent launch', 'installed workspace.message'])
+    assert.equal(calls.filter(call => call === once).length, 1, once);
+  assert.equal(calls.filter(call => call === 'installed project.settings').length, 2);
+  assert.ok(!calls.includes('plugin dev'));
+});
+
+test('legacy create journal closes against a manually bound folder project', t => {
+  const f = fakeWorkspace(t);
+  const input = { requestId: 'legacy-create', path: f.projectDir, name: 'agentboat-demo-folder', source: { kind: 'existing' } };
+  f.state.ref.name = input.name;
+  f.state.repos[0].kind = 'folder';
+  f.state.project.runId = 'run_manually_bound';
+  f.state.project.roles = { design: 'claude', code: 'codex', review: 'codex' };
+  f.set();
+  const file = path.join(f.home, 'projects', input.requestId + '.json');
+  mkdirSync(path.dirname(file), { recursive: true });
+  writeFileSync(file, JSON.stringify({ input, requestId: input.requestId, stage: 'needs-inspection',
+    registered: { repo: f.state.repos[0] }, error: 'plugin_not_found' }));
+  const result = f.workspace('create', input);
+  assert.equal(result.stage, 'already-bound');
+  assert.equal(result.runId, f.state.project.runId);
+  assert.equal(result.rolesMatchTemplate, true);
+  assert.deepEqual(JSON.parse(readFileSync(file)), result);
+  assert.deepEqual(f.workspace('create', input), result);
+  assert.deepEqual(f.calls().map(args => args[0] === 'plugin' ? args[4] : args.slice(0, 2).join(' ')),
+    ['repo show', 'projects.list', 'project.agent']);
+});
+
+test('retry after an uncertain create launch never opens another session, even after expiry', t => {
+  const f = fakeWorkspace(t);
+  f.state.failLaunch = true; f.set();
+  const input = { requestId: 'uncertain-create', path: f.projectDir, name: 'agentboat-demo-uncertain', source: { kind: 'existing' } };
+  assert.throws(() => f.workspace('create', input), /未确认 agent 收到提示词/);
+  const file = path.join(f.home, 'projects/auto/p1/1.json');
+  const attempt = JSON.parse(readFileSync(file));
+  attempt.at = '2000-01-01T00:00:00Z';
+  writeFileSync(file, JSON.stringify(attempt));
+  assert.throws(() => f.workspace('create', input), /已有启动记录/);
+  for (const once of ['repo add', 'project setup-update', 'agent launch']) {
+    assert.equal(f.calls().filter(args => args.slice(0, 2).join(' ') === once).length, 1, once);
+  }
 });

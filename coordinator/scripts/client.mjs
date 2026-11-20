@@ -8,6 +8,8 @@ import { createHash } from 'node:crypto';
 import { writeMainRoleCards } from './main-role-card.mjs';
 
 const [operation, argument, flag, taskId, extra] = process.argv.slice(2);
+// Internal callers pass handler data on stdin. The workspace hook excludes option-prefixed commands.
+const internal = operation === '--workspace-request' && ['project.settings', 'workspace.message', 'workspace.connections'].includes(argument) && !flag;
 const brief = operation === 'overview' && argument === '--brief';
 const readOptions = operation === 'read' ? parseArgs({ args: process.argv.slice(4), options: { full: { type: 'boolean' }, task: { type: 'string' } } }).values : {};
 if (operation === 'overview' && (argument && !brief || flag)) throw new Error('用法：node client.mjs overview [--brief]');
@@ -21,7 +23,7 @@ const leadBind = operation === 'project-lead-bind', leadSwitch = operation === '
 const leadActions = ['lead-take', 'lead-ready', 'lead-handoff', 'lead-resume'];
 const leadAction = leadActions.includes(operation);
 const allowed = [...leadActions, 'lead-history', 'projects', 'overview', 'main-read', 'main-bind', 'project-lead', 'project-lead-switch', 'project-lead-bind', 'message', 'read', 'bind', 'submit', 'feedback', 'feishu-reply', 'links-read', 'links-refresh', 'links-invite', 'links-cancel-invite', 'links-join', 'links-configure', 'links-rename', 'links-share', 'links-relate', 'links-revoke', 'links-send', 'hide', 'restore', 'delete', 'main-targets', 'connections', 'connection-read', 'connection-check', 'connection-send', 'connection-reply'];
-if (!allowed.includes(operation)) throw new Error('用法：node client.mjs projects|overview|main-read|main-targets|connections | connection-read|connection-check <名字> | main-bind|project-lead-switch|project-lead-bind|connection-send|connection-reply|links-send < stdin | read|project-lead <projectId> | bind|submit|message|feedback|feishu-reply|hide|restore|delete <input.json>');
+if (!internal && !allowed.includes(operation)) throw new Error('用法：node client.mjs projects|overview|main-read|main-targets|connections | connection-read|connection-check <名字> | main-bind|project-lead-switch|project-lead-bind|connection-send|connection-reply|links-send < stdin | read|project-lead <projectId> | bind|submit|message|feedback|feishu-reply|hide|restore|delete <input.json>');
 const target = fileURLToPath(new URL('../plugin/', import.meta.url));
 const caller = process.env.ORCA_AGENT_SESSION_ID ? `orca_session_id:${process.env.ORCA_AGENT_SESSION_ID}` : process.env.ORCA_TERMINAL_HANDLE;
 const profileEnv = release ? { ...process.env, ORCA_USER_DATA_PATH: activeUserDataPath() } : process.env;
@@ -32,7 +34,7 @@ function readInput(file) {
   const raw = file === 0 ? (stdin = readFileSync(0, 'utf8')) : readFileSync(file, 'utf8');
   return JSON.parse(raw.replace(/^\uFEFF/, ''));
 }
-const input = history ? { projectId: historyProject, end: historyArgs.length ? Number(historyArgs[1]) : undefined } : leadAction ? { runId: argument, action: operation.slice(5), caller, token: flag, ...(taskId ? { note: taskId } : {}) } : operation === 'connections' ? { operation: 'read' } : operation.startsWith('connection-') ? { ...(['connection-read','connection-check'].includes(operation) ? { name: argument } : readInput(0)), operation: operation.slice(11) } : operation.startsWith('links-') ? { ...(['links-join', 'links-configure', 'links-rename', 'links-share', 'links-relate', 'links-revoke', 'links-send'].includes(operation) ? readInput(0) : {}), operation: operation.slice(6) } : ['projects', 'overview'].includes(operation) ? null : operation === 'main-read' ? { operation: 'read' } : operation === 'read'
+const input = internal ? readInput(0) : history ? { projectId: historyProject, end: historyArgs.length ? Number(historyArgs[1]) : undefined } : leadAction ? { runId: argument, action: operation.slice(5), caller, token: flag, ...(taskId ? { note: taskId } : {}) } : operation === 'connections' ? { operation: 'read' } : operation.startsWith('connection-') ? { ...(['connection-read','connection-check'].includes(operation) ? { name: argument } : readInput(0)), operation: operation.slice(11) } : operation.startsWith('links-') ? { ...(['links-join', 'links-configure', 'links-rename', 'links-share', 'links-relate', 'links-revoke', 'links-send'].includes(operation) ? readInput(0) : {}), operation: operation.slice(6) } : ['projects', 'overview'].includes(operation) ? null : operation === 'main-read' ? { operation: 'read' } : operation === 'read'
   ? { operation, projectId: argument, taskId: readOptions.task }
   : operation === 'project-lead' ? { projectId: argument }
   : operation === 'main-targets' ? null
@@ -60,12 +62,12 @@ if (!delegatedFeedback && ['bind', 'submit', 'feedback', 'hide', 'restore', 'del
   }
 }
 if (leadAction && (!caller || !argument || !flag || extra || (operation === 'lead-handoff') !== !!taskId)) throw new Error('请在收到通知的 Orca 会话中执行原命令，交接说明用引号括起');
-const name = history ? 'lead.history' : leadAction ? 'lead.control' : operation === 'connections' || operation.startsWith('connection-') ? 'workspace.connections' : operation.startsWith('links-') ? 'workspace.links' : operation === 'projects' ? 'projects.list' : operation === 'overview' ? 'workspace.overview'
+const name = internal ? argument : history ? 'lead.history' : leadAction ? 'lead.control' : operation === 'connections' || operation.startsWith('connection-') ? 'workspace.connections' : operation.startsWith('links-') ? 'workspace.links' : operation === 'projects' ? 'projects.list' : operation === 'overview' ? 'workspace.overview'
   : operation === 'feishu-reply' ? 'workspace.reply' : operation.startsWith('main-') ? 'workspace.agent' : operation === 'message' ? 'workspace.message' : delegatedFeedback ? 'workspace.linkFeedback' : operation === 'feedback' ? 'project.feedback' : operation === 'project-lead' ? 'project.lead' : leadSwitch ? 'workspace.projectLead' : 'project.agent';
 const maintenance = ['hide', 'restore', 'delete'].includes(operation);
 const args = ['plugin', 'dev', 'request', target, operation === 'main-targets' ? 'workspace.agent.targets' : maintenance ? operation === 'delete' ? 'project.delete' : 'project.visibility' : name, '--json'];
 if (maintenance) { delete input.operation; if (operation !== 'delete') input.hidden = operation === 'hide'; }
-if (operation === 'message') args.push('--environment', 'local');
+if (internal || operation === 'message') args.push('--environment', 'local');
 if (input) args.push('--data', JSON.stringify(input));
 try {
   const request = async () => release ? JSON.stringify(await installedRequest(args[4], input)) + '\n'
@@ -103,6 +105,11 @@ try {
     }
   }
   const reply = JSON.parse(stdout), view = reply.result?.result;
+  // Dispatch checks the handler's rejection before retrying a conflicting submission.
+  if (release && reply.error?.code === 'invalid_request' && operation === 'submit') {
+    process.stderr.write(JSON.stringify(reply) + '\n');
+    process.exit(1);
+  }
   if (release && !reply.ok) throw Object.assign(new Error(reply.error.message), { code: reply.error.code });
   const success = reply.ok && reply.result?.ok !== false;
   let submission;
@@ -119,7 +126,7 @@ try {
       pendingAcceptance: task.pendingAcceptance ?? task.acceptance?.some(a => a.status === 'pending') ?? false,
       pendingDecision: task.pendingDecision ?? task.decisions?.some(d => d.answer === undefined) ?? false, submittedAt: task.submittedAt };
   }
-  if (success && view) {
+  if (!internal && success && view) {
     const project = view.project;
     if (project && ['submit', 'feedback', 'message', 'bind', 'project-lead-bind', 'hide', 'restore'].includes(operation)) {
       const { ref, revision, runId } = project;

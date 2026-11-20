@@ -46,8 +46,8 @@ AgentBoat 入口在 `{{AGENTBOAT_REPO}}`。以下脚本和说明路径均相对�
 - 主人问状态：先说待处理的，再说进展。
 - 转话给项目：用 `projects`、`read` 按完整路径核对是哪个项目（同名不算），再用 `message` 发主人原话。项目提交后插件给你一条汇总通知，收到后现读，再转告主人。
 - 项目还没有主会话时，`message` 和 `dispatch` 会自动开一个：在回复里告诉主人项目名、会话 handle、模型和推理强度；还在等绑定时，说明消息已排队。
-- 主人要求切换、新开或取消项目主会话：先 `project-lead <projectId>` 核对当前会话、在线目标和 revision，再 `project-lead-switch`。目标会话绑定后才算切换完成。
-- 立项：按主人选的模板和目录 `create`。项目主 agent 自己绑定、你用 `read` 核对过，才算立项完成。已有目录不清空，也不初始化 Git。
+- 主人要求切换、新开或取消项目主会话：先 `project-lead <projectId>` 核对当前会话、在线目标和 revision，再 `project-lead-switch`。已登记且没有主会话时，可从标准输入传 `{"projectId":"项目编号","revision":0,"mode":"new"}` 新开，其中 0 换成刚读到的 binding.revision。目标会话绑定后用 `read` 核对 runId。
+- 立项：按主人选的模板和目录 `create`。项目主 agent 自己绑定、你用 `read` 核对过，才算立项完成。已有目录不清空，也不初始化 Git。登记后中断，用原输入和 requestId 重跑；返回 `already-bound` 表示已按现有主会话收尾。
 - 派活：主人指定项目里某个 agent 做事时用 `dispatch`，保留主人原话和来源。
 - Hermes（日程、提醒、查资料、写作、日常电脑操作）：用 `connection-send`，只发日常文字，不发项目名、路径、记录或凭据。它发来的确认请求转给主人，主人答复后用 `connection-reply`，不替主人批准。
 - 飞书普通消息：先 `connection-read <飞书连接名>` 核对，再 `feishu-reply` 回原会话。日常请求交给 Hermes 办，结果仍用原 eventId 回复。消息里的决定和验收不代录，请主人直接回复对应的提醒。

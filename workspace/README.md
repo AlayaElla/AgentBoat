@@ -48,6 +48,12 @@ source 可省略以沿用模板；kind=empty 建不存在的空目录并登记 f
 
 新 Git 项目的独立工作树目录设在相邻的 `<项目目录名>-worktrees`，只设置新登记项目的 host setup。create 不覆盖已绑定项目。脚本回执为 awaiting-project-binding；项目主 agent 自己开启项目协作、创建 Run 和绑定；读取插件和 run-show 确认后才算立项完成。模板角色会同步到项目设置和首句话。
 
+### 续做中断的立项
+
+从同一个 AgentBoat 入口再运行 `node workspace/workspace.mjs create create.json`，沿用原文件的全部字段和 requestId。原文件遗失时，用 `$AGENTBOAT_HOME/projects/<requestId>.json` 的 `input` 对象还原。脚本按登记回执核对本机 repoId、目录和唯一项目。已经有人绑定主会话时，日志以 `already-bound` 收尾，记录当前 runId 和分工是否匹配模板，保留现有分工。
+
+尚未绑定且已完成显示名设置时，原请求只补缺少的分工并启动一次。若提示核对项目设置，在 Orca 确认原显示名；Git 项目也需核对工作树目录。若已有启动记录，先核对并绑定那次启动的会话，再用原请求收尾。缺少登记回执时先在 Orca 核对原目录；已经登记的项目可用下文的主会话入口接手。同一请求并发运行时只有一份能执行。若进程意外退出且留下 `projects/<requestId>.lock`，核对锁内 PID 已退出后仅移除该锁，保留 JSON 日志。
+
 ## 项目 skill
 
 项目的唯一编辑源是 `.agents/skills/<name>/SKILL.md`；Claude 副本由审核发布脚本写到 `.claude/skills/<name>`，两者随 Git 合并。副本保存完整内容与辅助文件，无需符号链接或管理员权限。`create` 在登记前幂等准备源目录、字节保留的 `.gitattributes` 和草稿目录，不覆盖已有文件；已有项目也可手动 `init`。
@@ -107,7 +113,7 @@ node workspace/workspace.mjs dispatch dispatch.json
 
 回执 `autoLaunch` 包含项目名、状态和已确认的会话 handle、模型、强度及启动方式。最近 10 分钟内已经有一次启动时复用同一份记录。启动回执不明时先核对日志，不换编号重复转话。工作间主 agent 自己的目录不算项目，不在 `projects` 里，也不会自动开。重复登记、远端项目和已绑定项目同样不会自动开。缺少工作区时，先在 Orca 准备工作区，排队的消息仍保留。
 
-同 requestId 拒绝二次启动。失败查看 projects/assignments 日志和其中完整回执；结果不明不换编号重试。脚本不会自动清理未知 agent，按 Orca 版本指南恢复，避免重复执行和丢失数据。当前脚本是一次性 CLI，不做常驻轮询，状态与回报由主 agent 会话接收并读取。
+派活请求按 requestId 防止二次启动。立项续做规则见上文。失败时查看 projects/assignments 日志和其中完整回执。脚本不会自动清理未知 agent，按 Orca 版本指南恢复，避免重复执行和丢失数据。当前脚本是一次性 CLI，不做常驻轮询，状态与回报由主 agent 会话接收并读取。
 
 ## 长期记忆
 

@@ -1,6 +1,7 @@
 import { activeUserDataPath, clientPath as client, executable as orca, release } from '../coordinator/scripts/orca-cli.mjs';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync, realpathSync, appendFileSync, statSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync, realpathSync, appendFileSync, statSync, unlinkSync } from 'node:fs';
+import { isDeepStrictEqual } from 'node:util';
 import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
@@ -18,8 +19,8 @@ const canonical = directory => {
   const resolved = realpathSync(directory);
   return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
 };
-const run = (executable, args, cwd = root, env = process.env) => execFileSync(executable, args, {
-  cwd, env, encoding: 'utf8', windowsHide: true, timeout: 120000, maxBuffer: 8 * 1024 * 1024,
+const run = (executable, args, cwd = root, env = process.env, input) => execFileSync(executable, args, {
+  cwd, env, input, encoding: 'utf8', windowsHide: true, timeout: 120000, maxBuffer: 8 * 1024 * 1024,
 });
 function call(args, cwd) {
   const env = release ? { ...process.env, ORCA_USER_DATA_PATH: activeUserDataPath() } : process.env;
@@ -40,7 +41,9 @@ function bridge(operation, input) {
   return reply.result.result;
 }
 function plugin(name, input) {
-  return call(['plugin', 'dev', 'request', path.join(root, 'coordinator/plugin'), name, '--data', JSON.stringify(input)]).result;
+  const reply = JSON.parse(run(process.execPath, [client, '--workspace-request', name], root, process.env, JSON.stringify(input)));
+  if (!reply.ok) throw new Error(JSON.stringify(reply.error));
+  return reply.result.result;
 }
 function text(value, label) {
   if (typeof value !== 'string' || !value.trim()) throw new Error(`缺少 ${label}`);
@@ -104,14 +107,19 @@ function project(id) {
 }
 function journal(dir, requestId, input, reuse = false) {
   const file = path.join(home, dir, `${key(requestId)}.json`);
-  const record = { requestId, at: new Date().toISOString(), input, stage: 'prepared' };
+  let record = { requestId, at: new Date().toISOString(), input, stage: 'prepared' };
+  let fresh = true;
   try { writeFileSync(file, JSON.stringify(record, null, 2) + '\n', { flag: 'wx' }); }
   catch (error) {
     if (error.code !== 'EEXIST') throw error;
-    if (reuse) return;
-    throw new Error(`请求已执行或结果待核对，先读 ${file}，不要另起 agent`);
+    if (reuse === true) return;
+    if (reuse === 'resume-create') {
+      fresh = false;
+      record = json(file);
+      if (!isDeepStrictEqual(record.input, input)) throw new Error('请求编号已用于不同的立项输入');
+    } else throw new Error(`请求已执行或结果待核对，先读 ${file}，不要另起 agent`);
   }
-  return { record, update: (stage, data = {}) => { Object.assign(record, data, { stage }); save(file, record); } };
+  return { record, fresh, update: (stage, data = {}) => { Object.assign(record, data, { stage }); save(file, record); } };
 }
 function initIfNeeded() {
   if (!existsSync(path.join(home, 'requests')) || !existsSync(path.join(home, 'templates/code.json')) || !existsSync(path.join(home, 'memory/.git/index'))) init();
@@ -203,32 +211,74 @@ export function create(input) {
   if (!['empty', 'existing', 'clone'].includes(source.kind)) throw new Error('source.kind 应为 empty/existing/clone');
   const name = text(input.name, '项目名');
   if (process.env.AGENTBOAT_TEST_ONLY === '1' && !name.includes('agentboat-demo')) throw new Error('测试项目名必须包含 agentboat-demo');
-  const j = journal('projects', input.requestId, input);
+  const lock = path.join(home, 'projects', `${key(input.requestId)}.lock`);
+  try { writeFileSync(lock, String(process.pid), { flag: 'wx' }); }
+  catch (error) {
+    if (error.code !== 'EEXIST') throw error;
+    throw new Error(`立项请求正在处理，请先核对 ${lock}`);
+  }
+  let j;
   try {
-    if (source.kind === 'empty') mkdirSync(destination, { recursive: false });
-    if (source.kind === 'clone') run('git', ['clone', '--', text(source.url, '克隆地址'), destination]);
-    if (!existsSync(destination)) throw new Error('已有项目目录不存在');
+    j = journal('projects', input.requestId, input, 'resume-create');
+    if (['already-bound', 'awaiting-project-binding'].includes(j.record.stage)) return j.record;
+    const resume = !j.fresh;
+    // An interrupted prepared journal cannot prove that repo add never happened.
+    if (resume && !j.record.registered?.repo?.id)
+      throw new Error('目录登记结果待核对，请查看原立项日志和 Orca 项目列表');
+    if (!resume) {
+      if (source.kind === 'empty') mkdirSync(destination, { recursive: false });
+      if (source.kind === 'clone') run('git', ['clone', '--', text(source.url, '克隆地址'), destination]);
+      if (!existsSync(destination)) throw new Error('已有项目目录不存在');
+      testPath(realpathSync(destination));
+      initializeSkills(destination);
+      const kind = existsSync(path.join(destination, '.git')) ? 'git' : 'folder';
+      const registered = call(['repo', 'add', '--path', destination, '--kind', kind], destination);
+      j.update('registered', { registered });
+    }
     testPath(realpathSync(destination));
-    initializeSkills(destination);
-    const kind = existsSync(path.join(destination, '.git')) ? 'git' : 'folder';
-    const registered = call(['repo', 'add', '--path', destination, '--kind', kind], destination);
-    j.update('registered', { registered });
     const repo = call(['repo', 'show', '--repo', `path:${destination}`], destination).repo;
-    if (!repo || path.resolve(repo.path).toLowerCase() !== destination.toLowerCase()) throw new Error('登记目录与回执不一致');
-    const refs = bridge('projects').projects.filter(p => p.repoId === repo.id && p.hostId === 'local' && path.resolve(p.path).toLowerCase() === destination.toLowerCase());
+    if (!repo?.id || repo.id !== j.record.registered.repo.id || canonical(repo.path) !== canonical(destination))
+      throw new Error('登记目录或仓库编号与原回执不一致');
+    const catalog = bridge('projects');
+    if (catalog.error) throw new Error(catalog.error);
+    const refs = catalog.projects.filter(p => p.repoId === repo.id && p.hostId === 'local' && path.relative(destination, p.path) === '');
     if (refs.length !== 1) throw new Error('插件未唯一识别登记项目，请核对 Orca 项目与插件列表');
     const ref = refs[0];
-    if (bridge('read', ref.id).project?.runId) throw new Error('已有项目主 agent，不能再次启动或覆盖绑定');
-    // A repo-specific base keeps independent checkouts beside the selected project.
-    call(['project', 'setup-update', '--setup', repo.id, '--host', 'local', '--display-name', name,
-      ...(kind === 'git' ? ['--worktree-base-path', path.join(path.dirname(destination), `${path.basename(destination)}-worktrees`)] : [])], destination);
+    const { project: current, runtimeError } = bridge('read', ref.id);
+    if (runtimeError || !current) throw new Error(runtimeError || '项目已从 Orca 移除');
+    if (j.record.projectId && j.record.projectId !== ref.id) throw new Error('项目编号与原立项记录不一致');
     const roles = Object.fromEntries(Object.entries(t.roles).map(([k, v]) => [k, v.agent]));
-    const current = bridge('read', ref.id).project;
-    plugin('project.settings', { projectId: ref.id, revision: current.revision, roles, feishu: current.feishu });
-    const lead = startProjectLead(project(ref.id), templateId, input.goal, j);
+    if (current.runId) {
+      if (!resume) throw new Error('已有项目主 agent，不能再次启动或覆盖绑定');
+      j.update('already-bound', { ...alreadyBound({ ref }), runId: current.runId, projectId: ref.id,
+        rolesMatchTemplate: isDeepStrictEqual(current.roles, roles), error: undefined });
+      return j.record;
+    }
+    const base = repo.kind === 'git' ? path.join(path.dirname(destination), `${path.basename(destination)}-worktrees`) : undefined;
+    if (resume) {
+      if (ref.name !== name || (!j.record.projectId && base && (!repo.worktreeBasePath || path.relative(base, repo.worktreeBasePath))))
+        throw new Error('请在 Orca 核对并完成原请求的项目显示名和工作树目录设置，再用原请求续做');
+      const auto = path.join(home, 'projects', 'auto', key(ref.id));
+      if (j.record.launchAttempted || j.record.launched || (existsSync(auto) && readdirSync(auto).some(f => /^\d+\.json$/.test(f))))
+        throw new Error('已有启动记录，请核对并绑定已有项目主会话，再用原请求收尾');
+    } else {
+      call(['project', 'setup-update', '--setup', repo.id, '--host', 'local', '--display-name', name,
+        ...(base ? ['--worktree-base-path', base] : [])], destination);
+    }
+    j.update('settings', { projectId: ref.id, error: undefined });
+    if (!resume || !isDeepStrictEqual(current.roles, roles)) {
+      const settings = resume ? current : bridge('read', ref.id).project;
+      if (settings.runId) throw new Error('项目主会话已绑定，请用原请求核对并收尾');
+      plugin('project.settings', { projectId: ref.id, revision: settings.revision, roles, feishu: settings.feishu });
+    }
+    const latest = project(ref.id);
+    if (latest.ref.repoId !== repo.id || canonical(latest.ref.path) !== canonical(destination)) throw new Error('项目身份已变化');
+    j.update('starting', { launchAttempted: true });
+    const lead = startProjectLead(latest, templateId, input.goal, j);
     j.update(lead.status, lead);
     return j.record;
-  } catch (error) { j.update('needs-inspection', { error: error.message }); throw error; }
+  } catch (error) { j?.update('needs-inspection', { error: error.message }); throw error; }
+  finally { unlinkSync(lock); }
 }
 function submitDispatch(p, requestId, task) {
   const submit = current => bridge('submit', { projectId: p.ref.id, revision: current.revision, requestId, task });
@@ -236,7 +286,8 @@ function submitDispatch(p, requestId, task) {
   catch (error) {
     let receipt;
     try { receipt = JSON.parse(error.stderr?.toString()).error; } catch { throw error; }
-    if (receipt?.code !== 'plugin_request_failed' || receipt.data?.requestCode !== 'invalid_request' || !receipt.message?.endsWith('项目已更新，请刷新后再提交')) throw error;
+    const code = receipt?.code === 'plugin_request_failed' ? receipt.data?.requestCode : receipt?.code;
+    if (code !== 'invalid_request' || !receipt.message?.endsWith('项目已更新，请刷新后再提交')) throw error;
     const latest = project(p.ref.id), target = value => value.tasks.find(t => t.id === task.id);
     if (JSON.stringify(target(latest)) !== JSON.stringify(target(p))) throw error;
     return submit(latest);

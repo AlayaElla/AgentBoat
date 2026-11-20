@@ -60,12 +60,9 @@ config = settings(config, home, skill, inbound)
 overrides = {'A2A_HOST': '127.0.0.1', 'A2A_PORT': '9900', 'A2A_AGENT_NAME': 'Hermes', 'A2A_BEARER_TOKEN': outbound, 'A2A_TRUSTED_PEERS': 'ip:127.0.0.1', 'A2A_ALLOW_ALL_USERS': 'false'}
 env = '\n'.join(line for line in env.splitlines() if line.split('=', 1)[0] not in overrides) + '\n'
 env += ''.join(f'{k}={v}\n' for k, v in overrides.items())
-exe = os.environ.get('ORCA_CLI_COMMAND') or shutil.which('orca')
-if not exe:
-    raise SystemExit('Run in an Orca terminal so ORCA_CLI_COMMAND identifies the host CLI')
-plugin = str(root.parent / 'coordinator/plugin')
+client = root.parent / 'coordinator/scripts/client.mjs'
 def request(data):
-    proc = subprocess.run([exe, 'plugin', 'dev', 'request', plugin, 'workspace.connections', '--json', '--data', json.dumps(data)], capture_output=True, text=True, encoding='utf-8', timeout=45)
+    proc = subprocess.run(['node', str(client), '--workspace-request', 'workspace.connections'], input=json.dumps(data), capture_output=True, text=True, encoding='utf-8', timeout=90)
     if proc.returncode:
         raise SystemExit('Orca Hermes settings request failed; local credentials were not printed, inspect plugin logs')
     return json.loads(proc.stdout)['result']['result']
