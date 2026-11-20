@@ -187,12 +187,17 @@ test('Claude role hooks scope actions by Orca identity and fail open', () => {
       setTranscript(question(), submit, result('call', reply));
       assert.equal(stop(), blocked ? 'block' : undefined);
     }
-    const reply = (id = 'msg_owner') => assistant('reply', `orca orchestration reply --id ${id} --body "处理好了 | > ;" --json`);
+    const reply = (id = 'msg_owner', body = '--body "处理好了 | > ;"') => assistant('reply', `orca orchestration reply --id ${id} ${body} --json`);
     const accepted = '{"ok":true,"result":{"messageId":"msg_reply_receipt"}}';
     for (const [id, output, failed, blocked] of [['msg_wrong', accepted, false, true], ['msg_owner', '{"ok":false}', false, true],
       ['msg_owner', accepted, true, true], ['msg_owner', accepted, false, false], ['msg_owner', 'Replied msg_reply_receipt', false, false]]) {
       setTranscript(question(), reply(id), result('reply', output, failed));
       assert.equal(stop(), blocked ? 'block' : undefined);
+    }
+    for (const [args, expected] of [['--body-file "long reply.txt"', undefined], ['--body-file -', undefined],
+      ['--body "重试" --retry-request req_fixture', undefined], ['--body-file - --unknown value', 'block']]) {
+      setTranscript(question(), reply('msg_owner', args), result('reply', accepted));
+      assert.equal(stop(), expected, args);
     }
     setTranscript(question(), question('msg_second'), reply(), result('reply', accepted));
     assert.equal(stop(), 'block');
