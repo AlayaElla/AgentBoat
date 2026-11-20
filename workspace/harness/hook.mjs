@@ -202,7 +202,7 @@ function replyTarget(args) {
   for (let i = 0; i < args.length; i++) {
     const [flag, ...value] = args[i].split('=');
     if (['--json', '--full'].includes(flag)) continue;
-    if (!['--id', '--body', '--from', '--run', '--on', '--environment', '--pairing-code', '--request-id'].includes(flag)) return;
+    if (!['--id', '--body', '--body-file', '--from', '--run', '--on', '--environment', '--pairing-code', '--request-id', '--retry-request'].includes(flag)) return;
     const arg = value.length ? value.join('=') : args[++i];
     if (flag === '--id') id = arg;
   }
