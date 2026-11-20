@@ -112,6 +112,8 @@ async function setup(options = {}, hub) {
     if (options.empty || options.projectUnbound) live.agents = [];
     if (options.twoWaitingAgents) live.agents.push({ id: 'agent-chat', projectId: 'p1', agent: 'claude', role: 'session', state: 'need', title: '等待设计决定', since: now - 120000, workspaceId: 'identity:chat-workspace' });
     const workspace = { revision: 1, runId: options.unbound ? '' : 'run_main', ...(!options.unbound ? { session: { handle: 'main', agent: 'claude', title: '统筹会话', online: 'online' } } : {}) };
+    const hermes = { id: 'hermes', type: 'a2a', name: 'Hermes', enabled: true, state: 'unchecked', message: '' };
+    if (options.coldMain) workspace.session.online = 'unknown';
     const sessions = ['甲', '乙'].map((name, i) => ({ handle: 'session-' + i, title: name + '会话', workspace: 'identity:test', workspaceName: '示例工作区', path: '/test/工作区 with spaces', agent: i ? 'codex' : 'claude', online: 'online' }));
     const projectSessions = [{ ...sessions[0], handle: 'project-session-0', title: '当前设计会话' },
       { ...sessions[1], handle: 'project-session-1', title: '编码会话' },
@@ -160,7 +162,7 @@ async function setup(options = {}, hub) {
         window.fixture.overviewFailures--;
         throw Error('fixture overview unavailable');
       }
-      if (name === 'workspace.overview') return clone({ workspace, versionLabel: options.versionLabel ?? '开发版', projects: [...registered().map(p => ({ ref: p.ref, revision:p.revision, counts: { review: p.tasks.filter(t => t.phase === 'ready' && t.acceptance.some(a => a.status === 'pending')).length }, agents: [], bound: true, updatedAt: '' })), ...(options.manyProjects ? Array.from({ length: 13 }, (_, i) => ({ ref: { ...project.ref, id: 'p' + (i + 2), name: '项目 ' + (i + 2) }, counts: { working: options.idleProjects ? 0 : 1 }, agents: [], bound: true, updatedAt: '' })) : [])], hidden: [], attention: attention(), questions: window.fixture.questions ?? [], reports: window.fixture.reports ?? [], links, connections: [], machines: [{ id: 'local', name: '主机', role: 'host' }] });
+      if (name === 'workspace.overview') return clone({ workspace, versionLabel: options.versionLabel ?? '开发版', projects: [...registered().map(p => ({ ref: p.ref, revision:p.revision, counts: { review: p.tasks.filter(t => t.phase === 'ready' && t.acceptance.some(a => a.status === 'pending')).length }, agents: [], bound: true, updatedAt: '' })), ...(options.manyProjects ? Array.from({ length: 13 }, (_, i) => ({ ref: { ...project.ref, id: 'p' + (i + 2), name: '项目 ' + (i + 2) }, counts: { working: options.idleProjects ? 0 : 1 }, agents: [], bound: true, updatedAt: '' })) : [])], hidden: [], attention: attention(), questions: window.fixture.questions ?? [], reports: window.fixture.reports ?? [], links, connections: options.hermes ? [hermes] : [], machines: [{ id: 'local', name: '主机', role: 'host' }] });
       if (name === 'workspace.agents' && options.holdAgents) await new Promise((resolve, reject) => {
         window.fixture.agentTimeout = () => reject(Error('workspace.agents timed out after 30000ms'));
       });
@@ -283,6 +285,13 @@ async function setup(options = {}, hub) {
         if (input.operation === 'share') Object.assign(peer, input, { sharingSet: true });
         if (input.operation === 'revoke') links.peers = links.peers.filter(p => p.id !== input.id);
         links.revision++; return clone(links);
+      }
+      if (name === window.fixture.holdRead) await new Promise((resolve, reject) => {
+        window.fixture.finishRead = ok => { delete window.fixture.holdRead; ok ? resolve() : reject(Error('read unavailable')); };
+      });
+      if (name === 'workspace.hermesApprovalMode') return 'smart';
+      if (name === 'workspace.connections' && options.hermes && input.operation === 'read') {
+        return { connection: hermes, a2a: { url: 'http://127.0.0.1:1234', port: 5678, revision: 1, entries: [] } };
       }
       if (name === 'workspace.agent.targets') return { sessions: clone(sessions), workspaces: [{ workspace: 'identity:test', name: '示例工作区', path: '/test/工作区 with spaces' }] };
       if (name === 'workspace.agent.switch') {
@@ -443,13 +452,56 @@ try {
   });
   await setup({width:1040});
   await test('home and settings share the bound main status, time and color',async()=>{
-    for(const [state,label,tone] of [['work','工作中 · 5 分钟前开始','work'],['need','等你 · 5 分钟前开始','need'],['idle','待命',''],['offline','离线','bad'],['unknown','未知','']]) {
+    for(const [state,label,tone] of [['work','工作中 · 5 分钟前开始','work'],['need','等你 · 5 分钟前开始','need'],['idle','待命',''],['offline','离线','bad'],['unknown','在线','']]) {
       await page.evaluate(state=>{fixture.live.main={handle:fixture.workspace.session.handle,status:{state,since:Date.now()-300000}};fixture.emit();},state);
       const lead=page.locator('[data-workspace=self] .lead');
       await lead.getByText(new RegExp(label.replace(' · ',' . '))).waitFor();
       assert.equal((await lead.locator('.dot').getAttribute('class')).trim(),('dot '+tone).trim());
       if (state==='work') {await page.getByRole('button',{name:'设置',exact:true}).click();await currentLayer().locator('.lead').getByText(/工作中 · 5 分钟前开始/).waitFor();await home();}
     }
+  });
+  await test('settings details show available data while reads are pending and recover locally', async () => {
+    await setup({ coldMain: true, holdAgents: true, hermes: true });
+    await page.getByRole('button', { name: '设置', exact: true }).click();
+    const manage = page.getByRole('button', { name: '管理主 agent' });
+    assert.match(await manage.innerText(), /正在获取状态/);
+    const hold = name => page.evaluate(name => { delete fixture.finishRead; fixture.holdRead = name; }, name);
+    const finish = ok => page.evaluate(ok => fixture.finishRead(ok), ok);
+    await hold('workspace.agent.targets');
+    await manage.click();
+    const detail = currentLayer();
+    await detail.getByText('正在读取在线会话…').waitFor();
+    assert.match(await detail.innerText(), /统筹会话/);
+    await detail.getByText('绑定详情').click();
+    await detail.getByText('run_main', { exact: true }).waitFor();
+    await finish(false);
+    await detail.getByText('在线会话暂时无法读取').waitFor();
+    await detail.getByRole('button', { name: '重试' }).click();
+    await detail.getByText('甲会话').waitFor();
+    await back();
+    await hold('workspace.connections');
+    await page.getByRole('button', { name: 'Hermes', exact: true }).click();
+    await detail.getByText('正在读取连接设置…').waitFor();
+    await detail.getByText('未检查', { exact: true }).waitFor();
+    assert.equal(await detail.getByRole('button', { name: '保存' }).count(), 0);
+    await finish(false);
+    await detail.getByText('连接设置暂时无法读取').waitFor();
+    await hold('workspace.hermesApprovalMode');
+    await detail.getByRole('button', { name: '重试' }).click();
+    await detail.getByText('正在读取审批方式…').waitFor();
+    const address = detail.getByLabel('对方的地址', { exact: true });
+    assert.equal(await address.inputValue(), 'http://127.0.0.1:1234');
+    await address.fill('http://127.0.0.1:4321');
+    await finish(true);
+    await detail.getByText('电脑操作的批准：smart').waitFor();
+    assert.equal(await address.inputValue(), 'http://127.0.0.1:4321');
+    await hold('workspace.connections');
+    await page.getByRole('button', { name: '刷新', exact: true }).click();
+    await page.waitForFunction(() => typeof fixture.finishRead === 'function');
+    await finish(false);
+    await detail.getByText('连接设置暂时无法读取').waitFor();
+    assert.equal(await address.inputValue(), 'http://127.0.0.1:4321');
+    assert.deepEqual(await page.evaluate(() => fixture.calls.filter(c => c.name === 'workspace.connections').map(c => c.input.operation)), ['read', 'read', 'read']);
   });
   await setup({width:1040});
   await test('single write confirms without waiting for background overview',async()=>{

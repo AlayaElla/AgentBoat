@@ -14,7 +14,7 @@ const req = (name: string, input?: any, timeoutMs?: number): Promise<any> => inp
   ? orca.plugin.request(name as any)
   : orca.plugin.request(name as any, JSON.parse(JSON.stringify(input)), timeoutMs ? { timeoutMs } : undefined)
 type PageData = { current: Project | null; task?: FeedbackTask | null; lead?: WorkspaceBinding; leadPanel?: ProjectLead; workspace?: ProjectWorkspace; connection?: any; targets?: any; archive?: ArchivePage }
-type Frame = { key: string; page: Page; form: Record<string, any>; data?: PageData; error?: string; load?: number; opener?: HTMLElement; dirty?: boolean; mounted?: boolean }
+type Frame = { key: string; page: Page; form: Record<string, any>; data?: PageData; error?: string; load?: number; opener?: HTMLElement; dirty?: boolean; mounted?: boolean; approvalMode?: string | null }
 let frameId = 0
 const frameFor = (page: Page): Frame => ({ key: 'page-' + ++frameId, page, form: {} })
 const homeFrame = frameFor({ kind: 'home' })
@@ -277,7 +277,7 @@ async function loadPage(f = active, taskReads?: Map<string, Promise<FeedbackTask
     }
     const [task, snapshot, connection, sessions, leadPanel, archive] = await Promise.all([
       taskRead, local && !taskRead ? req('project.read', { projectId: p.projectId }) : null,
-      p.kind === 'connection' && p.id ? req('workspace.connections', { operation: 'read', connectionId: p.id }) : null,
+      p.kind === 'connection' && p.id ? req('workspace.connections', { operation: 'read', connectionId: p.id, includeApprovalMode: false }) : null,
       p.kind === 'main' ? req('workspace.agent.targets') : null,
       p.kind === 'project-settings' && p.projectId ? req('project.lead', { projectId: p.projectId }) : undefined,
       p.kind === 'archive' || (p.kind === 'task' && p.end !== undefined) ? req('project.archive', { projectId: p.projectId, end: p.end }) : undefined
@@ -285,6 +285,11 @@ async function loadPage(f = active, taskReads?: Map<string, Promise<FeedbackTask
     if (request !== f.load) return
     f.data = { current: snapshot?.project ?? null, task, lead: snapshot?.lead, workspace: snapshot?.workspaceTarget, connection, targets: sessions, leadPanel, archive }
     f.error = undefined
+    if (connection?.a2a && f.approvalMode === undefined) {
+      f.approvalMode = null
+      void req('workspace.hermesApprovalMode').then(mode => { f.approvalMode = mode }, () => { f.approvalMode = '暂时无法读取' })
+        .finally(() => { if (f === active) render() })
+    }
     if (f === active) useFrame(f)
   } catch (e) {
     if (request !== f.load) return
@@ -311,7 +316,7 @@ async function go(next: Page, reset = false, keyboard = false) {
   const ready = loadPage(f)
   if (next.kind === 'project' && Date.now() - live.at >= 60_000) loadAgents(false)
   opener?.setAttribute('data-navigating', '')
-  if (!next.inboxRow) await Promise.race([ready, wait(150)])
+  if (!next.inboxRow && !settingsDetail(next)) await Promise.race([ready, wait(150)])
   opener?.removeAttribute('data-navigating')
   if (n !== nav) return
   const fromHome = Boolean(opener?.closest('.home-layer')) || prior === homeFrame
@@ -384,12 +389,17 @@ function loadAgents(force: boolean) {
 }
 async function refresh(forceAgents = false) {
   const n = ++refreshSeq
-  if (forceAgents) { refreshing = true; render() }
+  if (forceAgents) {
+    refreshing = true
+    if (active.approvalMode !== null) active.approvalMode = undefined
+    render()
+  }
   try {
     if (forceAgents && !pendingEdits && !busy) { await readSheets(); draftFailure = '' }
     loadAgents(forceAgents)
     if (!await readOverview(n, forceAgents) || n !== refreshSeq) return
     opened = Object.fromEntries(Object.entries(opened).filter(([id]) => id === 'self' || peers().some(p => p.id === id)))
+    if (settingsDetail(page)) render()
     const shown = new Set(inboxRows().map(r => r.id))
     for (const [id, f] of inlineRows) if (f !== active && !shown.has(f.page.inboxRow!)) {
       inlineRows.delete(id); expandedRows.delete(id); if (lastInline === id) lastInline = ''
@@ -481,14 +491,20 @@ function projectCard(p: { id: string; name: string; count: number; agents?: Agen
     el('button', { type: 'button', class: 'pcard-h', title: p.name, 'aria-label': p.name, 'aria-description': p.summary ?? (p.count ? `待处理 ${p.count}` : undefined), onclick: open }, el('span', { class: 'name grow trunc' }, p.name), pill(p.count), p.summary ? small(p.summary) : null, icon('chevron')),
     agents.length || p.note ? el('div', { class: 'pcard-b' }, unfinished.map(a => agentRow(a)), done ? small(`✓ 已完成 ${done} 个`) : null, p.note ? small(p.note) : null) : null)
 }
-function mainAgentInfo(agent: MainAgentActivity | null | undefined, bound = !!agent, activity = agent?.activity) {
-  const { label, tone } = activityStyle(activity ?? { state: agent?.online === 'offline' ? 'offline' : 'unknown' })
+function localMainStyle(session: AgentSession | undefined) {
+  const status = mainStatus(session, live)
+  if (status.state !== 'unknown') return activityStyle(status)
+  const online = session?.online
+  return { label: online && online !== 'unknown' ? mainAgentStates[online] : live.at ? '状态暂时无法读取' : '正在获取状态', tone: online === 'offline' ? 'bad' : '' }
+}
+function mainAgentInfo(agent: MainAgentActivity | null | undefined, bound = !!agent, style?: ReturnType<typeof activityStyle>) {
+  const { label, tone } = style ?? activityStyle(agent?.activity ?? { state: agent?.online === 'offline' ? 'offline' : 'unknown' })
   const title = agent ? [agentName(agent.agent), agent.title, label].filter(Boolean).join(' · ') : bound ? '已绑定' : '未绑定'
   return { title, tone }
 }
 function mainAgentLine(agent: MainAgentActivity | null | undefined, open?: () => void, bound = !!agent, showLabel = true) {
   const active = open ? actingMain(all.workspace) : undefined
-  const { title: primary, tone } = mainAgentInfo(active ?? agent, bound, open ? mainStatus(active, live) : agent?.activity)
+  const { title: primary, tone } = mainAgentInfo(active ?? agent, bound, open ? localMainStyle(active) : undefined)
   const title = open && all.workspace.backup ? primary + ' · ' + backupDescription(all.workspace) : primary
   return el(open ? 'button' : 'div', { class: 'lead', type: open ? 'button' : undefined, 'aria-label': open ? showLabel ? '主 agent' : '管理主 agent' : undefined, onclick: open }, dot(tone), showLabel ? el('span', { class: 't' }, '主 agent') : null, el('span', { class: 'grow trunc xs muted', title }, title), open ? icon('chevron') : null)
 }
@@ -1176,9 +1192,14 @@ function linksPage() {
 }
 function connectionPage() {
   const c = detail?.connection, a = detail?.a2a, f = detail?.feishu, type = c?.type ?? form['类型'] ?? 'a2a'
-  if (page.kind === 'connection' && !c) return callout('正在读取连接…')
-  return [!c ? select('类型', { a2a: 'A2A agent（Hermes 等）', feishu: '飞书' }, 'a2a', () => render()) : small(type === 'a2a' ? 'A2A agent' : '飞书'), input('名字', c?.name || ''), check('启用这个连接', form.enabled ?? c?.enabled ?? false, v => { markDirty(); form.enabled = v; render() }),
-    type === 'a2a' ? [input('对方的地址', a?.url || ''), input('对方的令牌', '', 'password'), input('主 agent 监听端口', String(a?.port ?? 0), 'number'), input('主 agent 的令牌', '', 'password'), a?.listening ? small(a.listening) : null, detail?.approvalMode ? small(`电脑操作的批准：${detail.approvalMode}`) : null, small('令牌已保存时，留空保留。')] : [input('App ID', f?.feishu.appId || ''), input('App Secret', '', 'password'), input('允许的用户', f?.feishu.senderIds.join('\n') || '', 'textarea'), input('允许的会话', f?.feishu.chatIds.join('\n') || '', 'textarea')],
+  if (page.kind === 'connection' && !c) {
+    const saved = all.connections?.find(c => c.id === page.id)
+    return [saved ? row(small(saved.type === 'a2a' ? 'A2A agent' : '飞书'), small(connectionStates[saved.state])) : null,
+      detailReadState('连接设置')]
+  }
+  const approval = detail?.approvalMode || active.approvalMode
+  return [active.error ? detailReadState('连接设置') : null, !c ? select('类型', { a2a: 'A2A agent（Hermes 等）', feishu: '飞书' }, 'a2a', () => render()) : small(type === 'a2a' ? 'A2A agent' : '飞书'), input('名字', c?.name || ''), check('启用这个连接', form.enabled ?? c?.enabled ?? false, v => { markDirty(); form.enabled = v; render() }),
+    type === 'a2a' ? [input('对方的地址', a?.url || ''), input('对方的令牌', '', 'password'), input('主 agent 监听端口', String(a?.port ?? 0), 'number'), input('主 agent 的令牌', '', 'password'), a?.listening ? small(a.listening) : null, approval === null ? small('正在读取审批方式…') : approval ? small(`电脑操作的批准：${approval}`) : null, small('令牌已保存时，留空保留。')] : [input('App ID', f?.feishu.appId || ''), input('App Secret', '', 'password'), input('允许的用户', f?.feishu.senderIds.join('\n') || '', 'textarea'), input('允许的会话', f?.feishu.chatIds.join('\n') || '', 'textarea')],
     c ? small(connectionStates[c.state as keyof typeof connectionStates]) : null, c?.message ? callout(c.message, 'danger') : null,
     button('保存', () => act(async () => { const split = (s: string) => s.split(/[\n,，]/).map(s => s.trim()).filter(Boolean); const result = await req('workspace.connections', { operation: 'save', ...(c ? { connectionId: c.id } : { type }), name: form['名字'], ...(type === 'a2a' ? { revision: a?.revision ?? 0, enabled: form.enabled ?? c?.enabled ?? false, url: form['对方的地址'], port: Number(form['主 agent 监听端口']), inboundToken: form['主 agent 的令牌'], outboundToken: form['对方的令牌'] } : { revision: f?.revision ?? 0, feishu: { enabled: form.enabled ?? c?.enabled ?? false, appId: form['App ID'], senderIds: split(form['允许的用户']), chatIds: split(form['允许的会话']) }, appSecret: form['App Secret'] }) }); markSaved(); active.form = {}; form = active.form; detail = result; active.page = { kind: 'connection', id: result.connection.id }; page = active.page; remember(); await refresh(); notice = '已保存' }), 'primary'),
     c?.type === 'a2a' ? button('检查连接', () => act(async () => { detail = await req('workspace.connections', { operation: 'check', connectionId: c.id }); notice = '检查完成' }), '', !c.enabled) : null,
@@ -1210,7 +1231,7 @@ function leadDescription(binding: WorkspaceBinding | undefined, label: string) {
   const s = binding?.session
   const backup = binding && (binding.backup || (binding.runId && label === '主会话')) ? backupDescription(binding) : ''
   if (!s) return binding?.runId ? ['已绑定' + label, backup].filter(Boolean).join(' · ') : `还没有${label}`
-  const status = label === '主 agent' ? activityStyle(mainStatus(s, live)).label
+  const status = label === '主 agent' ? localMainStyle(s).label
     : s.online !== 'unknown' ? mainAgentStates[s.online] : live.ok || page.kind === 'project-settings' ? agentStatusText() : ''
   return [binding?.backup ? '主用 ' + agentName(s.agent) : agentName(s.agent), s.title, status, backup].filter(Boolean).join(' · ')
 }
@@ -1222,13 +1243,13 @@ function pendingLead(t: MainTakeover | undefined, cancel?: () => unknown) {
   return card(callout(minutes ? `${status}，还剩 ${minutes} 分钟` : '对方没在有效期内完成绑定', !minutes || t.error ? 'danger' : ''),
     minutes && t.backupAgent ? small(`接管后会自动配一个 ${agentName(t.backupAgent)} 备用`) : null, cancel ? button('取消', cancel) : null)
 }
-function leadChoices(w: WorkspaceBinding, sessions: AgentSession[], choose: (input: SwitchChoice) => unknown, project = false) {
+function leadChoices(w: WorkspaceBinding, sessions: AgentSession[] | undefined, choose: (input: SwitchChoice) => unknown, project = false) {
   const label = project ? '主会话' : '主 agent'
   return [pendingLead(w.takeover, () => choose({ mode: 'cancel' })),
-    section('在线会话', sessions.map(s => card(row(el('span', { class: 'grow any' }, s.title || agentName(s.agent)),
+    section('在线会话', sessions?.map(s => card(row(el('span', { class: 'grow any' }, s.title || agentName(s.agent)),
       w.session?.handle === s.handle ? tag(`当前${label}`) : button(project || w.runId ? '换成它' : '设为主 agent', () => choose({ mode: 'existing', handle: s.handle }), 'primary')),
     small(project ? agentName(s.agent) : `${agentName(s.agent)} · ${s.workspaceName} · ${s.path}`))),
-    !sessions.length ? small('没有可接管的在线会话') : null)]
+    !sessions ? detailReadState('在线会话') : !sessions.length ? small('没有可接管的在线会话') : null)]
 }
 function chooseProjectLead(id: string, revision: number, input: SwitchChoice) {
   return act(async () => {
@@ -1255,6 +1276,10 @@ function projectLeadSettings(id: string) {
       button('新开一个主会话', () => choose({ mode: 'new', agent: form.Agent }), 'primary', !!data.workspaceError),
       data.workspaceError ? callout(data.workspaceError) : null))
 }
+function detailReadState(label: string) {
+  if (!active.error) return callout(`正在读取${label}…`)
+  return row(callout(`${label}暂时无法读取`), button('重试', () => { active.error = undefined; render(); void loadPage().then(render) }, 'sm'))
+}
 function mainPage() {
   const w = all.workspace, workspaces = targets?.workspaces ?? []
   const switchMain = async (input: SwitchChoice) => {
@@ -1263,8 +1288,9 @@ function mainPage() {
     catch (e) { error = (e as Error).message }
     await refresh()
   }
-  return [el('p', { class: 'any' }, leadDescription(w, '主 agent')), backupHistory(w), leadChoices(w, targets?.sessions ?? [], switchMain),
-    section('新会话', select('工作区', Object.fromEntries(workspaces.map((s: any) => [s.workspace, `${s.name} · ${s.path}`])), workspaces[0]?.workspace ?? ''), select('Agent', { claude: 'Claude', codex: 'Codex' }, 'claude'), button('新开一个主 agent', () => switchMain({ mode: 'new', workspace: form['工作区'], agent: form.Agent }), 'primary', !workspaces.length)),
+  return [el('p', { class: 'any' }, leadDescription(w, '主 agent')), backupHistory(w), leadChoices(w, targets?.sessions, switchMain),
+    active.error && targets ? detailReadState('在线会话') : null,
+    targets ? section('新会话', select('工作区', Object.fromEntries(workspaces.map((s: any) => [s.workspace, `${s.name} · ${s.path}`])), workspaces[0]?.workspace ?? ''), select('Agent', { claude: 'Claude', codex: 'Codex' }, 'claude'), button('新开一个主 agent', () => switchMain({ mode: 'new', workspace: form['工作区'], agent: form.Agent }), 'primary', !workspaces.length)) : null,
     fold(active.key + '-binding', '绑定详情', () => el('dl', { class: 'kv' }, Object.entries({ Run: w.runId || '未绑定', 会话: w.session?.handle || '未知', 目录: w.session?.path || '未知', 绑定时间: w.boundAt || '未知', 授权边界: w.securityBoundary || '未知' }).map(([k, v]) => [el('dt', {}, k), el('dd', {}, v)])))]
 }
 function settingsPage() {
@@ -1293,17 +1319,19 @@ function titleOf(f: Frame) {
 const skeleton = () => el('div', { class: 'skeleton', role: 'status', 'aria-label': '正在读取' }, [1, 2, 3].map(i => el('div', { class: `sk sk-${i}`, 'aria-hidden': 'true' })))
 const loadIssue = (f: Frame) => el('div', { class: 'card', role: 'alert' }, el('h2', { class: 'h2' }, '这一页没读出来'), el('p', { class: 'any' }, f.error),
   button('重试', () => { f.error = undefined; const ready = f === homeFrame ? refresh(true) : loadPage(f); render(); void ready.then(render) }, 'sm'))
+const settingsDetail = (p: Page) => p.kind === 'connection' || p.kind === 'main'
 function content(): any {
+  if (page.kind === 'main') return mainPage()
+  if (page.kind === 'connection') return connectionPage()
   if (active.error) return loadIssue(active)
   if (page.inboxRow) return inboxBody(active)
   if (!active.data) return skeleton()
   if (page.projectId) return current ? projectPage() : callout('项目已被移除或不可用')
   if (['peer', 'relation', 'peer-project'].includes(page.kind)) return peerPage()
   if (page.kind === 'links') return all.links ? linksPage() : callout('没有可用的工作间连接设置')
-  if (page.kind === 'connection' || page.kind === 'add-connection') return connectionPage()
+  if (page.kind === 'add-connection') return connectionPage()
   if (page.kind === 'agents') return agentContent()
   if (page.kind === 'settings') return settingsPage()
-  if (page.kind === 'main') return mainPage()
   return null
 }
 function heading(tag: string, f: Frame) {

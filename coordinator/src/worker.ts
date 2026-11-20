@@ -601,9 +601,10 @@ export function createCoordinator(api: OrcaWorkerApi, runtime: CoordinatorRuntim
       await store.mutateMessaging(m => { m.feishu = { enabled: false, appId: '', chatIds: [], senderIds: [] }; m.inbox = []; m.deliveries = m.deliveries.filter(d => !d.external) })
       await orca.secrets.delete(`feishu:${mailbox}`); await syncSources()
     })
+  orca.panels.handle('workspace.hermesApprovalMode', () => runtime.hermesApprovalMode())
   orca.panels.handle('workspace.connections', async input => {
     const result = await connections.handle(input)
-    if (!Array.isArray(result) && result.connection.type === 'a2a') {
+    if (input.includeApprovalMode !== false && !Array.isArray(result) && result.connection.type === 'a2a') {
       try { const mode = await runtime.hermesApprovalMode(); if (mode) result.approvalMode = mode } catch { /* A peer need not expose local approval settings. */ }
     }
     return result
@@ -855,7 +856,7 @@ export function createCoordinator(api: OrcaWorkerApi, runtime: CoordinatorRuntim
     const { list, error } = records ?? await availableProjectRecords()
     if (stoppedChecks) return
     const w = await store.workspace(), projects = list.filter(p => !p.hidden && p.runId && p.ref.hostId === 'local')
-    const inventory = (w.runId || projects.length) && !error ? await runtime.targets(true).catch(() => undefined) : undefined
+    const inventory = (w.runId || projects.length) && !error ? await runtime.targets('sample').catch(() => undefined) : undefined
     lastInventory = inventory ? { at: Date.now(), sessions: inventory.sessions } : undefined
     const known = error ? await store.all() : list
     await backups.syncContacts([w, ...known], inventory?.sessions, inventory?.workspaces.map(s => s.workspace) ?? list.map(p => p.ref.workspace).filter(Boolean))

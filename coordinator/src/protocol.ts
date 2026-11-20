@@ -7,6 +7,7 @@ export interface ArchivePage {
 declare module 'orca' {
   interface PluginRequests {
     'panel.feedbackState': { input: { change?: import('./feedback-drafts').Delta }; output: import('./feedback-drafts').Sheets }
+    'workspace.hermesApprovalMode': { output: string }
     'workspace.connections': { input: import('./connections').ConnectionsInput; output: import('./connections').Connection[] | import('./connections').ConnectionDetail }
     'workspace.agents': { input: { refresh?: boolean }; output: import('./model').AgentsSnapshot }
     'workspace.agent.open': { input: { id: string }; output: { opened: boolean; focusedTerminal: boolean } }

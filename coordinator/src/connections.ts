@@ -6,7 +6,7 @@ import { fail, text } from './store'
 
 export interface Connection { id: string; type: 'feishu' | 'a2a'; name: string; enabled: boolean; state: 'off' | 'connecting' | 'connected' | 'error' | 'unchecked'; message: string }
 type Entry = Pick<Connection, 'id' | 'type' | 'name'>
-export interface ConnectionsInput extends Omit<ButlerInput, 'operation'> { operation: 'read' | 'save' | 'delete' | 'check' | 'send' | 'reply'; connectionId?: string; name?: string; type?: Entry['type']; confirm?: boolean; feishu?: import('./model').FeishuConfig; appSecret?: string }
+export interface ConnectionsInput extends Omit<ButlerInput, 'operation'> { operation: 'read' | 'save' | 'delete' | 'check' | 'send' | 'reply'; connectionId?: string; name?: string; type?: Entry['type']; confirm?: boolean; includeApprovalMode?: boolean; feishu?: import('./model').FeishuConfig; appSecret?: string }
 export interface ConnectionDetail { connection: Connection; a2a?: ButlerSnapshot; feishu?: MessagingSnapshot; approvalMode?: string }
 
 export class Connections {
@@ -32,19 +32,20 @@ export class Connections {
   }
   async list(): Promise<Connection[]> {
     const entries = await this.directory()
-    return Promise.all(entries.map(async e => {
-      if (e.type === 'feishu') { const m = await this.messaging(); return { ...e, enabled: m.feishu.enabled, state: m.feishu.enabled ? m.connection.state : 'off', message: m.connection.message } }
-      const b = await this.instance(e).snapshot()
-      return { ...e, enabled: b.enabled, state: !b.enabled ? 'off' : b.error ? 'error' : b.connection === '已连接' ? 'connected' : 'unchecked', message: b.error }
-    }))
+    return Promise.all(entries.map(async e => (await this.detail(e)).connection))
   }
   private async detail(e: Entry): Promise<ConnectionDetail> {
-    return { connection: (await this.list()).find(x => x.id === e.id)!, ...(e.type === 'feishu' ? { feishu: await this.messaging() } : { a2a: await this.instance(e).snapshot() }) }
+    if (e.type === 'feishu') {
+      const m = await this.messaging()
+      return { feishu: m, connection: { ...e, enabled: m.feishu.enabled, state: m.feishu.enabled ? m.connection.state : 'off', message: m.connection.message } }
+    }
+    const b = await this.instance(e).snapshot()
+    return { a2a: b, connection: { ...e, enabled: b.enabled, state: !b.enabled ? 'off' : b.error ? 'error' : b.connection === '已连接' ? 'connected' : 'unchecked', message: b.error } }
   }
   handle(input: ConnectionsInput): Promise<Connection[] | ConnectionDetail> {
     const work = this.chain.then(async () => {
-      const entries = await this.directory()
       if (input.operation === 'read' && !input.connectionId && !input.name) return this.list()
+      const entries = await this.directory()
       let e = input.connectionId ? entries.find(e => e.id === input.connectionId) : entries.find(e => e.name === input.name)
       if (e && input.operation === 'save' && input.type && !input.connectionId) fail('连接名字不能重复')
       const creating = !e && input.operation === 'save' && !input.connectionId

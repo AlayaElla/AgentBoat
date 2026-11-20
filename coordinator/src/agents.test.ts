@@ -105,11 +105,14 @@ test('status shares an inspection list but the next inspection checks liveness a
   let api!: OrcaWorkerApi
   const worker = await mountWorker({ default: value => { api = value } }, { host })
   try {
-    await runtime.targets(true)
+    await runtime.targets('sample')
     await runtime.agents([], api.host, { handle: 'orca_session_id:test', workspace: 'id:test', agent: 'claude', path: '', title: '', workspaceName: '', online: 'unknown' })
     assert.deepEqual(calls, ['ps', 'list'])
     incomplete = true
-    await assert.rejects(() => runtime.targets(true), /会话列表不完整/)
+    await runtime.targets('display')
+    assert.deepEqual(calls, ['ps', 'list'])
+    await assert.rejects(() => runtime.targets(), /会话列表不完整/)
+    await assert.rejects(() => runtime.targets('sample'), /会话列表不完整/)
   } finally { await worker.deactivate() }
 })
 

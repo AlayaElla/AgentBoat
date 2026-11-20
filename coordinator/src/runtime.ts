@@ -22,7 +22,7 @@ export interface CoordinatorRuntime {
   syncContacts(wanted: LeadContact[], workspaces?: string[]): Promise<ContactRoutes>
   installedAgents(workspace: string): Promise<string[]>
   verifyRun(id: string, caller?: string): Promise<void>
-  targets(sample?: boolean): Promise<{ sessions: AgentSession[]; workspaces: { workspace: string; name: string; path: string }[] }>
+  targets(mode?: 'sample' | 'display'): Promise<{ sessions: AgentSession[]; workspaces: { workspace: string; name: string; path: string }[] }>
   identify(handle: string, runId: string, currentRunId?: string): Promise<AgentSession>
   requestTakeover(handle: string, prompt: string, subject?: string): Promise<void>
   launchMain(workspace: string, agent: string, prompt: string, options?: Omit<AgentLaunch, 'agent'>): Promise<string>
@@ -97,8 +97,8 @@ export class OrcaRuntime implements CoordinatorRuntime {
     const { owner } = await this.runBinding(id)
     if (caller && owner && owner !== caller) fail('Orca 返回的 Run 协调者与当前会话不符；请在目标会话创建自己的新 Run')
   }
-  async targets(sample = false) {
-    const read = (args: string[]) => sample ? this.list(args, readTimeout, true) : this.call(args, readTimeout)
+  async targets(mode?: 'sample' | 'display') {
+    const read = (args: string[]) => mode ? this.list(args, readTimeout, mode === 'sample') : this.call(args, readTimeout)
     // agents.list has no liveness/parent evidence; takeover still requires these exact CLI identities.
     const [ps, list] = await Promise.all([read(['worktree', 'ps', '--limit', '10000', '--agent-wait']), read(['terminal', 'list', '--limit', '10000'])])
     if (!Array.isArray(ps.worktrees) || !Array.isArray(list.terminals) || list.hostScope?.omittedHostIds?.includes('local') || ps.truncated || list.truncated || ps.hostScope?.omittedHostIds?.includes('local')) fail('会话列表不完整，请恢复 Orca 后重试')

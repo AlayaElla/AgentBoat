@@ -130,7 +130,7 @@ export function mainAgent(orca: OrcaWorkerApi, store: ProjectStore, runtime: Coo
     return read(input.operation === 'read' ? sample() : undefined)
   })
   orca.panels.handle('workspace.agent.targets', async () => {
-    const t = await runtime.targets()
+    const t = await runtime.targets('display')
     return { ...t, sessions: t.sessions.filter(s => s.online === 'online') }
   })
   orca.panels.handle('workspace.agent.switch', async input => {

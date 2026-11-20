@@ -279,6 +279,10 @@ test('connections isolate multiple A2A configs, tokens and histories', async () 
   try {
     const list = await worker.request('workspace.connections', { operation: 'read' }) as import('./connections').Connection[]
     assert.equal(list[0].name, 'Hermes'); assert.equal(list[0].id, 'butler')
+    const settings = await worker.request('workspace.connections', { operation: 'read', connectionId: 'butler', includeApprovalMode: false }) as import('./connections').ConnectionDetail
+    assert.equal(settings.a2a?.url, first.url)
+    assert.equal(settings.approvalMode, undefined)
+    assert.equal(await worker.request('workspace.hermesApprovalMode'), 'smart')
     assert.equal((await worker.request('workspace.connections', { operation: 'read', name: 'Hermes' }) as import('./connections').ConnectionDetail).approvalMode, 'smart')
     await assert.rejects(() => worker.request('workspace.connections', { operation: 'save', type: 'a2a', name: 'Hermes', enabled: false, port: 0, url: first.url }), /名字不能重复/)
     assert.deepEqual(host.data().storage['workspace.a2a:butler'], first)
