@@ -1,6 +1,6 @@
 import type {} from 'orca/frame'
 import type { ArchivePage } from './protocol'
-import { artifactVersions } from './artifact-versions.mjs'
+import { artifactTitle, artifactVersions } from './artifact-versions.mjs'
 import { actingMain, backupInCharge, blockedRevision, attention, projectSummary, agents, agentName, compareAgentActivity, groupedAttention, isProjectShared, isRecentAgent, labels, taskState, scopes, statuses, connectionStates, roles, mainStatus, mainAgentStates } from './model'
 import type { Acceptance, AgentSession, Artifact, Attention, LeadSwitch, MainTakeover, Overview, Project, ProjectLead, ProjectWorkspace, WorkspaceBinding } from './model'
 import type { FeedbackItem } from './store'
@@ -918,19 +918,17 @@ function taskList(tasks: { id?: string; title: string; state: keyof typeof label
   return tasks.length ? tasks.map((t, i) => keyed(item(t.title, [labels[t.state], t.updatedAt && relative(t.updatedAt)].filter(Boolean).join(' · '), t.open), t.id ?? String(i))) : small('还没有任务')
 }
 function artifactTab(projectId: string, tasks: { id: string; title: string; artifacts: Artifact[]; updatedAt?: string }[], projectUpdatedAt?: string): ProjectTab {
-  const groups = tasks.flatMap(task => artifactVersions(task.artifacts).map(versions => ({ task, versions })))
-  const time = (a: Artifact, task: { updatedAt?: string }) => a.registeredAt || task.updatedAt || projectUpdatedAt
+  const groups = artifactVersions(tasks)
+  const entry = ({ artifact, tasks: owners }: (typeof groups)[number][number]) => {
+    const [task] = owners
+    const source = artifact.registeredAt ? '登记' : task.updatedAt ? '任务更新' : '项目更新'
+    const summary = Array.from(owners, t => t.title).join('、') + ' · ' + source + ' ' + relative(artifact.registeredAt || task.updatedAt || projectUpdatedAt)
+    return item(artifactTitle(artifact), summary, artifact.url ? () => openArtifact(projectId, task.id, artifact) : undefined)
+  }
   return { count: groups.length, body: () => {
     if (!groups.length) return small('还没有成果')
-    const sorted = groups.sort((a, b) => (Date.parse(time(b.versions[0], b.task) || '') || 0) - (Date.parse(time(a.versions[0], a.task) || '') || 0))
-    return sorted.map(({ task, versions }) => {
-      const [latest, ...older] = versions
-      const entry = (a: Artifact) => {
-        const source = a.registeredAt ? '登记' : task.updatedAt ? '任务更新' : '项目更新'
-        const summary = task.title + ' · ' + source + ' ' + relative(time(a, task))
-        return item(a.label + ' · ' + a.version, summary, a.url ? () => openArtifact(projectId, task.id, a) : undefined)
-      }
-      const key = JSON.stringify(['artifact', projectId, task.id, latest.label])
+    return groups.map(([latest, ...older]) => {
+      const key = JSON.stringify(['artifact', projectId, latest.artifact.label])
       return keyed(card(entry(latest), older.length ? fold(key, '旧版本', () => older.map(entry), older.length) : null), key)
     })
   } }
@@ -960,7 +958,7 @@ function projectPage() {
     const archive = active.data?.archive
     const t = (archive?.tasks ?? p.tasks).find(t => t.id === page.id)
     if (!t) return callout('任务已不存在，请返回项目。')
-    const artifacts = t.artifacts.map(a => button(a.label + ' · ' + a.version, () => openArtifact(p.ref.id, t.id, a, archive?.end), 'sm'))
+    const artifacts = t.artifacts.map(a => button(artifactTitle(a), () => openArtifact(p.ref.id, t.id, a, archive?.end), 'sm'))
     const workers = projectAgents(p.ref.id).filter(a => a.taskId === t.id && a.state !== 'done')
     const messages = archive ? [] : p.events.filter(e => t.sourceIds.includes(e.id) || e.taskId === t.id)
     const historyRow = (title: string, h: Acceptance['history'][number], result: string) =>

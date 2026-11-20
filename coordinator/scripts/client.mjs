@@ -166,7 +166,7 @@ try {
         const recent = 3;
         const { artifactVersions } = await import(release ? '../../src/artifact-versions.mjs' : '../src/artifact-versions.mjs');
         const keep = new Set(task.acceptance.filter(a => a.status !== 'discarded').flatMap(a => a.artifactIds));
-        for (const [latest] of artifactVersions(task.artifacts).slice(0, recent)) keep.add(latest.id);
+        for (const [latest] of artifactVersions([task]).slice(0, recent)) keep.add(latest.artifact.id);
         const artifacts = task.artifacts.filter(a => keep.has(a.id));
         task.omittedArtifacts = task.artifacts.length - artifacts.length;
         task.artifacts = artifacts;

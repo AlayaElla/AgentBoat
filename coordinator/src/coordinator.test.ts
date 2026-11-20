@@ -715,6 +715,22 @@ test('acceptance keeps user conclusions and resets only changed items', () => {
   assert.throws(() => submitTask(p, { ...deliverable, artifacts: [{ ...deliverable.artifacts[0], url: 'D:\\Other\\secret.txt' }] }))
 })
 
+test('renaming an artifact preserves its registration, acceptance and notifications', () => {
+  const p = fresh(refs[0])
+  submitTask(p, deliverable)
+  const before = structuredClone(p)
+  const renamed = { ...deliverable.artifacts[0], label: '项目首页' }
+  submitTask(p, { ...deliverable, artifacts: [renamed] })
+  assert.deepEqual(p.tasks[0].artifacts, [{ ...before.tasks[0].artifacts[0], label: renamed.label }])
+  assert.deepEqual(p.tasks[0].acceptance, before.tasks[0].acceptance)
+  notifyWorkspace(before, p, 'workspace-run')
+  notifyFeishu(before, p, { enabled: true, appId: 'app', chatIds: ['chat'], senderIds: [] })
+  assert.deepEqual(p.deliveries, before.deliveries)
+  for (const change of [{ url: 'https://example.com/other' }, { version: 'v2' }]) {
+    assert.throws(() => submitTask(p, { ...deliverable, artifacts: [{ ...renamed, ...change }] }), /成果编号已存在；新版本请登记新的成果编号/)
+  }
+})
+
 test('task updates preserve omitted titles and goals and validate supplied values', () => {
   const p = fresh(refs[0]), update = { id: deliverable.id, phase: 'working' }
   assert.throws(() => submitTask(p, update), /任务标题/)

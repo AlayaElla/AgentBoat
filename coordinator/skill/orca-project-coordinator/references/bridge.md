@@ -42,7 +42,7 @@
 ```
 
 - 新建任务必填 id、title、goal、phase。更新同一 id 时，省略 title 或 goal 会保留原值。phase 取 working、blocked、paused、ready、completed。
-- 数组按 id 合并，省略的保留。任务、验收和来源的编号保持不变。成果 id 不能改写，每个新的成果版本用新 id；问题变了用新的决定 id。登记执行者成果时，在对应任务的 executions 保留 Orca Run、任务和派工编号。
+- 数组按 id 合并，省略的保留。任务、验收和来源的编号保持不变。成果名称写清这是什么，新版本沿用名称、使用新 id，版本号写在 version。用原 id、url 和 version 可更正名称。问题变了用新的决定 id。登记执行者成果时，在对应任务的 executions 保留 Orca Run、任务和派工编号。
 - 验收的 revision、status、history 由插件维护；核对内容或关联成果变了，自动出新版本。
 - 在 acceptance 或 decisions 中用 `{"id":"旧项编号","discarded":true,"reason":"已由新版取代"}` 撤下待验收、需要修改的验收项或待决定项。沿用同一验收编号提交有变化的核对内容或成果，会开启新一版并保留旧版历史。
 - sourceIds 用本项目 events 的 id，一个来源只关联一个任务。
