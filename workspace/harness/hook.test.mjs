@@ -61,6 +61,13 @@ test('Claude role hooks scope actions by Orca identity and fail open', () => {
     assert.equal(run('claude_workspace', 'bad input').decision, null);
     assert.equal(pre('Write', { file_path: path.join(main, 'new/subfile.txt') }), undefined);
     assert.equal(pre('Edit', { file_path: path.join(home, 'memory/log.md') }), undefined);
+    for (const file_path of ['memory/.git/config', '.ClAuDe/settings.json', '.CODEX\\config.toml', 'nested/../.git/config', '.git']) {
+      assert.equal(pre('Write', { file_path }), 'deny', file_path);
+    }
+    mkdirSync(path.join(main, '.git'));
+    symlinkSync(path.join(main, '.git'), path.join(main, 'alias'), process.platform === 'win32' ? 'junction' : 'dir');
+    assert.equal(pre('Edit', { file_path: 'alias/config' }), 'deny');
+    assert.equal(pre('Edit', { file_path: '.gitignore' }), undefined);
     for (const tool of ['Write', 'Edit', 'MultiEdit', 'NotebookEdit']) {
       const item = { [tool === 'NotebookEdit' ? 'notebook_path' : 'file_path']: path.join(project, 'code.txt') };
       assert.equal(pre(tool, item), 'deny', tool);
@@ -75,7 +82,8 @@ test('Claude role hooks scope actions by Orca identity and fail open', () => {
       'orca orchestration worker-start --spec "execute delegated work"', 'git status --short', 'git log --oneline',
       'node "' + client + '" overview', 'node "' + client + '" main-bind < input.json',
       "printf '%s' '{\"text\":\"message\"}' | node \"" + client + '" links-send',
-      'git -C "' + path.join(home, 'memory').replaceAll('\\', '/') + '" add notes.md']) assert.equal(cmd(command), undefined, command);
+      'git -C "' + path.join(home, 'memory').replaceAll('\\', '/') + '" add notes.md',
+      'git -C "' + path.join(home, 'memory').replaceAll('\\', '/') + '" commit -m "notes"']) assert.equal(cmd(command), undefined, command);
     for (const command of ['npm run build', 'node -e "42"', 'node ./outside.mjs', 'orca terminal send --text "npm run build"', 'find . -delete',
       'rg --pre=sh todo', 'git diff --output=save.txt', 'git -C "' + project.replaceAll('\\', '/') + '" add code.txt',
       'ls && npm run build', 'ls; npm run build', 'ls | npm run build', 'cat "$(command)"']) assert.equal(cmd(command), 'deny', command);

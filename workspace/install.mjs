@@ -4,14 +4,10 @@ import { isDeepStrictEqual } from 'node:util';
 import path from 'node:path';
 import os from 'node:os';
 import { fileURLToPath } from 'node:url';
-import { installationRoot, releasePluginKey } from '../coordinator/scripts/orca-cli.mjs';
+import { installationRoot } from '../coordinator/scripts/orca-cli.mjs';
 
 function sameProfile(root, repository) {
-  if (!path.isAbsolute(root)) return false;
-  if (!path.relative(repository, root)) return true;
-  // Pre-stable-entry setups stored the version hash inside this profile's plugins directory.
-  const releases = path.join(path.dirname(repository), 'plugins', releasePluginKey);
-  return path.basename(repository) === 'agentboat-current' && /^(?:[0-9a-f]{32}|[0-9a-f]{64})$/.test(path.relative(releases, root));
+  return path.isAbsolute(root) && !path.relative(repository, root);
 }
 
 function hookSettings(file, handler, owned, matchers, inspect, repository) {

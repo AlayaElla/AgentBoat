@@ -59,8 +59,6 @@ orca plugin update alayaella.agentboat
 
 ## 维护
 
-在已合入 Claude 和 Codex hooks 安装器的源码版本上运行：
-
 ```sh
 npm --prefix coordinator ci
 node coordinator/scripts/release.mjs vX.Y.Z <仓库外尚不存在的目录>

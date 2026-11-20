@@ -3,7 +3,7 @@ import type { WorkerReport } from './worker-reports.mjs';
 export const inboxLimit: number;
 export const questionWait: number;
 export const questionMaxAge: number;
-export interface OrcaQuestion { id: string; from: string; subject: string; body: string; at: number }
+export interface OrcaQuestion { id: string; from: string; subject: string; body: string; at: number; read?: boolean }
 export interface OrcaWorkerRecord {
   runId: string; dispatchId: string; taskId: string; dispatchStatus: string; workerState?: string | null;
   terminalState?: string; agentTerminalHandle?: string; projection?: { liveness?: { verdict?: string } };

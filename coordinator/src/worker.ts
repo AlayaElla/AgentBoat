@@ -9,11 +9,11 @@ import type { OrcaWorkerApi } from 'orca/worker'
 import { takeoverActive, waitingForProjectLead, actingMain, agents, type AgentSession, type LeadSwitch, type Project, type ProjectLead, type ProjectRef, type Snapshot, type SourceEvent, type Delivery, type MessagingSnapshot } from './model'
 import { FeishuSources, notifyFeishu, type MessageTransport } from './feishu'
 import { OrcaRuntime, defaultExecutable, readTimeout, type CoordinatorRuntime } from './runtime'
-import { ProjectStore, artifactUrl, expireArtifact, fail, feedback, fingerprint, fresh, maxMessageLength, notifyWorkspace, object, overview, resetBackup, receiveEvent, submitTask, strings, text, revision, mergeProjects, feishuConfig, verifyTakeover } from './store'
+import { ProjectStore, artifactUrl, expireArtifact, fail, feedback, fingerprint, fresh, maxMessageLength, notifyWorkspace, object, overview, resetBackup, retainRecent, receiveEvent, submitTask, strings, text, revision, mergeProjects, feishuConfig, verifyTakeover } from './store'
 import { WorkspaceLinks } from './links'
 import { fileErrorText, incomingHash, linkMessageHistory } from './link-messages'
 import { LinkFiles } from './link-files'
-import { groupedAttention, isProjectShared, isRunNotice, type OwnerQuestion } from './model'
+import { groupedAttention, isProjectShared, type OwnerQuestion } from './model'
 import { mainAgent, roleReminder, switchLead, takeoverView, recoverTakeover } from './main-agent'
 import { backupDefaults, projectLeadDefaults } from '../../workspace/agent-launch.mjs'
 import { promptClientPath, refreshReleaseSetup, pluginVersionLabel, release, roleRegistryPath } from '../scripts/orca-cli.mjs'
@@ -179,8 +179,7 @@ export function createCoordinator(api: OrcaWorkerApi, runtime: CoordinatorRuntim
           body: `项目：${project.ref.name}（${mail.projectId}）\n邮件：${mail.id} · 执行者 ${mail.from}\n原文摘录（资料）：\n${mail.body.slice(0, 1000)}\n${action}` }]
       })
       const obsolete = (delivery: Delivery) => {
-        if (delivery.state !== 'pending') return false
-        if (!delivery.runNotice) return isRunNotice(delivery.id)
+        if (delivery.state !== 'pending' || !delivery.runNotice) return false
         const { projectId, runId } = delivery.runNotice
         return currentRuns.get(projectId)?.runId !== runId ||
           updated.get(projectId)?.runId === runId && !actionableRunMail.has(delivery.noticeKeys?.[0] ?? '')
@@ -218,8 +217,7 @@ export function createCoordinator(api: OrcaWorkerApi, runtime: CoordinatorRuntim
   }, () => orca.panels.post('project.changed', { projectId: '' }), undefined, async (peer, messages) => {
     await store.mutateMessaging(m => {
       const sent = m.deliveries.filter(d => d.linkMessageHash && d.state === 'sent')
-      const expired = new Set(sent.slice(0, Math.max(0, sent.length - linkMessageHistory)))
-      if (expired.size) m.deliveries = m.deliveries.filter(d => !expired.has(d))
+      m.deliveries = retainRecent(m.deliveries, sent, linkMessageHistory)
       for (const message of messages) {
         const id = 'link-message:' + fingerprint([peer.id, message.requestId]), linkMessageHash = incomingHash(message)
         const prior = m.deliveries.find(d => d.id === id)
@@ -497,7 +495,7 @@ export function createCoordinator(api: OrcaWorkerApi, runtime: CoordinatorRuntim
     return role === 'workspace' ? main.deliver(run, { ...d, body }) : runtime.send(run, { ...d, body })
   }
   function deferMailbox() { setImmediate(() => { void flushMailbox().catch(() => {}) }) }
-  const needsWorkspaceRun = (d: Delivery) => d.linkMessageHash || isRunNotice(d.id) || d.id.startsWith('setup-hooks:')
+  const needsWorkspaceRun = (d: Delivery) => d.linkMessageHash || d.runNotice || d.id.startsWith('setup-hooks:')
   async function flushMailbox(): Promise<void> {
     const running = busy.get(mailbox)
     if (running) { await running; return flushMailbox() }
@@ -506,7 +504,7 @@ export function createCoordinator(api: OrcaWorkerApi, runtime: CoordinatorRuntim
         while (true) {
           const { runId } = await store.workspace(), m = await store.messaging()
           const d = m.deliveries.find(x => x.state === 'pending' &&
-            (x.runNotice ? actionableRunMail.has(x.noticeKeys?.[0] ?? '') : !isRunNotice(x.id)) &&
+            (!x.runNotice || actionableRunMail.has(x.noticeKeys?.[0] ?? '')) &&
             (x.targetRunId || !needsWorkspaceRun(x) || runId) &&
             (!x.external || m.feishu.enabled && x.external.appId === m.feishu.appId && m.feishu.chatIds.includes(x.external.chatId)))
           if (!d) break
@@ -632,7 +630,7 @@ export function createCoordinator(api: OrcaWorkerApi, runtime: CoordinatorRuntim
     const { list, error } = await availableProjectRecords()
     // Orca registration defines membership. A project can be registered without a workspace.
     const inbox = await unsubmitted(questions, list)
-    return { ...overview(list, await store.workspace(), error), versionLabel, questions: inbox.filter(item => !item.report), reports: inbox.filter(item => item.report), workspace: await main.read(live), links: await links.snapshot(), connections: await connections.list(), machines: [{ id: 'local', name: os.hostname(), role: 'host' as const, online: true }] }
+    return { ...overview(list, await store.workspace(), error), versionLabel, questions: inbox.filter(item => !item.report), reports: inbox.filter(item => item.report), workspace: await main.read(live, list), links: await links.snapshot(), connections: await connections.list(), machines: [{ id: 'local', name: os.hostname(), role: 'host' as const, online: true }] }
   })
   orca.panels.handle('workspace.message', async input => {
     const id = text(input.projectId, '项目编号', 200)
@@ -885,10 +883,11 @@ export function createCoordinator(api: OrcaWorkerApi, runtime: CoordinatorRuntim
         await backups.missing(r, '找不到已绑定主会话的工作区', w.runId).catch(() => {})
         continue
       }
+      const bot = !project && w.bot
       const pending: { at: number; title: string }[] = []
-      if (r.backup?.handle || (!project && w.bot)) {
-        const mail = project ? waitingByRun.get(r.runId) : await runtime.mail(r.runId).then(m => [...m.waiting ?? [], ...m.questions.map(q => ({ at: q.at, title: q.subject }))] as Waiting).catch(() => null)
-        if ((mail === null || !mail && r.backup?.phase === 'probing') && !(w.bot && !project)) continue
+      if (r.backup?.handle || bot) {
+        const mail = project ? waitingByRun.get(r.runId) : await runtime.mail(r.runId).then(m => [...m.waiting ?? [], ...m.questions.filter(q => !bot || !q.read).map(q => ({ at: q.at, title: q.subject }))] as Waiting).catch(() => null)
+        if ((mail === null || !mail && r.backup?.phase === 'probing') && !bot) continue
         const reports = (mail ?? []).flatMap(m => m.report ? [m.report] : [])
         const submitted = project && await store.archive.submittedReports(project, reports)
         pending.push(...(mail ?? []).filter(m => !m.report || (submitted ? !submitted.has(m.report.id) : !m.read)))
@@ -899,7 +898,7 @@ export function createCoordinator(api: OrcaWorkerApi, runtime: CoordinatorRuntim
             const at = Date.parse(e.receivedAt)
             if (!e.taskId || (submitted.get(e.taskId) ?? Infinity) < at) pending.push({ at, title: e.text.slice(0, 120) })
           }
-        } else {
+        } else if (!bot) {
           for (const entry of mailbox.inbox) {
             if (mailbox.deliveries.some(d => d.id === entry.event.id && d.targetRunId === w.runId) &&
               !mailbox.deliveries.some(d => d.external?.appId === entry.appId && d.external.replyTo === entry.event.sourceId.slice(entry.appId.length + 1) && d.state === 'sent'))
@@ -908,7 +907,7 @@ export function createCoordinator(api: OrcaWorkerApi, runtime: CoordinatorRuntim
         }
         const deliveries = project ? project.deliveries : [...mailbox.deliveries, ...projects.flatMap(p => p.deliveries.filter(d => d.targetRunId === w.runId))]
         for (const d of deliveries) if (!d.control && !d.external && !d.id.startsWith('retired:') && (!d.targetRunId || d.targetRunId === r.runId) &&
-          ['pending', 'uncertain'].includes(d.state)) pending.push({ at: d.createdAt ?? r.backup?.confirmedAt ?? r.backup?.since ?? Date.parse(w.boundAt ?? ''), title: d.subject })
+          (d.state === 'pending' || !bot && d.state === 'uncertain')) pending.push({ at: d.createdAt ?? r.backup?.confirmedAt ?? r.backup?.since ?? Date.parse(w.boundAt ?? ''), title: d.subject })
       }
       const context = (project ? [project] : projects).flatMap(p => p.tasks.filter(t => t.phase === 'working').map(t =>
         [t.title, ...t.executions.slice(-3).map(e => e.agent + ' ' + e.dispatchId)].join(' · ').slice(0, 300))).slice(0, 12).join('；')

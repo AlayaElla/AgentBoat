@@ -5,12 +5,12 @@ import { Butler, butlerUrl } from './butler'
 import { sample } from './fixtures'
 
 const token = 'test-only-inbound-token-1234567890123456789', other = 'test-only-outbound-token-1234567890123456789'
-async function instance(url = 'http://127.0.0.1:9900', failNotification = false) {
+async function instance(url = 'http://127.0.0.1:9900', failNotification = false, name = 'Hermes') {
   const storage = new Map<string, any>([['project:p1', sample().project]]), secrets = new Map<string, string>(), notices: any[] = []
   const before = structuredClone(storage.get('project:p1'))
   const api = { storage: { get: async (k: string) => structuredClone(storage.get(k) ?? null), set: async (k: string, v: any) => { assert.equal(k, 'workspace.a2a:butler'); storage.set(k, structuredClone(v)) } },
     secrets: { get: async (k: string) => secrets.get(k) ?? null, set: async (k: string, v: string) => { secrets.set(k, v) } } }
-  const b = new Butler(api as any, async () => 'run_mock', async (runId, id, body) => { notices.push({ runId, id, body }); if (failNotification) throw Error('Mock notification unavailable') }, () => {}, 'butler', () => 'Hermes')
+  const b = new Butler(api as any, async () => 'run_mock', async (runId, id, body) => { notices.push({ runId, id, body }); if (failNotification) throw Error('Mock notification unavailable') }, () => {}, 'butler', () => name)
   await b.handle({ operation: 'save', revision: 0, enabled: true, port: 0, url, inboundToken: token, outboundToken: other })
   return { b, storage, secrets, notices, before }
 }
@@ -249,19 +249,29 @@ test('disabling while Hermes is busy leaves queued messages unsent', async () =>
 
 
 test('A2A compacts completed payloads and keeps exact deduplication, failures stop one round', async () => {
-  const f = await instance(undefined, true)
+  const f = await instance(undefined, true, '联系人甲')
   try {
     const entry = (id: string, notification: string, state: string, size = 1) => ({ id, direction: 'incoming', hash: id, notification,
       task: { id: 'task-' + id, contextId: 'context', status: { state, timestamp: new Date().toISOString() }, history: [{ messageId: id, role: 'ROLE_USER', parts: [{ text: 'x'.repeat(size) }] }] } })
     f.storage.set('workspace.a2a:butler', { version: 1, revision: 1, enabled: true, port: 0, url: 'http://127.0.0.1:9900', entries: [
       entry('ended', 'sent', 'TASK_STATE_COMPLETED', 185000), entry('first', 'pending', 'TASK_STATE_SUBMITTED'), entry('second', 'pending', 'TASK_STATE_SUBMITTED')] })
     await f.b.handle({ operation: 'save', revision: 1, enabled: false, port: 0, url: 'http://127.0.0.1:9900' })
+    const send = { operation: 'send' as const, requestId: 'new-request', text: '测试', runId: 'run_mock' }
+    await assert.rejects(() => f.b.handle(send), /请先启用「联系人甲」/)
+    await assert.rejects(() => f.b.handle({ ...send, operation: 'reply', id: 'absent' }), /找不到「联系人甲」来源任务/)
     const compact = await f.b.snapshot()
     assert.equal(compact.entries[0].id, 'ended'); assert.equal(compact.entries[0].hash, 'ended'); assert.deepEqual(compact.entries[0].task.history, [])
     assert.equal(compact.entries[1].task.history.length, 1)
     f.storage.get('workspace.a2a:butler').enabled = true
     await (f.b as any).flushNotifications()
     assert.deepEqual((await f.b.snapshot()).entries.map(e => e.notification), ['sent', 'uncertain', 'pending']); assert.equal(f.notices.length, 1)
+    const data = f.storage.get('workspace.a2a:butler')
+    data.entries.push(...Array.from({ length: 101 }, (_, i) => entry('closed-' + i, 'sent', 'TASK_STATE_COMPLETED')))
+    await f.b.handle({ operation: 'save', revision: data.revision, enabled: false, port: 0, url: data.url })
+    const retained = (await f.b.snapshot()).entries
+    assert.equal(retained.length, 102)
+    assert.deepEqual(retained.slice(0, 3).map(e => e.id), ['first', 'second', 'closed-1'])
+    assert.equal(retained.at(-1)?.id, 'closed-100')
   } finally { f.b.stop() }
 })
 

@@ -4,6 +4,7 @@ import { workspaceSoul } from './bot-soul'
 import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { tmpdir } from 'node:os'
+import { testCoordinator } from './test-runtime'
 import { BackupLeads } from './backup-lead'
 import { mainAgent } from './main-agent'
 import { ProjectStore } from './store'
@@ -150,7 +151,7 @@ test('本机 bot 名单与远端隔离；每次更新先读完整记录，仅写
   assert.deepEqual(calls.map(([m]) => m), ['bots.list','bots.list','bots.update','bots.list','bots.update'])
 })
 
-async function setup() {
+function botRuntime() {
   const env = { current: { ...initial } as BotTarget | undefined, home: first as string | undefined, owner: null as string | null,
     soulActions: [] as string[], soulError: '', resetError: false, resetTo: first,
     generation: 2, reject: false, next: second, warning: '', resets: [] as string[], sends: [] as { target: string; body: string; type: string }[], updates: [] as any[], sessions: [primary, standby], launches: [] as string[] }
@@ -188,6 +189,11 @@ async function setup() {
     launchMain: async (ws: string) => { env.launches.push(ws); return standby.handle },
     send: async (target: string, d: { body: string }) => { env.sends.push({ target, body: d.body, type: 'run' }); return {} }
   } as unknown as CoordinatorRuntime
+  return { env, inventory, runtime }
+}
+
+async function setup() {
+  const { env, inventory, runtime } = botRuntime()
   let store!: ProjectStore, backups!: BackupLeads, main!: ReturnType<typeof mainAgent>
   const worker = await mountWorker({ default: orca => {
     store = new ProjectStore(orca.storage)
@@ -210,6 +216,30 @@ async function setup() {
   }
   return { env, worker, store, backups, main, poll, bind }
 }
+
+test('bot ignores delivered Feishu mail, uncertain notifications and read questions, then stops on overdue queued mail', async () => {
+  const { runtime } = botRuntime()
+  const host = mockHost()
+  let c!: ReturnType<typeof testCoordinator>
+  const worker = await mountWorker({ default: api => {
+    c = testCoordinator(api, { ...runtime, mail: async () => ({ waiting: [], reports: [], questions: [
+      { id: 'read', from: 'worker', subject: '已读问题', body: '已读', at: 1, read: true }
+    ] }) })
+  } }, { host })
+  try {
+    await c.store.mutateWorkspace(w => { w.runId = 'run_bot'; w.session = primary; w.bot = { id: initial.id }; w.boundAt = new Date(1).toISOString() })
+    await c.store.mutateMessaging(m => {
+      m.inbox.push({ appId: 'app', state: 'done', event: { id: 'seen', source: 'feishu', sourceId: 'app:seen', chatId: 'chat', senderId: 'owner', threadId: 'thread', receivedAt: new Date(1).toISOString(), text: '好的' } })
+      m.deliveries.push({ id: 'seen', targetRunId: 'run_bot', state: 'sent', subject: '已送达', body: '' },
+        { id: 'check', state: 'uncertain', subject: '待核对', body: '', createdAt: 1 })
+    })
+    await c.checkBackups()
+    assert.ok(!(await c.store.workspace()).botStopped)
+    await c.store.mutateMessaging(m => { m.deliveries.push({ id: 'queued', state: 'pending', subject: '待送达', body: '', createdAt: 1 }) })
+    await c.checkBackups()
+    assert.ok((await c.store.workspace()).botStopped)
+  } finally { c.stop(); await worker.deactivate() }
+})
 
 test('先写职责再开主对话、投递并核对收件地址，准备失败时允许取消', async () => {
   const { env, worker, store } = await setup()
@@ -334,29 +364,6 @@ test('同名和改名按 ID 识别，额度恢复时间未知时等主人，面�
     assert.equal((await read()).bot, undefined)
     assert.ok(env.soulActions.includes('remove bot-1'))
     assert.equal((await store.workspace()).originalBot, undefined)
-  } finally { await worker.deactivate() }
-})
-
-test('迁移只清理旧待命记录与控制命令，保留会话和未送达消息', async () => {
-  const { env, worker, store, main, bind } = await setup()
-  try {
-    await bind()
-    await store.mutateWorkspace(w => {
-      Object.assign(w.bot!, { standbyWorkspace: standby.workspace, standbyPath: standby.path })
-      w.backup = { primary: first, agent: standby.agent, handle: standby.handle, cycle: 'old', phase: 'standby', since: 1, history: [] }
-      w.retired = [{ id: 'old-take', subject: '', body: '', state: 'pending', control: { cycle: 'old', action: 'take', handle: standby.handle } },
-        { id: 'bot-mail:keep', subject: '消息', body: '消息', informational: true, createdAt: Date.now(), state: 'pending' }]
-    })
-    await main.recover(); await main.flushRetired()
-    const w = await store.workspace()
-    assert.equal(w.backup, undefined)
-    assert.ok(w.bot?.standbyRetired)
-    assert.ok(!('standbyWorkspace' in w.bot) && !('standbyPath' in w.bot))
-    assert.equal(w.session?.handle, first)
-    assert.deepEqual(w.retired?.map(d => d.id), ['bot-mail:keep'])
-    assert.deepEqual(env.launches, [])
-    await main.recover()
-    assert.equal((await store.workspace()).revision, w.revision)
   } finally { await worker.deactivate() }
 })
 

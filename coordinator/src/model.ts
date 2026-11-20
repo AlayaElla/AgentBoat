@@ -116,7 +116,6 @@ export function waitingForProjectLead(binding?: WorkspaceBinding) {
 export interface BotTarget { id: string; name: string; agent: string; paused: boolean }
 export interface BotBinding {
   id: string; name?: string; agent?: string; paused?: boolean
-  standbyRetired?: boolean
   soul?: { home: string; backup?: string; padding?: { prefix: string; length: number } }
   reason?: string; recoveryAt?: number; result?: string
 }
@@ -155,7 +154,6 @@ export type Attention = {
   itemId: string; title: string; summary: string
 } & ({ kind: 'review'; itemRevision: number; fingerprint: string } | { kind: 'decision' | 'blocked' | 'rework'; replied?: boolean })
 export interface OwnerQuestion { id: string; projectId: string; runId: string; from: string; title: string; body: string; at: number; report?: import('../scripts/worker-reports.mjs').WorkerReport }
-export const isRunNotice = (id: string) => /^(?:orca-question|orca-report|orca-mail):/.test(id)
 export interface Overview {
   versionLabel?: string
   connections?: import('./connections').Connection[]

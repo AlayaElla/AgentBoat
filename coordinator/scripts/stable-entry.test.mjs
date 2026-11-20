@@ -72,10 +72,13 @@ test('one setup survives two worker upgrades, old version pruning and separate O
   writeFileSync(guide, readFileSync(guide, 'utf8') + '\nfixture upgrade');
   await activateEntry(second);
   assert.match(readFileSync(skill, 'utf8'), /fixture upgrade$/);
+  const oldSkill = readFileSync(projectSkill, 'utf8').replaceAll(stable.replaceAll('\\', '/'), first.replaceAll('\\', '/'));
+  writeFileSync(projectSkill, oldSkill);
   const latest = version('c');
   rmSync(first, { recursive: true });
   await activateEntry(latest);
   assert.doesNotMatch(readFileSync(skill, 'utf8'), /fixture upgrade$/);
+  assert.equal(readFileSync(projectSkill, 'utf8'), oldSkill);
   assert.equal(realpathSync(stable), latest);
   assert.ok(!existsSync(path.join(temp, 'other-profile/agentboat-current')));
   const docs = ['workspace/README.md', 'coordinator/LINKS.md', 'coordinator/skill/orca-project-coordinator/references/bridge.md'];

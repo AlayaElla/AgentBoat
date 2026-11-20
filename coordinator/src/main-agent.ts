@@ -5,7 +5,7 @@ import { randomBytes, randomUUID } from 'node:crypto'
 import { existsSync } from 'node:fs'
 import { promptClientPath } from '../scripts/orca-cli.mjs'
 import type { OrcaWorkerApi } from 'orca/worker'
-import { agents, backupInCharge, type AgentSession, type Delivery, type LeadSwitch, type MainTakeover, type Project, type StoredTakeover, type WorkspaceBinding } from './model'
+import { agents, type AgentSession, type Delivery, type LeadSwitch, type MainTakeover, type Project, type StoredTakeover, type WorkspaceBinding } from './model'
 import type { CoordinatorRuntime } from './runtime'
 import type { AgentLaunch } from '../../workspace/agent-launch.mjs'
 import { ProjectStore, fail, fingerprint, takeoverActive, text, revision } from './store'
@@ -119,7 +119,7 @@ export async function switchLead(runtime: CoordinatorRuntime, input: LeadSwitch,
 }
 
 export function mainAgent(orca: OrcaWorkerApi, store: ProjectStore, runtime: CoordinatorRuntime, changed: () => void, bound: () => void, projects: () => Promise<Project[]>, backups: BackupLeads, sample: () => import('./model').AgentsSnapshot) {
-  async function read(sample?: import('./model').AgentsSnapshot): Promise<WorkspaceBinding> {
+  async function read(sample?: import('./model').AgentsSnapshot, list?: Project[]): Promise<WorkspaceBinding> {
     const w = await store.workspace()
     const takeover = takeoverView(w.takeover)
     const previous = w.retired?.filter(d => d.id.startsWith('retired:')).at(-1)
@@ -130,7 +130,7 @@ export function mainAgent(orca: OrcaWorkerApi, store: ProjectStore, runtime: Coo
     return { revision: w.revision, runId: w.runId, ...(w.bot ? { bot: { ...w.bot, ...current } } : {}),
       ...(w.backup ? { backup: backupView(w.backup) } : {}), securityBoundary: mainSecurityBoundary,
       ...(s ? { session: { ...s, online: w.botSwitch ? 'unknown' : online } } : {}), ...(w.boundAt ? { boundAt: w.boundAt } : {}),
-      ...(w.runId ? { projectNames: (await projects()).filter(p => !p.hidden && p.runId === w.runId).map(p => p.ref.name) } : {}),
+      ...(w.runId ? { projectNames: (list ?? await projects()).filter(p => !p.hidden && p.runId === w.runId).map(p => p.ref.name) } : {}),
       ...(previous ? { previousNotice: previous.state } : {}),
       ...(takeover ? { takeover } : {}) }
   }
@@ -221,23 +221,7 @@ export function mainAgent(orca: OrcaWorkerApi, store: ProjectStore, runtime: Coo
   })
   async function recover() {
     const w = await store.workspace()
-    const legacyBot = (bot: WorkspaceBinding['bot']) => bot && ('standbyWorkspace' in bot || 'standbyPath' in bot)
-    if (legacyBot(w.bot) || legacyBot(w.takeover?.bot) || (w.bot && w.backup) || needsLeadCompaction(w) || w.takeover?.state === 'sending' || w.retired?.some(d => d.state === 'sending')) await store.mutateWorkspace(w => {
-      for (const bot of [w.bot, w.takeover?.bot]) {
-        if (bot && 'standbyWorkspace' in bot) delete bot.standbyWorkspace
-        if (bot && 'standbyPath' in bot) delete bot.standbyPath
-      }
-      if (w.bot && w.backup) {
-        if (w.backup.handle) w.bot.standbyRetired = true
-        if (backupInCharge(w.backup) || w.backup.phase === 'taking') {
-          w.botStopped = true
-          w.bot.result = '原待命会话的接管状态需要核对。请在面板重新选择主 agent。'
-          delete w.botSwitch; delete w.botQuota
-        }
-        delete w.backup
-        if ('botHandoff' in w) delete w.botHandoff
-        w.retired = w.retired?.filter(d => !d.control && !d.id.startsWith('lead-recheck:'))
-      }
+    if (needsLeadCompaction(w) || w.takeover?.state === 'sending' || w.retired?.some(d => d.state === 'sending')) await store.mutateWorkspace(w => {
       recoverTakeover(w.takeover)
       for (const d of w.retired ?? []) if (d.state === 'sending') d.state = 'uncertain'
     })

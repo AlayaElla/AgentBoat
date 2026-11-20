@@ -1,7 +1,7 @@
 import http from 'node:http'
 import { randomUUID, timingSafeEqual } from 'node:crypto'
 import type { OrcaWorkerApi } from 'orca/worker'
-import { fail, fingerprint, object, text } from './store'
+import { fail, fingerprint, object, retainRecent, text } from './store'
 
 interface Message { messageId: string; role: 'ROLE_USER' | 'ROLE_AGENT'; contextId?: string; parts: { text: string }[] }
 interface Task { id: string; contextId: string; status: { state: string; timestamp: string }; history: Message[]; artifacts?: { artifactId: string; parts: { text: string }[] }[] }
@@ -55,11 +55,12 @@ export class Butler {
     const work = this.chain.then(async () => {
       const d = await this.data(), result = await fn(d)
       d.revision++
-      for (const e of d.entries) {
+      const finished = d.entries.filter(e => ['TASK_STATE_COMPLETED', 'TASK_STATE_FAILED', 'TASK_STATE_CANCELED', 'TASK_STATE_REJECTED'].includes(e.task.status.state) && ['sent', 'none'].includes(e.notification) && !e.error)
+      for (const e of finished) {
         if (Buffer.byteLength(JSON.stringify(d)) < 150000) break
-        if (!['TASK_STATE_COMPLETED', 'TASK_STATE_FAILED', 'TASK_STATE_CANCELED', 'TASK_STATE_REJECTED'].includes(e.task.status.state) || !['sent', 'none'].includes(e.notification) || e.error) continue
-        e.task.history = []; delete e.task.artifacts; delete e.error
+        e.task.history = []; delete e.task.artifacts
       }
+      d.entries = retainRecent(d.entries, finished)
       if (Buffer.byteLength(JSON.stringify(d)) > 190000) fail('A2A 记录已达容量上限；原记录已保留')
       await this.api.storage.set(this.key, d as any)
       for (const resolve of this.waiters) resolve()
@@ -119,20 +120,20 @@ export class Butler {
       await this.mutate(d => {
         const old = d.entries.find(e => e.id === requestId), hash = fingerprint([value, input.contextId || ''])
         if (old) { if (old.direction !== 'outgoing' || old.hash !== hash) fail('同编号内容不同'); return }
-        if (!d.enabled) fail('请先启用Hermes')
+        if (!d.enabled) fail(`请先启用「${this.name()}」`)
         d.entries.push({ id: requestId, direction: 'outgoing', hash, notification: 'none', task: { id: requestId, contextId, status: status('TASK_STATE_SUBMITTED'), history: [message(requestId, value, 'ROLE_USER', contextId)] } })
       })
     } else if (input.operation === 'reply') await this.mutate(d => {
       const e = d.entries.find(e => e.direction === 'incoming' && e.task.id === input.id)
-      if (!e) fail('找不到Hermes来源任务')
+      if (!e) fail(`找不到「${this.name()}」来源任务`)
       const hash = fingerprint(value)
-      if (e.replyId) { if (e.replyId !== requestId || e.replyHash !== hash) fail('该Hermes任务已经回复'); return }
+      if (e.replyId) { if (e.replyId !== requestId || e.replyHash !== hash) fail(`「${this.name()}」的这项任务已经回复`); return }
       e.replyId = requestId; e.replyHash = hash
       e.task.history.push(message(requestId, value, 'ROLE_AGENT', e.task.contextId))
       e.task.artifacts = [{ artifactId: requestId, parts: [{ text: value }] }]
       e.task.status = status('TASK_STATE_COMPLETED')
     })
-    else fail('不支持的Hermes操作')
+    else fail(`不支持的「${this.name()}」操作`)
     void this.tick().catch(() => {}); return this.snapshot()
   }
   private async fetch(url: string, body?: unknown): Promise<any> {
@@ -173,7 +174,7 @@ export class Butler {
       const reply = await this.fetch(url, { jsonrpc: '2.0', id: randomUUID(), method: poll ? 'GetTask' : 'SendMessage', params: poll ? { id: e.remoteId } : { message: e.task.history[0], configuration: { returnImmediately: true } } })
       const task = poll ? reply.result : reply.result?.task
       const direct = !poll && reply.result?.message
-      if (!task && !direct || task && (!task.id || !task.contextId || !/^TASK_STATE_/.test(task.status?.state))) throw Error('Hermes A2A 响应格式不正确')
+      if (!task && !direct || task && (!task.id || !task.contextId || !/^TASK_STATE_/.test(task.status?.state))) throw Error(`「${this.name()}」 A2A 响应格式不正确`)
       const content = task ? resultText(task) : direct.parts?.map((p: any) => p.text).filter(Boolean).join('\n').slice(0, 16000)
       await this.mutate(d => {
         const x = d.entries.find(x => x.id === e.id)!

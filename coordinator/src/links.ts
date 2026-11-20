@@ -198,10 +198,10 @@ function received(raw: unknown, peer: Peer): SharedReport {
       out.tasks = p.tasks.map((v: unknown) => {
         const t = object(v), decisions = titles(t.decisions), acceptance = titles(t.acceptance)
         if (!['working', 'ready', 'completed', 'blocked', 'paused'].includes(t.phase) ||
-          t.state !== undefined && (typeof t.state !== 'string' || !Object.hasOwn(labels, t.state))) fail('对端任务阶段不正确')
-        const state = t.state ?? taskState({ phase: t.phase, decisions: decisions.map(() => ({})), acceptance: acceptance.map(() => ({ status: 'pending' })) })
-        return { title: str(t.title, 200), phase: t.phase, state, decisions, acceptance,
-          ...(typeof t.blockedPending === 'boolean' && { blockedPending: t.blockedPending }) }
+          typeof t.state !== 'string' || !Object.hasOwn(labels, t.state) ||
+          t.phase === 'blocked' && typeof t.blockedPending !== 'boolean') fail('对端任务阶段不正确')
+        return { title: str(t.title, 200), phase: t.phase, state: t.state as keyof typeof labels, decisions, acceptance,
+          ...(t.phase === 'blocked' && { blockedPending: t.blockedPending }) }
       })
       out.activity = null
       if (p.activity !== null) {

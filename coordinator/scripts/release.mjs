@@ -10,7 +10,6 @@ if (!/^v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/.test(tag) || !output ||
 }
 const root = fileURLToPath(new URL('../../', import.meta.url));
 const coordinator = path.join(root, 'coordinator');
-if (!existsSync(path.join(coordinator, 'scripts/worker-reports.mjs'))) throw new Error('请在合入 Claude 与 Codex hooks 安装器后打包');
 const out = path.resolve(output);
 const relative = path.relative(root, out);
 if (relative === '' || (!path.isAbsolute(relative) && relative !== '..' && !relative.startsWith('..' + path.sep)) || existsSync(out)) {

@@ -14,7 +14,7 @@ export const transferKey = (identity: string, version: string, files: LinkFile[]
 function artifactResult({ path: file, name, size, type }: ReceivedFile, method: StreamMethod) {
   return { key: path.basename(path.dirname(file)), name, size, type, method }
 }
-type Request = ArtifactRef & { requestId: string; offset: number; bulk?: true }
+type Request = ArtifactRef & { requestId: string; offset: number }
 type Reply = { requestId: string; offset: number; reason?: string; version?: string; files?: LinkFile[]; chunk?: ReturnType<typeof wireChunk> }
 type Result = ReturnType<typeof artifactResult>
 type Receipt = { requestId: string; ok: boolean }
@@ -87,7 +87,7 @@ export class LinkArtifacts {
       wake()
     }
     const p: Pending = { identity, started, direct, offer: pull ? undefined : offer, fallback,
-      request: { ...ref, requestId, offset: -1, bulk: true }, result, finish, resetTimeout }
+      request: { ...ref, requestId, offset: -1 }, result, finish, resetTimeout }
     this.pending.set(peer, p)
     this.progress({ ...ref, id: peer, method: 'direct', received: 0, size: 0 })
     if (pull) {
@@ -147,7 +147,7 @@ export class LinkArtifacts {
   rejectDirect(peer: string, requestId: string, code: unknown) {
     const p = this.pending.get(peer)
     if (!p?.direct || p.receiving || p.request.requestId !== requestId) return
-    if (code === 'interrupted' || code === 'unsupported' || code === 'timeout' || code === 'busy') p.fallback(code)
+    if (code === 'interrupted' || code === 'timeout' || code === 'busy') p.fallback(code)
     else p.finish(undefined, reasonText(code))
   }
 
@@ -168,7 +168,7 @@ export class LinkArtifacts {
     if (request) {
       const ref = artifactRef(request), requestId = text(request.requestId, '请求编号', 64)
       if (!Number.isSafeInteger(request.offset) || request.offset < -1) fail('工作间文件分块不正确')
-      this.requests.set(peer, { ...ref, requestId, offset: request.offset, ...(request.bulk === true && { bulk: true as const }) })
+      this.requests.set(peer, { ...ref, requestId, offset: request.offset })
     }
     const p = this.pending.get(peer)
     if (!reply || !p || p.direct || reply.requestId !== p.request.requestId || reply.offset !== p.request.offset) return !!request || !!p && deferred === p.request.requestId
@@ -227,11 +227,8 @@ export class LinkArtifacts {
     try {
       if (Date.now() - transfer.started >= deadlineMs) fail('取文件超时，请重试')
       const { root, file, version } = await lookup(inbound)
-      const part = await artifactPart(root, file, offset, !!inbound.bulk)
+      const part = await artifactPart(root, file, offset)
       if (part.files) transfer.size = part.files[0].size
-      // Older receivers do not send completion receipts.
-      if (!inbound.bulk && (transfer.size === 0 || part.chunk && offset + Buffer.byteLength(part.chunk.data, 'base64') === transfer.size))
-        this.finishServing(peer, 'provided')
       return { request, receipt, reply: { requestId, offset, version, ...part } }
     } catch (e) {
       const reason = (e as { code?: string }).code === 'invalid_request' ? (e as Error).message : reasonText(artifactReason(e, 'missing'))

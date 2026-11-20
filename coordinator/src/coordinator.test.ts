@@ -976,12 +976,15 @@ test('overview reads registered projects with closed workspaces without writing 
   submitTask(p, { id: 'blocked', title: '依赖受阻', goal: '修复依赖', phase: 'blocked', decisions: [{ id: 'ask', question: '选择方案？' }] })
   submitTask(p, { ...deliverable, id: 'rework' })
   feedback(p, { items: [{ taskId: 'rework', kind: 'acceptance', itemId: 'page-check', itemRevision: 1, result: 'changes_requested', note: '调整标题' }] })
-  const host = mockHost({ storage: { 'project:p1': p as any } })
+  const host = mockHost({ storage: { 'project:p1': p as any, workspace: { version: 1, revision: 0, runId: p.runId, requests: [] } } })
   const before = structuredClone(host.data().storage)
-  const runtime: Partial<CoordinatorRuntime> = { projects: async () => [{ ...refs[0], workspace: '' }, refs[1]], verifyRun: async () => {}, send: async () => { throw new Error('must not send') } }
+  let catalogReads = 0
+  const runtime: Partial<CoordinatorRuntime> = { projects: async () => { catalogReads++; return [{ ...refs[0], workspace: '' }, refs[1]] }, verifyRun: async () => {}, send: async () => { throw new Error('must not send') } }
   const worker = await mountWorker({ default: (orca: OrcaWorkerApi) => { createCoordinator(orca, runtime) } }, { host })
   const all = await worker.request('workspace.overview')
-  assert.equal(all.workspace.revision, 0); assert.equal(all.workspace.runId, '')
+  assert.equal(catalogReads, 1)
+  assert.deepEqual(all.workspace.projectNames, [p.ref.name])
+  assert.equal(all.workspace.revision, 0); assert.equal(all.workspace.runId, p.runId)
   assert.deepEqual(all.attention.map(a => a.kind).sort(), ['blocked', 'decision', 'review', 'rework'])
   assert.equal(all.projects.length, 2)
   assert.equal(all.projects[0].counts.review, 1)

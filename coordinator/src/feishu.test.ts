@@ -241,6 +241,25 @@ test('mailbox compacts finished payloads, keeps dedup hashes and preserves unfin
   assert.equal(saved.inbox[0].event.id, event('done','original').id); assert.equal(saved.inbox[0].event.text, '')
   assert.equal(saved.deliveries[0].receiptHash, fingerprint([original, 'done', 'app_demo'])); assert.equal(saved.deliveries[0].body, '')
   assert.equal(saved.deliveries[1].body, pending); assert.equal(saved.deliveries[1].state, 'pending')
+
+  const open = event('unanswered', 'needs a reply')
+  const recent = await store.mutateMessaging(m => {
+    m.inbox.push({ appId: 'app_demo', event: open, state: 'done' })
+    m.deliveries.push({ id: open.id, state: 'sent', subject: '', body: '' })
+    for (let i = 0; i < 550; i++) {
+      const id = 'closed-' + i
+      m.inbox.push({ appId: 'app_demo', event: event(id, 'closed'), state: 'done' })
+      m.deliveries.push({ ...receipt, id: 'agent-reply:' + id, body: '', external: { ...receipt.external!, replyTo: id } })
+    }
+    assert.ok(Buffer.byteLength(JSON.stringify(m)) > 200000)
+    m.deliveries.push({ id: 'new', state: 'pending', subject: '', body: pending })
+  })
+  assert.equal(recent.inbox.length, 101)
+  assert.equal(recent.inbox[0].event.text, open.text)
+  assert.equal(recent.inbox[1].event.id, event('closed-450', 'closed').id)
+  assert.equal(recent.deliveries.length, 103)
+  assert.ok(recent.deliveries.some(d => d.id === open.id))
+  assert.equal((await store.messaging()).deliveries.at(-1)?.id, 'new')
 })
 
 test('rejected Feishu saves leave existing credentials unchanged', async () => {

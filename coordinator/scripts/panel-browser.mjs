@@ -94,7 +94,7 @@ async function setup(options = {}, hub) {
     if (options.blocked) project.tasks.push({ ...clone(task), id: 'blocked', title: '等待补建', phase: 'blocked', blockedRevision: 2, acceptance: [] });
     const p = (id, relation, status = 'connected') => ({ id, name: '工作间 ' + id, workspaceId: 'ws-' + id, state: status === 'pending' ? 'pending' : 'active', relation, sharingSet: false, status, scope: 'none', projectIds: [], lastSyncAt: new Date(now - 100000).toISOString(), receivedAt: new Date(now).toISOString(),
       ...(status === 'connected' ? { report: { scope: 'details', mainAgent: { agent: 'codex', title: '对方统筹会话', online: 'online', activity: {state:'work', since:now-300000} }, projects: [{ id: 'remote-p', name: '开放的项目', updatedAt: new Date().toISOString(), pending: 0, counts: { blocked: 1 },
-        tasks: [{ title: '受阻任务', phase: 'blocked', state: 'blocked', decisions: [], acceptance: [] }], activity: { truncated: true, agents: [
+        tasks: [{ title: '受阻任务', phase: 'blocked', state: 'blocked', blockedPending: true, decisions: [], acceptance: [] }], activity: { truncated: true, agents: [
           { agent: 'claude', role: 'session', state: 'need', title: '等待确认设计', since: now - 60_000 },
           { agent: 'codex', role: 'worker', state: 'work', title: '正在检查布局', taskTitle: '核对布局', since: now - 180_000 },
           { agent: 'codex', role: 'worker', state: 'done', title: '页面检查完成', since: now - 360_000 }

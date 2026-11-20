@@ -1,7 +1,7 @@
 import { reasonText } from './artifact-errors'
 import { createHash, randomUUID } from 'node:crypto'
 import { constants, createReadStream } from 'node:fs'
-import { lstat, mkdir, open, readFile, readdir, realpath, rename, rm, writeFile } from 'node:fs/promises'
+import { lstat, mkdir, open, readFile, readdir, realpath, rename, rm, rmdir, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { pluginDataPath } from '../scripts/orca-cli.mjs'
 import { artifactUrl, fail, fingerprint, object } from './store'
@@ -126,14 +126,14 @@ export async function openArtifactStream(root: string, file: string, signal: Abo
   } catch (e) { await input.close(); throw e }
 }
 
-export async function artifactPart(root: string, file: string, offset: number, bulk: boolean) {
+export async function artifactPart(root: string, file: string, offset: number) {
   const { input, size } = await openContained(root, file)
   try {
     if (offset === -1) {
       return { files: [await artifactMetadata(input, file, size)] }
     }
     if (!Number.isSafeInteger(offset) || offset < 0 || offset >= size) fail('工作间文件分块不正确')
-    return { chunk: await readChunk(input, size, 0, offset, bulk ? artifactChunkBytes : fileChunkBytes) }
+    return { chunk: await readChunk(input, size, 0, offset, artifactChunkBytes) }
   } finally { await input.close() }
 }
 
@@ -358,8 +358,26 @@ export class LinkFiles {
         else partial.push(row)
       }
       if (partial.length >= 10) fail('此连接正在接收的消息已达上限')
-      const reserved = [...done, ...partial].reduce((n, row) => n + amount(row.record.files), 0)
-      if (reserved + amount(files) > this.limits.received) return { error: 'capacity' }
+      let excess = [...done, ...partial].reduce((n, row) => n + amount(row.record.files), amount(files)) - this.limits.received
+      if (excess > 0) {
+        const copies = done.filter(({ record }) => isArtifactTransfer(record.requestId) && record.key === fingerprint([peer, record.requestId]))
+          .sort((a, b) => a.record.at.localeCompare(b.record.at))
+        const evict = []
+        for (const { folder, record } of copies) {
+          const [file] = safeFiles(record.files)
+          const names = await readdir(folder)
+          if (names.length !== 2 || !names.includes(file.name)) continue
+          evict.push({ folder, file })
+          excess -= file.size
+          if (excess <= 0) break
+        }
+        if (excess > 0) return { error: 'capacity' }
+        for (const { folder, file } of evict) {
+          await rm(path.join(folder, file.name))
+          await rm(path.join(folder, manifestName))
+          await rmdir(folder)
+        }
+      }
       record = { key, requestId, hash, at: new Date().toISOString(), files }
       await this.folder('receiving', peer, key)
       const temporary = path.join(directory, '.agentboat-manifest-' + randomUUID())

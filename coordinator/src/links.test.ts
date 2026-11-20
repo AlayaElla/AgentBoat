@@ -631,11 +631,10 @@ test('invites expire/cancel, malformed and oversized requests fail closed, expli
     const packet = { ...valid, projects: [project] }
     assert.equal(await post(s.listening, '/sync', { id: p.id, report: packet, exchange }, token), 200)
     assert.deepEqual(project.tasks?.map(t => t.state), ['review', 'decision'])
-    const legacyTasks = project.tasks!.map(({ state, ...task }) => task)
-    assert.equal(await post(s.listening, '/sync', { id: p.id, report: { ...packet, projects: [{ ...project, tasks: legacyTasks }] }, exchange }, token), 200)
     const accepted = (await a.links.snapshot()).peers[0].report
     assert.deepEqual(accepted?.projects[0].tasks, project.tasks)
     for (const changed of [
+      ...[{ state: undefined }, { phase: 'blocked' }].map(change => ({ ...packet, projects: [{ ...project, tasks: [{ ...project.tasks![0], ...change }] }] })),
       { ...packet, mainAgent: undefined }, { ...packet, mainAgent: { agent: [], title: '统筹', online: 'online' } },
       { ...packet, mainAgent: { agent: 'claude', title: '统筹', online: 'somewhere' } },
       { ...packet, projects: [{ ...project, activity: undefined }] },

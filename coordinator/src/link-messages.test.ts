@@ -248,6 +248,31 @@ test('attachment disk offsets survive restarts, unsafe names are cleaned and rev
   } finally { await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }) }
 })
 
+test('receive quota evicts the oldest artifact copy and preserves message attachments and the original', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'agentboat-evict-'))
+  try {
+    const files = new LinkFiles(root, { received: 3, outgoing: 4 }), data = Buffer.from('x')
+    const source = path.join(root, 'source.txt')
+    await writeFile(source, data)
+    const file = { name: 'source.txt', size: 1, type: 'text/plain', sha256: sha(data) }
+    const save = async (id: string) => {
+      const result = await files.receive('peer', 'work', id, id, [file], { index: 0, offset: 0, data: data.toString('base64') })
+      if (!('files' in result)) throw Error('接收未完成')
+      return result.files[0].path
+    }
+    const attachment = await save('message'), old = await save('artifact:' + 'a'.repeat(64))
+    const newest = await save('artifact:' + 'b'.repeat(64)), next = await save('message-2')
+    await assert.rejects(() => stat(old), /ENOENT/)
+    for (const retained of [source, attachment, newest, next]) assert.deepEqual(await readFile(retained), data)
+    assert.deepEqual(await files.receive('peer', 'work', 'oversize', 'hash', [{ ...file, size: 4 }]), { error: 'capacity' })
+    const note = path.join(path.dirname(newest), 'my-notes.txt')
+    await writeFile(note, data)
+    assert.deepEqual(await files.receive('peer', 'work', 'no-room', 'new', [file]), { error: 'capacity' })
+    assert.deepEqual(await readFile(note), data)
+    assert.deepEqual(await readFile(newest), data)
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
 test('the disk journal preserves existing text deduplication and grows past the host per-key limit', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'agentboat-t38-'))
   const body = '中文'.repeat(100)

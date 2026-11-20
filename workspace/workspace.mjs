@@ -1,4 +1,4 @@
-import { activeUserDataPath, clientPath as client, executable as orca, release } from '../coordinator/scripts/orca-cli.mjs';
+import { activeUserDataPath, clientPath as client, promptClientPath, executable as orca, release } from '../coordinator/scripts/orca-cli.mjs';
 import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync, realpathSync, appendFileSync, statSync, unlinkSync } from 'node:fs';
 import { isDeepStrictEqual } from 'node:util';
@@ -129,7 +129,7 @@ function launchProjectLead(j, t, project, goal) {
   if (!ref.workspace) throw new Error('项目当前没有工作区，请先在 Orca 准备项目工作区');
   const context = { projectId: ref.id, repoId: ref.repoId, hostId: ref.hostId, path: ref.path, name: ref.name, roles: project.roles, template: t.id };
   j.update('launching', { context, mainAgent: t.mainAgent });
-  const prompt = `${t.firstMessage}\n项目身份与分工：${JSON.stringify(context)}\n只在这个项目开启协作；读取 $orca-project-coordinator 和桥接说明。由你自己的会话创建 Run，再用 client.mjs read 现读版本并用 bind 绑定此 projectId，不能绑定工作间主 agent 或复用别的项目 Run。脚本路径：${client}。首轮完成绑定后简短回复项目编号与 Run；不要自行另起 agent。\n主人本次目标：${goal || '先开启项目协作，等待具体任务。'}`;
+  const prompt = `${t.firstMessage}\n项目身份与分工：${JSON.stringify(context)}\n只在这个项目开启协作；读取 $orca-project-coordinator 和桥接说明。由你自己的会话创建 Run，再用 client.mjs read 现读版本并用 bind 绑定此 projectId，不能绑定工作间主 agent 或复用别的项目 Run。脚本路径：${promptClientPath()}。首轮完成绑定后简短回复项目编号与 Run；不要自行另起 agent。\n主人本次目标：${goal || '先开启项目协作，等待具体任务。'}`;
   const launched = call(['agent', 'launch', '--worktree', ref.workspace, ...agentFlags(t.mainAgent), '--prompt', prompt], ref.path);
   j.update('launch-returned', { launched });
   if (t.mainAgent.surface === 'chat' && launched.outcome?.kind !== 'structured') {
@@ -269,7 +269,7 @@ export function create(input) {
     if (!resume || !isDeepStrictEqual(current.roles, roles)) {
       const settings = resume ? current : bridge('read', ref.id).project;
       if (settings.runId) throw new Error('项目主会话已绑定，请用原请求核对并收尾');
-      plugin('project.settings', { projectId: ref.id, revision: settings.revision, roles, feishu: settings.feishu });
+      plugin('project.settings', { projectId: ref.id, revision: settings.revision, roles });
     }
     const latest = project(ref.id);
     if (latest.ref.repoId !== repo.id || canonical(latest.ref.path) !== canonical(destination)) throw new Error('项目身份已变化');
@@ -323,7 +323,7 @@ export function dispatch(input) {
       id: taskId, title: input.title || name, goal, phase: 'working', progress: '已登记直接派活，尚未确认启动', artifacts: [artifact],
     });
     j.update('launching', { taskId, sourcePath: provenance, sender });
-    const prompt = `项目直接任务：${goal}\n来源：${source}；项目编号：${p.ref.id}；任务编号：${taskId}。只做此任务，保留他人改动，不再派子任务。完成后用 node ${JSON.stringify(client)} read ${p.ref.id} 核对项目当前绑定的 runId，再从自己的会话用 orca orchestration send --to run:<runId> 回报成果与验证边界。尚未绑定时先保存回报，等项目主会话绑定后送达。不要改项目或工作间主 Run 的绑定。`;
+    const prompt = `项目直接任务：${goal}\n来源：${source}；项目编号：${p.ref.id}；任务编号：${taskId}。只做此任务，保留他人改动，不再派子任务。完成后用 node ${JSON.stringify(promptClientPath())} read ${p.ref.id} 核对项目当前绑定的 runId，再从自己的会话用 orca orchestration send --to run:<runId> 回报成果与验证边界。尚未绑定时先保存回报，等项目主会话绑定后送达。不要改项目或工作间主 Run 的绑定。`;
     const launched = call(['worktree', 'create', '--repo', `id:${p.ref.repoId}`, '--name', name, '--no-parent',
       '--setup', 'skip', ...agentFlags(t.roles[role]), '--prompt', prompt], p.ref.path);
     j.update('launch-returned', { launched });

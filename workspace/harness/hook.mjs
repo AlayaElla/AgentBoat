@@ -62,13 +62,14 @@ function patchAllowed(input, role) {
   });
   return !!paths.length && paths.every(file => file === file.trim() && writablePath(input.cwd, file, [role.directory, agentboatHome]));
 }
+const protectedDirectory = /(?:^|[\\/])\.(?:git|claude|codex)[. ]*(?:[\\/]|$)/i;
 function writablePath(cwd, file, roots) {
-  if (typeof file !== 'string' || !file || typeof cwd !== 'string' || !path.isAbsolute(cwd) || file.split(/[\\/]/).includes('..')) return false;
+  if (typeof file !== 'string' || !file || typeof cwd !== 'string' || !path.isAbsolute(cwd) || protectedDirectory.test(file) || file.split(/[\\/]/).includes('..')) return false;
   if (process.platform === 'win32' && (/^\\\\[?.]\\/.test(file) || /^[a-z]:[^/\\]/i.test(file) || file.replace(/^[a-z]:/i, '').includes(':'))) return false;
   let target;
   try { target = canonical(path.resolve(cwd, file)); }
   catch (e) { if (['ENOENT', 'ELOOP', 'ENOTDIR'].includes(e.code)) return false; throw e; }
-  return roots.some(dir => typeof dir === 'string' && path.isAbsolute(dir) && inside(canonical(dir), target));
+  return !protectedDirectory.test(target) && roots.some(dir => typeof dir === 'string' && path.isAbsolute(dir) && inside(canonical(dir), target));
 }
 
 function words(command, bash) {

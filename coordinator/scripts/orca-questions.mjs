@@ -36,7 +36,7 @@ export async function openRunMail(messages, runId, readWork, now = Date.now()) {
       if (typeof taskId !== 'string' || !taskId) return [];
     }
     if (typeof dispatchId !== 'string' || !dispatchId) return [];
-    return [{ dispatchId, taskId, mail: { id: m.id, from: m.from_handle, subject: m.subject, body: m.body, at } }];
+    return [{ dispatchId, taskId, mail: { id: m.id, from: m.from_handle, subject: m.subject, body: m.body, at, read: !!m.read } }];
   });
   const result = { questions: [], reports: [] };
   if (!candidates.length) return result;

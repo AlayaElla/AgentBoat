@@ -1107,7 +1107,7 @@ function peerPage() {
       if (agent.state === 'need') addReadOnly('agent', i, agent.title, [agentName(agent.agent), agent.taskTitle || '未关联任务'])
     })
     pr.tasks?.forEach((t, i) => {
-      if (t.phase === 'blocked' && t.blockedPending !== false && !(pr.feedback && t.blockedPending)) addReadOnly('blocked', i, t.title, ['任务受阻'])
+      if (t.phase === 'blocked' && t.blockedPending && !pr.feedback) addReadOnly('blocked', i, t.title, ['任务受阻'])
       if (!pr.feedback || t.phase === 'paused') {
         if (t.decisions.length) addReadOnly('decision', i, t.title, t.decisions)
         if (t.acceptance.length) addReadOnly('review', i, t.title, t.acceptance)
@@ -1308,7 +1308,6 @@ function mainPage() {
   const mode = bots.length ? form.mainMode ?? (w.bot ? 'bot' : 'new') : 'new'
   return [el('p', { class: 'any' }, leadDescription(w, '主 agent')), w.bot ? el('p', {}, botStatus(w.bot)) : null,
     w.bot?.soul ? el('p', { class: 'any' }, '已写入职责说明', el('br'), w.bot.soul.backup ? '备份位置：' + w.bot.soul.backup : '原文件不存在，无需备份') : null,
-    w.bot?.standbyRetired ? callout('原来的待命会话已不再使用，可以自己关掉') : null,
     backupHistory(w), leadChoices(w, targets?.sessions, switchMain),
     active.error && targets ? detailReadState('在线会话') : null,
     bots.length ? tabButtons('切换方式', [{ id: 'bot', name: 'bot' }, { id: 'new', name: '新会话' }], mode, id => { form.mainMode = id; render() }) : null,

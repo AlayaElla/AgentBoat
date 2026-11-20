@@ -52,7 +52,7 @@ export class ArtifactStream {
           this.artifacts.rejectDirect(p.id, wanted.requestId, res.statusCode === 401 ? 'auth' : res.headers[reasonHeader])
           return
         }
-        fail(reasonText(res.statusCode === 404 ? 'unsupported' : 'interrupted'))
+        fail(reasonText('interrupted'))
       }
       await this.artifacts.stream(p.id, p.workspaceId, wanted.requestId, readMeta(res), res, Number(res.headers['content-length']))
     } finally { res.destroy() }

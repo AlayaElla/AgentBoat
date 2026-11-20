@@ -6,6 +6,11 @@ import type { StorageApi } from 'orca'
 import { ProjectArchive } from './project-archive'
 import { takeoverActive, blockedRevision, attention, projectSummary, taskState, type Acceptance, type Artifact, type Project, type ProjectRef, type SourceEvent, type Task, type Workspace, type Overview, type Messaging, type AgentSession, type StoredTakeover } from './model'
 
+export function retainRecent<T>(rows: T[], finished: T[], limit = 100, pinned?: (row: T) => boolean) {
+  const expired = new Set(finished.slice(0, -limit))
+  return expired.size ? rows.filter(row => !expired.has(row) || pinned?.(row)) : rows
+}
+
 export const maxMessageLength = 16000
 export function fail(message: string): never { throw Object.assign(new Error(message), { code: 'invalid_request' }) }
 export function object(value: unknown): Record<string, any> {
@@ -108,17 +113,25 @@ export class ProjectStore {
       if (expected !== undefined && expected !== m.revision) fail('工作间消息已更新，请刷新后再保存')
       await fn(m); m.revision++
       for (const d of m.deliveries) if (d.state === 'pending') d.createdAt ??= Date.now()
-      for (const entry of m.inbox) {
+      const sent = m.deliveries.filter(d => d.state === 'sent')
+      const replies = new Map(sent.filter(d => d.external?.replyTo && (d.id.startsWith('agent-reply:') || d.id.startsWith('response:')))
+        .map(d => [JSON.stringify([d.external!.appId, d.external!.replyTo]), d]))
+      const replyFor = (entry: Messaging['inbox'][number]) => replies.get(JSON.stringify([entry.appId, entry.event.sourceId.slice(entry.appId.length + 1)]))
+      const finished = m.inbox.filter(entry => entry.state === 'done' && replyFor(entry))
+      for (const entry of finished) {
         if (Buffer.byteLength(JSON.stringify(m)) < 150000) break
-        if (entry.state !== 'done' || !m.deliveries.some(d => d.id === `response:${entry.event.id}` && d.state === 'sent' || d.id.startsWith('agent-reply:') && d.state === 'sent' && d.external?.replyTo === entry.event.sourceId.slice(entry.appId.length + 1))) continue
         entry.event.text = ''
       }
-      for (const d of m.deliveries) {
+      for (const d of sent) {
+        if (!d.body) continue
         if (Buffer.byteLength(JSON.stringify(m)) < 150000) break
-        if (d.state !== 'sent' || !d.body) continue
         d.receiptHash = fingerprint([d.body, d.external?.replyTo, d.external?.appId])
         d.body = ''; d.subject = ''; delete d.error
       }
+      m.inbox = retainRecent(m.inbox, finished)
+      // Retained inbox rows still need their routing and reply receipts.
+      const pinned = new Set(m.inbox.flatMap(entry => [entry.event.id, replyFor(entry)?.id]))
+      m.deliveries = retainRecent(m.deliveries, sent, 100, d => pinned.has(d.id))
       if (Buffer.byteLength(JSON.stringify(m)) > 200_000) fail('工作间消息记录已达容量上限；原记录已保留')
       await this.storage.set('workspace.messaging', m as any)
       await this.updateRoles?.()

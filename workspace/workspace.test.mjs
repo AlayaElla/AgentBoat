@@ -153,6 +153,7 @@ syncBuiltinESMExports();`);
       cpSync(path.join(api.root, file), path.join(release, file), { recursive: true });
     }
     for (const file of ['setup.mjs', 'orca-plugin.json']) writeFileSync(path.join(release, file), '{}');
+    writeFileSync(path.join(release, '../current'), path.basename(release));
     const { cliBridge } = await import(pathToFileURL(path.join(release, 'coordinator/scripts/cli-bridge.mjs')));
     const host = cliBridge({ panels: { handle() {} } });
     for (const name of ['workspace.agent', 'projects.list', 'project.agent', 'project.settings', 'workspace.message']) {
@@ -278,6 +279,12 @@ test('installed create resumes settings and dispatch records its notice through 
   assert.deepEqual(await workspace('create', input), created);
   const task = await workspace('dispatch', { projectId: 'p1', requestId: 'installed-dispatch', name: 'agentboat-demo-worker', text: '模拟派活', source: 'fake source' });
   assert.equal(task.notification.status, 'recorded');
+  const prompts = f.calls().filter(args => args.includes('--prompt')).map(args => args[args.indexOf('--prompt') + 1]);
+  assert.equal(prompts.length, 2);
+  for (const prompt of prompts) {
+    assert.match(prompt, /agentboat-current/);
+    assert.ok(!prompt.includes('a'.repeat(64)));
+  }
   const calls = f.calls().map(args => args.slice(0, 2).join(' '));
   for (const once of ['repo add', 'project setup-update', 'agent launch', 'installed workspace.message'])
     assert.equal(calls.filter(call => call === once).length, 1, once);
