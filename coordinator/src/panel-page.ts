@@ -1,5 +1,6 @@
 import type {} from 'orca/frame'
 import type { ArchivePage } from './protocol'
+import { artifactVersions } from './artifact-versions.mjs'
 import { actingMain, backupInCharge, blockedRevision, attention, projectSummary, agents, agentName, compareAgentActivity, groupedAttention, isProjectShared, isRecentAgent, labels, taskState, scopes, statuses, connectionStates, roles, mainStatus, mainAgentStates } from './model'
 import type { Acceptance, AgentSession, Artifact, Attention, LeadSwitch, MainTakeover, Overview, Project, ProjectLead, ProjectWorkspace, WorkspaceBinding } from './model'
 import type { FeedbackItem } from './store'
@@ -225,8 +226,8 @@ function check(label: string, checked: boolean, change: (v: boolean) => void, op
 }
 const tabOf = (id: string) => tabsOf[id] ?? 'inbox'
 type ProjectTab = { count: number; body: () => any }
-function projectTabs(projectId: string, views: Partial<Record<'inbox' | 'tasks' | 'agents' | 'messages', ProjectTab>>) {
-  const names = { inbox: '待处理', tasks: '任务', agents: 'Agent', messages: '消息' }
+function projectTabs(projectId: string, views: Partial<Record<'inbox' | 'tasks' | 'artifacts' | 'agents' | 'messages', ProjectTab>>) {
+  const names = { inbox: '待处理', tasks: '任务', artifacts: '成果', agents: 'Agent', messages: '消息' }
   const entries = Object.entries(views) as [keyof typeof names, ProjectTab][]
   const [selected, view] = entries.find(([id]) => id === tabOf(projectId)) ?? entries[0]
   return [el('div', { class: 'tabs', role: 'tablist', 'aria-label': '项目页面', style: `--n:${entries.length};--i:${entries.findIndex(([id]) => id === selected)}`, onkeydown: (e: KeyboardEvent) => {
@@ -906,6 +907,24 @@ async function submitFeedback() {
 function taskList(tasks: { id?: string; title: string; state: keyof typeof labels; updatedAt?: string; open?: () => any }[]) {
   return tasks.length ? tasks.map((t, i) => keyed(item(t.title, [labels[t.state], t.updatedAt && relative(t.updatedAt)].filter(Boolean).join(' · '), t.open), t.id ?? String(i))) : small('还没有任务')
 }
+function artifactTab(projectId: string, tasks: { id: string; title: string; artifacts: Artifact[]; updatedAt?: string }[], projectUpdatedAt?: string): ProjectTab {
+  const groups = tasks.flatMap(task => artifactVersions(task.artifacts).map(versions => ({ task, versions })))
+  const time = (a: Artifact, task: { updatedAt?: string }) => a.registeredAt || task.updatedAt || projectUpdatedAt
+  return { count: groups.length, body: () => {
+    if (!groups.length) return small('还没有成果')
+    const sorted = groups.sort((a, b) => (Date.parse(time(b.versions[0], b.task) || '') || 0) - (Date.parse(time(a.versions[0], a.task) || '') || 0))
+    return sorted.map(({ task, versions }) => {
+      const [latest, ...older] = versions
+      const entry = (a: Artifact) => {
+        const source = a.registeredAt ? '登记' : task.updatedAt ? '任务更新' : '项目更新'
+        const summary = task.title + ' · ' + source + ' ' + relative(time(a, task))
+        return item(a.label + ' · ' + a.version, summary, a.url ? () => openArtifact(projectId, task.id, a) : undefined)
+      }
+      const key = JSON.stringify(['artifact', projectId, task.id, latest.label])
+      return keyed(card(entry(latest), older.length ? fold(key, '旧版本', () => older.map(entry), older.length) : null), key)
+    })
+  } }
+}
 function projectLeadRow(label: string, tone: string, description?: string, controls?: HTMLElement) {
   return el('div', { class: 'project-lead row g2 wrap' }, dot(tone), el('span', {}, label),
     description ? el('span', { class: 'grow any muted xs' }, description) : null, controls)
@@ -975,6 +994,7 @@ function projectPage() {
       tasks: { count: p.tasks.length, body: () => [listTasks(p.tasks), p.archive?.taskCount ?
         button(`更早的 ${p.archive.taskCount} 项已归档`, () => go({ kind: 'archive', projectId: p.ref.id, end: p.archive?.end }), 'text sm') : null] },
       agents: { count: projectAgents(p.ref.id).length, body: () => agentsPage(p.ref.id) },
+      artifacts: artifactTab(p.ref.id, p.tasks),
       messages: { count: p.deliveries.length + p.events.length, body: () => [
           p.deliveries.length ? section('通知', p.deliveries.map(d => card(d.subject, small(d.state === 'uncertain' ? '待核对，不会自动重发' : d.state === 'sent' ? '已通知' : '待通知'), small(d.error || ''),
             d.state === 'pending' ? button('发送通知', () => act(async () => { await req('project.deliver', { projectId: p.ref.id, deliveryId: d.id }); await refresh() })) : null))) : null,
@@ -1031,7 +1051,8 @@ function peerPage() {
       projectTabs(key, {
         inbox: { count: rows.length, body: () => [readOnly ? small(readOnly) : null, inbox(key, rows)] },
         tasks: { count: pr.tasks?.length ?? 0, body: () => taskList(pr.tasks ?? []) },
-        agents: { count: agents.length, body: () => [pr.activity ? agentColumns(agents, () => pr.name) : null, note ? small(note) : null] }
+        agents: { count: agents.length, body: () => [pr.activity ? agentColumns(agents, () => pr.name) : null, note ? small(note) : null] },
+        ...(pr.feedback?.tasks.some(t => t.artifacts.length) && { artifacts: artifactTab(key, pr.feedback.tasks, pr.updatedAt) })
       })]
   }
   if (page.kind === 'relation') {

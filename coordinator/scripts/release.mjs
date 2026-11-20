@@ -29,6 +29,7 @@ mkdirSync(out);
 for (const [source, destination] of [
   ['LICENSE', 'LICENSE'], ['README.md', 'README.md'],
   ['coordinator/plugin/worker.mjs', 'worker.mjs'],
+  ['coordinator/plugin/src/artifact-versions.mjs', 'src/artifact-versions.mjs'],
   ...['panel.html', 'panel.css', 'panel-page.ts', 'model.ts', 'protocol.ts', 'feedback-drafts.ts', 'assets'].map(name => ['coordinator/plugin/src/' + name, 'src/' + name]),
   ...['client.mjs', 'lead-contact.mjs', 'orca-cli.mjs', 'cli-bridge.mjs', 'main-role-card.mjs', 'worker-reports.mjs'].map(name => ['coordinator/scripts/' + name, 'coordinator/scripts/' + name]),
   ['coordinator/scripts/setup.mjs', 'setup.mjs'],

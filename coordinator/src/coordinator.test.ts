@@ -674,8 +674,11 @@ test('concurrent requests, replay and project boundaries preserve records', asyn
 test('acceptance keeps user conclusions and resets only changed items', () => {
   const p = fresh(refs[0])
   submitTask(p, { ...deliverable, acceptance: [...deliverable.acceptance, { ...deliverable.acceptance[0], id: 'stable', title: '文字' }] })
+  const registeredAt = p.tasks[0].artifacts[0].registeredAt
+  assert.ok(registeredAt && registeredAt === p.tasks[0].submittedAt)
   for (const a of p.tasks[0].acceptance) feedback(p, { items: [{ taskId: 'task-1', kind: 'acceptance', itemId: a.id, itemRevision: 1, result: 'passed' }] })
   submitTask(p, deliverable)
+  assert.equal(p.tasks[0].artifacts[0].registeredAt, registeredAt)
   assert.equal(p.tasks[0].acceptance[0].status, 'passed')
   submitTask(p, { ...deliverable, artifacts: [{ ...deliverable.artifacts[0], id: 'page-v2', version: 'v2' }], acceptance: [{ ...deliverable.acceptance[0], artifactIds: ['page-v2'] }] })
   assert.deepEqual(p.tasks[0].acceptance.map(a => [a.id, a.status, a.revision]), [['page-check', 'pending', 2], ['stable', 'passed', 1]])

@@ -108,7 +108,7 @@ function delegatedProject(p: Project): DelegatedProject {
     const version = blockedRevision(t)
     if (!decisions.length && !acceptance.length && version === undefined) return []
     const ids = new Set(acceptance.flatMap(a => a.artifactIds))
-    const artifacts = t.artifacts.filter(a => ids.has(a.id)).map(({ id, label, version, url }) => ({ id, label, version, url: /^https?:\/\//i.test(url) ? url : '' }))
+    const artifacts = t.artifacts.filter(a => ids.has(a.id)).map(({ id, label, version, url, registeredAt }) => ({ id, label, version, url: /^https?:\/\//i.test(url) ? url : '', ...(registeredAt && { registeredAt }) }))
     return [{ id: t.id, title: t.title, phase: t.phase, decisions, acceptance, artifacts,
       ...(version !== undefined && { blockedRevision: version, blockedStatus: t.blockedStatus, progress: t.progress.trim() || t.goal }) }]
   }) }
@@ -235,7 +235,9 @@ function receivedFeedback(raw: unknown): DelegatedProject {
         const url = a.url === '' ? '' : text(a.url, '成果链接', 4096)
         if (url && !/^https?:\/\//i.test(url)) fail('对端成果链接格式不正确')
         if (url) new URL(url)
-        return { id: text(a.id, '成果编号', 200), label: text(a.label, '成果名称', 200), version: text(a.version, '成果版本', 200), url }
+        const registeredAt = a.registeredAt === undefined ? undefined : text(a.registeredAt, '成果登记时间', 100)
+        if (registeredAt && !Number.isFinite(Date.parse(registeredAt))) fail('对端成果登记时间不正确')
+        return { id: text(a.id, '成果编号', 200), label: text(a.label, '成果名称', 200), version: text(a.version, '成果版本', 200), url, ...(registeredAt && { registeredAt }) }
       }) }
   }) }
 }

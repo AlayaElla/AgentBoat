@@ -614,6 +614,27 @@ try {
     assert.equal(await editor.inputValue(), '调整布局');
   });
   for (const width of [1040, 400]) {
+    await setup({ width, archive: true });
+    await test(`project artifacts show the latest per task, expand history and open the selected version at ${width}px`, async () => {
+      await page.evaluate(() => {
+        const t = fixture.project.tasks[0];
+        const artifact = (id, version, registeredAt) => ({ id, label: '原稿', version, registeredAt, url: '/example/' + id });
+        t.artifacts = [artifact('old', 'v9', '2025-01-01'), artifact('new', '定稿', '2025-02-01')];
+        fixture.project.tasks.push({ ...t, id: 'second', title: '插画', acceptance: [], artifacts: [artifact('other', 'v2', '2025-03-01')] });
+      });
+      await project();
+      await currentLayer().getByRole('tab', { name: '成果', exact: true }).click();
+      const panel = currentLayer().getByRole('tabpanel');
+      assert.deepEqual(await panel.locator('.item').evaluateAll(nodes => nodes.map(n => n.getAttribute('aria-label'))), ['原稿 · v2', '原稿 · 定稿']);
+      assert.match(await panel.innerText(), /插画 · 登记/);
+      assert.match(await panel.innerText(), /页面交付 · 登记/);
+      await panel.getByRole('button', { name: '原稿 · 定稿' }).click();
+      await panel.getByRole('button', { name: /旧版本/ }).click();
+      await panel.getByRole('button', { name: '原稿 · v9' }).click();
+      assert.deepEqual(await page.evaluate(() => fixture.calls.filter(c => c.name === 'project.openArtifact').map(c => c.input)), [
+        { projectId: 'p1', taskId: 't1', artifactId: 'new' }, { projectId: 'p1', taskId: 't1', artifactId: 'old' }
+      ]);
+    });
     await setup({ width, inboxBatch: true, artifacts: true });
     await test(`artifact actions use the owning project and report failures at ${width}px`, async () => {
       if (width === 1040) await openReview('页面交付');
@@ -1061,9 +1082,15 @@ try {
     const up = page.locator('[data-workspace=up]');
     await up.locator('.wsr-h').click();
     await up.getByRole('button', { name: '对方示例项目', exact: true }).click();
-    assert.deepEqual(await tabStructure(), localTabs);
+    assert.deepEqual((await tabStructure()).slice(0, 3), localTabs);
     assert.equal(await currentLayer().locator('.project-lead').getAttribute('class'), leadStyle);
-    assert.deepEqual(await tabs().allTextContents(), ['待处理4', '任务3', 'Agent3']);
+    assert.deepEqual(await tabs().allTextContents(), ['待处理4', '任务3', 'Agent3', '成果4']);
+    await tab('成果').click();
+    const artifacts = currentLayer().getByRole('tabpanel');
+    assert.equal(await artifacts.getByText('设计原稿 · v1', { exact: true }).count(), 2);
+    assert.equal(await artifacts.getByRole('button', { name: '设计原稿 · v1' }).count(), 0);
+    await artifacts.getByRole('button', { name: '网页预览 · v1' }).first().click();
+    assert.equal(await page.evaluate(() => fixture.calls.filter(c => c.name === 'shell.openExternal').at(-1).input), 'https://example.com/preview');
     await currentLayer().getByText('来自「工作间 up」，可代为处理').waitFor();
     await tab('任务').click();
     assert.deepEqual(await currentLayer().locator('.item .body .xs').allTextContents(), ['待验收', '待决定', '待验收']);

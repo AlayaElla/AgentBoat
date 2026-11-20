@@ -239,11 +239,12 @@ export function submitTask(project: Project, raw: unknown): void {
   delete task.blockedStatus
   if (phase === 'blocked') task.blockedRevision = project.revision + 1
   else delete task.blockedRevision
+  const submittedAt = new Date().toISOString()
   for (const a of list(input.artifacts ?? [], '成果')) {
     const artifact: Artifact = { id: text(a.id, '成果编号', 200), label: text(a.label, '成果名称', 200), url: artifactUrl(a.url, project.ref.path), version: text(a.version, '成果版本', 200) }
     const previous = task.artifacts.find(x => x.id === artifact.id)
-    if (previous && fingerprint(previous) !== fingerprint(artifact)) fail('成果编号已存在；新版本请登记新的成果编号')
-    if (!previous) task.artifacts.push(artifact)
+    if (previous && (previous.label !== artifact.label || previous.url !== artifact.url || previous.version !== artifact.version)) fail('成果编号已存在；新版本请登记新的成果编号')
+    if (!previous) task.artifacts.push({ ...artifact, registeredAt: submittedAt })
   }
   const withdrawals: FeedbackItem[] = []
   function submittedItems(kind: 'decision' | 'acceptance', entries: Record<string, any>[]) {
@@ -294,7 +295,7 @@ export function submitTask(project: Project, raw: unknown): void {
   // The lead withdrew these itself, so its own notice is not queued back to it.
   if (withdrawals.length) applyFeedback(project, [task], withdrawals, '项目主会话', true)
   if (phase === 'completed' && taskState({ ...task, phase: 'ready' }) !== 'completed') fail('仍有待决定、待验收或需修改的事项，不能标记为完成')
-  task.updatedAt = new Date().toISOString()
+  task.updatedAt = submittedAt
   task.submittedAt = task.updatedAt
   if (old) project.tasks[project.tasks.indexOf(old)] = task
   else project.tasks.push(task)
