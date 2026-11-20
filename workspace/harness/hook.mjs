@@ -125,7 +125,8 @@ function commandAllowed(input, role) {
   const bash = input.tool_name !== 'PowerShell', cwd = input.cwd;
   if (typeof input.tool_input?.command !== 'string' || !path.isAbsolute(cwd)) return false;
   const command = input.tool_input.command.trim();
-  if (command === 'orca plugin update ' + releasePluginKey) return true;
+  const update = 'orca plugin update ' + releasePluginKey;
+  if (command === update || command === update + ' --json') return true;
   const here = !bash && /^@'\r?\n([\s\S]*?)\r?\n'@[ \t]*\|[ \t]*([^\r\n]+)$/.exec(command);
   if (here && /(?:^|\r?\n)'@/.test(here[1])) return false;
   const tokens = words(here ? here[2] : command, bash);

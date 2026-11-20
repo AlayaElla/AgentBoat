@@ -34,6 +34,7 @@ declare module 'orca' {
     'project.settings': { input: { projectId: string; revision: number; roles: Project['roles']; runId?: string; caller?: string }; output: Snapshot }
     'project.feedback': { input: { projectId: string; revision?: number; requestId?: string; runId?: string; caller?: string; items: import('./store').FeedbackItem[] }; output: Snapshot }
     'project.deliver': { input: { projectId: string; deliveryId: string }; output: Snapshot }
+    'project.expireArtifact': { input: { projectId: string; revision: number; taskId: string; artifactId: string }; output: Snapshot }
     'project.openArtifact': { input: { projectId: string; taskId: string; artifactId: string; archiveEnd?: number }; output: { opened: boolean } }
     'project.agent': { input: { operation: 'read' | 'bind' | 'submit'; projectId: string; revision?: number; requestId?: string; runId?: string; caller?: string; currentRunId?: string; token?: string; task?: unknown; taskId?: string }; output: Snapshot & { task?: import('./model').Task; submitted?: Pick<import('./model').Task, 'id' | 'phase' | 'submittedAt'> & { pendingAcceptance: boolean; pendingDecision: boolean }; archiveStatus?: '已归档' } }
   }

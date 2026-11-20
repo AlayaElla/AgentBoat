@@ -2,7 +2,7 @@ export function artifactTitle({ label, version }) {
   return label === version ? label : label + ' · ' + version;
 }
 
-export function artifactVersions(tasks) {
+export function latestArtifacts(tasks, includeExpired = false) {
   // Older records have no registration time. Keep them behind dated versions, in append order on ties.
   const entries = tasks.flatMap(task => task.artifacts.map(artifact => ({
     task, artifact, registered: Date.parse(artifact.registeredAt) || 0,
@@ -18,9 +18,7 @@ export function artifactVersions(tasks) {
     }
     const entry = { artifact, tasks: new Set([task]) };
     if (artifact.url) urls.set(artifact.url, entry);
-    const versions = groups.get(artifact.label);
-    if (versions) versions.push(entry);
-    else groups.set(artifact.label, [entry]);
+    if (!groups.has(artifact.label)) groups.set(artifact.label, entry);
   }
-  return [...groups.values()];
+  return [...groups.values()].filter(({ artifact }) => includeExpired || !artifact.expired);
 }

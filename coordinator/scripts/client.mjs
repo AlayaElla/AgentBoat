@@ -164,10 +164,10 @@ try {
       }
       if (!readOptions.full) {
         const recent = 3;
-        const { artifactVersions } = await import(release ? '../../src/artifact-versions.mjs' : '../src/artifact-versions.mjs');
+        const { latestArtifacts } = await import(release ? '../../src/artifact-versions.mjs' : '../src/artifact-versions.mjs');
         const keep = new Set(task.acceptance.filter(a => a.status !== 'discarded').flatMap(a => a.artifactIds));
-        for (const [latest] of artifactVersions([task]).slice(0, recent)) keep.add(latest.artifact.id);
-        const artifacts = task.artifacts.filter(a => keep.has(a.id));
+        for (const { artifact } of latestArtifacts([task]).slice(0, recent)) keep.add(artifact.id);
+        const artifacts = task.artifacts.filter(a => !a.expired && keep.has(a.id));
         task.omittedArtifacts = task.artifacts.length - artifacts.length;
         task.artifacts = artifacts;
         task.omittedExecutions = Math.max(0, task.executions.length - recent);

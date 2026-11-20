@@ -187,8 +187,8 @@ const ref={id:'p1',name:'示例',path:'/private/path',repoId:'repo'}, counts={wo
 const hidden='history-marker', backup={phase:'taking',history:[hidden.repeat(4096),'a','b','c']};
 const project={ref, revision:3, archive:{id:hidden}, backup, requests:[], deliveries:[{state:'sent',body:'live'}],
   tasks:[{id:'t1',title:'一',phase:'ready',updatedAt:'today',decisions:[{id:'d',history:['current'],archivedHistory:12},{id:'closed',answer:null}],
-    acceptance:[{id:'a',status:'pending',artifactIds:['1']},{id:'old',status:'discarded',artifactIds:['2']}],
-    artifacts:['页面','旧文档','说明','图标','页面','页面'].map((label,i)=>({id:String(i+1),label})),executions:[1,2,3,4]},
+    acceptance:[{id:'a',status:'pending',artifactIds:['1']},{id:'old',status:'discarded',artifactIds:['2']},{id:'done',status:'passed',artifactIds:['8']}],
+    artifacts:['页面','旧文档','说明','图标','页面','页面','参考图','参考图'].map((label,i)=>({id:String(i+1),label,...(i===7&&{expired:true})})),executions:[1,2,3,4]},
     {id:'t2',title:'二',phase:'working',acceptance:[],decisions:[],artifacts:[],executions:[]}],
   events:[{id:'unlinked',text:'x'.repeat(200)},{id:'linked',taskId:'t1',text:'linked text'}]};
 const overview={workspace:{runId:'main',backup},links:['private'],attention:[{title:'待决定',fingerprint:'digest'}],questions:[{id:'msg_1'}],projects:[{ref,counts,revision:3,bound:false,agents:[{runId:'r'}]}]};
@@ -217,11 +217,11 @@ syncBuiltinESMExports();`);
       assert.equal(detail.task.id, id);
       assert.equal(detail.archiveStatus, id === 'old' ? '已归档' : undefined);
       assert.deepEqual(detail.task.artifacts.map(a => a.id), ['1','3','4','6']);
-      assert.equal(detail.task.omittedArtifacts, 2);
+      assert.equal(detail.task.omittedArtifacts, 4);
       assert.deepEqual(detail.task.executions, [2,3,4]);
       assert.equal(detail.task.omittedExecutions, 1);
       const all = call('read', 'p1', '--task', id, '--full').result.result.task;
-      assert.deepEqual(all.artifacts.map(a => a.id), ['1','2','3','4','5','6']);
+      assert.deepEqual(all.artifacts.map(a => a.id), ['1','2','3','4','5','6','7','8']);
       assert.deepEqual(all.executions, [1,2,3,4]);
     }
     for (const args of [['overview'], ['overview','--brief'], ['read','p1'], ['read','p1','--full'], ['main-read'], ['project-lead','p1']]) {

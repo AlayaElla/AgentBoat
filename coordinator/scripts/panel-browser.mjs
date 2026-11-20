@@ -203,6 +203,13 @@ async function setup(options = {}, hub) {
         const workspaceError = window.fixture.workspaceTarget.error;
         return clone({ binding: binding(p), defaultAgent: 'claude', sessions: workspaceError ? [] : projectSessions, ...(workspaceError ? { workspaceError } : {}) });
       }
+      if (name === 'project.expireArtifact') {
+        const p = projects.find(p => p.ref.id === input.projectId);
+        if (!p || input.revision !== p.revision) throw Error('项目已更新');
+        p.tasks.find(t => t.id === input.taskId).artifacts.find(a => a.id === input.artifactId).expired = true;
+        p.revision++;
+        return clone({ project: p });
+      }
       if (name === 'project.openArtifact') {
         const target = input.archiveEnd === 50 && input.projectId === 'p1' && input.taskId === archivedTask.id ? archivedTask :
           projects.find(p => p.ref.id === input.projectId)?.tasks.find(t => t.id === input.taskId);
@@ -618,7 +625,7 @@ try {
   });
   for (const width of [1040, 400]) {
     await setup({ width, archive: true });
-    await test(`project artifacts group across tasks, merge identical URLs and open each version at ${width}px`, async () => {
+    await test(`only latest artifacts appear and the owner can expire a group at ${width}px`, async () => {
       await page.evaluate(() => {
         const t = fixture.project.tasks[0];
         const artifact = (id, version, registeredAt) => ({ id, label: '原稿', version, registeredAt, url: '/example/' + id });
@@ -634,16 +641,20 @@ try {
       assert.deepEqual(await titles(), ['原稿']);
       assert.match(await panel.innerText(), /页面交付、插画 · 登记/);
       await panel.getByRole('button', { name: '原稿', exact: true }).click();
-      await panel.getByRole('button', { name: /旧版本/ }).click();
-      assert.deepEqual(await titles(), ['原稿', '原稿 · v2', '原稿 · v9']);
-      const other = panel.getByRole('button', { name: '原稿 · v2' });
-      assert.match(await other.innerText(), /插画 · 登记/);
-      await other.click();
-      const old = panel.getByRole('button', { name: '原稿 · v9' });
-      assert.match(await old.innerText(), /页面交付 · 登记/);
-      await old.click();
+      assert.equal(await panel.getByRole('button', { name: /旧版本/ }).count(), 0);
+      await panel.getByRole('button', { name: '标为过期', exact: true }).click();
+      await panel.getByRole('button', { name: '取消' }).click();
+      assert.deepEqual(await titles(), ['原稿']);
+      await panel.getByRole('button', { name: '标为过期', exact: true }).click();
+      await panel.getByRole('button', { name: '确认标为过期' }).click();
+      await panel.getByText('还没有成果').waitFor();
+      await currentLayer().getByRole('tab', { name: '任务', exact: true }).click();
+      await currentLayer().getByRole('button', { name: '页面交付', exact: true }).click();
+      await currentLayer().getByRole('button', { name: /^成果 / }).click();
+      await currentLayer().getByRole('button', { name: '原稿 · 已过期', exact: true }).waitFor();
+      await currentLayer().getByRole('button', { name: '原稿 · v9 · 旧版本', exact: true }).click();
       assert.deepEqual(await page.evaluate(() => fixture.calls.filter(c => c.name === 'project.openArtifact').map(c => c.input)), [
-        { projectId: 'p1', taskId: 't1', artifactId: 'new' }, { projectId: 'p1', taskId: 'second', artifactId: 'other' },
+        { projectId: 'p1', taskId: 't1', artifactId: 'new' },
         { projectId: 'p1', taskId: 't1', artifactId: 'old' }
       ]);
     });
@@ -1100,8 +1111,7 @@ try {
     await tab('成果').click();
     const artifacts = currentLayer().getByRole('tabpanel');
     assert.equal(await artifacts.getByText('设计原稿 · v1', { exact: true }).count(), 1);
-    await artifacts.getByRole('button', { name: /旧版本/ }).click();
-    assert.equal(await artifacts.getByText('设计原稿 · v1', { exact: true }).count(), 2);
+    assert.equal(await artifacts.getByRole('button', { name: /旧版本|标为过期/ }).count(), 0);
     assert.equal(await artifacts.getByRole('button', { name: '设计原稿 · v1' }).count(), 0);
     await artifacts.getByRole('button', { name: '网页预览 · v1' }).click();
     assert.equal(await page.evaluate(() => fixture.calls.filter(c => c.name === 'shell.openExternal').at(-1).input), 'https://example.com/preview');

@@ -116,12 +116,12 @@ test('Claude role hooks scope actions by Orca identity and fail open', () => {
     symlinkSync(outside, path.join(main, 'outside'), process.platform === 'win32' ? 'junction' : 'dir');
     assert.equal(cmd(overview + ' > outside/out.txt'), 'deny');
     assert.equal(cmd('npm run build', 'Monitor'), 'deny');
-    for (const command of ['orca plugin list --json', 'orca plugin logs local.project-coordinator', 'orca plugin update alayaella.agentboat']) {
+    for (const command of ['orca plugin list --json', 'orca plugin logs local.project-coordinator', 'orca plugin update alayaella.agentboat', 'orca plugin update alayaella.agentboat --json']) {
       assert.equal(cmd(command), undefined);
       assert.equal(pre('Bash', { command }, 'codex_workspace'), undefined);
     }
     for (const command of ['orca plugin update alayaella.agentboat --approve', 'orca plugin update other.plugin',
-      'orca plugin update alayaella.agentboat --json', 'orca plugin uninstall alayaella.agentboat',
+      'orca plugin update alayaella.agentboat --json --approve', 'orca plugin uninstall alayaella.agentboat',
       'orca plugin install .', 'orca plugin enable local.project-coordinator', 'orca plugin dev reload .'])
       assert.equal(pre('Bash', { command }, 'codex_workspace'), 'deny');
 

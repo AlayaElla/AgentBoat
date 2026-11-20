@@ -8,7 +8,7 @@ import type { OrcaWorkerApi } from 'orca/worker'
 import { actingMain, agents, type AgentSession, type LeadSwitch, type Project, type ProjectLead, type ProjectRef, type Snapshot, type SourceEvent, type Delivery, type MessagingSnapshot } from './model'
 import { FeishuSources, notifyFeishu, type MessageTransport } from './feishu'
 import { OrcaRuntime, defaultExecutable, readTimeout, type CoordinatorRuntime } from './runtime'
-import { ProjectStore, artifactUrl, fail, feedback, fingerprint, fresh, maxMessageLength, notifyWorkspace, object, overview, resetBackup, receiveEvent, submitTask, strings, text, revision, mergeProjects, feishuConfig, takeoverActive, verifyTakeover } from './store'
+import { ProjectStore, artifactUrl, expireArtifact, fail, feedback, fingerprint, fresh, maxMessageLength, notifyWorkspace, object, overview, resetBackup, receiveEvent, submitTask, strings, text, revision, mergeProjects, feishuConfig, takeoverActive, verifyTakeover } from './store'
 import { WorkspaceLinks } from './links'
 import { fileErrorText, incomingHash, linkMessageHistory } from './link-messages'
 import { LinkFiles } from './link-files'
@@ -804,6 +804,17 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
     if (!d || d.state !== 'pending') fail('仅可发送尚未发送的通知；结果待核对的通知不会重复发送')
     await flush(input.projectId)
     return snapshot(input.projectId)
+  })
+  orca.panels.handle('project.expireArtifact', async input => {
+    const { ref, refs } = await projectEntry(input.projectId)
+    if (ref.hostId !== 'local') fail('只能将本机项目的成果标为过期')
+    const project = await store.mutate(ref.id, revision(input.revision), p => {
+      const task = p.tasks.find(t => t.id === input.taskId)
+      if (!task) fail('任务不属于当前项目')
+      expireArtifact(task, text(input.artifactId, '成果编号', 200))
+    })
+    changed(ref.id)
+    return { projects: refs, project: projectView(project) }
   })
   orca.panels.handle('project.openArtifact', async input => {
     const ref = await requireProject(input.projectId), p = await store.register(ref)

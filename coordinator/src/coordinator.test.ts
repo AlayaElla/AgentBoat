@@ -731,6 +731,50 @@ test('renaming an artifact preserves its registration, acceptance and notificati
   }
 })
 
+test('lead and owner expire artifacts only after pending reviews are resolved', async () => {
+  const p = fresh(refs[0])
+  const other = { ...deliverable.artifacts[0], id: 'other', label: '说明' }
+  submitTask(p, { ...deliverable, artifacts: [...deliverable.artifacts, other] })
+  const original = p.tasks[0].acceptance[0]
+  const remote = { ...refs[1], hostId: 'remote' }
+  const host = mockHost({ storage: { 'project:p1': p as any } })
+  let c!: ReturnType<typeof createCoordinator>
+  const worker = await mountWorker({ default: api => { c = createCoordinator(api, { projects: async () => [refs[0], remote] }) } }, { host })
+  const input = { projectId: 'p1', revision: 0, taskId: deliverable.id, artifactId: 'page-v1' }
+  const marker = { id: 'page-v1', expired: true, reason: '改用新版' }
+  const task = { id: deliverable.id, phase: 'ready', artifacts: [marker] }
+  const submit = { projectId: 'p1', revision: 0, operation: 'submit' as const, requestId: 'expire', task }
+  try {
+    await assert.rejects(() => worker.request('project.expireArtifact', input), /请先撤下或处理/)
+    await assert.rejects(() => worker.request('project.expireArtifact', { ...input, projectId: remote.id }), /本机项目/)
+    await assert.rejects(() => worker.request('project.agent', submit), /请先撤下或处理/)
+    const saved = (await worker.request('project.agent', { ...submit, task: { ...task, phase: 'working',
+      acceptance: [{ id: original.id, discarded: true, reason: '已取代' }] } })).project!
+    assert.deepEqual(saved.tasks[0].artifacts[0], { ...p.tasks[0].artifacts[0], expired: true, expiryReason: marker.reason })
+    assert.equal(saved.tasks[0].acceptance[0].fingerprint, original.fingerprint)
+    assert.deepEqual(saved.tasks[0].acceptance[0].artifactIds, original.artifactIds)
+    await assert.rejects(() => worker.request('project.expireArtifact', { ...input, artifactId: other.id }), /项目已更新/)
+    const result = (await worker.request('project.expireArtifact', { ...input, artifactId: other.id, revision: saved.revision })).project!
+    assert.deepEqual(result.tasks[0].artifacts[1], { ...p.tasks[0].artifacts[1], expired: true })
+    assert.deepEqual(result.tasks[0].acceptance, saved.tasks[0].acceptance)
+    assert.deepEqual(result.deliveries, [])
+    assert.throws(() => submitTask(result, { ...deliverable, acceptance: [{ ...deliverable.acceptance[0], id: 'new' }] }), /已过期/)
+  } finally { c.stop(); await worker.deactivate() }
+})
+
+test('expiring an artifact with no reason keeps a resolved blocker quiet', () => {
+  const p = fresh(refs[0])
+  submitTask(p, { ...deliverable, phase: 'blocked', acceptance: [] })
+  p.tasks[0].blockedStatus = 'replied'
+  const before = structuredClone(p)
+  submitTask(p, { id: deliverable.id, phase: 'blocked', artifacts: [{ id: 'page-v1', expired: true }] })
+  assert.equal(p.tasks[0].artifacts[0].expired, true)
+  assert.equal(p.tasks[0].blockedStatus, 'replied')
+  notifyWorkspace(before, p, 'workspace-run')
+  notifyFeishu(before, p, { enabled: true, appId: 'app', chatIds: ['chat'], senderIds: [] })
+  assert.deepEqual(p.deliveries, [])
+})
+
 test('task updates preserve omitted titles and goals and validate supplied values', () => {
   const p = fresh(refs[0]), update = { id: deliverable.id, phase: 'working' }
   assert.throws(() => submitTask(p, update), /任务标题/)

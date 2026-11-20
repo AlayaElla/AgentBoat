@@ -225,6 +225,15 @@ function list(value: unknown, label: string, max = 100): Record<string, any>[] {
   return value.map(object)
 }
 
+export function expireArtifact(task: Task, id: string, reason?: string): void {
+  const artifact = task.artifacts.find(a => a.id === id)
+  if (!artifact) fail('要标为过期的成果不存在')
+  const pending = task.acceptance.find(a => a.status === 'pending' && a.artifactIds.includes(id))
+  if (pending) fail(`请先撤下或处理引用该成果的待验收项「${pending.title}」`)
+  artifact.expired = true
+  if (reason) artifact.expiryReason = reason
+}
+
 export function submitTask(project: Project, raw: unknown): void {
   const input = object(raw)
   const id = text(input.id, '任务编号', 200)
@@ -236,12 +245,18 @@ export function submitTask(project: Project, raw: unknown): void {
   task.goal = text(input.goal === undefined ? old?.goal : input.goal, '任务目标', 16000)
   task.progress = typeof input.progress === 'string' ? input.progress.slice(0, 16000) : task.progress
   task.phase = phase
-  delete task.blockedStatus
-  if (phase === 'blocked') task.blockedRevision = project.revision + 1
-  else delete task.blockedRevision
   const submittedAt = new Date().toISOString()
-  for (const a of list(input.artifacts ?? [], '成果')) {
-    const artifact: Artifact = { id: text(a.id, '成果编号', 200), label: text(a.label, '成果名称', 200), url: artifactUrl(a.url, project.ref.path), version: text(a.version, '成果版本', 200) }
+  const artifacts = list(input.artifacts ?? [], '成果')
+  const expirations = new Map<string, string | undefined>()
+  for (const a of artifacts) {
+    const id = text(a.id, '成果编号', 200)
+    if (a.expired !== undefined && typeof a.expired !== 'boolean') fail('expired 必须是布尔值')
+    if (a.expired) {
+      if (artifacts.filter(x => text(x.id, '成果编号', 200) === id).length !== 1) fail('同一次提交不能重复标记或更新同一成果')
+      expirations.set(id, a.reason === undefined || a.reason === '' ? undefined : text(a.reason, '过期原因'))
+      continue
+    }
+    const artifact: Artifact = { id, label: text(a.label, '成果名称', 200), url: artifactUrl(a.url, project.ref.path), version: text(a.version, '成果版本', 200) }
     const previous = task.artifacts.find(x => x.id === artifact.id)
     if (previous) {
       if (previous.url !== artifact.url || previous.version !== artifact.version) fail('成果编号已存在；新版本请登记新的成果编号')
@@ -249,6 +264,11 @@ export function submitTask(project: Project, raw: unknown): void {
     } else task.artifacts.push({ ...artifact, registeredAt: submittedAt })
   }
   const withdrawals: FeedbackItem[] = []
+  if (!(expirations.size && old?.phase === 'blocked' && phase === 'blocked' && task.progress === old.progress)) {
+    delete task.blockedStatus
+    if (phase === 'blocked') task.blockedRevision = project.revision + 1
+    else delete task.blockedRevision
+  }
   function submittedItems(kind: 'decision' | 'acceptance', entries: Record<string, any>[]) {
     for (const entry of entries) {
       if (entry.discarded !== undefined && typeof entry.discarded !== 'boolean') fail('discarded 必须是布尔值')
@@ -271,6 +291,7 @@ export function submitTask(project: Project, raw: unknown): void {
     const aid = text(a.id, '验收编号', 200)
     const previous = task.acceptance.find(x => x.id === aid)
     if (previous?.fingerprint === af) continue
+    if (artifactIds.some(id => task.artifacts.find(x => x.id === id)?.expired)) fail('验收项不能关联已过期的成果')
     const item: Acceptance = { ...previous, id: aid, ...fields, revision: (previous?.revision ?? 0) + 1, status: 'pending', history: previous?.history ?? [], fingerprint: af }
     if (previous) task.acceptance[task.acceptance.indexOf(previous)] = item
     else task.acceptance.push(item)
@@ -296,6 +317,7 @@ export function submitTask(project: Project, raw: unknown): void {
   }
   // The lead withdrew these itself, so its own notice is not queued back to it.
   if (withdrawals.length) applyFeedback(project, [task], withdrawals, '项目主会话', true)
+  for (const [id, reason] of expirations) expireArtifact(task, id, reason)
   if (phase === 'completed' && taskState({ ...task, phase: 'ready' }) !== 'completed') fail('仍有待决定、待验收或需修改的事项，不能标记为完成')
   task.updatedAt = submittedAt
   task.submittedAt = task.updatedAt
