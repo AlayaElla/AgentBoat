@@ -231,11 +231,11 @@ async function setup(options = {}, hub) {
       if (name === 'workspace.linkArtifact') {
         if (window.fixture.artifactError) throw Error(window.fixture.artifactError);
         if (window.fixture.delayArtifact) {
-          events['workspace.artifactProgress']({ ...input, received: 1200000, size: 3100000 });
+          events['workspace.artifactProgress']({ ...input, method: 'chunks', received: 1200000, size: 3100000 });
           await new Promise(resolve => { window.fixture.finishArtifact = resolve; });
         }
         const f = window.fixture.peerFile;
-        return { key: 'test-file', name: f.name, size: atob(f.data).length, type: f.type };
+        return { method: f.method || 'direct', key: 'test-file', name: f.name, size: atob(f.data).length, type: f.type };
       }
       if (name === 'workspace.readLinkArtifact') return window.fixture.peerFile.data;
       if (name === 'project.openArtifact') {
@@ -1288,8 +1288,9 @@ try {
     };
     await page.evaluate(() => { fixture.delayArtifact = true; });
     const image = await openFile('design.png', 'image/png', 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a82kAAAAASUVORK5CYII=');
-    await image.getByRole('status').filter({ hasText: '正在从对方取文件 1.2/3.1 MB' }).waitFor();
-    await page.evaluate(() => { fixture.delayArtifact = false; fixture.finishArtifact(); });
+    await image.getByRole('status').filter({ hasText: '分块传输 1.2/3.1 MB' }).waitFor();
+    await page.evaluate(() => { fixture.peerFile.method = 'chunks'; fixture.delayArtifact = false; fixture.finishArtifact(); });
+    await image.getByRole('status').filter({ hasText: /^分块传输$/ }).waitFor();
     await image.getByRole('img').waitFor();
     await page.waitForFunction(() => document.querySelector('dialog img')?.naturalWidth === 1);
     await image.getByRole('button', { name: '关闭' }).click();
@@ -1299,6 +1300,7 @@ try {
     await svg.getByRole('button', { name: '关闭' }).click();
     const markdown = '# 设计说明\n<em>原文</em>';
     const doc = await openFile('design.md', 'text/markdown', Buffer.from(markdown).toString('base64'));
+    assert.equal(await doc.getByRole('status').textContent(), '整文件直传');
     assert.equal(await doc.locator('pre').textContent(), markdown);
     assert.equal(await doc.locator('em').count(), 0);
     await doc.getByRole('button', { name: '关闭' }).click();

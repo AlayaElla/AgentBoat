@@ -14,7 +14,7 @@ declare module 'orca' {
     'project.visibility': { input: { projectId: string; revision: number; hidden: boolean; runId?: string; caller?: string }; output: Snapshot }
     'project.delete': { input: { projectId: string; revision: number; confirm: string }; output: { deleted: string; exportPath: string } }
     'workspace.links': { input: { operation: 'read' | 'configure' | 'rename' | 'invite' | 'cancel-invite' | 'join' | 'share' | 'revoke' | 'refresh' | 'relate' | 'send'; runId?: string; requestId?: string; text?: string; files?: string[]; relation?: 'above' | 'below' | 'peer' | null; revision?: number; id?: string; code?: string; name?: string; enabled?: boolean; host?: string; port?: number; publicUrl?: string; tls?: boolean; certificate?: string; privateKey?: string; scope?: Sharing['scope']; allProjects?: boolean; projectIds?: string[]; delegateFeedback?: boolean }; output: LinksSnapshot }
-    'workspace.linkArtifact': { input: import('./link-artifacts').ArtifactRef & { id: string }; output: { name: string; size: number; type: string; key: string } }
+    'workspace.linkArtifact': { input: import('./link-artifacts').ArtifactRef & { id: string }; output: { name: string; size: number; type: string; key: string; method: import('./link-artifacts').StreamMethod } }
     'workspace.readLinkArtifact': { input: { id: string; key: string; offset: number }; output: string }
     'workspace.linkFeedback': { input: DelegatedFeedback & { id: string }; output: FeedbackReply }
     'workspace.reply': { input: { runId: string; eventId: string; requestId: string; text: string }; output: MessagingSnapshot }

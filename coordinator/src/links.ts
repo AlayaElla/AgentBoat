@@ -1,3 +1,4 @@
+import { reasonText } from './artifact-errors'
 import http from 'node:http'
 import https from 'node:https'
 import { BlockList, isIP, type AddressInfo, type LookupFunction } from 'node:net'
@@ -8,7 +9,8 @@ import type { OrcaWorkerApi } from 'orca/worker'
 import { actingMain, blockedRevision, projectCounts, attention, agents, compareAgentActivity, groupedAttention, isProjectShared, isRecentAgent, labels, mainStatus, mainAgentStates, taskState, type AgentActivity, type AgentsSnapshot, type MainAgentActivity, type Project, type Task, type WorkspaceBinding } from './model'
 import { fail, fingerprint, object, revision, strings, text, type FeedbackItem } from './store'
 import { LinkMessages, type IncomingMessage, type MessageExchange, type WireMessage } from './link-messages'
-import { LinkArtifacts, artifactRef, type ArtifactExchange, type ArtifactRef } from './link-artifacts'
+import { LinkArtifacts, artifactRef, streamTimeout, type ArtifactExchange, type ArtifactRef } from './link-artifacts'
+import { ArtifactStream } from './artifact-stream'
 import { LinkFiles } from './link-files'
 import { setTimeout as delay } from 'node:timers/promises'
 
@@ -281,14 +283,18 @@ const lookupHttpHost: LookupFunction = (host, options, callback) => {
     else callback(null, safe[0].address, safe[0].family)
   })
 }
+function connect(url: string, route: string, headers: http.OutgoingHttpHeaders, signal?: AbortSignal) {
+  const u = new URL(endpoint(url) + route)
+  return (u.protocol === 'https:' ? https : http).request(u, { method: 'POST', rejectUnauthorized: true, signal,
+    ...(u.protocol === 'http:' && { agent: false, lookup: lookupHttpHost }), headers })
+}
 async function call(url: string, route: string, body: unknown, token = '', signal?: AbortSignal): Promise<any> {
-  const u = new URL(endpoint(url) + route), data = JSON.stringify(body)
+  const data = JSON.stringify(body)
   if (Buffer.byteLength(data) > LIMIT) fail('工作间上报过大，请减少开放的项目')
   return new Promise((resolve, reject) => {
-    const req = (u.protocol === 'https:' ? https : http).request(u, { method: 'POST', rejectUnauthorized: true, signal,
-      ...(u.protocol === 'http:' ? { agent: false, lookup: lookupHttpHost } : {}), headers: {
-      'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(data), ...(token ? { Authorization: `Bearer ${token}` } : {})
-    } }, res => {
+    const req = connect(url, route, { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(data),
+      ...(token && { Authorization: 'Bearer ' + token }) }, signal)
+    req.once('response', res => {
       if (res.statusCode !== 200) { res.resume(); reject(Object.assign(new Error(res.statusCode === 401 ? '连接已断开或凭据无效' : '对端未接受请求，请核对连接状态'), { status: res.statusCode })); return }
       void jsonBody(res).then(resolve, () => reject(new Error('对端未返回有效的工作间消息')))
     })
@@ -297,6 +303,7 @@ async function call(url: string, route: string, body: unknown, token = '', signa
 }
 
 export class WorkspaceLinks {
+  private stream: ArtifactStream
   private artifacts: LinkArtifacts
   private messages: LinkMessages
   private receipts = new Map<string, Receipts>()
@@ -320,7 +327,15 @@ export class WorkspaceLinks {
   private syncing = new Map<string, Promise<string | undefined>>()
   private listening = ''
   private error = ''
-  constructor(private orca: Pick<OrcaWorkerApi, 'storage' | 'secrets'> & Partial<Pick<OrcaWorkerApi, 'log' | 'panels'>>, private projects: () => Promise<Project[]>, private changed: () => void, private chooseHost = invitationHost, private enqueue?: (peer: Peer, messages: IncomingMessage[]) => Promise<void>, private activity?: () => Promise<LocalActivity>, files = new LinkFiles(), private checkCatalog?: () => Promise<unknown>, private applyFeedback?: (peer: Peer, input: DelegatedFeedback) => Promise<string | undefined>) { this.messages = new LinkMessages(files); this.artifacts = new LinkArtifacts(files, line => orca.log?.(line), progress => orca.panels?.post('workspace.artifactProgress', progress)) }
+  constructor(private orca: Pick<OrcaWorkerApi, 'storage' | 'secrets'> & Partial<Pick<OrcaWorkerApi, 'log' | 'panels'>>, private projects: () => Promise<Project[]>, private changed: () => void, private chooseHost = invitationHost, private enqueue?: (peer: Peer, messages: IncomingMessage[]) => Promise<void>, private activity?: () => Promise<LocalActivity>, files = new LinkFiles(), private checkCatalog?: () => Promise<unknown>, private applyFeedback?: (peer: Peer, input: DelegatedFeedback) => Promise<string | undefined>) {
+    this.messages = new LinkMessages(files)
+    this.artifacts = new LinkArtifacts(files, line => orca.log?.(line), progress => orca.panels?.post('workspace.artifactProgress', progress))
+    this.stream = new ArtifactStream(this.artifacts, connect, async (peerId, ref) => {
+      const peer = (await this.data()).peers.find(p => p.id === peerId && p.state === 'active')
+      if (!peer) fail(reasonText('offline'))
+      return this.artifactSource(peer, ref)
+    })
+  }
   private serial<T>(fn: () => Promise<T>): Promise<T> { const p = this.chain.then(fn); this.chain = p.catch(() => {}); return p }
   private async data(): Promise<LinkData> {
     const raw = await this.orca.storage.get('workspace.links')
@@ -416,7 +431,7 @@ export class WorkspaceLinks {
           void this.serve(q, s)
         }
         this.server = d.tls ? https.createServer(JSON.parse(await this.orca.secrets.get('workspace-links-tls') || '{}'), serve) : http.createServer(serve)
-        this.server.requestTimeout = 5000; this.server.headersTimeout = 5000; this.server.maxConnections = 2 * maxPeers + 16
+        this.server.requestTimeout = streamTimeout; this.server.headersTimeout = 5000; this.server.maxConnections = 4 * maxPeers + 16
         await new Promise<void>((resolve, reject) => { this.server!.once('error', reject); this.server!.listen(d.port, d.host, resolve) })
         this.listening = `${d.tls ? 'https' : 'http'}://${isIP(d.host) === 6 ? `[${d.host}]` : d.host}:${(this.server.address() as AddressInfo).port}`
         this.server.on('error', () => { this.closeListener(); this.error = '监听已停止，请检查地址与端口'; this.changed() })
@@ -427,6 +442,7 @@ export class WorkspaceLinks {
   private closeListener() { this.server?.closeAllConnections(); this.server?.close(); this.server = undefined; this.listening = ''; this.invitation = undefined }
   stop() {
     this.running = false
+    this.stream.stop()
     this.artifacts.stop()
     clearInterval(this.timer)
     clearInterval(this.catalogTimer)
@@ -493,6 +509,7 @@ export class WorkspaceLinks {
       const knownIds = new Set([...p.projectIds, ...own.map(p => p.ref.id)])
       if (projectIds?.some(id => !knownIds.has(id))) fail('只能开放本工作间自己的项目')
       Object.assign(p, setting, { projectIds: projectIds ?? p.projectIds, sharingSet: true }); d.revision++; await this.save(d)
+      this.stream.stop(p.id) // In-flight senders must observe the new sharing scope immediately.
     })
     this.wake(input.id); await this.sync(input.id); this.changed(); return this.snapshot()
   }
@@ -534,31 +551,34 @@ export class WorkspaceLinks {
   }
   async openArtifact(connectionId: string, input: ArtifactRef) {
     const ref = artifactRef(input)
-    const { endpoint, result } = await this.serial(async () => {
+    const { result } = await this.serial(async () => {
       const p = (await this.data()).peers.find(p => p.id === connectionId && p.state === 'active')
-      if (!p) fail('工作间连接已断开')
+      if (!p) fail(reasonText('offline'))
       const last = this.incoming.get(p.id)
       if (!last || last.offline || Date.now() - Date.parse(last.receivedAt) >= 35_000) fail('对方离线，暂时无法获取成果')
-      const result = this.artifacts.start(p.id, ref)
-      this.wake(p.id)
-      return { endpoint: p.endpoint, result }
+      const token = await this.orca.secrets.get(secretKey(p.id))
+      if (!token) fail(reasonText('offline'))
+      const wake = () => {
+        this.wake(p.id)
+        if (p.endpoint) void this.sync(p.id).catch(() => {})
+      }
+      return { result: this.artifacts.start(p.id, ref, p.endpoint ? (offer, signal) => this.stream.pull(p, token, offer, signal) : undefined, wake) }
     })
-    if (endpoint) void this.sync(connectionId).catch(() => {})
     return result
   }
   async readArtifact(connectionId: string, key: string, offset: number) {
     const peer = (await this.data()).peers.find(p => p.id === connectionId && p.state === 'active')
-    if (!peer) fail('工作间连接已断开')
+    if (!peer) fail(reasonText('offline'))
     return this.artifacts.files.readArtifact(peer.id, peer.workspaceId, key, offset)
   }
   private async artifactSource(peer: Peer, ref: ArtifactRef) {
     const project = (await this.projects()).find(p => p.ref.id === ref.projectId)
-    if (!project || project.ref.hostId !== 'local' || !canDelegate(peer) || !isProjectShared(project, peer)) fail('对方未开放此项目的成果')
+    if (!project || project.ref.hostId !== 'local' || !canDelegate(peer) || !isProjectShared(project, peer)) fail(reasonText('denied'))
     const artifact = project.tasks.find(t => t.id === ref.taskId)?.artifacts.find(a => a.id === ref.artifactId)
-    if (!artifact) fail('这个任务没有登记此成果')
-    if (artifact.expired) fail('此成果已过期')
-    if (!delegatedProject(project).tasks.find(t => t.id === ref.taskId)?.artifacts.some(a => a.id === ref.artifactId)) fail('此成果已不在开放的验收项中')
-    if (/^https?:/i.test(artifact.url)) fail('此成果是网页链接')
+    if (!artifact) fail(reasonText('unregistered'))
+    if (artifact.expired) fail(reasonText('expired'))
+    if (!delegatedProject(project).tasks.find(t => t.id === ref.taskId)?.artifacts.some(a => a.id === ref.artifactId)) fail(reasonText('withdrawn'))
+    if (/^https?:/i.test(artifact.url)) fail(reasonText('web'))
     return { root: project.ref.path, file: artifact.url, version: artifact.version }
   }
   async submitFeedback(connectionId: string, input: unknown): Promise<FeedbackReply> {
@@ -611,7 +631,8 @@ export class WorkspaceLinks {
   }
   private async removePeer(d: LinkData, connectionId: string) {
     await this.orca.secrets.delete(secretKey(connectionId))
-    this.artifacts.stop(connectionId)
+    this.stream.stop(connectionId)
+    await this.artifacts.stop(connectionId)
     await this.messages.revoke(connectionId)
     this.waiters.get(connectionId)?.(401)
     this.watchers.get(connectionId)?.abort()
@@ -666,7 +687,8 @@ export class WorkspaceLinks {
     const state = new AbortController(), signal = state.signal
     this.watchers.set(p.id, state)
     void (async () => {
-      let backoff = 250
+      let backoff = 250, pushCount = 0
+      let pushing = Promise.resolve()
       while (!signal.aborted) {
         try {
           const version = await this.sync(p.id, signal)
@@ -674,7 +696,16 @@ export class WorkspaceLinks {
           const token = await this.orca.secrets.get(secretKey(p.id))
           if (!token) return
           if (!version) throw Error()
-          await call(p.endpoint, '/wait', { id: p.id, since: version }, token, signal)
+          const waited = await call(p.endpoint, '/wait', { id: p.id, since: version }, token, signal)
+          if (waited.offer && pushCount < 2) {
+            // The next open can arrive before the previous push's HTTP acknowledgement.
+            pushCount++
+            pushing = pushing.then(async () => {
+              if (signal.aborted) return
+              const peer = (await this.data()).peers.find(peer => peer.id === p.id && peer.state === 'active')
+              if (peer) await this.stream.push(peer, token, waited.offer)
+            }).catch(() => {}).finally(() => { pushCount-- })
+          }
           backoff = 250
         } catch (e) {
           if (signal.aborted) return
@@ -774,9 +805,25 @@ export class WorkspaceLinks {
       if (incoming) incoming.offline = true
     })
   }
+  private async authenticated(d: LinkData, peerId: unknown, authorization: string | undefined) {
+    const p = d.peers.find(p => p.id === peerId && p.state === 'active')
+    const token = p && await this.orca.secrets.get(secretKey(p.id))
+    return p && token && equal(authorization || '', 'Bearer ' + token) ? p : undefined
+  }
   private async serve(req: http.IncomingMessage, res: http.ServerResponse) {
+    // Preserve the shorter control-body deadline while allowing a bounded binary upload.
+    if (req.url !== '/artifact/push') {
+      const timer = setTimeout(() => req.destroy(), 5000)
+      req.once('end', () => clearTimeout(timer)).once('close', () => clearTimeout(timer))
+    }
     const reply = (status: number, body: unknown) => { res.writeHead(status, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }); res.end(JSON.stringify(body)) }
     try {
+      if (req.method === 'POST' && (req.url === '/artifact/get' || req.url === '/artifact/push')) {
+        const p = await this.authenticated(await this.data(), req.headers['x-workspace-link'], req.headers.authorization)
+        if (!p) { req.resume(); reply(401, {}); return }
+        await this.stream.serve(p, req, res, req.url === '/artifact/get' ? await jsonBody(req) : undefined)
+        return
+      }
       if (req.method !== 'POST' || !['/pair', '/sync', '/revoke', '/wait'].includes(req.url || '')) { req.resume(); reply(404, { error: 'Not found' }); return }
       const body = await jsonBody(req)
       const sync = await this.serial(async () => {
@@ -791,17 +838,17 @@ export class WorkspaceLinks {
           d.peers.push({ id: connectionId, workspaceId, name, endpoint: '', state: 'active', ...defaults() }); d.revision++; await this.save(d)
           reply(200, { workspaceId: d.workspaceId }); this.changed(); return
         }
-        const p = d.peers.find(p => p.id === body.id && p.state === 'active'), token = p && await this.orca.secrets.get(secretKey(p.id))
-        if (!p || !token || !equal(req.headers.authorization || '', `Bearer ${token}`)) { reply(401, { error: 'Unauthorized' }); return }
+        const p = await this.authenticated(d, body.id, req.headers.authorization)
+        if (!p) { reply(401, { error: 'Unauthorized' }); return }
         if (req.url === '/wait') {
           const since = id(body.since)
           this.waiters.get(p.id)?.()
-          if (since !== this.version(p.id)) { reply(200, {}); return }
+          if (since !== this.version(p.id) || this.artifacts.offer(p.id)) { reply(200, { offer: this.artifacts.takeOffer(p.id) }); return }
           const cleanup = () => {
             clearTimeout(timer)
             if (this.waiters.get(p.id) === finish) this.waiters.delete(p.id)
           }
-          const finish = (status = 200) => { cleanup(); if (!res.destroyed) reply(status, {}) }
+          const finish = (status = 200) => { cleanup(); if (!res.destroyed) reply(status, status === 200 ? { offer: this.artifacts.takeOffer(p.id) } : {}) }
           const timer = setTimeout(finish, waitTime)
           res.once('close', cleanup)
           this.waiters.set(p.id, finish)

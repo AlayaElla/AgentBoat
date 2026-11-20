@@ -1,3 +1,5 @@
+import http from 'node:http'
+import type { AddressInfo } from 'node:net'
 import { assert, test, mockHost, mountWorker } from 'orca/testing'
 import path from 'node:path'
 import os from 'node:os'
@@ -158,13 +160,24 @@ test('peer artifacts use authenticated loopback in both directions, cache comple
     task.artifacts.push(artifact); task.acceptance[0].artifactIds.push('local')
     return artifact
   }
-  const local = add(a); add(b)
+  const local = add(a), remote = add(b)
   try {
     await writeFile(file, bytes)
     await a.links.start(); await b.links.start()
     const { id } = (await b.links.join((await a.links.invite()).invitation!.code)).peers[0]
     const share = async (s: typeof a, projectIds: string[]) => s.links.share({ revision: (await s.links.snapshot()).revision, id, scope: 'details', projectIds, delegateFeedback: true })
     await share(a, ['p1']); await share(b, ['p1'])
+    // A previous listener returns 404 for the new route. Keep exercising resumable chunks.
+    const stream = (a.links as any).stream
+    const serve = stream.serve.bind(stream)
+    stream.serve = (_peer: unknown, _req: unknown, res: http.ServerResponse) => res.writeHead(404).end()
+    for (const route of ['/artifact/get', '/artifact/push']) {
+      const unauthenticated = await fetch((await a.links.snapshot()).listening + route, {
+        method: 'POST', headers: { 'x-workspace-link': id, 'x-artifact-request': 'test', authorization: 'Bearer invalid' }
+      })
+      assert.equal(unauthenticated.status, 401)
+      await unauthenticated.text()
+    }
     const get = (s = b) => s.links.openArtifact(id, ref)
     const [first, concurrent] = await Promise.all([get(), get()])
     assert.deepEqual(first, concurrent)
@@ -186,8 +199,31 @@ test('peer artifacts use authenticated loopback in both directions, cache comple
     const second = await get()
     assert.notEqual(second.key, first.key)
     assert.equal(chunks, sent * 2)
+    assert.equal(second.method, 'chunks')
+    stream.serve = serve
+    const cached = await get()
+    assert.equal(cached.method, 'direct')
+    assert.equal(cached.key, second.key)
+    const alias = path.join(root, 'project-alias')
+    await symlink(dir, alias, 'junction')
+    a.projects[0].ref.path = alias
+    assert.equal((await get()).key, second.key)
+    a.projects[0].ref.path = dir
+    const source = stream.source.bind(stream)
+    let checks = 0
+    stream.source = (...args: any[]) => {
+      if (++checks === 3) local.expired = true
+      return source(...args)
+    }
+    local.version = 'expire-before-final-bytes'
+    await assert.rejects(get, /过期/)
+    stream.source = source
+    local.expired = false
     await assert.rejects(() => b.links.readArtifact(id, '../drawing.md', 0), /未找到/)
     assert.equal((await get(a)).size, bytes.length)
+    remote.expired = true
+    await assert.rejects(() => get(a), /过期/)
+    remote.expired = false
     assert.equal((await b.links.snapshot(true)).peers[0].recentMessages?.length, 0)
     await assert.rejects(() => b.links.openArtifact(id, { ...ref, taskId: 'task-2' }), /没有登记/)
     local.expired = true; await assert.rejects(get, /过期/)
@@ -205,6 +241,10 @@ test('peer artifacts use authenticated loopback in both directions, cache comple
     local.url = file; await truncate(file, maxLinkFileBytes + 1)
     await assert.rejects(get, /25 MB/)
     await rm(file); await assert.rejects(get, e => e instanceof Error && /不存在/.test(e.message) && !e.message.includes(dir))
+    assert.ok(a.logs.some(s => s.includes('stage=open_hash reason=missing')))
+    assert.ok(a.logs.some(s => s.includes('stage=authorize reason=expired')))
+    assert.ok(b.logs.some(s => s.includes('reason=too_large')))
+    assert.ok([...a.logs, ...b.logs].every(s => !s.includes(dir) && !s.includes('drawing.md')))
     a.links.stop(); await b.links.refresh(); await assert.rejects(get, /离线/)
   } finally { a.links.stop(); b.links.stop(); await rm(root, { recursive: true, force: true }) }
 })
@@ -213,6 +253,31 @@ test('3 MiB peer artifact over a single listener with the production watch and r
   const root = await mkdtemp(path.join(os.tmpdir(), 'artifact-speed-'))
   const a = await instance('listener'), b = await instance('dialer', false)
   const file = path.join(root, 'image.png'), bytes = Buffer.alloc(3 * 1024 ** 2, 73)
+  const routes: string[] = []
+  let target = '', holdBody: Promise<void> | undefined, release: (() => void) | undefined, breakBody = false
+  const proxy = http.createServer(async (req, res) => {
+    routes.push(req.url!)
+    await delay(40)
+    if (res.destroyed) return
+    const hop = http.request(target + req.url, { method: req.method, headers: req.headers }, async incoming => {
+      incoming.on('error', () => res.destroy())
+      await delay(40)
+      if (res.destroyed) { incoming.destroy(); return }
+      res.writeHead(incoming.statusCode!, incoming.headers)
+      if (req.url === '/artifact/get' && (holdBody || breakBody)) {
+        for await (const chunk of incoming) {
+          res.write(chunk)
+          if (breakBody) { await delay(20); res.destroy(); break }
+          await holdBody
+        }
+        if (!res.destroyed) res.end()
+      } else incoming.pipe(res)
+    })
+    hop.on('error', () => res.destroy())
+    res.on('close', () => hop.destroy())
+    req.pipe(hop)
+  })
+  await new Promise<void>(resolve => proxy.listen(0, '127.0.0.1', resolve))
   try {
     await writeFile(file, bytes)
     for (const side of [a, b]) {
@@ -222,16 +287,16 @@ test('3 MiB peer artifact over a single listener with the production watch and r
       t.acceptance[0].artifactIds.push('drawing')
       await side.links.start()
     }
-    const { id } = (await b.links.join((await a.links.invite()).invitation!.code)).peers[0]
+    const invite = await a.links.invite()
+    target = invite.listening
+    const code = JSON.parse(Buffer.from(invite.invitation!.code.slice(4), 'base64url').toString())
+    code.url = 'http://127.0.0.1:' + (proxy.address() as AddressInfo).port
+    const { id } = (await b.links.join('AB1.' + Buffer.from(JSON.stringify(code)).toString('base64url'))).peers[0]
     for (const side of [a, b]) await side.links.share({ id, revision: (await side.links.snapshot()).revision, scope: 'details', projectIds: ['p1'], delegateFeedback: true })
     assert.equal((await a.links.snapshot()).peers[0].endpoint, '')
     assert.equal((await b.links.snapshot()).enabled, false)
-    // Count actual HTTP syncs, including ordinary traffic, with a controlled 30 ms round-trip cost.
-    const client = b.links as any, sync = client.syncOne.bind(client)
-    let rounds = 0
-    client.syncOne = async (...args: unknown[]) => { rounds++; await delay(30); return sync(...args) }
     for (const side of [a, b]) {
-      const started = performance.now(), initial = rounds
+      const started = performance.now(), initial = routes.length
       const result = await side.links.openArtifact(id, { projectId: 'p1', taskId: 'task-1', artifactId: 'drawing' })
       const parts = []
       for (let offset = 0; offset < bytes.length;) {
@@ -240,19 +305,21 @@ test('3 MiB peer artifact over a single listener with the production watch and r
       }
       const ms = Math.round(performance.now() - started)
       assert.deepEqual(Buffer.concat(parts), bytes)
-      assert.ok(rounds - initial < 35, 'expected fewer than 35 syncs for a cold 3 MiB file')
+      assert.equal(result.method, 'direct')
+      assert.deepEqual(routes.slice(initial).filter(route => route.startsWith('/artifact/')), [side === a ? '/artifact/push' : '/artifact/get'])
+      assert.ok(ms < 5000)
       assert.ok(side.progress.some(p => p.received > 0 && p.received < bytes.length && p.size === bytes.length))
-      console.log('T87 loopback 3 MiB', side === a ? 'from dialer' : 'from listener', { ms, syncs: rounds - initial })
+      console.log('T95 loopback 3 MiB, 80 ms RTT', side === a ? 'from dialer' : 'from listener', { ms, syncs: routes.slice(initial).filter(route => route === '/sync').length })
     }
     await b.links.refresh() // Flush the final verification receipt before inspecting sender logs.
     for (const side of [a, b]) {
-      assert.equal(side.logs.length, 4)
-      assert.ok(side.logs.every(line => /^peer artifact (send|receive) (start|complete) id=[a-f0-9]{12} bytes=(unknown|3145728) ms=\d+$/.test(line)))
+      assert.ok(side.logs.every(line => /^peer artifact (send|receive) \w+ id=[a-f0-9]{12} bytes=(unknown|3145728) ms=\d+ stage=\w+$/.test(line)))
       for (const direction of ['send', 'receive']) assert.ok(side.logs.some(s => s.includes(direction + ' complete') && s.includes('bytes=3145728')))
     }
 
     // A message too large to share a frame with a bulk chunk and a feedback reply both pass mid-transfer.
     a.projects[0].tasks[0].artifacts.at(-1)!.version = 'v2'
+    holdBody = new Promise(resolve => { release = resolve })
     b.progress.length = 0
     let complete = false
     const transfer = b.links.openArtifact(id, { projectId: 'p1', taskId: 'task-1', artifactId: 'drawing' }).then(() => { complete = true })
@@ -266,8 +333,16 @@ test('3 MiB peer artifact over a single listener with the production watch and r
     assert.equal(feedback.state, 'rejected') // This fixture has no feedback handler.
     await until(async () => !!(await b.links.snapshot(true)).peers[0].recentMessages?.some(m => m.requestId === 'during-transfer'))
     assert.equal(complete, false)
+    release!()
     await transfer
-  } finally { a.links.stop(); b.links.stop(); await rm(root, { recursive: true, force: true }) }
+    holdBody = undefined
+    a.projects[0].tasks[0].artifacts.at(-1)!.version = 'v3'
+    breakBody = true
+    const recovered = await b.links.openArtifact(id, { projectId: 'p1', taskId: 'task-1', artifactId: 'drawing' })
+    assert.equal(recovered.method, 'chunks')
+    assert.equal(recovered.size, bytes.length)
+    assert.deepEqual(Buffer.from(await b.links.readArtifact(id, recovered.key, 0), 'base64'), bytes.subarray(0, 256 * 1024))
+  } finally { release?.(); a.links.stop(); b.links.stop(); proxy.closeAllConnections(); proxy.close(); await rm(root, { recursive: true, force: true }) }
 })
 
 test('unexpected peer fields cannot enter panel snapshots or be rewritten', async () => {

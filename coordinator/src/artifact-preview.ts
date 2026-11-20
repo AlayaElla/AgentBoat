@@ -1,7 +1,7 @@
 import type {} from 'orca/frame'
-import type { ArtifactRef } from './link-artifacts'
+import type { ArtifactRef, StreamMethod } from './link-artifacts'
 
-type FileInfo = { name: string; type: string; size: number; key: string }
+type FileInfo = { name: string; type: string; size: number; key: string; method: StreamMethod }
 
 async function showPdf(bytes: Uint8Array, body: HTMLElement, dialog: HTMLDialogElement) {
   const base = new URL('./assets/pdf/', document.baseURI)
@@ -51,9 +51,10 @@ export async function previewArtifact(label: string, ref: ArtifactRef & { id: st
   dialog.addEventListener('keydown', e => { if (e.key === 'Escape') e.stopPropagation() })
   dialog.addEventListener('close', () => dialog.remove(), { once: true })
   document.body.append(dialog); dialog.showModal()
+  const methodLabel = (method: StreamMethod) => method === 'direct' ? '整文件直传' : '分块传输'
   const progress = orca.plugin.on('workspace.artifactProgress', p => {
     if (p.id === ref.id && p.projectId === ref.projectId && p.taskId === ref.taskId && p.artifactId === ref.artifactId)
-      status.textContent = `正在从对方取文件 ${(p.received / 1e6).toFixed(1)}/${(p.size / 1e6).toFixed(1)} MB`
+      status.textContent = !p.size ? methodLabel(p.method) : `${methodLabel(p.method)} ${(p.received / 1e6).toFixed(1)}/${(p.size / 1e6).toFixed(1)} MB`
   })
   try {
     const file = await getFile().finally(() => progress.dispose())
@@ -65,7 +66,7 @@ export async function previewArtifact(label: string, ref: ArtifactRef & { id: st
       if (!raw.length || offset + raw.length > bytes.length) throw Error('成果读取不完整，请重新获取')
       for (let i = 0; i < raw.length; i++) bytes[offset++] = raw.charCodeAt(i)
     }
-    status.textContent = ''
+    status.textContent = methodLabel(file.method)
     const save = document.createElement('button')
     save.textContent = '保存到本机'
     save.onclick = async () => {

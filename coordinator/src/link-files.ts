@@ -1,3 +1,4 @@
+import { reasonText } from './artifact-errors'
 import { createHash, randomUUID } from 'node:crypto'
 import { constants, createReadStream } from 'node:fs'
 import { lstat, mkdir, open, readFile, readdir, realpath, rename, rm, writeFile } from 'node:fs/promises'
@@ -72,25 +73,56 @@ export function wireChunk(raw: unknown, limit = fileChunkBytes): FileChunk | und
 async function readChunk(input: Awaited<ReturnType<typeof open>>, size: number, index: number, offset: number, limit = fileChunkBytes) {
   const data = Buffer.alloc(Math.min(limit, size - offset))
   const { bytesRead } = await input.read(data, 0, data.length, offset)
-  if (bytesRead !== data.length) fail('读取过程中附件已变化，请重试')
+  if (bytesRead !== data.length) fail(reasonText('changed'))
   return { index, offset, data: data.toString('base64') }
 }
 
 // Check the registered name, its resolved location and the opened file before reading any bytes.
 async function openContained(root: string, file: string) {
-  const target = artifactUrl(file, root)
-  if (!path.isAbsolute(target) || process.platform === 'win32' && (!/^[a-z]:[/\\]/i.test(target) || target.slice(2).includes(':'))) fail('成果路径不属于当前项目')
-  const base = await realpath(root), actual = await realpath(target)
+  const base = await realpath(root)
+  // macOS can register a canonical filename while the project uses a root alias such as /var.
+  let anchor = root, target: string
+  try { target = artifactUrl(file, anchor) }
+  catch (e) {
+    if (root === base) throw e
+    anchor = base
+    target = artifactUrl(file, anchor)
+  }
+  if (!path.isAbsolute(target) || process.platform === 'win32' && (!/^[a-z]:[/\\]/i.test(target) || target.slice(2).includes(':'))) fail(reasonText('outside'))
+  const actual = await realpath(target)
   artifactUrl(actual, base)
   const info = await lstat(target)
-  if (!info.isFile() || path.relative(actual, path.resolve(base, path.relative(root, target)))) fail('只可查看项目内的普通文件')
-  if (info.size > maxLinkFileBytes) fail('单个附件不得超过 25 MB')
+  if (!info.isFile() || path.relative(actual, path.resolve(base, path.relative(anchor, target)))) fail(reasonText('special'))
+  if (info.size > maxLinkFileBytes) fail(reasonText('too_large'))
   const input = await open(actual, constants.O_RDONLY | (constants.O_NOFOLLOW || 0) | (constants.O_NONBLOCK || 0))
   try {
     const [pinned, current] = await Promise.all([input.stat(), lstat(target)])
     if (!pinned.isFile() || pinned.ino !== info.ino || pinned.dev !== info.dev || pinned.size !== info.size || !current.isFile() || current.ino !== pinned.ino || current.dev !== pinned.dev ||
-      path.relative(actual, await realpath(target))) fail('读取过程中附件已变化，请重试')
+      path.relative(actual, await realpath(target))) fail(reasonText('changed'))
     return { input, size: pinned.size }
+  } catch (e) { await input.close(); throw e }
+}
+
+async function artifactMetadata(input: Awaited<ReturnType<typeof open>>, file: string, size: number, signal?: AbortSignal) {
+  const hash = createHash('sha256')
+  if (size) for await (const bytes of input.createReadStream({ start: 0, end: size - 1, autoClose: false, signal })) hash.update(bytes)
+  const [name] = safeNames([path.basename(file)])
+  return { name, size, type: fileType(name), sha256: hash.digest('hex') }
+}
+
+export async function openArtifactStream(root: string, file: string, signal: AbortSignal) {
+  const { input, size } = await openContained(root, file)
+  try {
+    const before = await input.stat()
+    const metadata = await artifactMetadata(input, file, size, signal)
+    const verify = async () => {
+      const current = await openContained(root, file)
+      try {
+        const after = await current.input.stat()
+        if (before.ino !== after.ino || before.dev !== after.dev || before.size !== after.size || before.ctimeMs !== after.ctimeMs) fail(reasonText('changed'))
+      } finally { await current.input.close() }
+    }
+    return { input, metadata, verify }
   } catch (e) { await input.close(); throw e }
 }
 
@@ -98,10 +130,7 @@ export async function artifactPart(root: string, file: string, offset: number, b
   const { input, size } = await openContained(root, file)
   try {
     if (offset === -1) {
-      const hash = createHash('sha256')
-      if (size) for await (const bytes of input.createReadStream({ start: 0, end: size - 1, autoClose: false })) hash.update(bytes)
-      const [name] = safeNames([path.basename(file)])
-      return { files: [{ name, size, type: fileType(name), sha256: hash.digest('hex') }] }
+      return { files: [await artifactMetadata(input, file, size)] }
     }
     if (!Number.isSafeInteger(offset) || offset < 0 || offset >= size) fail('工作间文件分块不正确')
     return { chunk: await readChunk(input, size, 0, offset, bulk ? artifactChunkBytes : fileChunkBytes) }
@@ -159,7 +188,7 @@ export class LinkFiles {
         (process.platform === 'win32' && !/^[a-z]:[/\\]/i.test(value))) fail('请填写本机文件的绝对路径')
       const source = await realpath(value), info = await stat(source)
       if (!info?.isFile() || (process.platform === 'win32' && !/^[a-z]:[/\\]/i.test(source))) fail('仅可发送本机普通文件')
-      if (info.size > maxLinkFileBytes) fail('单个附件不得超过 25 MB')
+      if (info.size > maxLinkFileBytes) fail(reasonText('too_large'))
       total += info.size
       if (total > this.limits.outgoing || total + pendingBytes > this.limits.outgoing) fail('此连接待发附件已达 100 MB 上限，原记录已保留')
       sources.push({ source, size: info.size, name: path.basename(value) })
@@ -264,7 +293,45 @@ export class LinkFiles {
     })))
   }
 
-  async receive(peer: string, workspace: string, requestId: string, hash: string, files: LinkFile[], chunk?: FileChunk):
+  async receiveStream(peer: string, workspace: string, transfer: string, file: LinkFile, body: AsyncIterable<Buffer>,
+    length: number, progress: (n: number) => void, signal: AbortSignal) {
+    const files = [file], hash = fingerprint(files)
+    const reserve = () => this.receive(peer, workspace, transfer, hash, files)
+    const initial = await reserve()
+    if ('error' in initial) fail(reasonText(initial.error))
+    if ('offsets' in initial && length !== file.size) fail('成果缓存不可用')
+    const key = fingerprint([peer, transfer])
+    const folder = 'offsets' in initial && await this.existingFolder('receiving', segment(peer), key)
+    // Reuse the reservation's partial file so a broken stream can resume through the chunk protocol.
+    const output = folder ? await open(path.join(folder, safeFiles(files)[0].name),
+      constants.O_CREAT | constants.O_WRONLY | constants.O_TRUNC | (constants.O_NOFOLLOW || 0), 0o600) : undefined
+    try {
+      let count = 0
+      for await (const bytes of body) {
+        signal.throwIfAborted()
+        count += bytes.length
+        if (count > length) fail('成果大小与声明不符')
+        await output?.writeFile(bytes)
+        progress(count)
+      }
+      if (count !== length) fail('成果读取不完整，请重试')
+      await output?.sync()
+    } finally { await output?.close() }
+    signal.throwIfAborted()
+    if ('files' in initial) return initial.files[0]
+    const result = await reserve()
+    if (!('files' in result)) fail(reasonText('checksum'))
+    return result.files[0]
+  }
+
+  private writes = Promise.resolve()
+  receive(...args: Parameters<LinkFiles['receivePart']>) {
+    const result = this.writes.then(() => this.receivePart(...args))
+    this.writes = result.then(() => {}, () => {})
+    return result
+  }
+
+  private async receivePart(peer: string, workspace: string, requestId: string, hash: string, files: LinkFile[], chunk?: FileChunk):
     Promise<{ offsets: number[] } | { files: ReceivedFile[] } | { error: 'capacity' | 'checksum' }> {
     const key = fingerprint([peer, requestId]), finalRoot = await this.folder('received', segment(workspace))
     const incoming = await this.folder('receiving', segment(peer)), directory = path.join(incoming, key)
