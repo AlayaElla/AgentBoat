@@ -12,14 +12,23 @@ type Rpc = (method: 'bots.list' | 'bots.update', params?: object) => Promise<any
 export const botHomeHandle = (value: unknown): value is string =>
   typeof value === 'string' && /^orca_session_id:[\da-f]{8}(?:-[\da-f]{4}){3}-[\da-f]{12}$/i.test(value)
 
+export function localEndpoint(transports: unknown, platform = process.platform): string {
+  const windows = platform === 'win32'
+  const kind = windows ? 'named-pipe' : 'unix'
+  const endpoint = Array.isArray(transports) && transports.find(t => t?.kind === kind)?.endpoint
+  if (typeof endpoint !== 'string' || endpoint.includes('\0') ||
+      !(windows ? endpoint.startsWith('\\\\.\\pipe\\') : path.posix.isAbsolute(endpoint))) throw Error('本机 Orca 通道不可用')
+  return endpoint
+}
+
 async function localRpc(method: Parameters<Rpc>[0], params?: object) {
   let metadata
   try { metadata = JSON.parse(await readFile(path.join(activeUserDataPath(), 'orca-runtime.json'), 'utf8')) }
   catch { throw Error('本机 Orca 通道配置不可用') }
-  const pipe = metadata.transports?.find((t: any) => t.kind === 'named-pipe')?.endpoint
-  if (typeof pipe !== 'string' || !pipe.startsWith('\\\\.\\pipe\\') || !metadata.authToken) throw Error('本机 Orca 通道不可用')
+  const endpoint = localEndpoint(metadata?.transports)
+  if (typeof metadata.authToken !== 'string' || !metadata.authToken) throw Error('本机 Orca 通道不可用')
   return new Promise((resolve, reject) => {
-    const socket = createConnection(pipe), id = randomUUID()
+    const socket = createConnection(endpoint), id = randomUUID()
     const abort = () => { socket.destroy(); reject(Error(method + ' 本机调用未确认')) }
     const timer = setTimeout(abort, 15000)
     socket.once('error', abort).once('close', () => { clearTimeout(timer); reject(Error(method + ' 通道已关闭')) })
@@ -51,15 +60,13 @@ function target({ id, name, agent, paused }: BotTarget): BotTarget {
 }
 
 export class LocalBots {
-  constructor(private call: Call, private rpc: Rpc = localRpc, private enabled = process.platform === 'win32', private data = pluginDataPath()) {}
+  constructor(private call: Call, private rpc: Rpc = localRpc, private data = pluginDataPath()) {}
   async list(): Promise<BotTarget[]> {
-    if (!this.enabled) throw Error('此机器使用会话绑定')
     const { bots } = await this.call(['bot', 'list'])
     if (!Array.isArray(bots)) throw Error('本机 bot 列表不完整')
     return bots.filter(b => !b.server && (!b.hostId || b.hostId === 'local')).map(target)
   }
   private async record(id: string) {
-    if (!this.enabled) throw Error('本机不支持 bot 切换')
     return (await this.rpc('bots.list')).bots.find((b: any) => b.id === id && b.hostId === 'local')
   }
   async find(id: string) {
@@ -89,7 +96,6 @@ export class LocalBots {
     return handle
   }
   async newHome(id: string) {
-    if (!this.enabled) throw Error('本机不支持 bot 切换')
     const result = await this.call(['bot', 'new-chat', '--bot', id])
     const handle = 'orca_session_id:' + result.sessionId
     if (!botHomeHandle(handle)) throw Error('请在 Orca 核对新开的 bot 主对话')
@@ -102,7 +108,7 @@ export class LocalBots {
     return { agent: bot.agent, ...(full.launch ? { launch: full.launch as Record<string, unknown> } : {}) }
   }
   async update(bot: BotTarget, agent: string, launch?: Record<string, unknown>, expected?: Awaited<ReturnType<LocalBots['original']>>) {
-    if (!this.enabled || !['claude', 'codex'].includes(agent)) throw Error('不支持此 agent')
+    if (!['claude', 'codex'].includes(agent)) throw Error('不支持此 agent')
     const before = await this.original(bot)
     if (expected && !isDeepStrictEqual(before, expected)) throw Error('切换前 bot 启动设置已变化')
     await this.rpc('bots.update', { botId: bot.id, updates: { agent, ...(launch ? { launch } : {}) } })

@@ -1,5 +1,5 @@
 import { assert, mockHost, mountWorker, test } from 'orca/testing'
-import { LocalBots, quotaReceipt } from './bot-runtime'
+import { LocalBots, localEndpoint, quotaReceipt } from './bot-runtime'
 import { workspaceSoul } from './bot-soul'
 import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import path from 'node:path'
@@ -17,12 +17,26 @@ const initial: BotTarget = { id: 'bot-1', name: '统筹', agent: 'claude', pause
 const primary: AgentSession = { handle: first, workspace: 'bot-folder', workspaceName: '统筹', title: 'Home', path: '/bots/one', agent: 'claude', online: 'online', state: 'done' }
 const standby = { ...primary, handle: 'orca_session_id:codex_spare', workspace: 'standby', path: '/standby', agent: 'codex' }
 
+test('本机 RPC 只接受当前平台的管道类型与绝对地址', () => {
+  const pipe = { kind: 'named-pipe', endpoint: '\\\\.\\pipe\\orca-test' }
+  const unix = { kind: 'unix', endpoint: '/tmp/orca-test.sock' }
+  const tcp = { kind: 'tcp', endpoint: '127.0.0.1:1234' }
+  for (const platform of ['win32', 'darwin', 'linux'] as const) {
+    const [local, foreign] = platform === 'win32' ? [pipe, unix] : [unix, pipe]
+    assert.equal(localEndpoint([tcp, foreign, local], platform), local.endpoint)
+    for (const invalid of [[tcp, foreign], [{ ...local, endpoint: foreign.endpoint }], [{ ...local, endpoint: 'relative' }],
+      [{ ...local, endpoint: local.endpoint + '\0suffix' }]]) {
+      assert.throws(() => localEndpoint(invalid, platform), /本机 Orca 通道不可用/)
+    }
+  }
+})
+
 test('按本机工作区与磁盘 ID 更新 SOUL，备份原字节，保留主人内容', async () => {
   const root = await mkdtemp(path.join(tmpdir(), 'agentboat-soul-'))
   const home = path.join(root, 'bot-2'), old = path.join(root, 'bot'), data = path.join(root, 'plugin-data')
   const soul = path.join(home, 'SOUL.md'), diskId = path.join(home, 'bot.json')
   const row = { ...initial, name: '新名字', folderWorkspaceId: 'two', hostId: 'local' }
-  const api = new LocalBots(async () => assert.fail('CLI'), async () => ({ bots: [row] }), true, data)
+  const api = new LocalBots(async () => assert.fail('CLI'), async () => ({ bots: [row] }), data)
   const homes = mainTargets([['two', home], ['one', old]].map(([id, folder]) => ({
     botHome: true, worktreeId: 'folder:' + id, path: folder, address: { environment: 'local', worktree: id }
   })), []).workspaces
@@ -72,7 +86,7 @@ test('按本机工作区与磁盘 ID 更新 SOUL，备份原字节，保留主�
       assert.equal(await get(), markers)
     }
     await writeFile(soul, '主人新内容')
-    const unavailable = new LocalBots(async () => assert.fail('CLI'), async () => ({ bots: [row] }), true, diskId)
+    const unavailable = new LocalBots(async () => assert.fail('CLI'), async () => ({ bots: [row] }), diskId)
     await assert.rejects(() => unavailable.writeSoul(row, homes), /SOUL.md/)
     assert.equal(await get(), '主人新内容')
     await writeFile(diskId, JSON.stringify({ ...row, id: 'other' }))
@@ -124,7 +138,7 @@ test('本机 bot 名单与远端隔离；每次更新先读完整记录，仅写
     if (method === 'bots.list') return { bots: [{ ...current, hostId: 'local', launch, permissionMode: 'keep' }] }
     current = { ...current, agent: params.updates.agent, name: '新名' }
     return { bot: current }
-  }, true)
+  })
   const original = await api.original(initial)
   assert.deepEqual(await api.list(), [initial])
   assert.equal(await api.home(initial), first)
@@ -134,7 +148,6 @@ test('本机 bot 名单与远端隔离；每次更新先读完整记录，仅写
   assert.deepEqual(calls.filter(([m]) => m === 'bots.update').map(([,p]) => p), [
     { botId: initial.id, updates: { agent: 'codex' } }, { botId: initial.id, updates: { agent: 'claude', launch } }])
   assert.deepEqual(calls.map(([m]) => m), ['bots.list','bots.list','bots.update','bots.list','bots.update'])
-  await assert.rejects(() => new LocalBots(cli, async () => assert.fail('RPC'), false).list())
 })
 
 async function setup() {
