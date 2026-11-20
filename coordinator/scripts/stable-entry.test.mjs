@@ -55,7 +55,7 @@ test('one setup survives two worker upgrades, old version pruning and separate O
     // Use the worker bundle layout and the same startup call as activate().
     const worker = path.join(directory, 'worker.mjs');
     cpSync(path.join(directory, 'coordinator/scripts/orca-cli.mjs'), worker);
-    await run(['--input-type=module', '-e', `import {installationRoot} from ${JSON.stringify(pathToFileURL(worker).href)}; installationRoot()`],
+    await run(['--input-type=module', '-e', `import {refreshReleaseSetup} from ${JSON.stringify(pathToFileURL(worker).href)}; await refreshReleaseSetup()`],
       undefined, { ORCA_USER_DATA_PATH: path.join(temp, 'other-profile') });
   };
   const first = version('a');
@@ -67,10 +67,15 @@ test('one setup survives two worker upgrades, old version pruning and separate O
   assert.equal(hook, path.join(stable, 'workspace/harness/hook.mjs'));
   for (const file of [skill, projectSkill, path.join(home, '.codex/hooks.json')])
     assert.ok(readFileSync(file, 'utf8').includes(stable.replaceAll('\\', '/')));
-  await activateEntry(version('b'));
+  const second = version('b');
+  const guide = path.join(second, 'workspace/skill/agentboat-workspace/SKILL.md');
+  writeFileSync(guide, readFileSync(guide, 'utf8') + '\nfixture upgrade');
+  await activateEntry(second);
+  assert.match(readFileSync(skill, 'utf8'), /fixture upgrade$/);
   const latest = version('c');
   rmSync(first, { recursive: true });
   await activateEntry(latest);
+  assert.doesNotMatch(readFileSync(skill, 'utf8'), /fixture upgrade$/);
   assert.equal(realpathSync(stable), latest);
   assert.ok(!existsSync(path.join(temp, 'other-profile/agentboat-current')));
   const docs = ['workspace/README.md', 'coordinator/LINKS.md', 'coordinator/skill/orca-project-coordinator/references/bridge.md'];

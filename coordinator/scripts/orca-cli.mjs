@@ -1,7 +1,7 @@
 import path from 'node:path';
 import os from 'node:os';
-import { existsSync, lstatSync, readFileSync, readlinkSync, symlinkSync, unlinkSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
+import { existsSync, lstatSync, readFileSync, readlinkSync, realpathSync, symlinkSync, unlinkSync } from 'node:fs';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const appCli = path.resolve(path.dirname(process.execPath), process.platform === 'win32' ? 'resources/bin/orca.exe' : '../Resources/bin/orca');
 export const executable = process.env.ORCA_CLI_COMMAND || (existsSync(appCli) ? appCli : process.platform === 'win32'
@@ -78,4 +78,12 @@ export function installationRoot() {
   const entry = linkCurrentRelease();
   if (!entry) throw Error('找不到 AgentBoat 当前安装版本，请确认插件已启用');
   return entry;
+}
+
+export async function refreshReleaseSetup() {
+  if (!installed) return;
+  const entry = installationRoot();
+  if (path.relative(versionDir, realpathSync(entry))) return;
+  const { refreshInstalledSkills } = await import(pathToFileURL(path.join(entry, 'workspace/install.mjs')).href);
+  if (refreshInstalledSkills(entry)) return pluginVersionLabel();
 }

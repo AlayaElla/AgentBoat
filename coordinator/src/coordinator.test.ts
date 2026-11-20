@@ -15,6 +15,27 @@ import { inboxLimit, openRunMail, questionWait, questionMaxAge } from '../script
 import { escalationWait, projectSubmissions, reportSubmitted, reportWait, workerReport } from '../scripts/worker-reports.mjs'
 const mainSession = { handle: 'orca_session_id:test-main', title: '测试主会话', workspace: 'id:test', workspaceName: '测试工作区', path: '/test', agent: 'claude', online: 'online' as const }
 
+test('hook-change reminder waits for a bound workspace and is sent once per release across restarts', async () => {
+  const host = mockHost(), sent: string[] = []
+  let c!: ReturnType<typeof createCoordinator>
+  for (const version of ['1.0.0', '1.0.0', '1.0.1']) {
+    const worker = await mountWorker({ default: api => { c = createCoordinator(api, {
+      send: async (run, d) => { assert.equal(run, 'run_main'); sent.push(d.body); return {} }
+    }) } }, { host })
+    try {
+      await c.start(version)
+      await c.flushMailbox()
+      if (!sent.length) {
+        assert.equal((await c.store.messaging()).deliveries[0].state, 'pending')
+        await c.store.mutateWorkspace(w => { w.runId = 'run_main' })
+        await c.flushMailbox()
+      }
+    } finally { c.stop(); await worker.deactivate() }
+  }
+  assert.equal(sent.length, 2)
+  assert.ok(sent[0].includes('1.0.0') && sent[1].includes('1.0.1'))
+})
+
 test('project content and client receipts return while background session inventory is slow', async () => {
   const p = { ...fresh(refs[0]), runId: 'run_project', mainAgentHandle: mainSession.handle }
   const host = mockHost({ storage: { 'project:p1': p as any } })

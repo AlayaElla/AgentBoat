@@ -55,7 +55,7 @@ orca plugin update alayaella.agentboat
 
 有新权限时按 Orca 回执审核。插件启动时会按该 Orca 配置的 `current` 更新 `agentboat-current`（Windows 目录联接，macOS 或 Linux 目录符号链接）。已在运行的会话可继续使用同一个 `agentboat-current/coordinator/scripts/client.mjs`，相关说明和 hooks 也随入口更新。入口被删除时，重启插件即可重建；若该位置已有其他内容，先将其移开。
 
-只有 skill 文本变化时才需要重跑首次设置，再开启新会话加载新文本。从使用版本哈希路径的旧版首次升级到固定入口时也请执行一次，并在 Codex 的 `/hooks` 中核对新路径。
+升级会自动刷新已安装的两份 skill，开启新会话即可加载。只有工作间主 agent 收到 hooks 变化提醒时，才需要重跑首次设置，并在 Codex 的 `/hooks` 中核对登记。
 
 ## 维护
 

@@ -4,6 +4,7 @@ export const clientPath: string;
 export function promptClientPath(): string;
 export function installationRoot(): string;
 export const release: boolean;
+export function refreshReleaseSetup(): Promise<string | undefined>;
 export function pluginVersionLabel(): string;
 export const pluginKey: string;
 export function activeUserDataPath(): string;

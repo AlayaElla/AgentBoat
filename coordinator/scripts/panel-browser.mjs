@@ -323,6 +323,8 @@ const openReview = async (title = '页面交付') => {
 };
 try {
   await setup({ inboxBatch: true, width: 400 });
+  await page.evaluate(() => document.fonts.ready.then(() => true));
+  await page.mouse.move(1, 1); // Let Edge acknowledge its first native input before timing panel actions.
   await test('narrow inbox starts with three rows and no dock, expands and collapses the rest', async () => {
     assert.equal(await rail().locator('[data-inbox-row]').count(), 3);
     assert.equal(await dock().count(), 0);

@@ -15,7 +15,7 @@ import { LinkFiles } from './link-files'
 import { groupedAttention, isProjectShared, isRunNotice, type OwnerQuestion } from './model'
 import { mainAgent, roleReminder, switchLead, takeoverView, recoverTakeover } from './main-agent'
 import { projectLeadDefaults } from '../../workspace/agent-launch.mjs'
-import { promptClientPath, installationRoot, pluginVersionLabel, release, roleRegistryPath } from '../scripts/orca-cli.mjs'
+import { promptClientPath, refreshReleaseSetup, pluginVersionLabel, release, roleRegistryPath } from '../scripts/orca-cli.mjs'
 import { cliBridge } from '../scripts/cli-bridge.mjs'
 import { applyDelta, type Sheets } from './feedback-drafts'
 import { roleRegistry } from './role-registry'
@@ -483,6 +483,7 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
     return runtime.send(d.targetRunId || fallbackRunId, { ...d, body })
   }
   function deferMailbox() { setImmediate(() => { void flushMailbox().catch(() => {}) }) }
+  const needsWorkspaceRun = (d: Delivery) => d.linkMessageHash || isRunNotice(d.id) || d.id.startsWith('setup-hooks:')
   async function flushMailbox(): Promise<void> {
     const running = busy.get(mailbox)
     if (running) { await running; return flushMailbox() }
@@ -492,7 +493,7 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
           const { runId } = await store.workspace(), m = await store.messaging()
           const d = m.deliveries.find(x => x.state === 'pending' &&
             (x.runNotice ? actionableRunMail.has(x.noticeKeys?.[0] ?? '') : !isRunNotice(x.id)) &&
-            (x.targetRunId || !(x.linkMessageHash || isRunNotice(x.id)) || runId) &&
+            (x.targetRunId || !needsWorkspaceRun(x) || runId) &&
             (!x.external || m.feishu.enabled && x.external.appId === m.feishu.appId && m.feishu.chatIds.includes(x.external.chatId)))
           if (!d) break
           let claimed = false
@@ -505,7 +506,7 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
           })
           if (!claimed) continue
           try {
-            const receipt = await sendDelivery(d, d.runNotice?.stage === 'project' ? 'project' : 'workspace', d.linkMessageHash || isRunNotice(d.id) ? runId : undefined)
+            const receipt = await sendDelivery(d, d.runNotice?.stage === 'project' ? 'project' : 'workspace', needsWorkspaceRun(d) ? runId : undefined)
             await store.mutateMessaging(m => {
               const saved = m.deliveries.find(x => x.id === d.id)!
               saved.state = 'sent'
@@ -920,7 +921,14 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
     }, delay)
     refreshMain.unref()
   }
-  return { store, links, connections, ingest, flush, flushMailbox, updateStatus, refreshQuestions, checkBackups, stop: () => { stoppedChecks = true; clearTimeout(refreshMain); activityEvent.dispose(); connections.stop(); links.stop(); sources.stop() }, async start() {
+  return { store, links, connections, ingest, flush, flushMailbox, updateStatus, refreshQuestions, checkBackups, stop: () => { stoppedChecks = true; clearTimeout(refreshMain); activityEvent.dispose(); connections.stop(); links.stop(); sources.stop() }, async start(hooksChangedVersion?: string) {
+    if (hooksChangedVersion) try {
+      const id = 'setup-hooks:' + hooksChangedVersion
+      if (!(await store.messaging()).deliveries.some(d => d.id === id)) await store.mutateMessaging(m => {
+        if (!m.deliveries.some(d => d.id === id)) m.deliveries.push({ id, state: 'pending', subject: 'AgentBoat hooks 需要更新',
+          body: `AgentBoat ${hooksChangedVersion} 的 hooks 登记有变化，请主人或项目在当前 Orca 配置下重跑首次设置。` })
+      })
+    } catch (error) { console.error('AgentBoat 无法登记 hooks 提醒', error) }
     if (refreshRoles) { await readCatalog(); await refreshRoles() }
     await links.start()
     await connections.start()
@@ -947,14 +955,16 @@ let coordinator: ReturnType<typeof createCoordinator> | undefined
 let cli: ReturnType<typeof cliBridge> | undefined
 export default async function activate(orca: OrcaWorkerApi): Promise<void> {
   // A broken stable link must not stop the plugin; the versioned paths keep working.
-  if (release) try { installationRoot() } catch (error) { console.error(`AgentBoat 固定入口未更新：${error instanceof Error ? error.message : error}`) }
+  let hooksChangedVersion: string | undefined
+  try { hooksChangedVersion = await refreshReleaseSetup() }
+  catch (error) { console.error('AgentBoat 启动时检查固定入口和 skill 失败', error) }
   const runtime = new OrcaRuntime(async () => {
     const configured = await orca.settings.get('cliPath')
     return typeof configured === 'string' && configured.trim() ? configured.trim() : defaultExecutable
   })
   cli = release ? cliBridge(orca) : undefined
   coordinator = createCoordinator(cli?.api ?? orca, runtime, undefined, undefined, undefined, roleRegistryPath())
-  await coordinator.start()
+  await coordinator.start(hooksChangedVersion)
   await cli?.start()
 }
 export function deactivate(): void { cli?.stop(); coordinator?.stop() }
