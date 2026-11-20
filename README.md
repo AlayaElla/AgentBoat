@@ -7,8 +7,10 @@ AgentBoat 在 Orca 里汇总各项目的进展、待决定事项和成果验收�
 需要 Orca 1.4.261 或更新版本、Git 和 Node.js 22 或更新版本。先启动 Orca，再在终端运行：
 
 ```sh
-orca plugin install AlayaElla/AgentBoat@v0.1.0
+orca plugin install AlayaElla/AgentBoat
 ```
+
+不写版本号时安装最新版本。要装指定版本，在后面加 `@vX.Y.Z`，例如 `AlayaElla/AgentBoat@v0.1.15`。
 
 Orca 会显示来源、权限和审批指纹。核对插件为 `alayaella.agentboat`、来源为 `AlayaElla/AgentBoat`，然后按回执里的命令批准。点击 Orca 底部状态栏的「工作间」打开面板。
 
@@ -61,7 +63,7 @@ orca plugin update alayaella.agentboat
 
 ```sh
 npm --prefix coordinator ci
-node coordinator/scripts/release.mjs v0.1.0 <仓库外尚不存在的目录>
+node coordinator/scripts/release.mjs vX.Y.Z <仓库外尚不存在的目录>
 ```
 
 脚本先跑类型检查和测试，再构建独立的发布目录，验证两种 hooks 的首次设置和 Orca 清单，并生成包含插件产物的 Git 提交和版本 tag。审核后可推送脚本打印的单个 tag。每个版本只发布一次，新版本使用新的 tag。
