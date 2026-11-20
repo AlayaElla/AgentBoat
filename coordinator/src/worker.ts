@@ -15,7 +15,7 @@ import { LinkFiles } from './link-files'
 import { groupedAttention, isProjectShared, isRunNotice, type OwnerQuestion } from './model'
 import { mainAgent, roleReminder, switchLead, takeoverView, recoverTakeover } from './main-agent'
 import { projectLeadDefaults } from '../../workspace/agent-launch.mjs'
-import { promptClientPath, installationRoot, release, roleRegistryPath } from '../scripts/orca-cli.mjs'
+import { promptClientPath, installationRoot, pluginVersionLabel, release, roleRegistryPath } from '../scripts/orca-cli.mjs'
 import { cliBridge } from '../scripts/cli-bridge.mjs'
 import { applyDelta, type Sheets } from './feedback-drafts'
 import { roleRegistry } from './role-registry'
@@ -599,11 +599,12 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
     })
     await flushMailbox(); return messagingSnapshot()
   })
+  const versionLabel = pluginVersionLabel()
   orca.panels.handle('workspace.overview', async () => {
     const { list, error } = await availableProjectRecords()
     // Orca registration defines membership. A project can be registered without a workspace.
     const inbox = await unsubmitted(questions, list)
-    return { ...overview(list, await store.workspace(), error), questions: inbox.filter(item => !item.report), reports: inbox.filter(item => item.report), workspace: await main.read(live), links: await links.snapshot(), connections: await connections.list(), machines: [{ id: 'local', name: os.hostname(), role: 'host' as const, online: true }] }
+    return { ...overview(list, await store.workspace(), error), versionLabel, questions: inbox.filter(item => !item.report), reports: inbox.filter(item => item.report), workspace: await main.read(live), links: await links.snapshot(), connections: await connections.list(), machines: [{ id: 'local', name: os.hostname(), role: 'host' as const, online: true }] }
   })
   orca.panels.handle('workspace.message', async input => {
     const id = text(input.projectId, '项目编号', 200)

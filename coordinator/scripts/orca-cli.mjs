@@ -20,6 +20,14 @@ export const releasePluginKey = 'alayaella.agentboat';
 const workerRelease = existsSync(new URL('./setup.mjs', import.meta.url)) && existsSync(new URL('./orca-plugin.json', import.meta.url));
 const releaseRoot = new URL(workerRelease ? './' : '../../', import.meta.url);
 export const release = existsSync(new URL('setup.mjs', releaseRoot)) && existsSync(new URL('orca-plugin.json', releaseRoot));
+export function pluginVersionLabel() {
+  if (!release) return '开发版';
+  try {
+    const { version } = JSON.parse(readFileSync(new URL('orca-plugin.json', releaseRoot), 'utf8'));
+    if (typeof version === 'string' && version.trim()) return `版本 v${version}`;
+  } catch { /* Keep the panel available if the manifest cannot be read. */ }
+  return '版本未知';
+}
 const versionDir = path.resolve(fileURLToPath(releaseRoot));
 const keyDir = path.dirname(versionDir);
 const pluginsDir = path.dirname(keyDir);

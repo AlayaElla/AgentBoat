@@ -155,7 +155,7 @@ async function setup(options = {}, hub) {
         return clone(sheets);
       }
       if (name === 'workspace.overview' && window.fixture.delayOverview) await new Promise(resolve => { window.fixture.finishOverview = resolve; });
-      if (name === 'workspace.overview') return clone({ workspace, projects: [...registered().map(p => ({ ref: p.ref, revision:p.revision, counts: { review: p.tasks.filter(t => t.phase === 'ready' && t.acceptance.some(a => a.status === 'pending')).length }, agents: [], bound: true, updatedAt: '' })), ...(options.manyProjects ? Array.from({ length: 13 }, (_, i) => ({ ref: { ...project.ref, id: 'p' + (i + 2), name: '项目 ' + (i + 2) }, counts: { working: options.idleProjects ? 0 : 1 }, agents: [], bound: true, updatedAt: '' })) : [])], hidden: [], attention: attention(), questions: window.fixture.questions ?? [], reports: window.fixture.reports ?? [], links, connections: [], machines: [{ id: 'local', name: '主机', role: 'host' }] });
+      if (name === 'workspace.overview') return clone({ workspace, versionLabel: options.versionLabel ?? '开发版', projects: [...registered().map(p => ({ ref: p.ref, revision:p.revision, counts: { review: p.tasks.filter(t => t.phase === 'ready' && t.acceptance.some(a => a.status === 'pending')).length }, agents: [], bound: true, updatedAt: '' })), ...(options.manyProjects ? Array.from({ length: 13 }, (_, i) => ({ ref: { ...project.ref, id: 'p' + (i + 2), name: '项目 ' + (i + 2) }, counts: { working: options.idleProjects ? 0 : 1 }, agents: [], bound: true, updatedAt: '' })) : [])], hidden: [], attention: attention(), questions: window.fixture.questions ?? [], reports: window.fixture.reports ?? [], links, connections: [], machines: [{ id: 'local', name: '主机', role: 'host' }] });
       if (name === 'workspace.agents') return clone({ ...live, agents: live.agents.filter(a => !window.fixture.removedProjects?.includes(a.projectId)) });
       if (name === 'workspace.agent.open') {
         const agent = live.agents.find(a => a.id === input.id && a.state === 'need');
@@ -744,6 +744,16 @@ try {
       { method: 'terminal.focus', terminalId: 'term-need' }, { method: 'workspace.open', workspaceId: 'identity:chat-workspace' }
     ]);
   });
+  for (const [width, versionLabel] of [[320, '版本 v1.2.34'], [1040, '开发版']]) {
+    await setup({ width, versionLabel });
+    await test(`settings shows ${versionLabel} at ${width}px`, async () => {
+      await page.getByRole('button', { name: '设置', exact: true }).click();
+      const label = currentLayer().getByText(versionLabel, { exact: true });
+      await label.waitFor();
+      const box = await label.boundingBox();
+      assert.ok(box.x >= 0 && box.x + box.width <= width && box.y >= 0 && box.y + box.height <= page.viewportSize().height);
+    });
+  }
   await setup({ width: 320 });
   await test('settings five sections fit 320 and unsaved forms return immediately with continue editing', async () => {
     for (const [label, start, end] of [['刷新', 'M3 12a9 9', 'M8 16H3v5'], ['设置', 'M9.671 4.136', 'M15 12a3 3 0 1 0-6 0 3 3 0 1 0 6 0Z']]) {

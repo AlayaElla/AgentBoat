@@ -6,7 +6,7 @@ import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
-import { releasePluginKey } from './orca-cli.mjs';
+import { pluginVersionLabel, releasePluginKey } from './orca-cli.mjs';
 
 const repo = fileURLToPath(new URL('../../', import.meta.url));
 const client = 'coordinator/scripts/client.mjs';
@@ -33,6 +33,21 @@ function fixture(t) {
   }
   return { temp, profile, home, key, stable, run, version };
 }
+
+test('version label identifies development and reads the running release manifest', async t => {
+  assert.equal(pluginVersionLabel(), '开发版');
+  const { version } = fixture(t);
+  const running = version('a');
+  version('b');
+  const worker = path.join(running, 'worker.mjs');
+  cpSync(path.join(repo, 'coordinator/scripts/orca-cli.mjs'), worker);
+  const manifest = path.join(running, 'orca-plugin.json');
+  writeFileSync(manifest, JSON.stringify({ version: '1.2.34' }));
+  const entry = await import(pathToFileURL(worker));
+  assert.equal(entry.pluginVersionLabel(), '版本 v1.2.34');
+  writeFileSync(manifest, '{}');
+  assert.equal(entry.pluginVersionLabel(), '版本未知');
+});
 
 test('one setup survives two worker upgrades, old version pruning and separate Orca profiles', async t => {
   const { temp, profile, home, key, stable, run, version } = fixture(t);

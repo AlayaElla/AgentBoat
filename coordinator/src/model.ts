@@ -134,6 +134,7 @@ export type Attention = {
 export interface OwnerQuestion { id: string; projectId: string; runId: string; from: string; title: string; body: string; at: number; report?: import('../scripts/worker-reports.mjs').WorkerReport }
 export const isRunNotice = (id: string) => /^(?:orca-question|orca-report|orca-mail):/.test(id)
 export interface Overview {
+  versionLabel?: string
   connections?: import('./connections').Connection[]
   machines?: { id: string; name: string; role: 'host' | 'client'; online?: boolean }[]
   hidden?: ProjectRef[]

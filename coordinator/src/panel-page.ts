@@ -1194,6 +1194,7 @@ function mainPage() {
 }
 function settingsPage() {
   return [
+    all.versionLabel ? small(all.versionLabel) : null,
     section('主 agent', el('div', {}, mainAgentLine(all.workspace.session, () => go({ kind: 'main' }), !!all.workspace.runId, false))),
     section('外部连接', button('添加连接', () => go({ kind: 'add-connection' }), 'sm'), (all.connections ?? []).map(c => keyed(
       item(c.name, `${c.type === 'a2a' ? 'A2A agent' : '飞书'} · ${connectionStates[c.state]}`, () => go({ kind: 'connection', id: c.id })), c.id)), !all.connections?.length ? small('没有外部连接') : null),
