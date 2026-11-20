@@ -105,7 +105,6 @@ export class BackupLeads {
     const live = inventory.sessions.find(s => s.handle === session.handle && s.workspace === session.workspace)
     if (unopened(b)) {
       if (!session.agent) return this.missing(r, '无法识别主会话的 agent 类型', ownerRun)
-      if (!inventory.workspaces.some(w => w.workspace === session.workspace)) return this.missing(r, '找不到主会话的工作区', ownerRun)
       const { agent, ...options } = backupDefaults(session.agent)
       const installed = await this.runtime.installedAgents(session.workspace).catch(() => undefined)
       if (!installed) return this.missing(r, '无法读取 Orca 的可启动 agent 列表', ownerRun)

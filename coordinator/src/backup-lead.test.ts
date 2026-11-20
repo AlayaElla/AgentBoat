@@ -23,7 +23,7 @@ test('在线主用存在超过十五分钟的待办且已知不在工作时才�
 
 async function fixture(project: Project, workspace?: Workspace, exports?: string) {
   const host = mockHost({ storage: { ['project:' + project.ref.id]: project as any, ...(workspace ? { workspace: workspace as any } : {}) } })
-  const env = { sessions: [primary], available: true, failLaunch: false, owner: primary.handle as string | null, generation: 1, installed: ['claude', 'codex'], spaces: [{ workspace: primary.workspace, name: '项目', path: primary.path }], launches: [] as { agent: string; options: unknown; prompt: string }[],
+  const env = { sessions: [primary], available: true, failLaunch: false, owner: primary.handle as string | null, generation: 1, installed: ['claude', 'codex'], spaces: [{ workspace: primary.workspace, name: '项目', path: primary.path }], launches: [] as { workspace: string; agent: string; options: unknown; prompt: string }[],
     catalogReads: 0, contacts: [] as string[], mailRuns: [] as string[], controls: [] as { handle: string; prompt: string }[], deliveries: [] as string[], reports: [] as any[] }
   let c!: ReturnType<typeof testCoordinator>
   const worker = await mountWorker({ default: api => {
@@ -35,8 +35,8 @@ async function fixture(project: Project, workspace?: Workspace, exports?: string
       installedAgents: async () => env.installed,
       identify: async (handle, run, own) => { assert.equal(run, own); return env.sessions.find(s => s.handle === handle)! },
       mail: async runId => { env.mailRuns.push(runId); return { reports: [], questions: [], waiting: env.reports } },
-      launchMain: async (_, agent, prompt, options) => {
-        env.launches.push({ agent, prompt, options })
+      launchMain: async (workspace, agent, prompt, options) => {
+        env.launches.push({ workspace, agent, prompt, options })
         if (env.failLaunch) throw Error('模拟启动回执丢失')
         env.sessions.push({ ...primary, handle: 'orca_session_id:backup', title: '备用', agent })
         return 'orca_session_id:backup'
@@ -54,6 +54,22 @@ async function fixture(project: Project, workspace?: Workspace, exports?: string
   return { c, worker, env, poll, command, close: async () => { c.stop(); await worker.deactivate() } }
 }
 const bound = () => ({ ...fresh(refs[0]), runId: 'run_project', mainAgentHandle: primary.handle, mainSession: primary })
+test('主用绑定在其他项目工作区时，只在该工作区可用后原地补开备用', async () => {
+  const p = { ...bound(), ref: refs[1] }, { env, poll, c, close } = await fixture(p)
+  try {
+    env.spaces = [p.ref]
+    await poll()
+    const missing = (await c.store.get(p.ref.id)).backup
+    assert.equal(missing?.phase, 'unavailable')
+    assert.equal(missing?.problem, '找不到已绑定主会话的工作区')
+    assert.equal(env.launches.length, 0)
+    env.spaces.push(refs[0])
+    await poll()
+    assert.deepEqual(env.launches.map(l => l.workspace), [primary.workspace])
+    assert.equal((await c.store.get(p.ref.id)).backup?.phase, 'standby')
+  } finally { await close() }
+})
+
 test('在线主用探测满十分钟未确认才接管原 Run，随后可恢复交回', async () => {
   const p = bound(), { env, poll, command, c, close } = await fixture(p)
   const realNow = Date.now

@@ -831,8 +831,7 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
         continue
       }
       const session = inventory.sessions.find(s => s.handle === handle) ?? (project ? projectBinding({ ...project, mainAgentHandle: handle }).session : w.session)
-      if (!session || project && !inventory.workspaces.some(s => s.workspace === session.workspace && path.relative(s.path, project.ref.path) === '') ||
-        !project && w.session && w.session.workspace !== session.workspace) {
+      if (!session || !inventory.workspaces.some(w => w.workspace === session.workspace)) {
         await backups.missing(r, '找不到已绑定主会话的工作区', w.runId).catch(() => {})
         continue
       }
