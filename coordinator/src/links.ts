@@ -110,7 +110,7 @@ function delegatedProject(p: Project): DelegatedProject {
     const ids = new Set(acceptance.flatMap(a => a.artifactIds))
     const artifacts = t.artifacts.filter(a => ids.has(a.id)).map(({ id, label, version, url, registeredAt }) => ({ id, label, version, url: /^https?:\/\//i.test(url) ? url : '', ...(registeredAt && { registeredAt }) }))
     return [{ id: t.id, title: t.title, phase: t.phase, decisions, acceptance, artifacts,
-      ...(version !== undefined && { blockedRevision: version, blockedStatus: t.blockedStatus, progress: t.progress.trim() || t.goal }) }]
+      ...(version !== undefined && { blockedRevision: version, ...(t.blockedStatus && { blockedStatus: t.blockedStatus }), progress: t.progress.trim() || t.goal }) }]
   }) }
 }
 
@@ -225,7 +225,7 @@ function receivedFeedback(raw: unknown): DelegatedProject {
     if (!['working', 'ready', 'completed', 'blocked'].includes(t.phase)) fail('对端待处理任务状态不正确')
     if (t.blockedRevision !== undefined && (t.phase !== 'blocked' || t.blockedStatus !== undefined && t.blockedStatus !== 'replied')) fail('对端受阻项格式不正确')
     return { id: text(t.id, '任务编号', 200), title: text(t.title, '任务名称', 200), phase: t.phase,
-      ...(t.blockedRevision !== undefined && { blockedRevision: revision(t.blockedRevision), blockedStatus: t.blockedStatus, progress: text(t.progress, '受阻说明', 16000) }),
+      ...(t.blockedRevision !== undefined && { blockedRevision: revision(t.blockedRevision), ...(t.blockedStatus && { blockedStatus: t.blockedStatus }), progress: text(t.progress, '受阻说明', 16000) }),
       decisions: list(t.decisions, 100).map(d => ({ id: text(d.id, '决定编号', 200), question: text(d.question, '问题', 4000), options: strings(d.options, '选项', 10).map(x => text(x, '选项', 200)) })),
       acceptance: list(t.acceptance, 100).map(a => {
         if (t.phase !== 'ready' || a.status !== 'pending' || typeof a.fingerprint !== 'string' || !/^[0-9a-f]{64}$/.test(a.fingerprint)) fail('对端验收格式不正确')

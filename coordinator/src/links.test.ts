@@ -58,10 +58,14 @@ test('delegated feedback applies once in both directions and rechecks sharing on
     assert.match((await send(b)).reason!, /未允许/)
     await assert.rejects(() => share(a, true, 'summary'), /含任务详情/)
     await share(a, true)
-    const shared = (await b.c.links.refresh()).peers[0].report!.projects
+    const outgoing = report([project], { scope: 'details', allProjects: true, projectIds: [], delegateFeedback: true }, 'local', '测试')
+    assert.ok(!Object.hasOwn(outgoing.projects[0].feedback!.tasks[1], 'blockedStatus'))
+    await b.c.links.refresh()
+    const shared = (await b.worker.request('workspace.overview')).links!.peers[0].report!.projects
     assert.deepEqual(shared.map(p => p.id), ['p1'])
     assert.deepEqual(shared[0].feedback?.tasks[1].decisions[0].options, d.options)
     assert.equal(shared[0].feedback?.tasks[1].blockedRevision, decision.blockedRevision)
+    assert.ok(!Object.hasOwn(shared[0].feedback!.tasks[1], 'blockedStatus'))
     assert.equal(shared[0].feedback?.tasks[1].progress, decision.goal)
     assert.equal(shared[0].feedback?.tasks[0].acceptance[0].fingerprint, check.fingerprint)
     assert.equal(shared[0].feedback?.tasks[0].acceptance[0].revision, check.revision)

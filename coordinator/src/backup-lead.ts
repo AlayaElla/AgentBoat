@@ -201,7 +201,10 @@ export class BackupLeads {
         !queue(r).some(d => d.control?.cycle === b.cycle && d.control.action === 'ready' && (d.state === 'pending' || d.state === 'sending'))) {
         await this.updateBinding(r, row => { row.backup!.lastProbe = now; control(row, 'ready', '额度已恢复请确认。') })
       } else if (problem !== b.problem) {
-        await this.updateBinding(r, row => { row.backup!.problem = problem; if (problem) record(row, problem, ownerRun) })
+        await this.updateBinding(r, row => {
+          if (problem) { row.backup!.problem = problem; record(row, problem, ownerRun) }
+          else delete row.backup!.problem
+        })
       } else return
     }
     this.changed(id)

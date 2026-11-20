@@ -185,7 +185,7 @@ export class OrcaRuntime implements CoordinatorRuntime {
   async send(runId: string, delivery: Delivery): Promise<{ requestId?: string }> {
     const result = await this.call(['orchestration', 'send', '--from', `plugin:${pluginKey}`, '--to', `run:${runId}`, '--type', 'status',
       '--subject', delivery.subject.startsWith('【项目协作】') ? delivery.subject : `【项目协作】${delivery.subject}`, '--body', delivery.body])
-    return { requestId: result.mutation?.requestId }
+    return result.mutation?.requestId ? { requestId: result.mutation.requestId } : {}
   }
 }
 export function assertProjectIdle(ref: ProjectRef, ps: any, list: any) {
@@ -208,7 +208,8 @@ export function mainTargets(rows: any[], terminals: any[]) {
       if (!handle) continue
       const live = match ? a.subagentObservation : t?.connected === true && t?.writable === true && !t?.orphaned ? 'live' : t?.connected === false ? 'exited' : undefined
       sessions.push({ handle, title: a.conversationName || a.displayName || t?.paneTitle || t?.title || '', workspace, workspaceName: name, path: w.path,
-        ...(a.state ? { state: a.state, stateStartedAt: a.stateStartedAt } : {}), agent: a.agentType || t?.agentType || '', online: live === 'live' ? 'online' : live === 'exited' ? 'offline' : 'unknown' })
+        ...(a.state ? { state: a.state, ...(Number.isFinite(a.stateStartedAt) && { stateStartedAt: a.stateStartedAt }) } : {}),
+        agent: a.agentType || t?.agentType || '', online: live === 'live' ? 'online' : live === 'exited' ? 'offline' : 'unknown' })
     }
   }
   return { sessions, workspaces }

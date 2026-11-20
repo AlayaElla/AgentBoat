@@ -15,6 +15,30 @@ import { inboxLimit, openRunMail, questionWait, questionMaxAge } from '../script
 import { escalationWait, projectSubmissions, reportSubmitted, reportWait, workerReport } from '../scripts/worker-reports.mjs'
 const mainSession = { handle: 'orca_session_id:test-main', title: '测试主会话', workspace: 'id:test', workspaceName: '测试工作区', path: '/test', agent: 'claude', online: 'online' as const }
 
+test('panel results reject invalid nested fields and log the request and path before transport', async () => {
+  let value: unknown
+  const worker = await mountWorker({ default: api => { createCoordinator(api, { targets: async () => ({ sessions: [], workspaces: [value] as any }) }) } }, { host: mockHost() })
+  try {
+    const read = () => worker.request('workspace.agent.targets')
+    const child = { ok: true }
+    value = { a: child, b: child, empty: Object.create(null), inherited: Object.create(child) }
+    assert.equal((await read()).workspaces.length, 1)
+    for (const invalid of [undefined, NaN, Infinity, -Infinity, 1n, Symbol(), () => {}, new Date(), new Map(), new Set(), new class {}()]) {
+      value = { field: invalid }
+      await assert.rejects(read, /workspace\.agent\.targets.*\$\.workspaces\[0\]\.field/)
+      assert.match(worker.logs.at(-1)!, /workspace\.agent\.targets.*\$\.workspaces\[0\]\.field/)
+    }
+    const cycle: { loop?: object } = {}
+    cycle.loop = cycle
+    value = cycle
+    await assert.rejects(read, /workspaces\[0\]\.loop.*循环引用/)
+    value = Array(1)
+    await assert.rejects(read, /workspaces\[0\]\[0\].*undefined/)
+    value = { [Symbol()]: true }
+    await assert.rejects(read, /workspaces\[0\]\[Symbol\]/)
+  } finally { await worker.deactivate() }
+})
+
 test('hook-change reminder waits for a bound workspace and is sent once per release across restarts', async () => {
   const host = mockHost(), sent: string[] = []
   let c!: ReturnType<typeof createCoordinator>
@@ -358,6 +382,7 @@ test('inbox task reads only the selected registered project task without a sessi
     const read = (projectId: string, taskId: string) => worker.request('project.task', { projectId, taskId })
     assert.deepEqual(await read('p1', 'task-1'), project.tasks[0])
     assert.equal(await read('p1', 'missing'), null)
+    assert.ok(!Object.hasOwn(await worker.request('project.agent', { operation: 'read', projectId: 'p1', taskId: 'missing' }), 'task'))
     await assert.rejects(() => read('p2', 'task-1'), /项目已从 Orca 移除/)
     assert.equal(sessionReads, 0)
   } finally { await worker.deactivate() }
@@ -508,6 +533,9 @@ test('the first write archives whole completed tasks and submit restores their h
   feedback(p, { items: [{ taskId: deliverable.id, kind: 'decision', itemId: 'd', answer: '甲' },
     { taskId: deliverable.id, kind: 'acceptance', itemId: 'page-check', itemRevision: 1, result: 'passed' }] })
   const old = p.tasks[0]
+  const original = { operation: 'submit' as const, projectId: 'p1', task: { id: old.id }, requestId: 'original', revision: 0 }
+  p.requests.push({ id: original.requestId, fingerprint: fingerprint(original) })
+  delete old.submittedAt // Older archived tasks only have updatedAt.
   old.updatedAt = '2020-01-01'; old.sourceIds.push('old')
   const event = { id: 'old', taskId: old.id, source: 'test', sourceId: '1', senderId: '', chatId: '', threadId: '', text: '原文', receivedAt: old.updatedAt }
   p.events.push(event)
@@ -534,10 +562,13 @@ test('the first write archives whole completed tasks and submit restores their h
     const result = await read()
     assert.equal(result.archiveStatus, '已归档')
     assert.deepEqual(result.task, old)
-    const report = { id: 'm', from: '', body: '', at: Date.parse(old.submittedAt!) }
+    const receipt = (await worker.request('project.agent', original)).submitted!
+    assert.equal(receipt.id, old.id)
+    assert.ok(!Object.hasOwn(receipt, 'submittedAt'))
+    const report = { id: 'm', from: '', body: '', at: Date.parse(old.updatedAt) }
     assert.deepEqual(await c.store.archive.submittedReports({ ...saved, tasks: [] }, [report]), new Set(['m']))
     // An in-memory version supersedes its archived proof even when the cursor is unchanged.
-    const newer = { ...report, at: Date.parse(old.submittedAt!) + 1 }
+    const newer = { ...report, at: report.at + 1 }
     assert.deepEqual(await c.store.archive.submittedReports({ ...saved, tasks: [] }, [newer]), new Set())
     const shadow = { ...old, submittedAt: '2000-01-01', updatedAt: '2000-01-01' }
     assert.deepEqual(await c.store.archive.submittedReports({ ...saved, tasks: [shadow] }, [report]), new Set())

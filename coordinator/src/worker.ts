@@ -4,6 +4,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { realpath, stat } from 'node:fs/promises'
 import { Connections } from './connections'
+import { checkedPanels } from './panel-result'
 import type { OrcaWorkerApi } from 'orca/worker'
 import { actingMain, agents, type AgentSession, type LeadSwitch, type Project, type ProjectLead, type ProjectRef, type Snapshot, type SourceEvent, type Delivery, type MessagingSnapshot } from './model'
 import { FeishuSources, notifyFeishu, type MessageTransport } from './feishu'
@@ -23,7 +24,8 @@ import { escalationWait } from '../scripts/worker-reports.mjs'
 
 const activityInterval = 60_000
 
-export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRuntime, transport?: MessageTransport, exportDirectory?: string, linkFiles?: LinkFiles, roleFile?: string) {
+export function createCoordinator(api: OrcaWorkerApi, runtime: CoordinatorRuntime, transport?: MessageTransport, exportDirectory?: string, linkFiles?: LinkFiles, roleFile?: string) {
+  const orca = { ...api, panels: checkedPanels(api) }
   const refreshRoles: (() => Promise<void>) | undefined = roleFile ? roleRegistry(roleFile, async () => {
     const [workspace, projects, mailbox] = await Promise.all([store.workspace(), store.all(), store.messaging().catch(() => undefined)])
     const registered = catalog && mergeProjects(projects, projectRefs(catalog, workspace))
@@ -741,7 +743,8 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
       if (input.taskId === undefined || !result.project) return result
       const taskId = text(input.taskId, '任务编号', 200)
       const task = await store.archive.task(result.project, taskId)
-      return { ...result, task, ...(task && !result.project.tasks.some(t => t.id === taskId) ? { archiveStatus: '已归档' as const } : {}) }
+      if (!task) return result
+      return { ...result, task, ...(!result.project.tasks.some(t => t.id === taskId) ? { archiveStatus: '已归档' as const } : {}) }
     }
     await ensure(id)
     if (!['bind', 'submit'].includes(input.operation)) fail('不支持的协作操作')
@@ -792,7 +795,7 @@ export function createCoordinator(orca: OrcaWorkerApi, runtime: CoordinatorRunti
       const taskId = text(object(input.task).id, '任务编号', 200)
       if (!written.tasks.some(t => t.id === taskId)) {
         const task = await store.archive.storedTask(written, taskId)
-        if (task) return { ...result, submitted: { id: task.id, phase: task.phase, submittedAt: task.submittedAt,
+        if (task) return { ...result, submitted: { id: task.id, phase: task.phase, ...(task.submittedAt !== undefined && { submittedAt: task.submittedAt }),
           pendingAcceptance: task.acceptance.some(a => a.status === 'pending'), pendingDecision: task.decisions.some(d => d.answer === undefined) } }
       }
     }

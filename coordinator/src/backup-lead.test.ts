@@ -352,6 +352,8 @@ test('无绑定、隐藏和移除的项目跳过；启动失败记录一次；�
     assert.equal(b.phase, 'standby')
     assert.ok(b.problem?.includes('均停住'))
     assert.equal(env.controls.length, 0)
+    env.sessions = [primary]; await poll()
+    assert.ok(!Object.hasOwn((await c.store.get(p.ref.id)).backup!, 'problem'))
   } finally { await close() }
 })
 

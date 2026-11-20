@@ -63,6 +63,7 @@ function clearChoices(id: string) { editChoices(id, Object.keys(choices(id)).map
 const inlineRows = new Map<string, Frame>()
 const expandedRows = new Set<string>(), folded = new Map<string, boolean>()
 let error = '', notice = '', busy = false, more = false, nav = 0, refreshing = false, refreshSeq = 0
+let overviewIssue = ''
 let direction = '', leaving: Frame | undefined, lastInline = '', organizationScroll = 0, trayOpen = false
 let toastAction: { label: string; run: () => void } | undefined, toastTimer = 0, toastText = ''
 let actionIds: Record<string, number> = {}, clickedAction = '', busyAction = ''
@@ -351,10 +352,28 @@ function back(toHome = false, preserveToast = false) {
   }
   void loadPage(restored).then(() => { if (active === restored) render() })
 }
+async function readOverview(seq: number, manual = false) {
+  for (const delay of [0, 400, 1200]) {
+    if (delay) await new Promise(resolve => setTimeout(resolve, delay))
+    if (seq !== refreshSeq) return false
+    try {
+      const next = await req('workspace.overview')
+      if (seq !== refreshSeq) return false
+      all = next
+      overviewIssue = ''
+      return true
+    } catch (e) {
+      if (seq !== refreshSeq) return false
+      if (manual) { overviewIssue = `总览刷新失败：${(e as Error).message}`; return false }
+    }
+  }
+  overviewIssue = all ? '总览暂时无法更新，当前显示上次的内容' : '总览暂时无法读取'
+  return false
+}
 async function refreshOverview() {
   const seq = ++refreshSeq
-  try { const next = await req('workspace.overview'); if (seq === refreshSeq) { all = next; render(); void reconcileFeedback() } }
-  catch { /* The confirmed write does not depend on the background overview. */ }
+  const updated = await readOverview(seq)
+  if (seq === refreshSeq) { refreshing = false; render(); if (updated) void reconcileFeedback() }
 }
 let readingAgents: Promise<void> | undefined
 function loadAgents(force: boolean) {
@@ -369,9 +388,7 @@ async function refresh(forceAgents = false) {
   try {
     if (forceAgents && !pendingEdits && !busy) { await readSheets(); draftFailure = '' }
     loadAgents(forceAgents)
-    const overview = await req('workspace.overview')
-    if (n !== refreshSeq) return
-    all = overview
+    if (!await readOverview(n, forceAgents) || n !== refreshSeq) return
     opened = Object.fromEntries(Object.entries(opened).filter(([id]) => id === 'self' || peers().some(p => p.id === id)))
     const shown = new Set(inboxRows().map(r => r.id))
     for (const [id, f] of inlineRows) if (f !== active && !shown.has(f.page.inboxRow!)) {
@@ -760,7 +777,8 @@ function dock() {
   return el('footer', { class: 'dock', 'data-key': 'dock' },
     el('div', { class: 'toasts', 'aria-live': 'polite', 'data-animate': 'fade' }, message ? el('div', { class: `toast${error || savedError ? ' danger' : ''}`, 'data-key': message, role: error || savedError ? 'alert' : 'status' },
       el('span', { class: 'grow any' }, message), action ? button(action.label, action.run, 'sm') : null,
-      button('', closeToast, 'text sm icon', false, '关闭提示', 'close')) : null),
+      button('', closeToast, 'text sm icon', false, '关闭提示', 'close')) : overviewIssue ? el('div', { class: 'toast', role: 'status' },
+        el('span', { class: 'grow any' }, overviewIssue), button('重试', () => refresh(true), 'sm')) : null),
     expansion(count > 0, el('section', { class: 'sheet', 'aria-label': '待提交', 'data-sheet': '' },
       expansion(trayOpen && count > 0, el('div', { class: 'tray-list' }, items.map(({ projectId, id, d }) => keyed(el('div', { class: 'tray-row' },
         tag(d.result ? feedbackActions[d.result] : d.kind === 'blocked' ? '受阻答复' : '决定'), el('span', { class: 'grow any' }, `${d.title} · ${inboxProjectName(projectId)}`), invalidDraft(d) ? small('还没写内容') : null,
@@ -1291,7 +1309,7 @@ function layer(f: Frame, isTop: boolean) {
 function render() {
   if (!all) {
     updateChildren(root, el('div', {}, el('header', { class: 'top' }, heading('h1', homeFrame)),
-      el('div', { class: 'initial' }, error ? card(el('p', {}, error), button('重试', () => refresh(true), 'sm')) : skeleton())))
+      el('div', { class: 'initial' }, error || overviewIssue ? card(el('p', {}, error || overviewIssue), button('重试', () => refresh(true), 'sm')) : skeleton())))
     return
   }
   actionIds = {}

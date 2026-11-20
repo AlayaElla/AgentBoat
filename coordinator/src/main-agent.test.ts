@@ -376,4 +376,9 @@ test('runtime target parser uses exact chat session and terminal pane; unknown l
   const t = mainTargets([ws], [{ tabId: 'tab', leafId: 'leaf', handle: 'terminal-exact', connected: true, writable: true }])
   assert.deepEqual(t.sessions.map(s => [s.handle, s.online]), [['orca_session_id:test-session', 'online'], ['orca_session_id:idle', 'unknown'], ['orca_session_id:closed', 'offline'], ['terminal-exact', 'online'], ['orca_session_id:stale', 'unknown']])
   assert.equal(mainTargets([{ ...ws, hostId: 'remote' }], []).sessions.length, 0)
+  for (const time of [undefined, NaN, Infinity, 0]) {
+    const [session] = mainTargets([{ ...ws, agents: [{ ...ws.agents[4], stateStartedAt: time }] }], []).sessions
+    assert.equal(session.state, 'working')
+    assert.equal(Object.hasOwn(session, 'stateStartedAt'), time === 0)
+  }
 })

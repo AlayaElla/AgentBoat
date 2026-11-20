@@ -155,6 +155,10 @@ async function setup(options = {}, hub) {
         return clone(sheets);
       }
       if (name === 'workspace.overview' && window.fixture.delayOverview) await new Promise(resolve => { window.fixture.finishOverview = resolve; });
+      if (name === 'workspace.overview' && window.fixture.overviewFailures > 0) {
+        window.fixture.overviewFailures--;
+        throw Error('fixture overview unavailable');
+      }
       if (name === 'workspace.overview') return clone({ workspace, versionLabel: options.versionLabel ?? '开发版', projects: [...registered().map(p => ({ ref: p.ref, revision:p.revision, counts: { review: p.tasks.filter(t => t.phase === 'ready' && t.acceptance.some(a => a.status === 'pending')).length }, agents: [], bound: true, updatedAt: '' })), ...(options.manyProjects ? Array.from({ length: 13 }, (_, i) => ({ ref: { ...project.ref, id: 'p' + (i + 2), name: '项目 ' + (i + 2) }, counts: { working: options.idleProjects ? 0 : 1 }, agents: [], bound: true, updatedAt: '' })) : [])], hidden: [], attention: attention(), questions: window.fixture.questions ?? [], reports: window.fixture.reports ?? [], links, connections: [], machines: [{ id: 'local', name: '主机', role: 'host' }] });
       if (name === 'workspace.agents' && options.holdAgents) await new Promise((resolve, reject) => {
         window.fixture.agentTimeout = () => reject(Error('workspace.agents timed out after 30000ms'));
@@ -322,6 +326,27 @@ const openReview = async (title = '页面交付') => {
   return body;
 };
 try {
+  await setup({ inboxBatch: true, width: 400 });
+  await test('background overview retries silently, retains content on failure and clears the notice after recovery', async () => {
+    const failReads = (count, name) => page.evaluate(([count, name]) => {
+      fixture.calls.length = 0; fixture.overviewFailures = count; fixture.project.ref.name = name; fixture.emit();
+    }, [count, name]);
+    const attempts = () => page.evaluate(() => fixture.calls.filter(c => c.name === 'workspace.overview').length);
+    await failReads(1, '更新后的项目');
+    await page.waitForFunction(() => fixture.overviewFailures === 0);
+    assert.equal(await page.locator('.toast').count(), 0);
+    await page.getByText('更新后的项目', { exact: true }).first().waitFor();
+    assert.equal(await attempts(), 2);
+    await failReads(3, '恢复后的项目');
+    const notice = page.getByRole('status').filter({ hasText: '当前显示上次的内容' });
+    await notice.waitFor();
+    assert.equal(await attempts(), 3);
+    assert.equal(await page.getByRole('alert').count(), 0);
+    assert.ok(await page.getByText('更新后的项目', { exact: true }).first().isVisible());
+    await notice.getByRole('button', { name: '重试' }).click();
+    await page.getByText('恢复后的项目', { exact: true }).first().waitFor();
+    assert.equal(await notice.count(), 0);
+  });
   await setup({ inboxBatch: true, width: 400 });
   await page.evaluate(() => document.fonts.ready.then(() => true));
   await page.mouse.move(1, 1); // Let Edge acknowledge its first native input before timing panel actions.
