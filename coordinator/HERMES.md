@@ -35,10 +35,10 @@ bash workspace/install-hermes.sh
 
 ```sh
 cd "$HOME/Library/Application Support/orca/agentboat-current"
-bash workspace/install-hermes.sh --attach --profile '星月'
+bash workspace/install-hermes.sh --attach --profile xingyue
 ```
 
-参数使用磁盘上的目录名。自定义安装时，`HERMES_HOME` 指向包含 `profiles/` 的根目录，`HERMES_INSTALL_DIR` 指向现有 Hermes 源码目录。脚本直接使用其中的 `.venv/bin/python` 或 `venv/bin/python`，其他布局可用 `HERMES_PYTHON` 指定已安装的 Hermes 解释器。它跳过安装、升级、LaunchAgent 登记和网关启停。
+`--profile` 填 `~/.hermes/profiles` 下的**目录名**，不是显示名（这台 Mac 上星月的目录名是 `xingyue`，填「星月」会找不到目录而直接退出）。自定义安装时，`HERMES_HOME` 指向包含 `profiles/` 的根目录，`HERMES_INSTALL_DIR` 指向现有 Hermes 源码目录。脚本直接使用其中的 `.venv/bin/python` 或 `venv/bin/python`，其他布局可用 `HERMES_PYTHON` 指定已安装的 Hermes 解释器。它跳过安装、升级、LaunchAgent 登记和网关启停。
 
 **写入内容。** 假设星月原有 QQ 渠道、系统提示和审批，原先没有 A2A。脚本在星月目录内备份原有的 `config.yaml` 和 `.env` 为同时间戳的 `*.before-hermes-<时间戳>`，备份权限为 0600。下面是写入后的新增项，两个令牌各自独立：
 
