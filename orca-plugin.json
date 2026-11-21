@@ -1,0 +1,79 @@
+{
+  "manifestVersion": 2,
+  "id": "agentboat",
+  "name": "AgentBoat",
+  "version": "0.1.32",
+  "description": "分项目处理决定与成果验收，保存任务记录并接收飞书消息。",
+  "engines": {
+    "orca": ">=1.4.261"
+  },
+  "execution": "trusted-worker",
+  "pluginApi": 1,
+  "main": "worker.mjs",
+  "contributes": {
+    "events": [
+      {
+        "on": "agent.status.changed"
+      }
+    ],
+    "settings": [
+      {
+        "key": "cliPath",
+        "title": "Orca CLI 路径",
+        "type": "string",
+        "default": ""
+      }
+    ],
+    "commands": [
+      {
+        "id": "workspace.overview",
+        "title": "打开工作间总览",
+        "when": "global"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "workspace.overview",
+        "key": "Mod+Alt+Shift+J",
+        "when": "global"
+      }
+    ],
+    "statusBarItems": [
+      {
+        "id": "coordinator",
+        "text": "工作间",
+        "icon": "blocks",
+        "command": "workspace.overview"
+      }
+    ],
+    "panels": [
+      {
+        "id": "project-coordinator",
+        "title": "工作间",
+        "icon": "blocks",
+        "entry": "src/panel.html",
+        "ui": "html"
+      }
+    ]
+  },
+  "capabilities": [
+    {
+      "kind": "storage:own"
+    },
+    {
+      "kind": "secrets:own"
+    },
+    {
+      "kind": "settings:own"
+    },
+    {
+      "kind": "workspace:write"
+    },
+    {
+      "kind": "workspace:read"
+    },
+    {
+      "kind": "agent:read"
+    }
+  ]
+}
