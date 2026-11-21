@@ -5,20 +5,42 @@ import { mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync, rmSyn
 import os from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { pluginDataPath } from './orca-cli.mjs';
+
+// Run the child against a disposable release endpoint, including operations that consume stdin.
+function writeFixture(file, code) {
+  const profile = path.dirname(file), data = pluginDataPath(profile);
+  mkdirSync(data, { recursive: true });
+  writeFileSync(file, code + `
+import { createServer } from 'node:http';
+import { writeFileSync as saveEndpoint } from 'node:fs';
+process.env.ORCA_USER_DATA_PATH = ${JSON.stringify(profile)};
+process.env.ORCA_CLI_COMMAND = 'fixture-orca';
+const server = createServer(async (req, res) => {
+  let body = '';
+  for await (const chunk of req) body += chunk;
+  const { name, input } = JSON.parse(body);
+  res.end(JSON.stringify(reply(name, input)));
+});
+await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+server.unref();
+saveEndpoint(${JSON.stringify(path.join(data, 'cli-endpoint.json'))}, JSON.stringify({ port: server.address().port, token: '0'.repeat(64) }));
+`);
+}
 
 test('main-bind queries in its own process without --from and overwrites supplied identity', () => {
   const dir = mkdtempSync(path.join(os.tmpdir(), 'main-bind-client-'));
   const fixture = path.join(dir, 'orca-fixture.mjs');
-  writeFileSync(fixture, `import cp from 'node:child_process';
+  writeFixture(fixture, `import cp from 'node:child_process';
 import { syncBuiltinESMExports } from 'node:module';
 cp.execFileSync = (_exe, args) => {
   if (args[0] === 'orchestration') {
     if (args.includes('--from')) throw Error('chatNotDeclarable');
     return JSON.stringify({ok:true,result:{run:process.env.TEST_NO_RUN ? null : {id:'run_self'}}});
   }
-  const input = JSON.parse(args[args.indexOf('--data') + 1]);
-  return JSON.stringify({input, handler:args[4]});
+  throw Error('Unexpected Orca command');
 };
+const reply = (handler, input) => ({ok:true,input,handler});
 syncBuiltinESMExports();`);
   try {
     const call = (chat, extra = {}) => execFileSync(process.execPath, ['--import', pathToFileURL(fixture).href, 'scripts/client.mjs', 'main-bind', '--check'], {
@@ -36,9 +58,9 @@ syncBuiltinESMExports();`);
       ['--import', pathToFileURL(fixture).href, 'scripts/client.mjs', command],
       { encoding:'utf8', windowsHide:true, input:JSON.stringify(input), env:{ ...process.env, ORCA_AGENT_SESSION_ID:'project-chat' } }));
     const switchInput = { projectId:'p1', revision:2, mode:'new', agent:'codex', runId:'run_forged' };
-    assert.deepEqual(projectLead('project-lead-switch', switchInput), { handler:'workspace.projectLead', input:{ ...switchInput, runId:'run_self' } });
+    assert.deepEqual(projectLead('project-lead-switch', switchInput), { ok:true, handler:'workspace.projectLead', input:{ ...switchInput, runId:'run_self' } });
     const bindInput = { projectId:'p1', revision:3, requestId:'project-bind', runId:'run_self', token:'test-only' };
-    assert.deepEqual(projectLead('project-lead-bind', bindInput), { handler:'project.agent', input:{
+    assert.deepEqual(projectLead('project-lead-bind', bindInput), { ok:true, handler:'project.agent', input:{
       ...bindInput, operation:'bind', caller:'orca_session_id:project-chat', currentRunId:'run_self' } });
   } finally { rmSync(dir, {recursive:true,force:true}); }
 });
@@ -47,7 +69,7 @@ test('main-bind writes both role cards only after a matching receipt and retries
   const dir = mkdtempSync(path.join(os.tmpdir(), 'main-role-client-'));
   const fixture = path.join(dir, 'orca-fixture.mjs');
   const start = '<!-- AgentBoat:workspace-role:start -->', end = '<!-- AgentBoat:workspace-role:end -->';
-  writeFileSync(fixture, `import cp from 'node:child_process';
+  writeFixture(fixture, `import cp from 'node:child_process';
 import fs from 'node:fs';
 import { syncBuiltinESMExports } from 'node:module';
 const open = fs.openSync;
@@ -57,8 +79,9 @@ fs.openSync = (file, ...args) => {
 };
 cp.execFileSync = (_exe, args) => {
   if (args[0] === 'orchestration') return JSON.stringify({ok:true,result:{run:{id:'run_self'}}});
-  return JSON.stringify({ok:!process.env.TEST_ROLE_REJECT,result:{result:{runId:'run_self',session:{path: process.env.TEST_ROLE_DIRECTORY, handle:process.env.TEST_ROLE_HANDLE}}}});
+  throw Error('Unexpected Orca command');
 };
+const reply = () => process.env.TEST_ROLE_REJECT ? {ok:false,error:{message:'rejected'}} : {ok:true,result:{result:{runId:'run_self',session:{path: process.env.TEST_ROLE_DIRECTORY, handle:process.env.TEST_ROLE_HANDLE}}}};
 syncBuiltinESMExports();`);
   const call = (directory, command = 'main-bind', check = false, env = {}) => JSON.parse(execFileSync(process.execPath,
     ['--import', pathToFileURL(fixture).href, 'scripts/client.mjs', command, ...(check ? ['--check'] : [])], {
@@ -75,7 +98,7 @@ syncBuiltinESMExports();`);
     writeFileSync(claude, original); writeFileSync(agents, managed);
     call(first, 'main-bind', true);
     call(first, 'main-bind', false, {TEST_ROLE_HANDLE:'orca_session_id:different'});
-    assert.equal(call(first, 'main-bind', false, {TEST_ROLE_REJECT:'1'}).ok, false);
+    assert.throws(() => call(first, 'main-bind', false, {TEST_ROLE_REJECT:'1'}), /rejected/);
     call(first, 'project-lead-bind');
     assert.equal(readFileSync(claude, 'utf8'), original);
     assert.equal(readFileSync(agents, 'utf8'), managed);
@@ -109,10 +132,7 @@ syncBuiltinESMExports();`);
 test('connection and link CLI take message JSON from stdin', () => {
   const dir = mkdtempSync(path.join(os.tmpdir(), 'connection-client-'));
   const fixture = path.join(dir, 'orca-fixture.mjs');
-  writeFileSync(fixture, `import cp from 'node:child_process';
-import {syncBuiltinESMExports} from 'node:module';
-cp.execFileSync = (_exe, args) => JSON.stringify({handler:args[4],input:JSON.parse(args[args.indexOf('--data')+1])});
-syncBuiltinESMExports();`);
+  writeFixture(fixture, 'const reply = (handler, input) => ({ok:true,handler,input});');
   try {
     for (const operation of ['read', 'check', 'send', 'reply']) {
       const input = {name:'Hermes',runId:'mock-main',requestId:'mock-request',contextId:'mock-context',id:'mock-task',text:'模拟日常消息'};
@@ -123,20 +143,21 @@ syncBuiltinESMExports();`);
     for (const message of [{ text: '模拟主 agent 消息' }, { files: [path.join(dir, 'fixture.png')] }]) {
       const input = { id: 'local-connection', runId: 'mock-main', requestId: 'mock-message', ...message };
       const value = JSON.parse(execFileSync(process.execPath, ['--import', pathToFileURL(fixture).href, 'scripts/client.mjs', 'links-send'], { encoding: 'utf8', windowsHide: true, input: JSON.stringify(input) }));
-      assert.deepEqual(value, { handler: 'workspace.links', input: { ...input, operation: 'send' } });
+      assert.deepEqual(value, { ok:true, handler: 'workspace.links', input: { ...input, operation: 'send' } });
     }
     const input = { id:'peer', projectId:'p1', revision:0, requestId:'discard', items:[{taskId:'t',kind:'decision',itemId:'d',result:'discarded'}] };
     const inputFile = path.join(dir, 'feedback.json');
     writeFileSync(inputFile, JSON.stringify(input));
     const value = JSON.parse(execFileSync(process.execPath, ['--import', pathToFileURL(fixture).href, 'scripts/client.mjs', 'feedback', inputFile], {encoding:'utf8',windowsHide:true}));
-    assert.deepEqual(value, {handler:'workspace.linkFeedback', input});
+    assert.deepEqual(value, {ok:true,handler:'workspace.linkFeedback', input});
   } finally { rmSync(dir, {recursive:true,force:true}); }
 });
 
 test('project writes attach the local caller and current Run as optional display metadata', () => {
   const dir = mkdtempSync(path.join(os.tmpdir(), 'project-caller-client-')), fixture = path.join(dir, 'orca-fixture.mjs'), inputFile = path.join(dir, 'input.json');
-  writeFileSync(fixture, `import cp from 'node:child_process'; import {syncBuiltinESMExports} from 'node:module';
-cp.execFileSync=(_exe,args)=>{if(args[0]==='orchestration'){if(args.includes('--from'))throw Error('wrong identity');if(process.env.TEST_NO_RUN)throw Error('Run unavailable');return JSON.stringify({ok:true,result:{run:{id:'run_current'}}});}return JSON.stringify({input:JSON.parse(args[args.indexOf('--data')+1])});};syncBuiltinESMExports();`);
+  writeFixture(fixture, `import cp from 'node:child_process'; import {syncBuiltinESMExports} from 'node:module';
+cp.execFileSync=(_exe,args)=>{if(args[0]==='orchestration'){if(args.includes('--from'))throw Error('wrong identity');if(process.env.TEST_NO_RUN)throw Error('Run unavailable');return JSON.stringify({ok:true,result:{run:{id:'run_current'}}});}throw Error('Unexpected command');};syncBuiltinESMExports();
+const reply = (name, input) => ({ok:true,result:{ok:false},input});`);
   try {
     for (const operation of ['bind', 'submit', 'feedback', 'hide', 'restore', 'delete']) for (const mode of ['chat', 'terminal', 'none', 'no-run']) {
       const input = {projectId:'p1',revision:0,requestId:'r',caller:'forged',...(operation==='bind'?{runId:'run_bound'}:{}),
@@ -153,16 +174,16 @@ cp.execFileSync=(_exe,args)=>{if(args[0]==='orchestration'){if(args.includes('--
 test('submit emits the hook receipt only for the exact saved write and preserves the bridge reply', () => {
   const dir = mkdtempSync(path.join(os.tmpdir(), 'project-submit-client-'));
   const fixture = path.join(dir, 'orca-fixture.mjs'), input = path.join(dir, 'input.json');
-  writeFileSync(fixture, "import cp from 'node:child_process'; import {syncBuiltinESMExports} from 'node:module'; import {createHash} from 'node:crypto';\n" +
-    `cp.execFileSync=(_exe,args)=>{
-      const raw=args[args.indexOf('--data')+1], input=JSON.parse(raw);
+  writeFixture(fixture, `import {createHash} from 'node:crypto';
+    const reply = (name, input) => {
+      const raw = JSON.stringify(input);
       const fingerprint=process.env.TEST_UNMATCHED?'wrong':createHash('sha256').update(raw).digest('hex');
       const archived=!!process.env.TEST_ARCHIVED, task={...input.task,acceptance:archived?[]:[{status:'pending'}]};
-      return JSON.stringify({ok:true,result:{result:{submitted:archived?{id:task.id,phase:task.phase,pendingAcceptance:false,pendingDecision:false}:undefined,project:{
+      return {ok:true,result:{result:{submitted:archived?{id:task.id,phase:task.phase,pendingAcceptance:false,pendingDecision:false}:undefined,project:{
         ref:{id:input.projectId},revision:2,runId:'run_self',archive:archived?{last:{revision:2,tasks:1}}:undefined,
         tasks:archived?[]:[task],requests:[{id:input.requestId,fingerprint}]
-      }}}});
-    };syncBuiltinESMExports();`);
+      }}}};
+    };`);
   writeFileSync(input, JSON.stringify({ projectId: 'p1', revision: 1, runId: 'run_self', requestId: 'one', task: { id: 't1', phase: 'ready' } }));
   try {
     const call = (unmatched, archived = false) => execFileSync(process.execPath, ['--import', pathToFileURL(fixture).href, 'scripts/client.mjs', 'submit', input], {
@@ -182,8 +203,7 @@ test('submit emits the hook receipt only for the exact saved write and preserves
 
 test('brief and single-task reads preserve the bridge envelope and omit unrelated state', () => {
   const dir = mkdtempSync(path.join(os.tmpdir(), 'compact-client-')), fixture = path.join(dir, 'orca-fixture.mjs');
-  writeFileSync(fixture, `import cp from 'node:child_process'; import {syncBuiltinESMExports} from 'node:module';
-const ref={id:'p1',name:'示例',path:'/private/path',repoId:'repo'}, counts={working:2};
+  writeFixture(fixture, `const ref={id:'p1',name:'示例',path:'/private/path',repoId:'repo'}, counts={working:2};
 const hidden='history-marker', backup={phase:'taking',history:[hidden.repeat(4096),'a','b','c']};
 const project={ref, revision:3, archive:{id:hidden}, backup, requests:[], deliveries:[{state:'sent',body:'live'}],
   tasks:[{id:'t1',title:'一',phase:'ready',updatedAt:'today',decisions:[{id:'d',history:['current'],archivedHistory:12},{id:'closed',answer:null}],
@@ -192,9 +212,10 @@ const project={ref, revision:3, archive:{id:hidden}, backup, requests:[], delive
     {id:'t2',title:'二',phase:'working',acceptance:[],decisions:[],artifacts:[],executions:[]}],
   events:[{id:'unlinked',text:'x'.repeat(200)},{id:'linked',taskId:'t1',text:'linked text'}]};
 const overview={workspace:{runId:'main',backup},links:['private'],attention:[{title:'待决定',fingerprint:'digest'}],questions:[{id:'msg_1'}],projects:[{ref,counts,revision:3,bound:false,agents:[{runId:'r'}]}]};
-cp.execFileSync=(_exe,args)=>{const archived=args.includes('--data')&&JSON.parse(args[args.indexOf('--data')+1]).taskId==='old';
-return JSON.stringify({ok:true,id:'fixture',result:{result:args[4]==='workspace.overview'?overview:args[4]==='lead.history'?{history:[hidden]}:args[4]==='workspace.agent'?overview.workspace:args[4]==='project.lead'?{binding:{backup}}:{project,lead:{backup},...(archived?{task:{...project.tasks[0],id:'old',goal:'archived-body'},archiveStatus:'已归档'}:{})}}});};
-syncBuiltinESMExports();`);
+const reply = (name, input) => {
+const archived=input?.taskId==='old';
+return {ok:true,id:'fixture',result:{result:name==='workspace.overview'?overview:name==='lead.history'?{history:[hidden]}:name==='workspace.agent'?overview.workspace:name==='project.lead'?{binding:{backup}}:{project,lead:{backup},...(archived?{task:{...project.tasks[0],id:'old',goal:'archived-body'},archiveStatus:'已归档'}:{})}}};};
+`);
   const call = (...args) => JSON.parse(execFileSync(process.execPath, ['--import', pathToFileURL(fixture).href, 'scripts/client.mjs', ...args],
     { encoding: 'utf8', windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] }));
   try {
@@ -243,8 +264,9 @@ syncBuiltinESMExports();`);
 test('write receipts identify the affected project or message and omit unrelated records', () => {
   const dir = mkdtempSync(path.join(os.tmpdir(), 'write-receipt-'));
   const fixture = path.join(dir, 'host.mjs'), file = path.join(dir, 'request.json');
-  writeFileSync(fixture, `import cp from 'node:child_process'; import {syncBuiltinESMExports} from 'node:module';
-cp.execFileSync=(_exe,args)=>args[0]==='orchestration'?'{"ok":true,"result":{"run":{"id":"run_self"}}}':process.env.TEST_RECEIPT;
+  writeFixture(fixture, `import cp from 'node:child_process'; import {syncBuiltinESMExports} from 'node:module';
+cp.execFileSync=(_exe,args)=>'{"ok":true,"result":{"run":{"id":"run_self"}}}';
+const reply = () => JSON.parse(process.env.TEST_RECEIPT);
 syncBuiltinESMExports();`);
   const call = (command, view, input, stdin = false) => {
     writeFileSync(file, JSON.stringify(input));
@@ -294,8 +316,7 @@ syncBuiltinESMExports();`);
 test('the bridge explains approval and reload errors while keeping unrelated validation errors', () => {
   const dir = mkdtempSync(path.join(os.tmpdir(), 'client-reload-'));
   const fixture = path.join(dir, 'orca-fixture.mjs');
-  writeFileSync(fixture, `import cp from 'node:child_process'; import {syncBuiltinESMExports} from 'node:module';
-cp.execFileSync=()=>{throw Object.assign(Error('CLI rejected'),{stdout:process.env.FIXTURE_REPLY});};syncBuiltinESMExports();`);
+  writeFixture(fixture, 'const reply = () => JSON.parse(process.env.FIXTURE_REPLY);');
   const run = error => execFileSync(process.execPath, ['--import', pathToFileURL(fixture).href, 'scripts/client.mjs', 'overview'],
     { encoding: 'utf8', windowsHide: true, stdio: ['ignore','pipe','pipe'], env: { ...process.env, FIXTURE_REPLY: JSON.stringify({ok:false,error}) } });
   try {

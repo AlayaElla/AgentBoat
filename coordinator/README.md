@@ -16,50 +16,7 @@ Orca 右侧的工作间是 HTML 面板，首页只有「等你处理」和「组
 
 主 agent 页直接列出在线会话，点「设为主 agent」或「换成它」即发出接管；也可直接新开主 agent，默认 Claude，可改 Codex。等待时可取消或改选其他会话，旧凭据随即失效；10 分钟内未绑定会显示原因。目标会话仍须核对身份、创建自己的 Run、先 `main-bind --check` 再正式绑定，一次性凭据不会写入 skill。
 
-## 开发版安装和更新
-
-需要 Node.js 22+、Git、正在运行的 Orca >=1.4.261，并确认终端能运行 `orca status --json`。先将下面的仓库地址换成自己的 AgentBoat Git 地址：
-
-```sh
-git clone <AgentBoat仓库地址> AgentBoat
-cd AgentBoat/coordinator
-npm install
-npm run build
-orca plugin dev load plugin --json
-node ../workspace/install.mjs
-orca plugin open local.agentboat --panel project-coordinator --json
-```
-
-首次加载按 Orca 回执核对权限并批准；需要指纹时使用回执给出的命令和 fingerprint。`plugin/` 不进 Git，拉代码后必须在本机构建，再加载此目录。安装器会同时安装工作间主 agent 和项目协作两份 skill 到 `~/.agents/skills/`，并在 `~/.claude/skills/` 建立链接；命令中的仓库路径会替换为本机绝对路径。移动仓库后重新运行安装器，开启新会话加载更新后的 skill。
-
-更新时在 `AgentBoat/coordinator` 执行以下步骤。证据目录须在仓库外，且其父目录已经存在；下面用系统临时目录创建父目录并保留备份，终端内设定的变量不进入仓库：
-
-```sh
-git pull --ff-only
-npm install
-orca plugin types . --json
-npm run typecheck
-node scripts/test-local.mjs
-# 首次检查时将浏览器工具装到仓库外；已安装时直接复用 PLAYWRIGHT_MODULE
-browser_tools="$(mktemp -d -t agentboat-browser)"
-npm install --prefix "$browser_tools" playwright-core
-export PLAYWRIGHT_MODULE="$browser_tools/node_modules/playwright-core/index.mjs"
-# 使用 Mac 上的 Chrome；其他 Chromium 浏览器改为其真实可执行文件路径
-export BROWSER_EXECUTABLE="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
-node scripts/panel-browser.mjs
-evidence_parent="$(mktemp -d -t agentboat-update)"
-evidence="$evidence_parent/backup"
-node scripts/release-evidence.mjs backup "$evidence"
-npm run build
-orca plugin dev reload plugin --json
-node scripts/release-evidence.mjs snapshot "$evidence" after
-node scripts/release-evidence.mjs compare "$evidence" after
-node ../workspace/install.mjs
-```
-
-检查失败时停止，先修复再构建。每次 `orca plugin dev reload` 都可能返回 `approval_required`，这是 Orca 对开发插件的审批流程。先与上一版核对回执里的插件身份、清单和权限，完全相同才按回执批准，有差异就停下问主人；批准后再拍快照比较。保留终端打印的备份位置；如有可解释的正常项目更新，核实后另存基线重比；解释不了的差异或数据丢失应立即恢复旧构建并回报，保留当前数据，不自行修记录。没有修改清单和权限的更新不应增加授权。
-
-macOS 默认插件数据目录为 `~/Library/Application Support/orca/plugins-data/local.agentboat`；Windows 默认位于用户的 `AppData/Roaming/orca/plugins-data/local.agentboat`（使用系统 APPDATA）。两者均优先使用 `ORCA_USER_DATA_PATH` 指定的 Orca 用户数据目录。备份脚本与项目导出共用这条规则；开发版或自定义 profile 应在当前 Orca 终端内执行，或显式设置该环境变量。
+## 数据与归档
 
 每次项目写入都整理旧记录。按任务最后更新时间倒序保留 20 项已完成任务，与面板近期完成记录的展示数量一致。已结束通知保留最近写入的 24 条，请求凭证保留最近写入的 128 个，供日常回看和多轮核对。未完成任务及其来源、未结束通知和仍可回复的飞书提醒全部保留。随任务移出的来源一并归档。其余来源最多保留 30 天，其中尚未分配的消息按接收时间保留最近 24 条，留出关联任务的时间。
 
@@ -82,13 +39,11 @@ node scripts/test-local.mjs
 node scripts/panel-browser.mjs
 npm run build
 orca plugin validate plugin --json
-orca plugin dev load plugin --json
-orca plugin open local.agentboat --panel project-coordinator --json
 ```
 
-`plugin/` 是自包含运行目录，包含打包后的官方飞书 SDK；不要直接加载有 node_modules 的源码根目录，以免超出 Orca 文件大小限制。修改后重新 build 与 dev reload。清单变更必须逐项核对用户授权后才按回执指纹批准。开发加载会保留，开发版 CLI 使用 Orca 的 dev request。正式版的安装和升级见 [AgentBoat](../README.md)。
+构建生成的 `plugin/` 用于打包发布。仓库 client 通过当前 Orca 用户环境里正式版插件的本机桥接发起请求。安装和升级步骤见 [AgentBoat](../README.md)。
 
-用户正在使用的插件构建会自动重新加载。构建前先将插件数据整个备份到仓库外，并用 client 读取全部项目快照；测试与类型检查、无头检查全部通过后才能构建。每次重新加载后比对全部项目；差异若来自快照后的正常写入，核实后取新快照再比；解释不了的差异或丢失立即回退旧构建并回报，不自行修数据。使用 mockHost 隔离数据测试通知，不向真实项目写测试记录或发送消息。`node scripts/release-evidence.mjs backup <仓库外目录>` 备份数据、旧构建并取全项目快照；用 snapshot 与 compare 保存并比对重载结果。修改 skill 后执行 `node ../workspace/install.mjs`，一次同步两份 skill 和 Claude 链接。Hermes 的 `workspace/install-hermes.ps1` 仅用于 Windows，其 skill 和系统提示由该安装流程管理。
+更新前可用 `node scripts/release-evidence.mjs backup <仓库外的新目录>` 保存已安装版本、插件数据和项目快照。更新后用 `snapshot <同一目录> after` 和 `compare <同一目录> after` 核对所有项目。备份含本机连接信息，请保存在个人专用目录。
 
 Orca 1.4.256 在本机 Windows 的 plugin test/check 会错误拒绝其测试运行时的相对导入。可以用以下脚本将同一官方测试运行时与测试临时打包，不修改 Orca 安装文件：
 

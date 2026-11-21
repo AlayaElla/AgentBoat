@@ -972,6 +972,7 @@ export function createCoordinator(api: OrcaWorkerApi, runtime: CoordinatorRuntim
 let coordinator: ReturnType<typeof createCoordinator> | undefined
 let cli: ReturnType<typeof cliBridge> | undefined
 export default async function activate(orca: OrcaWorkerApi): Promise<void> {
+  if (!release) throw new Error('请在 Orca 中安装 AgentBoat 正式版')
   // A broken stable link must not stop the plugin; the versioned paths keep working.
   let hooksChangedVersion: string | undefined
   try { hooksChangedVersion = await refreshReleaseSetup() }
@@ -980,9 +981,9 @@ export default async function activate(orca: OrcaWorkerApi): Promise<void> {
     const configured = await orca.settings.get('cliPath')
     return typeof configured === 'string' && configured.trim() ? configured.trim() : defaultExecutable
   })
-  cli = release ? cliBridge(orca) : undefined
-  coordinator = createCoordinator(cli?.api ?? orca, runtime, undefined, undefined, undefined, roleRegistryPath())
+  cli = cliBridge(orca)
+  coordinator = createCoordinator(cli.api, runtime, undefined, undefined, undefined, roleRegistryPath())
   await coordinator.start(hooksChangedVersion)
-  await cli?.start()
+  await cli.start()
 }
 export function deactivate(): void { cli?.stop(); coordinator?.stop() }

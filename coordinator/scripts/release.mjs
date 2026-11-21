@@ -2,7 +2,7 @@ import { execFileSync } from 'node:child_process';
 import { cpSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { executable, releasePluginKey } from './orca-cli.mjs';
+import { executable, pluginKey } from './orca-cli.mjs';
 
 const [tag, output] = process.argv.slice(2);
 if (!/^v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/.test(tag) || !output || process.argv.length !== 4) {
@@ -37,7 +37,7 @@ for (const [source, destination] of [
   cpSync(path.join(root, source), path.join(out, destination), { recursive: true });
 }
 const manifest = JSON.parse(readFileSync(path.join(coordinator, 'plugin/orca-plugin.json'), 'utf8'));
-if (manifest.id !== releasePluginKey.split('.')[1]) throw new Error('发布身份与清单 ID 不一致');
+if (manifest.id !== pluginKey.split('.')[1]) throw new Error('发布身份与清单 ID 不一致');
 manifest.version = tag.slice(1);
 writeFileSync(path.join(out, 'orca-plugin.json'), JSON.stringify(manifest, null, 2) + '\n');
 node('scripts/setup.test.mjs', out);

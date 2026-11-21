@@ -15,13 +15,12 @@ export function userDataPath(platform = process.platform, env = process.env, hom
     : path.join(env.XDG_CONFIG_HOME || path.join(home, '.config'), 'orca'));
 }
 
-export const releasePluginKey = 'alayaella.agentboat';
+export const pluginKey = 'alayaella.agentboat';
 // The worker is bundled at the release root while client and hook scripts keep their source layout.
 const workerRelease = existsSync(new URL('./setup.mjs', import.meta.url)) && existsSync(new URL('./orca-plugin.json', import.meta.url));
 const releaseRoot = new URL(workerRelease ? './' : '../../', import.meta.url);
 export const release = existsSync(new URL('setup.mjs', releaseRoot)) && existsSync(new URL('orca-plugin.json', releaseRoot));
 export function pluginVersionLabel() {
-  if (!release) return '开发版';
   try {
     const { version } = JSON.parse(readFileSync(new URL('orca-plugin.json', releaseRoot), 'utf8'));
     if (typeof version === 'string' && version.trim()) return `版本 v${version}`;
@@ -32,10 +31,9 @@ const versionDir = path.resolve(fileURLToPath(releaseRoot));
 const keyDir = path.dirname(versionDir);
 const pluginsDir = path.dirname(keyDir);
 const versionHash = /^(?:[0-9a-f]{32}|[0-9a-f]{64})$/;
-const installed = release && versionHash.test(path.basename(versionDir)) && path.basename(pluginsDir) === 'plugins';
+const installed = release && versionHash.test(path.basename(versionDir)) && path.basename(keyDir) === pluginKey && path.basename(pluginsDir) === 'plugins';
 export const activeUserDataPath = () => installed ? path.dirname(pluginsDir) : userDataPath();
-export const pluginKey = installed ? path.basename(keyDir) : release ? releasePluginKey : 'local.' + releasePluginKey.split('.')[1];
-const stableRoot = () => path.resolve(activeUserDataPath(), 'agentboat-current');
+export const stableRoot = () => path.resolve(activeUserDataPath(), 'agentboat-current');
 const clientScript = 'coordinator/scripts/client.mjs';
 export const stableClientPath = () => path.join(stableRoot(), clientScript);
 export const clientPath = path.join(versionDir, clientScript);
@@ -47,15 +45,14 @@ export const pluginDataPath = (root = activeUserDataPath()) => path.join(root, '
 export const roleRegistryPath = (...profile) => path.join(pluginDataPath(profile.length ? userDataPath(...profile) : undefined), 'roles.json');
 
 // Orca owns current and prunes old releases. Keep our directory link outside its plugins tree.
-export function linkCurrentRelease() {
-  const key = installed ? keyDir : path.resolve(activeUserDataPath(), 'plugins', releasePluginKey);
-  const link = stableRoot(), current = path.join(key, 'current');
+function linkCurrentRelease() {
+  const link = stableRoot(), current = path.join(keyDir, 'current');
   for (let attempt = 0; attempt < 3; attempt++) {
     let hash;
     try { hash = readFileSync(current, 'utf8').trim(); }
     catch (error) { if (error.code === 'ENOENT') return; throw error; }
     if (!versionHash.test(hash)) throw Error('AgentBoat 当前版本无效，请检查 Orca 插件安装');
-    const target = path.join(key, hash);
+    const target = path.join(keyDir, hash);
     if (!lstatSync(target, { throwIfNoEntry: false })?.isDirectory() ||
         ![clientScript, 'setup.mjs', 'orca-plugin.json'].every(file => existsSync(path.join(target, file))))
       throw Error('AgentBoat 当前版本文件尚未就绪，请稍后重试');
@@ -63,7 +60,7 @@ export function linkCurrentRelease() {
     if (entry) {
       const previous = entry.isSymbolicLink() && path.resolve(path.dirname(link), readlinkSync(link));
       if (previous && !path.relative(previous, target)) return link;
-      if (!previous || path.relative(path.dirname(previous), key) || !versionHash.test(path.basename(previous)))
+      if (!previous || path.relative(path.dirname(previous), keyDir) || !versionHash.test(path.basename(previous)))
         throw Error(`固定入口已有其他内容，未覆盖：${link}`);
       try { unlinkSync(link); } catch (error) { if (error.code !== 'ENOENT') throw error; }
     }

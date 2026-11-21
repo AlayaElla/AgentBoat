@@ -136,7 +136,7 @@ test('Claude role hooks scope actions by Orca identity and fail open', () => {
     }
     for (const command of ['orca plugin update alayaella.agentboat --approve', 'orca plugin update other.plugin',
       'orca plugin update alayaella.agentboat --json --approve', 'orca plugin uninstall alayaella.agentboat',
-      'orca plugin install .', 'orca plugin enable local.project-coordinator', 'orca plugin dev reload .'])
+      'orca plugin install .', 'orca plugin enable local.project-coordinator'])
       assert.equal(pre('Bash', { command }, 'codex_workspace'), 'deny');
 
     assert.match(run('codex_workspace', { hook_event_name: 'SessionStart', source: 'startup', transcript_path: transcript, session_id: 'native-fixture' }).decision.hookSpecificOutput.additionalContext, /工作间管理员/);

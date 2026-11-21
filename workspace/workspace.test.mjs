@@ -75,7 +75,7 @@ function handlePlugin(name, input, s, save) {
           s.bindOnReceipt = false; s.project.runId = 'run_project'; s.project.revision++; save();
         }
         if (input.revision !== s.project.revision) {
-          const error = Object.assign(Error('项目已更新，请刷新后再提交'), { code: 'invalid_request' }); error.stdout = JSON.stringify({ ok: false, error: { code: 'plugin_request_failed', data: { requestCode: 'invalid_request' }, message: '项目已更新，请刷新后再提交' } }); throw error;
+          throw Object.assign(Error('项目已更新，请刷新后再提交'), { code: 'invalid_request' });
         }
         s.project.requests.push({ id: input.requestId, fingerprint: createHash('sha256').update(JSON.stringify(input)).digest('hex') });
         s.project.tasks.push(input.task); s.project.revision++; save();
@@ -89,7 +89,7 @@ function handlePlugin(name, input, s, save) {
   throw Error('Unexpected plugin request ' + name);
 }
 
-function fakeWorkspace(t) {
+async function fakeWorkspace(t) {
   const directory = mkdtempSync(path.join(sandbox, 'agentboat-demo-t39-'));
   t.after(() => {
     assert.equal(path.dirname(directory), sandbox);
@@ -108,10 +108,8 @@ function fakeWorkspace(t) {
   const read = () => JSON.parse(readFileSync(data));
   set();
   writeFileSync(fixture, `import cp from 'node:child_process';
-import { createHash } from 'node:crypto';
 import { syncBuiltinESMExports } from 'node:module';
 import { readFileSync, writeFileSync, appendFileSync } from 'node:fs';
-${handlePlugin.toString()}
 const real = cp.execFileSync;
 cp.execFileSync = (executable, args, options) => {
   if (executable === process.execPath || executable === 'git') return real(executable, args, options);
@@ -119,7 +117,6 @@ cp.execFileSync = (executable, args, options) => {
   appendFileSync(process.env.T39_LOG, JSON.stringify(args) + '\\n');
   const s = JSON.parse(readFileSync(process.env.T39_STATE));
   const done = result => JSON.stringify({ ok: true, result });
-  const plugin = result => done({ result });
   const save = () => writeFileSync(process.env.T39_STATE, JSON.stringify(s));
   const arg = key => args[args.indexOf(key) + 1];
   switch (args.slice(0, 2).join(' ')) {
@@ -134,120 +131,112 @@ cp.execFileSync = (executable, args, options) => {
     case 'agent launch': return done({ outcome: { kind: 'structured', sessionId: 'fake-project-lead' }, prompt: { outcome: s.failLaunch ? 'unknown' : 'journaled' } });
     case 'worktree create': return done({ launch: { outcome: { kind: 'terminal', handle: 'fake-worker' }, prompt: { outcome: 'handed-to-terminal' } } });
   }
-  if (args.slice(0,3).join(' ') !== 'plugin dev request') throw Error('Unexpected fake request: ' + args.slice(0,3));
-  const input = args.includes('--data') ? JSON.parse(arg('--data')) : {};
-  if (process.env.T83_INSTALLED) throw Error('Installed workspace used the dev plugin');
-  return plugin(handlePlugin(args[4], input, s, save));
+  throw Error('Unexpected Orca command: ' + args.slice(0,2));
 };
 syncBuiltinESMExports();`);
   const env = { ...process.env, NODE_OPTIONS: `--import=${pathToFileURL(fixture).href}`, ORCA_CLI_COMMAND: 't39-fake-orca', ORCA_AGENT_SESSION_ID: 'demo-main', ORCA_TERMINAL_HANDLE: '',
     T39_LOG: log, T39_STATE: data, AGENTBOAT_HOME: home, AGENTBOAT_TEST_ONLY: '1', AGENTBOAT_SANDBOX: sandbox };
-  const command = (script, subcommand, payload) => {
-    writeFileSync(input, JSON.stringify(payload));
-    return JSON.parse(execFileSync(process.execPath, [script, subcommand, input], { env, cwd: api.root, encoding: 'utf8', windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] }));
-  };
-  async function installedWorkspace() {
-    const profile = path.join(directory, 'profile');
-    const release = path.join(profile, 'plugins', 'alayaella.agentboat', 'a'.repeat(64));
-    for (const file of ['workspace', ...['client', 'cli-bridge', 'orca-cli', 'main-role-card'].map(name => `coordinator/scripts/${name}.mjs`)]) {
-      cpSync(path.join(api.root, file), path.join(release, file), { recursive: true });
-    }
-    for (const file of ['setup.mjs', 'orca-plugin.json']) writeFileSync(path.join(release, file), '{}');
-    writeFileSync(path.join(release, '../current'), path.basename(release));
-    const { cliBridge } = await import(pathToFileURL(path.join(release, 'coordinator/scripts/cli-bridge.mjs')));
-    const host = cliBridge({ panels: { handle() {} } });
-    for (const name of ['workspace.agent', 'projects.list', 'project.agent', 'project.settings', 'workspace.message']) {
-      host.api.panels.handle(name, input => {
-        appendFileSync(log, JSON.stringify(['installed', name]) + '\n');
-        const s = read();
-        return handlePlugin(name, input, s, () => set(s));
-      });
-    }
-    await host.start();
-    t.after(() => host.stop());
-    return async (operation, payload) => {
-      writeFileSync(input, JSON.stringify(payload));
-      const { stdout } = await promisify(execFile)(process.execPath, [path.join(release, 'workspace/workspace.mjs'), operation, input],
-        { env: { ...env, T83_INSTALLED: '1', ORCA_USER_DATA_PATH: profile }, windowsHide: true });
-      return JSON.parse(stdout);
-    };
+  const profile = path.join(directory, 'profile');
+  const release = path.join(profile, 'plugins', 'alayaella.agentboat', 'a'.repeat(64));
+  for (const file of ['workspace', ...['client', 'cli-bridge', 'orca-cli', 'main-role-card'].map(name => `coordinator/scripts/${name}.mjs`)]) {
+    cpSync(path.join(api.root, file), path.join(release, file), { recursive: true });
   }
-  return { home, directory, projectDir, state, set, read, installedWorkspace,
+  for (const file of ['setup.mjs', 'orca-plugin.json']) writeFileSync(path.join(release, file), '{}');
+  writeFileSync(path.join(release, '../current'), path.basename(release));
+  const { cliBridge } = await import(pathToFileURL(path.join(release, 'coordinator/scripts/cli-bridge.mjs')));
+  const host = cliBridge({ panels: { handle() {} } });
+  for (const name of ['workspace.agent', 'projects.list', 'project.agent', 'project.settings', 'workspace.message']) {
+    host.api.panels.handle(name, input => {
+      appendFileSync(log, JSON.stringify(['installed', name]) + '\n');
+      const s = read();
+      return handlePlugin(name, input, s, () => set(s));
+    });
+  }
+  await host.start();
+  t.after(() => host.stop());
+  async function command(script, subcommand, payload) {
+    writeFileSync(input, JSON.stringify(payload));
+    const { stdout } = await promisify(execFile)(process.execPath, [script, subcommand, input],
+      { env: { ...env, ORCA_USER_DATA_PATH: profile }, cwd: api.root, windowsHide: true });
+    return JSON.parse(stdout);
+  }
+  return { home, directory, projectDir, state, set, read,
     calls: () => existsSync(log) ? readFileSync(log, 'utf8').trim().split('\n').map(line => JSON.parse(line)) : [],
-    message: requestId => command('coordinator/scripts/client.mjs', 'message', { projectId: ref.id, requestId, runId: state.main.runId, text: '模拟主人原话' }).result.result,
-    workspace: (subcommand, payload) => command('workspace/workspace.mjs', subcommand, payload) };
+    message: async requestId => (await command('coordinator/scripts/client.mjs', 'message', { projectId: ref.id, requestId, runId: state.main.runId, text: '模拟主人原话' })).result.result,
+    workspace: (subcommand, payload) => command('workspace/workspace.mjs', subcommand, payload),
+    installedWorkspace: (op, payload) => command(path.join(release, 'workspace/workspace.mjs'), op, payload) };
 }
 
-test('first message initializes only its own home, opens a chat and reuses the pending launch until expiry', t => {
-  const f = fakeWorkspace(t);
+test('first message initializes only its own home, opens a chat and reuses the pending launch until expiry', async t => {
+  const f = await fakeWorkspace(t);
   const options = ['--agent', 'claude', '--surface', 'chat'];
-  const first = f.message('message-1');
+  const first = await f.message('message-1');
   assert.equal(first.queued, '项目还没有主会话，已排队');
   assert.deepEqual(first.autoLaunch, { status: 'awaiting-project-binding', projectName: '现有项目', handle: 'orca_session_id:fake-project-lead',
     agent: 'claude', surface: 'chat', reused: false });
   assert.equal(existsSync(path.join(f.home, 'templates/code.json')), true);
   assert.equal(existsSync(path.join(f.projectDir, '.git')), false);
-  assert.equal(f.message('message-2').autoLaunch.reused, true);
+  assert.equal((await f.message('message-2')).autoLaunch.reused, true);
   assert.equal(f.calls().filter(args => args[0] === 'agent').length, 1);
   const profile = path.join(f.home, 'projects/auto/p1/1.json');
   const pending = JSON.parse(readFileSync(profile)); pending.at = new Date(Date.now() - 11 * 60_000).toISOString(); writeFileSync(profile, JSON.stringify(pending));
-  assert.equal(f.message('message-3').autoLaunch.reused, false);
+  assert.equal((await f.message('message-3')).autoLaunch.reused, false);
   assert.deepEqual(f.calls().filter(args => args[0] === 'agent').map(args => args.slice(args.indexOf('--agent'), args.indexOf('--prompt'))), [options, options]);
   assert.deepEqual(f.read().project.messages.map(m => m.requestId), ['message-1', 'message-2', 'message-3']);
   assert.deepEqual(f.read().project.roles, f.state.project.roles);
-  assert.equal(f.calls().some(args => ['repo add', 'project setup-update'].includes(args.slice(0,2).join(' ')) || args[4] === 'project.settings'), false);
+  assert.equal(f.calls().some(args => ['repo add', 'project setup-update'].includes(args.slice(0,2).join(' ')) || args[1] === 'project.settings'), false);
 });
 
-test('an in-flight panel takeover keeps a relayed message queued without opening a second project lead', t => {
-  const f = fakeWorkspace(t);
+test('an in-flight panel takeover keeps a relayed message queued without opening a second project lead', async t => {
+  const f = await fakeWorkspace(t);
   f.state.lead = { takeover: { state: 'waiting', target: { handle: 'orca_session_id:fixture-takeover' } } };
   f.set();
-  const result = f.message('during-takeover');
+  const result = await f.message('during-takeover');
   assert.equal(result.autoLaunch.status, 'awaiting-project-binding');
   assert.equal(result.autoLaunch.handle, 'orca_session_id:fixture-takeover');
   assert.equal(f.calls().filter(args => args[0] === 'agent').length, 0);
   assert.equal(f.read().project.messages.length, 1);
 });
 
-test('auto launch refuses the main directory, duplicate paths, remote or already bound projects and missing workspaces', t => {
-  const f = fakeWorkspace(t);
-  const withState = (requestId, change, reason) => {
+test('auto launch refuses the main directory, duplicate paths, remote or already bound projects and missing workspaces', async t => {
+  const f = await fakeWorkspace(t);
+  const withState = async (requestId, change, reason) => {
     const s = structuredClone(f.state); change(s); f.set(s);
-    const result = f.message(requestId);
+    const result = await f.message(requestId);
     assert.match(result.autoLaunch.reason, reason);
     if (!s.project.runId) assert.equal(result.queued, '项目还没有主会话，已排队');
   };
-  withState('own', s => { s.main.session.path = f.projectDir; }, /自己的目录/);
-  withState('duplicate', s => { s.repos.push({ id: 'same', path: path.join(f.projectDir, '..', path.basename(f.projectDir)) }); }, /重复登记/);
-  withState('remote', s => { s.ref.hostId = 'ssh:remote'; }, /本机登记/);
-  withState('bound', s => { s.project.runId = 'run_project'; }, /已绑定/);
-  withState('missing-workspace', s => { s.ref.workspace = ''; }, /当前没有工作区/);
+  await withState('own', s => { s.main.session.path = f.projectDir; }, /自己的目录/);
+  await withState('duplicate', s => { s.repos.push({ id: 'same', path: path.join(f.projectDir, '..', path.basename(f.projectDir)) }); }, /重复登记/);
+  await withState('remote', s => { s.ref.hostId = 'ssh:remote'; }, /本机登记/);
+  await withState('bound', s => { s.project.runId = 'run_project'; }, /已绑定/);
+  await withState('missing-workspace', s => { s.ref.workspace = ''; }, /当前没有工作区/);
   assert.equal(f.calls().some(args => args[0] === 'agent'), false);
 });
 
-test('an uncertain launch preserves the queued message and waits for inspection', t => {
-  const f = fakeWorkspace(t); f.state.failLaunch = true; f.set();
-  assert.match(f.message('uncertain').autoLaunch.reason, /未确认 agent 收到提示词/);
-  assert.equal(f.message('next').autoLaunch.status, 'needs-inspection');
+test('an uncertain launch preserves the queued message and waits for inspection', async t => {
+  const f = await fakeWorkspace(t); f.state.failLaunch = true; f.set();
+  assert.match((await f.message('uncertain')).autoLaunch.reason, /未确认 agent 收到提示词/);
+  assert.equal((await f.message('next')).autoLaunch.status, 'needs-inspection');
   assert.equal(f.calls().filter(args => args[0] === 'agent').length, 1);
   assert.equal(f.read().project.messages.length, 2);
 });
 
-test('manual create shares launch defaults and the same pending-project guard', t => {
-  const f = fakeWorkspace(t);
-  const lead = f.workspace('create', { requestId: 'manual-create', path: f.projectDir, name: 'agentboat-demo-existing', source: { kind: 'existing' } });
+test('manual create shares launch defaults and the same pending-project guard', async t => {
+  const f = await fakeWorkspace(t);
+  const lead = await f.workspace('create', { requestId: 'manual-create', path: f.projectDir, name: 'agentboat-demo-existing', source: { kind: 'existing' } });
   assert.equal(lead.surface, 'chat'); assert.equal(lead.model, undefined); assert.equal(lead.effort, undefined);
   assert.equal(lead.launched.outcome.sessionId, 'fake-project-lead');
-  assert.equal(f.message('after-manual').autoLaunch.reused, true);
+  assert.equal((await f.message('after-manual')).autoLaunch.reused, true);
   assert.equal(f.calls().filter(args => args[0] === 'agent').length, 1);
 });
 
-for (const bindOnReceipt of [false, true]) test(`dispatch records its notice when binding ${bindOnReceipt ? 'races the receipt' : 'is still pending'}`, t => {
-  const f = fakeWorkspace(t);
+for (const bindOnReceipt of [false, true]) test(`dispatch records its notice when binding ${bindOnReceipt ? 'races the receipt' : 'is still pending'}`, async t => {
+  const f = await fakeWorkspace(t);
   f.state.bindOnReceipt = bindOnReceipt; f.set();
   execFileSync('git', ['init', '--quiet'], { cwd: f.projectDir });
   execFileSync('git', ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '--allow-empty', '-m', 'fixture'], { cwd: f.projectDir });
-  const result = f.workspace('dispatch', { projectId: 'p1', requestId: 'dispatch-1', role: 'code', name: 'agentboat-demo-worker', text: '只在隔离测试中处理', source: 'fake source' });
+  const result = await f.workspace('dispatch', { projectId: 'p1', requestId: 'dispatch-1', role: 'code', name: 'agentboat-demo-worker', text: '只在隔离测试中处理', source: 'fake source' });
   assert.equal(result.autoLaunch.handle, 'orca_session_id:fake-project-lead');
   assert.equal(result.handle, 'fake-worker');
   assert.equal(result.notification.status, bindOnReceipt ? 'recorded' : 'queued');
@@ -261,7 +250,7 @@ for (const bindOnReceipt of [false, true]) test(`dispatch records its notice whe
 });
 
 test('installed create resumes settings and dispatch records its notice through the local bridge', async t => {
-  const f = fakeWorkspace(t), workspace = await f.installedWorkspace();
+  const f = await fakeWorkspace(t), workspace = f.installedWorkspace;
   const input = { requestId: 'installed-create', path: f.projectDir, name: 'agentboat-demo-bridge', source: { kind: 'existing' } };
   execFileSync('git', ['init', '--quiet'], { cwd: f.projectDir });
   execFileSync('git', ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '--allow-empty', '-m', 'fixture'], { cwd: f.projectDir });
@@ -289,11 +278,10 @@ test('installed create resumes settings and dispatch records its notice through 
   for (const once of ['repo add', 'project setup-update', 'agent launch', 'installed workspace.message'])
     assert.equal(calls.filter(call => call === once).length, 1, once);
   assert.equal(calls.filter(call => call === 'installed project.settings').length, 2);
-  assert.ok(!calls.includes('plugin dev'));
 });
 
-test('legacy create journal closes against a manually bound folder project', t => {
-  const f = fakeWorkspace(t);
+test('legacy create journal closes against a manually bound folder project', async t => {
+  const f = await fakeWorkspace(t);
   const input = { requestId: 'legacy-create', path: f.projectDir, name: 'agentboat-demo-folder', source: { kind: 'existing' } };
   f.state.ref.name = input.name;
   f.state.repos[0].kind = 'folder';
@@ -304,26 +292,26 @@ test('legacy create journal closes against a manually bound folder project', t =
   mkdirSync(path.dirname(file), { recursive: true });
   writeFileSync(file, JSON.stringify({ input, requestId: input.requestId, stage: 'needs-inspection',
     registered: { repo: f.state.repos[0] }, error: 'plugin_not_found' }));
-  const result = f.workspace('create', input);
+  const result = await f.workspace('create', input);
   assert.equal(result.stage, 'already-bound');
   assert.equal(result.runId, f.state.project.runId);
   assert.equal(result.rolesMatchTemplate, true);
   assert.deepEqual(JSON.parse(readFileSync(file)), result);
-  assert.deepEqual(f.workspace('create', input), result);
-  assert.deepEqual(f.calls().map(args => args[0] === 'plugin' ? args[4] : args.slice(0, 2).join(' ')),
+  assert.deepEqual(await f.workspace('create', input), result);
+  assert.deepEqual(f.calls().map(args => args[0] === 'installed' ? args[1] : args.slice(0, 2).join(' ')),
     ['repo show', 'projects.list', 'project.agent']);
 });
 
-test('retry after an uncertain create launch never opens another session, even after expiry', t => {
-  const f = fakeWorkspace(t);
+test('retry after an uncertain create launch never opens another session, even after expiry', async t => {
+  const f = await fakeWorkspace(t);
   f.state.failLaunch = true; f.set();
   const input = { requestId: 'uncertain-create', path: f.projectDir, name: 'agentboat-demo-uncertain', source: { kind: 'existing' } };
-  assert.throws(() => f.workspace('create', input), /未确认 agent 收到提示词/);
+  await assert.rejects(f.workspace('create', input), /未确认 agent 收到提示词/);
   const file = path.join(f.home, 'projects/auto/p1/1.json');
   const attempt = JSON.parse(readFileSync(file));
   attempt.at = '2000-01-01T00:00:00Z';
   writeFileSync(file, JSON.stringify(attempt));
-  assert.throws(() => f.workspace('create', input), /已有启动记录/);
+  await assert.rejects(f.workspace('create', input), /已有启动记录/);
   for (const once of ['repo add', 'project setup-update', 'agent launch']) {
     assert.equal(f.calls().filter(args => args.slice(0, 2).join(' ') === once).length, 1, once);
   }

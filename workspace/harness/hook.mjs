@@ -2,7 +2,7 @@ import { closeSync, fstatSync, lstatSync, openSync, readFileSync, readSync, real
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { roleRegistryPath, stableClientPath, clientPath, releasePluginKey } from '../../coordinator/scripts/orca-cli.mjs';
+import { roleRegistryPath, stableRoot, clientPath, pluginKey } from '../../coordinator/scripts/orca-cli.mjs';
 import { readRoleCard } from '../../coordinator/scripts/main-role-card.mjs';
 import { workerReport, reportSubmitted } from '../../coordinator/scripts/worker-reports.mjs';
 
@@ -109,7 +109,7 @@ function nodeAllowed(args, cwd, bash) {
   if (!script) return false;
   const requested = shellPath(cwd, script, bash);
   // Resolve only the published entry; arbitrary user-created script aliases stay outside the allowlist.
-  const entryRoot = path.resolve(path.dirname(stableClientPath()), '../..');
+  const entryRoot = stableRoot();
   const relative = path.relative(entryRoot, requested);
   const file = inside(entryRoot, requested) ? path.resolve(workspaceDir, '..', relative) : requested;
   if (!same(file, requested) && !same(file, canonical(requested))) return false;
@@ -126,7 +126,7 @@ function commandAllowed(input, role) {
   const bash = input.tool_name !== 'PowerShell', cwd = input.cwd;
   if (typeof input.tool_input?.command !== 'string' || !path.isAbsolute(cwd)) return false;
   const command = input.tool_input.command.trim();
-  const update = 'orca plugin update ' + releasePluginKey;
+  const update = 'orca plugin update ' + pluginKey;
   if (command === update || command === update + ' --json') return true;
   const here = !bash && /^@'\r?\n([\s\S]*?)\r?\n'@[ \t]*\|[ \t]*([^\r\n]+)$/.exec(command);
   if (here && /(?:^|\r?\n)'@/.test(here[1])) return false;

@@ -1,10 +1,31 @@
 # Hermes 连接
 
-在“工作间 → 设置 → 外部连接”按唯一名字管理 A2A 连接。Windows 的 Hermes 安装与自动配置用 `workspace/install-hermes.ps1`；macOS 不运行此 Windows 安装脚本，可在安装 Hermes 后直接配置 A2A 连接。配置脚本经 workspace.connections 按名字 Hermes 新建或更新 a2a 记录，不依赖固定连接编号。任意 A2A 连接详情会在本机配置可读时显示审批方式。
+在“工作间 → 设置 → 外部连接”按名字管理 A2A 连接。Windows 使用仓库里的 `workspace/install-hermes.ps1`，macOS 使用下面的脚本。两者共用配置程序，按名字 Hermes 新建或更新 A2A 连接。本机安装了 Hermes 时，连接详情显示其审批方式。
 
-自动配置使用 Hermes 9900、插件 9901。两个方向都要求至少 32 字符的独立令牌；插件令牌只存 Orca secrets，Hermes 令牌只存本机 .env 与 config.yaml。空令牌表示不更换。插件监听始终为 127.0.0.1，出站只允许无路径、无凭据的回环 HTTP 地址；远端经已有隧道接入。
+自动配置使用 Hermes 9900、插件 9901。两个方向各用一个至少 32 字符的独立令牌。AgentBoat 将令牌保存在 Orca secrets，Hermes 将入站令牌保存在本机 `.env`、出站令牌保存在 `config.yaml`。空令牌表示不更换。插件监听始终为 127.0.0.1，出站只允许无路径、无凭据的回环 HTTP 地址；远端经已有隧道接入。
 
 Hermes 仅处理日程提醒、资料整理、写作和日常电脑操作，使用自己的 daily、记忆和 skill。审批 smart，cron/single-query/unattended 为 deny，拒绝后不能放宽审批。配置脚本在本机备份配置，不打印凭据。
+
+## macOS 安装
+
+Mac 主 agent 使用主人的普通登录账户，打开一次已启用正式版 AgentBoat 的工作间面板。在 AgentBoat **源码仓库根目录**运行下列命令。自定义 Orca 用户环境时，使用该环境的终端或先设置对应的 `ORCA_USER_DATA_PATH`。
+
+```sh
+bash workspace/install-hermes.sh
+```
+
+脚本调用官方非交互安装器，默认将 Hermes 安装在 `~/.hermes/hermes-agent`，命令入口为 `~/.local/bin/hermes`。它在 Hermes 的 Python 环境中配置 A2A、审批、日常目录和专用 skill，并通过正式版 AgentBoat 的本机桥接登记连接。已有官方脚本安装的 Hermes 时，运行 `bash workspace/install-hermes.sh --configure-only` 可跳过下载。使用自定义数据目录或源码目录时沿用安装时的 `HERMES_HOME` 和 `HERMES_INSTALL_DIR`。[Hermes 官方安装说明](https://hermes-agent.nousresearch.com/docs/getting-started/installation)
+
+**主人在 Mac 上完成模型登录。** 在自己的终端运行 `~/.local/bin/hermes model`，选择自己的订阅或提供商，按提示完成浏览器授权或输入密钥。密钥只在本机交互输入。日后使用电脑操作时，由主人按实际需要批准 macOS 权限。
+
+**登录完成后，Mac 主 agent 启动并查看服务。**
+
+```sh
+~/.local/bin/hermes gateway start
+~/.local/bin/hermes gateway status
+```
+
+安装脚本通过 `gateway install --no-start-now` 写入当前用户的 LaunchAgent。首次安装后可手动启动，也可等下次登录自动启动。已有正在运行的 LaunchAgent 时，官方命令可能重新加载服务。[Hermes 官方网关说明](https://hermes-agent.nousresearch.com/docs/user-guide/messaging#macos-launchd)
 
 ## A2A 接口和命令
 

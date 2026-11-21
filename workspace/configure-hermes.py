@@ -38,18 +38,23 @@ if '--self-test' in sys.argv:
     print('Hermes configuration self-check passed')
     sys.exit(0)
 
-home = Path(os.environ.get('HERMES_HOME', str(Path(os.environ['LOCALAPPDATA']) / 'hermes')))
+home = Path(os.environ.get('HERMES_HOME') or (Path(os.environ['LOCALAPPDATA']) / 'hermes' if os.name == 'nt' else Path.home() / '.hermes'))
 root = Path(__file__).resolve().parent
 config_path, env_path = home / 'config.yaml', home / '.env'
-config = yaml.safe_load(config_path.read_text(encoding='utf-8-sig')) or {}
+try:
+    config = yaml.safe_load(config_path.read_text(encoding='utf-8-sig')) or {}
+except yaml.YAMLError:
+    raise SystemExit('Invalid Hermes config.yaml; inspect the file locally') from None
 # Refuse to reconfigure an existing unrelated agent or channel.
 if config.get('a2a_agents') and 'orca-main' not in config['a2a_agents']:
     raise SystemExit('Existing Hermes peers found; inspect this home before configuring Hermes')
 if any((value or {}).get('enabled') for name, value in ((config.get('gateway') or {}).get('platforms') or {}).items() if name != 'a2a'):
     raise SystemExit('Existing user channels found; inspect this home before configuring Hermes')
-stamp = datetime.now().strftime('%Y%m%d-%H%M%S')
+stamp = datetime.now().strftime('%Y%m%d-%H%M%S-%f')
 for file in (config_path, env_path):
     if file.exists():
+        if os.name == 'posix':
+            file.chmod(0o600)
         shutil.copy2(file, file.with_name(file.name + '.before-hermes-' + stamp))
 env = env_path.read_text(encoding='utf-8-sig') if env_path.exists() else ''
 values = dict(line.split('=', 1) for line in env.splitlines() if '=' in line and not line.lstrip().startswith('#'))

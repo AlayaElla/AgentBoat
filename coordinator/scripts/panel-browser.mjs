@@ -173,7 +173,7 @@ async function setup(options = {}, hub) {
         window.fixture.overviewFailures--;
         throw Error('fixture overview unavailable');
       }
-      if (name === 'workspace.overview') return clone({ workspace, versionLabel: options.versionLabel ?? '开发版', projects: [...registered().map(p => ({ ref: p.ref, revision:p.revision, counts: { review: p.tasks.filter(t => t.phase === 'ready' && t.acceptance.some(a => a.status === 'pending')).length }, agents: [], bound: true, updatedAt: '' })), ...(options.manyProjects ? Array.from({ length: 13 }, (_, i) => ({ ref: { ...project.ref, id: 'p' + (i + 2), name: '项目 ' + (i + 2) }, counts: { working: options.idleProjects ? 0 : 1 }, agents: [], bound: true, updatedAt: '' })) : [])], hidden: [], attention: attention(), questions: window.fixture.questions ?? [], reports: window.fixture.reports ?? [], links, connections: options.hermes ? [hermes] : [], machines: [{ id: 'local', name: '主机', role: 'host' }] });
+      if (name === 'workspace.overview') return clone({ workspace, versionLabel: options.versionLabel ?? '版本未知', projects: [...registered().map(p => ({ ref: p.ref, revision:p.revision, counts: { review: p.tasks.filter(t => t.phase === 'ready' && t.acceptance.some(a => a.status === 'pending')).length }, agents: [], bound: true, updatedAt: '' })), ...(options.manyProjects ? Array.from({ length: 13 }, (_, i) => ({ ref: { ...project.ref, id: 'p' + (i + 2), name: '项目 ' + (i + 2) }, counts: { working: options.idleProjects ? 0 : 1 }, agents: [], bound: true, updatedAt: '' })) : [])], hidden: [], attention: attention(), questions: window.fixture.questions ?? [], reports: window.fixture.reports ?? [], links, connections: options.hermes ? [hermes] : [], machines: [{ id: 'local', name: '主机', role: 'host' }] });
       if (name === 'workspace.agents' && options.holdAgents) await new Promise((resolve, reject) => {
         window.fixture.agentTimeout = () => reject(Error('workspace.agents timed out after 30000ms'));
       });
@@ -924,7 +924,7 @@ try {
       { method: 'terminal.focus', terminalId: 'term-need' }, { method: 'workspace.open', workspaceId: 'identity:chat-workspace' }
     ]);
   });
-  for (const [width, versionLabel] of [[320, '版本 v1.2.34'], [1040, '开发版']]) {
+  for (const [width, versionLabel] of [[320, '版本 v1.2.34'], [1040, '版本未知']]) {
     await setup({ width, versionLabel });
     await test(`settings shows ${versionLabel} at ${width}px`, async () => {
       await page.getByRole('button', { name: '设置', exact: true }).click();

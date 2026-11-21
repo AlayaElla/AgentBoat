@@ -6,7 +6,7 @@ import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
-import { pluginVersionLabel, releasePluginKey } from './orca-cli.mjs';
+import { pluginVersionLabel, pluginKey } from './orca-cli.mjs';
 
 const repo = fileURLToPath(new URL('../../', import.meta.url));
 const client = 'coordinator/scripts/client.mjs';
@@ -14,7 +14,7 @@ function fixture(t) {
   const temp = mkdtempSync(path.join(os.tmpdir(), 'agentboat-stable-'));
   t.after(() => rmSync(temp, { recursive: true, force: true }));
   const profile = path.join(temp, 'Orca profile'), home = path.join(temp, 'home');
-  const key = path.join(profile, 'plugins', releasePluginKey), stable = path.join(profile, 'agentboat-current');
+  const key = path.join(profile, 'plugins', pluginKey), stable = path.join(profile, 'agentboat-current');
   const env = { ...process.env, HOME: home, USERPROFILE: home, CODEX_HOME: path.join(home, '.codex'),
     ORCA_USER_DATA_PATH: profile, AGENTBOAT_HOME: path.join(home, '.agentboat'), ORCA_AGENT_SESSION_ID: '' };
   function version(letter) {
@@ -34,8 +34,8 @@ function fixture(t) {
   return { temp, profile, home, key, stable, run, version };
 }
 
-test('version label identifies development and reads the running release manifest', async t => {
-  assert.equal(pluginVersionLabel(), '开发版');
+test('version label reads the running manifest and tolerates missing metadata', async t => {
+  assert.equal(pluginVersionLabel(), '版本未知');
   const { version } = fixture(t);
   const running = version('a');
   version('b');
@@ -84,7 +84,7 @@ test('one setup survives two worker upgrades, old version pruning and separate O
   const docs = ['workspace/README.md', 'coordinator/LINKS.md', 'coordinator/skill/orca-project-coordinator/references/bridge.md'];
   for (const file of [hook, ...docs.map(file => path.join(stable, file))]) assert.ok(realpathSync(file).startsWith(latest + path.sep));
   assert.ok(JSON.parse((await run([path.join(stable, 'workspace/workspace.mjs'), 'init'])).stdout).home);
-  const registry = path.join(profile, 'plugins-data', releasePluginKey, 'roles.json');
+  const registry = path.join(profile, 'plugins-data', pluginKey, 'roles.json');
   mkdirSync(path.dirname(registry), { recursive: true });
   writeFileSync(registry, JSON.stringify({ version: 1, sessions: {
     'orca_session_id:claude_fixture': { role: 'workspace-main', directory: home }
@@ -124,34 +124,42 @@ test('entry refuses occupied files, directories and foreign directory links', as
   assert.equal(realpathSync(stable), other);
 });
 
-test('repository client forwards stdin on plugin_not_found and keeps a running dev plugin or uncertain writes local', async t => {
-  const { temp, stable, run, version } = fixture(t);
-  const mock = path.join(temp, 'dev-cli.mjs');
-  writeFileSync(mock, `import cp from 'node:child_process'; import {syncBuiltinESMExports} from 'node:module';
-cp.execFileSync=()=>{const code=process.env.DEV_ERROR;if(!code)return '{"dev":true}';
-throw Object.assign(Error('dev request'),{stderr:JSON.stringify({ok:false,error:{code}})});};syncBuiltinESMExports();`);
-  const args = ['--import', pathToFileURL(mock).href, path.join(repo, client), 'links-rename'];
+test('repository client sends stdin once to the release bridge in its profile', async t => {
+  const { run, version } = fixture(t);
+  const args = [path.join(repo, client), 'links-rename'];
   const input = JSON.stringify({ name: '新的名字' });
-  const absent = { DEV_ERROR: 'plugin_not_found' };
-  await assert.rejects(run(args, input, absent), e => e.stderr.includes('插件可能没有安装或启用') && e.stderr.includes(path.join(stable, client)));
+  await assert.rejects(run(args, input), /确认 AgentBoat 已启用/);
   const dir = version('a');
   const { cliBridge } = await import(pathToFileURL(path.join(dir, 'coordinator/scripts/cli-bridge.mjs')));
   const bridge = cliBridge({ panels: { handle() {} } });
   let calls = 0;
   bridge.api.panels.handle('workspace.links', data => { calls++; return data; });
-  bridge.api.panels.handle('projects.list', () => { throw Object.assign(Error('missing'), { code: 'plugin_not_found' }); });
   await bridge.start();
   try {
-    assert.deepEqual(JSON.parse((await run(args, input, { DEV_ERROR: '' })).stdout), { dev: true });
-    await assert.rejects(run(args, input, { DEV_ERROR: 'timeout' }));
-    assert.equal(calls, 0);
-    const forwarded = await run(args, input, absent);
-    assert.equal(forwarded.stderr.trim(), '请改用固定入口 ' + path.join(stable, client));
-    assert.deepEqual(JSON.parse(forwarded.stdout).result.result, { name: '新的名字', operation: 'rename' });
-    assert.equal(calls, 1);
-    await assert.rejects(run([path.join(stable, client), 'projects']), e =>
-      e.stderr.includes('插件可能没有安装或启用') && e.stderr.includes(path.join(stable, client)));
+    const reply = JSON.parse((await run(args, input)).stdout);
+    assert.equal(reply.result.pluginKey, pluginKey);
+    assert.deepEqual(reply.result.result, { name: '新的名字', operation: 'rename' });
   } finally { bridge.stop(); }
-  await assert.rejects(run(args, input, absent), /未取得回执/);
+  await assert.rejects(run(args, input), /未取得回执/);
   assert.equal(calls, 1);
+});
+
+test('release evidence copies the installed version and compares snapshots in its profile', async t => {
+  const { temp, profile, stable, run, version } = fixture(t);
+  const dir = version('a');
+  symlinkSync(dir, stable, process.platform === 'win32' ? 'junction' : 'dir');
+  const bridge = (await import(pathToFileURL(path.join(dir, 'coordinator/scripts/cli-bridge.mjs')))).cliBridge({ panels: { handle() {} } });
+  bridge.api.panels.handle('workspace.agent', () => ({}));
+  bridge.api.panels.handle('projects.list', () => ({ projects: [{ id: 'p1' }] }));
+  await bridge.start();
+  try {
+    const storage = path.join(profile, 'plugins-data', pluginKey, 'storage.json');
+    writeFileSync(storage, JSON.stringify({ 'project:p1': { revision: 2 } }));
+    const backup = path.join(temp, 'backup');
+    const evidence = (op, ...args) => run([path.join(repo, 'coordinator/scripts/release-evidence.mjs'), op, backup, ...args]);
+    await evidence('backup');
+    assert.equal(readFileSync(path.join(backup, 'plugin/orca-plugin.json'), 'utf8'), readFileSync(path.join(dir, 'orca-plugin.json'), 'utf8'));
+    await evidence('snapshot', 'after');
+    assert.equal(JSON.parse((await evidence('compare', 'after')).stdout).projects, 1);
+  } finally { bridge.stop(); }
 });

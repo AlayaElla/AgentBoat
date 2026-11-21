@@ -1,8 +1,7 @@
-import { activeUserDataPath, executable, linkCurrentRelease, release, stableClientPath } from './orca-cli.mjs';
+import { activeUserDataPath, executable, release } from './orca-cli.mjs';
 import { installedRequest } from './cli-bridge.mjs';
-import { execFileSync, spawnSync } from 'node:child_process';
+import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { createHash } from 'node:crypto';
 import { writeMainRoleCards } from './main-role-card.mjs';
@@ -24,14 +23,12 @@ const leadActions = ['lead-take', 'lead-ready', 'lead-handoff', 'lead-resume'];
 const leadAction = leadActions.includes(operation);
 const allowed = [...leadActions, 'lead-history', 'projects', 'overview', 'main-read', 'main-bind', 'project-lead', 'project-lead-switch', 'project-lead-bind', 'message', 'read', 'bind', 'submit', 'feedback', 'feishu-reply', 'links-read', 'links-refresh', 'links-invite', 'links-cancel-invite', 'links-join', 'links-configure', 'links-rename', 'links-share', 'links-relate', 'links-revoke', 'links-send', 'hide', 'restore', 'delete', 'main-targets', 'connections', 'connection-read', 'connection-check', 'connection-send', 'connection-reply'];
 if (!internal && !allowed.includes(operation)) throw new Error('用法：node client.mjs projects|overview|main-read|main-targets|connections | connection-read|connection-check <名字> | main-bind|project-lead-switch|project-lead-bind|connection-send|connection-reply|links-send < stdin | read|project-lead <projectId> | bind|submit|message|feedback|feishu-reply|hide|restore|delete <input.json>');
-const target = fileURLToPath(new URL('../plugin/', import.meta.url));
 const caller = process.env.ORCA_AGENT_SESSION_ID ? `orca_session_id:${process.env.ORCA_AGENT_SESSION_ID}` : process.env.ORCA_TERMINAL_HANDLE;
 const profileEnv = release ? { ...process.env, ORCA_USER_DATA_PATH: activeUserDataPath() } : process.env;
 const currentRun = () => JSON.parse(execFileSync(executable, ['orchestration', 'run-current', '--environment', 'local', '--json', '--full'], { encoding: 'utf8', windowsHide: true, env: profileEnv, timeout: 25000, maxBuffer: 1024 * 1024 }));
 
-let stdin;
 function readInput(file) {
-  const raw = file === 0 ? (stdin = readFileSync(0, 'utf8')) : readFileSync(file, 'utf8');
+  const raw = readFileSync(file, 'utf8');
   return JSON.parse(raw.replace(/^\uFEFF/, ''));
 }
 const input = internal ? readInput(0) : history ? { projectId: historyProject, end: historyArgs.length ? Number(historyArgs[1]) : undefined } : leadAction ? { runId: argument, action: operation.slice(5), caller, token: flag, ...(taskId ? { note: taskId } : {}) } : operation === 'connections' ? { operation: 'read' } : operation.startsWith('connection-') ? { ...(['connection-read','connection-check'].includes(operation) ? { name: argument } : readInput(0)), operation: operation.slice(11) } : operation.startsWith('links-') ? { ...(['links-join', 'links-configure', 'links-rename', 'links-share', 'links-relate', 'links-revoke', 'links-send'].includes(operation) ? readInput(0) : {}), operation: operation.slice(6) } : ['projects', 'overview'].includes(operation) ? null : operation === 'main-read' ? { operation: 'read' } : operation === 'read'
@@ -65,16 +62,13 @@ if (leadAction && (!caller || !argument || !flag || extra || (operation === 'lea
 const name = internal ? argument : history ? 'lead.history' : leadAction ? 'lead.control' : operation === 'connections' || operation.startsWith('connection-') ? 'workspace.connections' : operation.startsWith('links-') ? 'workspace.links' : operation === 'projects' ? 'projects.list' : operation === 'overview' ? 'workspace.overview'
   : operation === 'feishu-reply' ? 'workspace.reply' : operation.startsWith('main-') ? 'workspace.agent' : operation === 'message' ? 'workspace.message' : delegatedFeedback ? 'workspace.linkFeedback' : operation === 'feedback' ? 'project.feedback' : operation === 'project-lead' ? 'project.lead' : leadSwitch ? 'workspace.projectLead' : 'project.agent';
 const maintenance = ['hide', 'restore', 'delete'].includes(operation);
-const args = ['plugin', 'dev', 'request', target, operation === 'main-targets' ? 'workspace.agent.targets' : maintenance ? operation === 'delete' ? 'project.delete' : 'project.visibility' : name, '--json'];
+const handler = operation === 'main-targets' ? 'workspace.agent.targets' : maintenance ? operation === 'delete' ? 'project.delete' : 'project.visibility' : name;
 if (maintenance) { delete input.operation; if (operation !== 'delete') input.hidden = operation === 'hide'; }
-if (internal || operation === 'message') args.push('--environment', 'local');
-if (input) args.push('--data', JSON.stringify(input));
 try {
-  const request = async () => release ? JSON.stringify(await installedRequest(args[4], input)) + '\n'
-    : execFileSync(executable, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true, timeout: 40000, maxBuffer: 1024 * 1024 });
-  let stdout = await request();
+  const request = () => installedRequest(handler, input);
+  let reply = await request();
   if (leadAction) {
-    const first = JSON.parse(stdout);
+    const first = reply;
     const next = first.result?.result;
     if (first.ok && typeof next?.park === 'string' && operation === 'lead-handoff') {
       const own = currentRun().result?.run;
@@ -83,8 +77,7 @@ try {
         { encoding: 'utf8', windowsHide: true, env: profileEnv, timeout: 25000 })).result?.run : undefined;
       if (!parked?.id || parked.objective !== next.park) throw new Error('未确认备用会话的待命 Run');
       input.standbyRunId = parked.id;
-      args[args.indexOf('--data') + 1] = JSON.stringify(input);
-      stdout = await request();
+      reply = await request();
     }
     if (argument && first.ok && (next?.useRun === argument || next?.checkRun === argument)) {
       let used;
@@ -100,17 +93,16 @@ try {
       input.currentRunId = run.id;
       input.generation = run.consumer_generation;
       input.confirm = true;
-      args[args.indexOf('--data') + 1] = JSON.stringify(input);
-      stdout = await request();
+      reply = await request();
     }
   }
-  const reply = JSON.parse(stdout), view = reply.result?.result;
+  const view = reply.result?.result;
   // Dispatch checks the handler's rejection before retrying a conflicting submission.
-  if (release && reply.error?.code === 'invalid_request' && operation === 'submit') {
+  if (reply.error?.code === 'invalid_request' && operation === 'submit') {
     process.stderr.write(JSON.stringify(reply) + '\n');
     process.exit(1);
   }
-  if (release && !reply.ok) throw Object.assign(new Error(reply.error.message), { code: reply.error.code });
+  if (!reply.ok) throw Object.assign(new Error(reply.error.message), reply.error);
   const success = reply.ok && reply.result?.ok !== false;
   let submission;
   if (operation === 'submit' && success) {
@@ -228,22 +220,10 @@ try {
     try { const reply = JSON.parse(output); if (reply.error) { error = reply.error; break; } } catch { /* Keep the CLI diagnostic. */ }
   }
   process.exitCode = 1;
-  if (error.code === 'plugin_not_found') {
-    const fixed = stableClientPath();
-    try {
-      if (!release && linkCurrentRelease()) {
-        console.error(`请改用固定入口 ${fixed}`);
-        const child = spawnSync(process.execPath, [fixed, ...process.argv.slice(2)], {
-          input: stdin, stdio: ['pipe', 'inherit', 'inherit'], windowsHide: true
-        });
-        if (child.error) throw child.error;
-        process.exitCode = child.status ?? 1;
-      } else console.error(`插件可能没有安装或启用。固定入口：${fixed}`);
-    } catch (cause) { console.error(`插件可能没有安装或启用。固定入口：${fixed}。${cause.message}`); }
-  } else if (['approval_required', 'approval_stale'].includes(error?.code) ||
+  if (['approval_required', 'approval_stale'].includes(error?.code) ||
     ['unavailable', 'consent_required'].includes(error?.data?.requestCode) ||
     error?.code === 'invalid_argument' && /is not approved and enabled, so its worker cannot run/i.test(error.message))
     process.stderr.write('插件正在重载或等待批准，稍后重试。写入结果待核对时，请沿用原请求编号。\n');
   else if (e.stdout || e.stderr) process.stderr.write(e.stdout || e.stderr);
-  else process.stderr.write(release ? e.message + '\n' : 'Orca 请求未取得回执，请先读项目记录核对，勿直接重复写入。\n');
+  else process.stderr.write(e.message + '\n');
 }

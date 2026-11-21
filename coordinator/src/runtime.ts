@@ -3,6 +3,7 @@ import { LeadContacts } from '../scripts/lead-contact.mjs'
 import type { LeadContact, ContactRoutes } from './model'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
+import { existsSync } from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
 import type { AgentSession, Delivery, ProjectRef } from './model'
@@ -171,10 +172,18 @@ export class OrcaRuntime implements CoordinatorRuntime {
     return workers
   }
   async hermesApprovalMode() {
-    const home = process.env.HERMES_HOME || path.join(process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local'), 'hermes')
-    const { stdout } = await execute(process.platform === 'win32' ? path.join(home, 'bin', 'hermes.exe') : 'hermes', ['config', 'get', 'approvals.mode', '--json'], { timeout: 15000, windowsHide: true, maxBuffer: 65536 })
-    const mode = JSON.parse(stdout)
-    return ['manual', 'smart', 'off'].includes(mode) ? mode : ''
+    const macLauncher = path.join(os.homedir(), '.local', 'bin', 'hermes')
+    const command = process.platform === 'win32'
+      ? path.join(process.env.HERMES_HOME || path.join(process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local'), 'hermes'), 'bin', 'hermes.exe')
+      : process.platform === 'darwin' && existsSync(macLauncher) ? macLauncher : 'hermes'
+    try {
+      const { stdout } = await execute(command, ['config', 'get', 'approvals.mode', '--json'], { timeout: 15000, windowsHide: true, maxBuffer: 65536 })
+      const mode = JSON.parse(stdout)
+      return ['manual', 'smart', 'off'].includes(mode) ? mode : ''
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return ''
+      throw error
+    }
   }
   async removeProject(ref: ProjectRef, host: HostApi<'worker'>) {
     if (ref.hostId !== 'local') fail('只能移除本机项目')

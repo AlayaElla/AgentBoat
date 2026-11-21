@@ -1,25 +1,23 @@
-import { cp, mkdir, readFile, writeFile } from 'node:fs/promises';
+import { cp, mkdir, realpath, readFile, writeFile } from 'node:fs/promises';
 import { execFileSync } from 'node:child_process';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { isDeepStrictEqual } from 'node:util';
-import { pluginDataPath } from './orca-cli.mjs';
+import { pluginDataPath, stableClientPath, stableRoot } from './orca-cli.mjs';
 
-const root = fileURLToPath(new URL('../', import.meta.url));
 const [operation, destination, name = 'before'] = process.argv.slice(2);
 if (!destination || !['backup', 'snapshot', 'compare'].includes(operation)) throw new Error('Usage: release-evidence.mjs backup|snapshot|compare <backup-dir> [snapshot-name]');
 const data = pluginDataPath();
 const json = async file => JSON.parse(await readFile(file, 'utf8'));
 const save = (file, value) => writeFile(file, JSON.stringify(value, null, 2) + '\n');
 function request(...args) {
-  const reply = JSON.parse(execFileSync(process.execPath, [path.join(root, 'scripts/client.mjs'), ...args], { encoding: 'utf8', windowsHide: true, maxBuffer: 2 * 1024 * 1024 }));
+  const reply = JSON.parse(execFileSync(process.execPath, [stableClientPath(), ...args], { encoding: 'utf8', windowsHide: true, maxBuffer: 2 * 1024 * 1024 }));
   if (!reply.ok) throw new Error('Plugin read failed');
   return reply.result.result;
 }
 if (operation === 'backup') {
-  await mkdir(destination, { recursive: false });
+  await mkdir(destination, { mode: 0o700 });
   await cp(data, path.join(destination, 'plugins-data'), { recursive: true, errorOnExist: true });
-  await cp(path.join(root, 'plugin'), path.join(destination, 'plugin'), { recursive: true, errorOnExist: true });
+  await cp(await realpath(stableRoot()), path.join(destination, 'plugin'), { recursive: true, errorOnExist: true });
   await mkdir(path.join(destination, 'evidence'));
 }
 if (operation === 'backup' || operation === 'snapshot') {
