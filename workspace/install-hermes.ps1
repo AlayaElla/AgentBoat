@@ -11,7 +11,7 @@ if (-not $ConfigureOnly) {
 $installRoot = Join-Path $hermesRoot 'hermes-agent'
 . (Join-Path $installRoot 'scripts/desktop-update/runtime.ps1')
 $runtimeCommand = @(Get-HermesRuntimeCommand -InstallRoot $installRoot)
-$bootstrap = "import sys, runpy; sys.path.insert(0, sys.argv.pop(1)); import hermes_bootstrap; runpy.run_path(sys.argv[1], run_name='__main__')"
+$bootstrap = "import sys, runpy; sys.path.insert(0, sys.argv.pop(1)); import hermes_bootstrap; runpy.run_path(sys.argv.pop(1), run_name='__main__')"
 & $runtimeCommand[0] -I -c $bootstrap $installRoot (Join-Path $PSScriptRoot 'configure-hermes.py') --self-test
 if ($LASTEXITCODE) { throw 'Hermes configuration self-check failed' }
 & $runtimeCommand[0] -I -c $bootstrap $installRoot (Join-Path $PSScriptRoot 'configure-hermes.py')

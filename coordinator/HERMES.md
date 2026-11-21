@@ -4,9 +4,9 @@
 
 自动配置使用 Hermes 9900、插件 9901。两个方向各用一个至少 32 字符的独立令牌。AgentBoat 将令牌保存在 Orca secrets，Hermes 将入站令牌保存在本机 `.env`、出站令牌保存在 `config.yaml`。空令牌表示不更换。插件监听始终为 127.0.0.1，出站只允许无路径、无凭据的回环 HTTP 地址；远端经已有隧道接入。
 
-Hermes 仅处理日程提醒、资料整理、写作和日常电脑操作，使用自己的 daily、记忆和 skill。审批 smart，cron/single-query/unattended 为 deny，拒绝后不能放宽审批。配置脚本在本机备份配置，不打印凭据。
+专用安装使用独立的 daily、记忆和 skill 处理日程提醒、资料整理、写作和日常电脑操作，审批 smart，cron/single-query/unattended 为 deny。接入已有 profile 时沿用其工作目录、身份、审批和渠道，仅增加 A2A 和一项 skill。两种模式都在本机备份配置，令牌只写入本机配置和 Orca secrets。
 
-## macOS 安装
+## macOS 全新安装（AgentBoat 专用）
 
 Mac 主 agent 使用主人的普通登录账户，打开一次已启用正式版 AgentBoat 的工作间面板。在正式版的固定入口目录运行下列命令（macOS 上是 `~/Library/Application Support/orca/agentboat-current`，安装脚本随正式版发布，不需要源码仓库）。自定义 Orca 用户环境时，使用该环境的终端或先设置对应的 `ORCA_USER_DATA_PATH`。
 
@@ -26,6 +26,62 @@ bash workspace/install-hermes.sh
 ```
 
 安装脚本通过 `gateway install --no-start-now` 写入当前用户的 LaunchAgent。首次安装后可手动启动，也可等下次登录自动启动。已有正在运行的 LaunchAgent 时，官方命令可能重新加载服务。[Hermes 官方网关说明](https://hermes-agent.nousresearch.com/docs/user-guide/messaging#macos-launchd)
+
+## macOS 只接入已有的星月
+
+默认 profile 位于 `~/.hermes`，具名 profile 位于 `~/.hermes/profiles/<目录名>/`，各自拥有 `config.yaml`、`.env` 和 `skills/`。在这台 Mac 上，已有网关承载四份配置。共享的 8642 提供 `/p/<profile>/` 等入口，A2A 适配器从所属 profile 取端口和认证信息，星月单独监听 `127.0.0.1:9900`。AgentBoat 在 9901 接收星月对 `orca-main` 的调用。[官方 profile 说明](https://hermes-agent.nousresearch.com/docs/user-guide/profiles) · [多 profile 网关](https://hermes-agent.nousresearch.com/docs/user-guide/multi-profile-gateways) · [A2A 配置](https://hermes-agent.nousresearch.com/docs/user-guide/messaging/a2a) · [官方适配器实现](https://github.com/NousResearch/hermes-agent/blob/main/plugins/platforms/a2a/adapter.py)
+
+**接入。** 当安装的 AgentBoat 版本已包含 `--attach` 时，Mac 主 agent 用原登录账户打开已启用插件的工作间面板，在终端运行：
+
+```sh
+cd "$HOME/Library/Application Support/orca/agentboat-current"
+bash workspace/install-hermes.sh --attach --profile '星月'
+```
+
+参数使用磁盘上的目录名。自定义安装时，`HERMES_HOME` 指向包含 `profiles/` 的根目录，`HERMES_INSTALL_DIR` 指向现有 Hermes 源码目录。脚本直接使用其中的 `.venv/bin/python` 或 `venv/bin/python`，其他布局可用 `HERMES_PYTHON` 指定已安装的 Hermes 解释器。它跳过安装、升级、LaunchAgent 登记和网关启停。
+
+**写入内容。** 假设星月原有 QQ 渠道、系统提示和审批，原先没有 A2A。脚本在星月目录内备份原有的 `config.yaml` 和 `.env` 为同时间戳的 `*.before-hermes-<时间戳>`，备份权限为 0600。下面是写入后的新增项，两个令牌各自独立：
+
+```yaml
+gateway:
+  platforms:
+    a2a: {enabled: true, extra: {port: 9900}}
+a2a_agents:
+  orca-main:
+    url: http://127.0.0.1:9901
+    auth: {type: bearer, token: "<已打码，AgentBoat 入站>"}
+    timeout: 600
+    capabilities: [daily]
+platform_toolsets:
+  a2a: [web, browser, terminal, file, skills, cronjob, memory, computer_use, a2a]
+```
+
+已有 `platform_toolsets.a2a` 列表时仅补上 `a2a`。`.env` 末尾追加如下内容：
+
+```dotenv
+A2A_HOST=127.0.0.1
+A2A_PORT=9900
+A2A_AGENT_NAME=Hermes
+A2A_BEARER_TOKEN=<已打码，Hermes 入站>
+A2A_TRUSTED_PEERS=ip:127.0.0.1
+A2A_ALLOW_ALL_USERS=false
+```
+
+脚本新增 `skills/agentboat-hermes/SKILL.md`，在面板登记名为 Hermes 的 A2A 连接，对端为 `http://127.0.0.1:9900`。若 profile 缺失、已有 A2A 配置、同名 skill 或连接，或任一本机端口不可用，脚本会在备份和写入前退出。再次执行会提示已有 A2A 平台。
+
+**重启和测试。** 由维护现有网关的人择时按原方式重启同一个网关。恢复后 Mac 主 agent 在“工作间 → 设置 → 外部连接 → Hermes”检查连接，再从已绑定的主 Run 发送一句“星月，请回复：收到测试”。使用下节的 `connection-send` 输入格式和新的请求编号，在该连接的最近往来中核对同一请求的回复。
+
+**回退。** 在星月目录中选取本次接入前同一时间戳的两份备份，还原前先核对备份之后是否另有手动改动。可在该目录执行以下命令（替换时间戳）：
+
+```sh
+stamp='本次备份时间戳'
+cp -p "config.yaml.before-hermes-$stamp" config.yaml
+cp -p ".env.before-hermes-$stamp" .env
+rm skills/agentboat-hermes/SKILL.md
+rmdir skills/agentboat-hermes
+```
+
+若接入前没有 `.env`，回退时移除本次新建的 `.env`。在面板删除本次新建的 Hermes 连接（会同时删除其凭据和往来记录），再由维护者重启同一网关。若脚本在登记连接时失败，先核对面板中的登记结果，再按上述步骤回退。
 
 ## A2A 接口和命令
 
@@ -70,7 +126,7 @@ send/reply 输入：
 
 A2A 没有项目读取或写入路由。主 agent 只发明确选择的日常文字，Hermes 不读项目、仓库、其他 agent 的凭据或目录。来源不自动写入项目 events。此约束不构成同一系统用户下的目录隔离。
 
-Hermes skill 源为 `workspace/skill/agentboat-hermes`，安装在 Hermes home 的 `skills/agentboat-hermes`，内容同时作为系统提示。定时任务明确指定 agentboat-hermes、固定事项编号、时区与 a2a_call 联系 orca-main，结果交主 agent 转告用户；创建回执不等于送达，gateway 运行才执行。
+Hermes skill 源为 `workspace/skill/agentboat-hermes`，安装在对应 profile 的 `skills/agentboat-hermes`。专用安装同时将其内容设为系统提示。定时任务明确指定 agentboat-hermes、固定事项编号、时区与 a2a_call 联系 orca-main，结果交主 agent 转告用户；创建回执不等于送达，gateway 运行才执行。
 
 ## 排查
 
