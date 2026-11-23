@@ -1,14 +1,14 @@
 {
   "id": "code",
-  "name": "代码项目：Claude 设计，Codex 编码和审查",
-  "mainAgent": { "agent": "codex" },
-  "backupAgent": { "agent": "antigravity" },
+  "name": "代码项目：Antigravity 设计，Codex 编码和审查",
+  "mainAgent": { "agent": "antigravity" },
+  "backupAgent": { "agent": "codex" },
   "backupAgents": {
     "codex": { "agent": "codex", "model": "gpt-6.2-astra", "effort": "xhigh", "surface": "chat" },
     "claude": { "agent": "claude", "model": "claude-opus-5-5", "effort": "xhigh", "surface": "chat" }
   },
   "roles": {
-    "design": { "agent": "claude" },
+    "design": { "agent": "antigravity" },
     "code": { "agent": "codex" },
     "review": { "agent": "codex" }
   },

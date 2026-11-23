@@ -10,8 +10,10 @@ const sorted = value => value && typeof value === 'object' && !Array.isArray(val
   : value;
 // Exact shipped templates, including installations made before backupAgents existed.
 const legacyCode = new Set([
+  '8daac2a78a9a2ef461a6f9fbb486bbf1160bf97818053cfb7b0e20a4b7971bb7', // v0.1.0–v0.1.6
   '56f70a0f23bdf928129bc1595e7774ac26c70245beca3218f24b52a0f6bc7d83',
   'eec41a8178853129932232b33af900a66dace7e22c9c1f04d42a61f433ea5408',
+  'cccc5131c10a09c55a1f0d581504402b32f2bc636c9e7f5d4eb8c6b657abc20d', // v0.1.36
 ]);
 
 export function projectTemplate(id) {

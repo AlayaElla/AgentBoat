@@ -136,13 +136,13 @@ test('project roles and new leads use the current workspace catalog and Orca lau
     const roles = { design: 'antigravity', code: 'codex', review: 'qoder' }
     const settings = await worker.request('project.settings', { projectId: ref.id, revision: (await read()).binding.revision, roles })
     assert.deepEqual(settings.project!.roles, roles)
-    assert.deepEqual((await read()).leadAgents, { primary: { agent: 'codex' }, backup: { agent: 'antigravity' } })
-    for (const choice of [undefined, 'antigravity']) {
+    assert.deepEqual((await read()).leadAgents, { primary: { agent: 'antigravity' }, backup: { agent: 'codex' } })
+    for (const choice of [undefined, 'codex']) {
       const result = await launch(choice)
       assert.equal(result.binding.takeover?.target.handle, 'orca_session_id:fake-' + launches.length)
       assert.equal(result.binding.takeover?.state, 'waiting')
-      assert.equal(result.binding.takeover?.backupAgent, choice === 'antigravity' ? undefined : 'antigravity')
-      const argv = launches.at(-1)!, agent = choice ?? 'codex'
+      assert.equal(result.binding.takeover?.backupAgent, choice === 'codex' ? undefined : 'codex')
+      const argv = launches.at(-1)!, agent = choice ?? 'antigravity'
       const flag = (k: string) => argv.includes('--' + k) ? argv[argv.indexOf('--' + k) + 1] : undefined
       assert.equal(flag('agent'), agent)
       assert.equal(flag('model'), undefined)
@@ -154,15 +154,15 @@ test('project roles and new leads use the current workspace catalog and Orca lau
     }
     const saveLead = async (leadAgents: import('./model').Project['leadAgents']) =>
       worker.request('project.settings', { projectId: ref.id, revision: (await read()).binding.revision, leadAgents })
-    await assert.rejects(() => saveLead({ backup: { agent: 'codex' } }), /需要选择不同/)
-    await saveLead({ primary: { agent: 'antigravity' }, backup: { agent: 'codex' } })
+    await assert.rejects(() => saveLead({ backup: { agent: 'antigravity' } }), /需要选择不同/)
+    await saveLead({ primary: { agent: 'codex' }, backup: { agent: 'antigravity' } })
     const fresh = await read()
     const auto = { projectId: ref.id, revision: fresh.binding.revision, workspace: projectWorkspaceId, mode: 'new' as const, startOnly: true }
     const manual = { projectId: auto.projectId, revision: auto.revision, mode: auto.mode }
     const double = await Promise.allSettled([worker.request('project.lead', auto), worker.request('project.lead', manual)])
     assert.equal(double.filter(r => r.status === 'fulfilled').length, 1)
-    assert.equal((await read()).binding.takeover?.target.agent, 'antigravity')
-    assert.equal((await read()).binding.takeover?.backupAgent, 'codex')
+    assert.equal((await read()).binding.takeover?.target.agent, 'codex')
+    assert.equal((await read()).binding.takeover?.backupAgent, 'antigravity')
     installed = ['codex']
     assert.deepEqual((await read()).roleAgents?.map(a => a.id), ['codex'])
     await assert.rejects(() => worker.request('project.settings', { projectId: ref.id, revision: (host.data().storage['project:p1'] as any).revision, roles }), /不可用/)

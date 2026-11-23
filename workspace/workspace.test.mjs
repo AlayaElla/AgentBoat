@@ -1,4 +1,4 @@
-import test from 'node:test';
+import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, readFileSync, writeFileSync, cpSync, appendFileSync, existsSync, rmSync, mkdirSync, realpathSync } from 'node:fs';
 import os from 'node:os';
@@ -7,6 +7,8 @@ import { execFile, execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { promisify } from 'node:util';
 import { pathToFileURL } from 'node:url';
+import code from './templates/code.json' with { type: 'json' };
+import { projectLeadAgents, templateLeadAgents } from './agent-launch.mjs';
 
 const sandboxPath = path.resolve(process.env.AGENTBOAT_SANDBOX || path.join(os.tmpdir(), 'agentboat-sandbox'));
 mkdirSync(sandboxPath, { recursive: true });
@@ -16,61 +18,85 @@ process.env.AGENTBOAT_HOME = testHome;
 process.env.AGENTBOAT_SANDBOX = sandbox;
 process.env.AGENTBOAT_TEST_ONLY = '1';
 const api = await import('./workspace.mjs');
+const defaultLeadAgents = templateLeadAgents(code);
 
-test('初始化不覆盖模板；记忆按来源隔离、带日期、重复记录拒绝追加', () => {
-  try {
-    api.init();
-    assert.equal(api.template('code').roles.code.agent, 'codex');
-    const custom = path.join(testHome, 'templates/code.json');
-    const value = JSON.parse(readFileSync(custom));
-    assert.equal(value.mainAgent.agent, 'codex');
-    assert.equal(value.backupAgent.agent, 'antigravity');
-    const old = { ...value, mainAgent: { agent: 'claude', surface: 'chat' } };
-    delete old.backupAgent;
-    writeFileSync(custom, '\uFEFF' + JSON.stringify(old));
-    assert.equal(api.template('code').mainAgent.agent, 'codex');
-    assert.equal(JSON.parse(readFileSync(custom, 'utf8').slice(1)).mainAgent.agent, 'claude');
-    old.mainAgent = old.backupAgents.claude;
-    delete old.backupAgents;
-    writeFileSync(custom, JSON.stringify(old));
-    assert.equal(api.template('code').mainAgent.agent, 'codex');
-    value.name = '自定义';
-    value.mainAgent = { agent: 'antigravity' };
-    writeFileSync(custom, JSON.stringify(value));
-    api.init();
-    assert.equal(api.template('code').name, '自定义');
-    assert.deepEqual(api.template('code').mainAgent, value.mainAgent);
-    assert.throws(() => api.template('../escape'));
-    const entry = { id: 'fact-1', kind: 'user', date: '2026-11-14T00:00:00Z', source: '测试主人 / msg-1', text: '偏好短回答' };
-    api.remember(entry);
-    const user = readFileSync(path.join(testHome, 'memory/user.md'), 'utf8');
-    assert.match(user, /2026-11-14T00:00:00.000Z/);
-    assert.match(user, /测试主人 \/ msg-1/);
-    assert.throws(() => api.remember(entry), /已存在/);
-    assert.equal(readFileSync(path.join(testHome, 'memory/user.md'), 'utf8'), user);
-    api.remember({ ...entry, id: 'infer-1', kind: 'inference', text: '未经确认的推断' });
-    api.remember({ ...entry, id: 'external-1', kind: 'external', workspaceId: 'other', text: '外部内容' });
-    assert.doesNotMatch(readFileSync(path.join(testHome, 'memory/user.md'), 'utf8'), /推断|外部内容/);
-    assert.match(readFileSync(path.join(testHome, 'memory/external/other.md'), 'utf8'), /外部内容/);
-    assert.match(execFileSync('git', ['ls-files'], { cwd: path.join(testHome, 'memory'), encoding: 'utf8' }), /user.md/);
-    assert.throws(() => api.remember({ ...entry, kind: 'external', workspaceId: '../escape' }));
-    assert.throws(() => api.remember({ ...entry, id: 'bad-date', date: 'bad' }));
-    api.testPath(path.join(sandbox, 'agentboat-demo-project'));
-    assert.throws(() => api.testPath(path.join(path.dirname(sandbox), 'AgentBoat')));
-    assert.throws(() => api.testPath(`${sandbox}-other/agentboat-demo-project`));
-    assert.throws(() => api.testPath(path.join(sandbox, 'real-project')));
-    assert.equal(existsSync(path.join(testHome, 'memory/.git')), true);
-    const launch = { outcome: { handle: 'agent-1' }, prompt: { outcome: 'journaled' } };
-    assert.equal(api.launchReceipt(launch), 'agent-1');
-    assert.throws(() => api.launchReceipt({ launch }));
-    assert.equal(api.launchReceipt({ outcome: { kind: 'structured', handle: 'tab', sessionId: 'test-chat' }, prompt: { outcome: 'journaled' } }), 'orca_session_id:test-chat');
-    assert.throws(() => api.launchReceipt({ outcome: { handle: 'agent-1' }, prompt: { outcome: 'unknown' } }));
-  } finally {
-    const resolved = path.resolve(testHome);
-    assert.equal(path.dirname(resolved), sandbox);
-    assert.match(path.basename(resolved), /^agentboat-demo-unit-/);
-    rmSync(resolved, { recursive: true, force: true });
+after(() => {
+  const resolved = path.resolve(testHome);
+  assert.equal(path.dirname(resolved), sandbox);
+  assert.match(path.basename(resolved), /^agentboat-demo-unit-/);
+  rmSync(resolved, { recursive: true, force: true });
+});
+
+test('code 模板提供默认主备和分工，旧原版读取时升级，定制模板原样保留', () => {
+  const expectedLeads = { primary: { agent: 'antigravity' }, backup: { agent: 'codex' } };
+  assert.deepEqual(projectLeadAgents(), expectedLeads);
+  api.init();
+  const local = path.join(testHome, 'templates/code.json');
+  assert.deepEqual(JSON.parse(readFileSync(local, 'utf8')), code);
+  assert.deepEqual(projectLeadAgents(), expectedLeads);
+  assert.deepEqual(api.template('code').roles, {
+    design: { agent: 'antigravity' }, code: { agent: 'codex' }, review: { agent: 'codex' },
+  });
+
+  const v036 = {
+    id: 'code',
+    name: '代码项目：Claude 设计，Codex 编码和审查',
+    mainAgent: { agent: 'codex' },
+    backupAgent: { agent: 'antigravity' },
+    backupAgents: {
+      codex: { agent: 'codex', model: 'gpt-6.2-astra', effort: 'xhigh', surface: 'chat' },
+      claude: { agent: 'claude', model: 'claude-opus-5-5', effort: 'xhigh', surface: 'chat' },
+    },
+    roles: { design: { agent: 'claude' }, code: { agent: 'codex' }, review: { agent: 'codex' } },
+    source: { kind: 'empty' },
+    firstMessage: '开启项目协作。先核对当前项目与目标，按模板分工；只在有明确工作时派工，用户的决定与验收必须保留原话。项目 skill 的编辑源为 .agents/skills，提议放 .agentboat/skill-proposals，由项目主 agent 审核发布并合并后共享；Claude 副本由 project-skills.mjs 生成。',
+  };
+  const { id, name, roles, source, firstMessage, backupAgents } = v036;
+  const v010 = { id, name, roles, source, firstMessage, mainAgent: { agent: 'claude', surface: 'chat' } };
+  for (const old of [v036, { ...v010, backupAgents }, v010, { ...v010, mainAgent: backupAgents.claude }]) {
+    const contents = '\uFEFF' + JSON.stringify(old);
+    writeFileSync(local, contents);
+    assert.deepEqual(api.template('code'), code);
+    assert.deepEqual(projectLeadAgents(), expectedLeads);
+    assert.equal(readFileSync(local, 'utf8'), contents);
   }
+
+  const customized = { ...v036, backupAgent: null };
+  const contents = JSON.stringify(customized);
+  writeFileSync(local, contents);
+  api.init();
+  assert.deepEqual(api.template('code'), customized);
+  assert.deepEqual(projectLeadAgents(), { primary: v036.mainAgent, backup: null });
+  assert.equal(readFileSync(local, 'utf8'), contents);
+  assert.throws(() => api.template('../escape'));
+});
+
+test('记忆按来源隔离、带日期、重复记录拒绝追加', () => {
+  api.init();
+  const entry = { id: 'fact-1', kind: 'user', date: '2026-11-14T00:00:00Z', source: '测试主人 / msg-1', text: '偏好短回答' };
+  api.remember(entry);
+  const user = readFileSync(path.join(testHome, 'memory/user.md'), 'utf8');
+  assert.match(user, /2026-11-14T00:00:00.000Z/);
+  assert.match(user, /测试主人 \/ msg-1/);
+  assert.throws(() => api.remember(entry), /已存在/);
+  assert.equal(readFileSync(path.join(testHome, 'memory/user.md'), 'utf8'), user);
+  api.remember({ ...entry, id: 'infer-1', kind: 'inference', text: '未经确认的推断' });
+  api.remember({ ...entry, id: 'external-1', kind: 'external', workspaceId: 'other', text: '外部内容' });
+  assert.doesNotMatch(readFileSync(path.join(testHome, 'memory/user.md'), 'utf8'), /推断|外部内容/);
+  assert.match(readFileSync(path.join(testHome, 'memory/external/other.md'), 'utf8'), /外部内容/);
+  assert.match(execFileSync('git', ['ls-files'], { cwd: path.join(testHome, 'memory'), encoding: 'utf8' }), /user.md/);
+  assert.throws(() => api.remember({ ...entry, kind: 'external', workspaceId: '../escape' }));
+  assert.throws(() => api.remember({ ...entry, id: 'bad-date', date: 'bad' }));
+  api.testPath(path.join(sandbox, 'agentboat-demo-project'));
+  assert.throws(() => api.testPath(path.join(path.dirname(sandbox), 'AgentBoat')));
+  assert.throws(() => api.testPath(`${sandbox}-other/agentboat-demo-project`));
+  assert.throws(() => api.testPath(path.join(sandbox, 'real-project')));
+  assert.equal(existsSync(path.join(testHome, 'memory/.git')), true);
+  const launch = { outcome: { handle: 'agent-1' }, prompt: { outcome: 'journaled' } };
+  assert.equal(api.launchReceipt(launch), 'agent-1');
+  assert.throws(() => api.launchReceipt({ launch }));
+  assert.equal(api.launchReceipt({ outcome: { kind: 'structured', handle: 'tab', sessionId: 'test-chat' }, prompt: { outcome: 'journaled' } }), 'orca_session_id:test-chat');
+  assert.throws(() => api.launchReceipt({ outcome: { handle: 'agent-1' }, prompt: { outcome: 'unknown' } }));
 });
 
 function handlePlugin(name, input, s, save) {
@@ -80,7 +106,7 @@ function handlePlugin(name, input, s, save) {
     case 'project.settings':
       if (s.failSettings) throw Error('settings unavailable');
       s.project.roles = input.roles;
-      if (input.template && !s.project.leadAgents) s.project.leadAgents = { primary: { agent: 'codex' }, backup: { agent: 'antigravity' } };
+      if (input.template && !s.project.leadAgents) s.project.leadAgents = defaultLeadAgents;
       s.project.revision++; save(); return { project: s.project };
     case 'project.agent':
       if (input.operation === 'submit') {
@@ -167,7 +193,7 @@ syncBuiltinESMExports();`);
         assert.equal(input.startOnly, true);
         assert.equal(input.workspace, s.ref.workspace);
         assert.equal(s.project.runId, '');
-        const leadAgents = s.project.leadAgents ?? { primary: { agent: 'codex' }, backup: { agent: 'antigravity' } };
+        const leadAgents = s.project.leadAgents ?? defaultLeadAgents;
         appendFileSync(log, JSON.stringify(['agent', 'launch', '--agent', leadAgents.primary.agent, '--prompt', path.join(profile, 'agentboat-current', input.introduction)]) + '\n');
         const takeover = s.failLaunch ? { state: 'uncertain', target: { handle: '' }, error: '未确认 agent 收到提示词' }
           : { state: 'waiting', target: { handle: 'orca_session_id:fake-project-lead' } };
@@ -192,13 +218,13 @@ syncBuiltinESMExports();`);
     installedWorkspace: (op, payload) => command(path.join(release, 'workspace/workspace.mjs'), op, payload) };
 }
 
-test('first message initializes only its own home, opens Codex and reuses the pending launch until expiry', async t => {
+test('first message initializes only its own home, opens Antigravity and reuses the pending launch until expiry', async t => {
   const f = await fakeWorkspace(t);
-  const options = ['--agent', 'codex'];
+  const options = ['--agent', 'antigravity'];
   const first = await f.message('message-1');
   assert.equal(first.queued, '项目还没有主会话，已排队');
   assert.deepEqual(first.autoLaunch, { status: 'awaiting-project-binding', projectName: '现有项目', handle: 'orca_session_id:fake-project-lead',
-    agent: 'codex', reused: false });
+    agent: 'antigravity', reused: false });
   assert.equal(existsSync(path.join(f.home, 'templates/code.json')), true);
   assert.equal(existsSync(path.join(f.projectDir, '.git')), false);
   assert.equal((await f.message('message-2')).autoLaunch.reused, true);
@@ -251,9 +277,11 @@ test('an uncertain launch preserves the queued message and waits for inspection'
 test('manual create shares launch defaults and the same pending-project guard', async t => {
   const f = await fakeWorkspace(t);
   const lead = await f.workspace('create', { requestId: 'manual-create', path: f.projectDir, name: 'agentboat-demo-existing', source: { kind: 'existing' } });
-  assert.equal(lead.agent, 'codex'); assert.equal(lead.model, undefined); assert.equal(lead.effort, undefined);
+  assert.equal(lead.agent, 'antigravity'); assert.equal(lead.model, undefined); assert.equal(lead.effort, undefined);
   assert.equal(lead.handle, 'orca_session_id:fake-project-lead');
-  assert.equal(f.read().project.leadAgents.backup.agent, 'antigravity');
+  const { roles, leadAgents } = f.read().project;
+  assert.deepEqual(roles, { design: 'antigravity', code: 'codex', review: 'codex' });
+  assert.deepEqual(leadAgents, { primary: { agent: 'antigravity' }, backup: { agent: 'codex' } });
   assert.equal((await f.message('after-manual')).autoLaunch.reused, true);
   assert.equal(f.calls().filter(args => args[0] === 'agent').length, 1);
 });
@@ -314,7 +342,7 @@ test('legacy create journal closes against a manually bound folder project', asy
   f.state.ref.name = input.name;
   f.state.repos[0].kind = 'folder';
   f.state.project.runId = 'run_manually_bound';
-  f.state.project.roles = { design: 'claude', code: 'codex', review: 'codex' };
+  f.state.project.roles = { design: 'antigravity', code: 'codex', review: 'codex' };
   f.set();
   const file = path.join(f.home, 'projects', input.requestId + '.json');
   mkdirSync(path.dirname(file), { recursive: true });

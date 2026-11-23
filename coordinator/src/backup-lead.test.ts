@@ -77,7 +77,7 @@ test('主用绑定在其他项目工作区时，只在该工作区可用后原�
 for (const agent of ['codex', 'antigravity']) test('项目主用探测超时后接管和交回原 Run：' + agent, async () => {
   const main = { ...primary, agent, handle: `orca_session_id:${agent}_lead` }
   const p: Project = { ...fresh(refs[0]), runId: 'run_project', mainAgentHandle: main.handle, mainSession: main }
-  if (agent === 'antigravity') p.leadAgents = { primary: { agent }, backup: { agent: 'codex' } }
+  if (agent === 'codex') p.leadAgents = { primary: { agent }, backup: { agent: 'antigravity' } }
   const { env, poll, command, c, close } = await fixture(p, undefined, undefined, main)
   env.installed.push('antigravity')
   const realNow = Date.now
@@ -288,12 +288,12 @@ for (const agent of ['claude', 'codex', 'antigravity']) test('项目备用缺失
     await poll(); await poll()
     const row = await c.store.get(p.ref.id)
     assert.equal(row.backup?.phase, 'unavailable')
-    assert.match(row.backup?.problem ?? '', agent === 'antigravity' ? /与当前主用相同/ : /未启用备用代理 antigravity/)
+    assert.match(row.backup?.problem ?? '', agent === 'codex' ? /与当前主用相同/ : /未启用备用代理 codex/)
     assert.deepEqual(row.backup?.history, [])
     assert.equal(row.deliveries.length, 0)
     assert.equal(env.launches.length, 0)
-    const other = agent === 'antigravity' ? 'codex' : 'antigravity'
-    if (agent === 'antigravity') await c.store.mutate(p.ref.id, undefined, p => { p.leadAgents = { backup: { agent: other } } })
+    const other = agent === 'codex' ? 'antigravity' : 'codex'
+    if (agent === 'codex') await c.store.mutate(p.ref.id, undefined, p => { p.leadAgents = { primary: { agent }, backup: { agent: other } } })
     env.installed.push(other)
     await poll(); await poll()
     assert.deepEqual(env.launches.map(l => l.agent), [other])
