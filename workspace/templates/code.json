@@ -1,0 +1,17 @@
+{
+  "id": "code",
+  "name": "代码项目：Antigravity 设计，Codex 编码和审查",
+  "mainAgent": { "agent": "antigravity" },
+  "backupAgent": { "agent": "codex" },
+  "backupAgents": {
+    "codex": { "agent": "codex", "model": "gpt-6.2-astra", "effort": "xhigh", "surface": "chat" },
+    "claude": { "agent": "claude", "model": "claude-opus-5-5", "effort": "xhigh", "surface": "chat" }
+  },
+  "roles": {
+    "design": { "agent": "antigravity" },
+    "code": { "agent": "codex" },
+    "review": { "agent": "codex" }
+  },
+  "source": { "kind": "empty" },
+  "firstMessage": "开启项目协作。先核对当前项目与目标，按模板分工；只在有明确工作时派工，用户的决定与验收必须保留原话。项目 skill 的编辑源为 .agents/skills，提议放 .agentboat/skill-proposals，由项目主 agent 审核发布并合并后共享；Claude 副本由 project-skills.mjs 生成。"
+}
