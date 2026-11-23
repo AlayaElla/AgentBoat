@@ -99,8 +99,7 @@ type Receipts = Omit<MessageExchange, 'messages'>
 const noReceipts: Receipts = { received: [] }
 const hasReceipts = (r: Receipts) => !!(r.received.length || r.progress?.length || r.rejected?.length)
 const maxPeers = 50, maxProjectAgents = 20, maxReportAgents = 100, maxActivityTitle = 200
-// Existing peers only accept these identifiers in shared reports.
-const knownAgent = (value: unknown): value is string => typeof value === 'string' && ['', 'claude', 'codex', 'opencode'].includes(value)
+const knownAgent = (value: unknown): value is string => typeof value === 'string' && (value === '' || /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,99}$/.test(value))
 const publicAgent = (value: string) => knownAgent(value) ? value : ''
 const canDelegate = (p: Sharing) => p.scope === 'details' && p.delegateFeedback === true
 

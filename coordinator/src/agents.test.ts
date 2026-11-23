@@ -184,33 +184,34 @@ for (const scenario of ['removed', 'wrong-project', 'remote', 'truncated', 'list
 test('matching project writes fill missing display identity and preserve the recorded primary', async () => {
   const ref = refs[0], p = fresh(ref); p.runId = 'run_project'
   const own = { ...workspace, id: ref.workspace.replace(/^id:/, ''), projectId: ref.repoId }, lead = { ...own, id: 'lead-workspace' }
-  let caller = 'orca_session_id:claude_project', c!: ReturnType<typeof testCoordinator>
+  const legacyAgent = 'custom_agent-fork'
+  let caller = `orca_session_id:${legacyAgent}_12345678_1234_4321_8123_123456789abc`, c!: ReturnType<typeof testCoordinator>
   const host = mockHost({ storage: { 'project:p1': p as any }, results: { 'workspace.list': { workspaces: [own, lead], truncated: false }, 'agents.list': { agents: [agent()] }, 'workspace.open': { opened: true } } })
   const worker = await mountWorker({ default: api => { c = testCoordinator(api, {
     projects: async () => refs,
-    targets: async () => ({ workspaces: [], sessions: [{ handle: caller, workspace: 'id:lead-workspace', workspaceName: 'Lead', path: '/lead', title: 'Main', agent: 'claude', online: 'unknown' }] }),
+    targets: async () => ({ workspaces: [], sessions: [{ handle: caller, workspace: 'id:lead-workspace', workspaceName: 'Lead', path: '/lead', title: 'Main', agent: legacyAgent, online: 'unknown' }] }),
     verifyRun: async run => { if (run === 'run_forbidden') throw Error('existing Run check refused') }
   }) } }, { host })
   const submit = (handle: string, runId = 'run_project') => worker.request('project.agent', { operation: 'submit', projectId: ref.id, revision: (host.data().storage['project:p1'] as any).revision, requestId: crypto.randomUUID(), runId, caller: handle, task: { id: 't', title: 'Task', goal: 'Goal', phase: 'working' } })
   try {
     assert.equal((await worker.request('project.read', { projectId: ref.id })).mainAgent, undefined)
     const result = await submit(caller)
-    assert.equal(result.project!.mainAgentHandle, caller); assert.equal(result.mainAgent, 'claude')
+    assert.equal(result.project!.mainAgentHandle, caller); assert.equal(result.mainAgent, legacyAgent)
     assert.deepEqual(result.workspaceTarget, { workspaceId: own.id })
-    assert.equal((await submit('orca_session_id:codex_project')).mainAgent, 'claude')
+    assert.equal((await submit('orca_session_id:codex_project')).mainAgent, legacyAgent)
     await worker.request('project.openMain', { projectId: ref.id })
     assert.deepEqual(host.callsOf('workspace.open').at(-1), { workspaceId: lead.id })
     assert.equal((await submit('orca_session_id:claude_other', 'run_other')).project!.mainAgentHandle, caller)
     caller = 'orca_session_id:uuid-without-agent-prefix'
-    assert.equal((await submit(caller)).mainAgent, 'claude')
+    assert.equal((await submit(caller)).mainAgent, legacyAgent)
     host.respond('workspace.list', { workspaces: [own], truncated: false })
     assert.deepEqual((await worker.request('project.read', { projectId: ref.id })).workspaceTarget, { workspaceId: own.id })
     await assert.rejects(() => worker.request('project.agent', { operation: 'bind', projectId: ref.id, revision: (host.data().storage['project:p1'] as any).revision, requestId: 'refused', runId: 'run_forbidden', caller }), /existing Run check refused/)
     await assert.rejects(() => worker.request('project.agent', { operation: 'bind', projectId: ref.id, revision: (host.data().storage['project:p1'] as any).revision, requestId: 'rebind', runId: 'run_next' }), /接管凭据/)
     const bound = await worker.request('project.agent', { operation: 'bind', projectId: ref.id, revision: (host.data().storage['project:p1'] as any).revision, requestId: 'same-run', runId: 'run_project', caller: 'orca_session_id:claude_bound' })
-    assert.equal(bound.mainAgent, 'claude')
+    assert.equal(bound.mainAgent, legacyAgent)
     const settings = await worker.request('project.settings', { projectId: ref.id, revision: bound.project!.revision, roles: bound.project!.roles, runId: 'run_project', caller: 'orca_session_id:codex_settings' })
-    assert.equal(settings.mainAgent, 'claude')
+    assert.equal(settings.mainAgent, legacyAgent)
     const before = structuredClone(host.data().storage['project:p1'])
     await assert.rejects(() => worker.request('project.agent', { operation: 'submit', projectId: ref.id, revision: (before as any).revision, requestId: 'invalid', runId: 'run_next', caller, task: {} }), /./)
     assert.deepEqual(host.data().storage['project:p1'], before)

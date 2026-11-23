@@ -541,11 +541,11 @@ test('two loopback workspaces pair once, share only selected local projects, cha
 
 test('details sync shares current main and scoped live agents without local identifiers', async () => {
   const b = await instance('B'), p = sample().project!, hidden = { ...fresh({ ...refs[1], id: 'hidden' }), hidden: true }
-  const session = { handle: 'private-handle', title: '统筹会话', workspace: 'private-workspace', workspaceName: 'private-machine', path: '/private/path', agent: 'claude', online: 'online' as const }
+  const session = { handle: 'private-handle', title: '统筹会话', workspace: 'private-workspace', workspaceName: 'private-machine', path: '/private/path', agent: 'antigravity', online: 'online' as const }
   const workspace = { version: 1, revision: 1, runId: 'private-run', requests: [], session }
   const host = mockHost({ storage: { 'project:p1': p as any, 'project:hidden': hidden as any, workspace } })
   const now = Date.now()
-  const visible: LiveAgent = { id: 'private-live-agent', terminalId: 'private-terminal', workspaceId: 'private-workspace', projectId: 'p1', agent: 'codex', role: 'worker', state: 'work', rawState: 'working', title: '正在检查', taskId: p.tasks[0].id, since: now }
+  const visible: LiveAgent = { id: 'private-live-agent', terminalId: 'private-terminal', workspaceId: 'private-workspace', projectId: 'p1', agent: 'hermes', role: 'worker', state: 'work', rawState: 'working', title: '正在检查', taskId: p.tasks[0].id, since: now }
   let live = [visible, { ...visible, id: 'unselected', projectId: 'p2', title: '未选项目 agent' },
     { ...visible, id: 'hidden', projectId: 'hidden', title: '隐藏项目 agent' },
     { ...visible, id: 'old', state: 'done' as const, title: '过期 agent', since: now - 86_400_001 }]
@@ -569,10 +569,10 @@ test('details sync shares current main and scoped live agents without local iden
     assert.equal(reads, 0)
 
     const details = await share('details', ['p1', 'hidden'])
-    assert.deepEqual(details.mainAgent, { agent: 'claude', title: '统筹会话', online: 'online', activity: { state: 'work', since: now } })
+    assert.deepEqual(details.mainAgent, { agent: 'antigravity', title: '统筹会话', online: 'online', activity: { state: 'work', since: now } })
     assert.deepEqual(details.projects.map(p => p.id), ['p1'])
     assert.deepEqual(details.projects[0].activity, { truncated: false, agents: [
-      { agent: 'codex', role: 'worker', state: 'work', title: '正在检查', taskTitle: p.tasks[0].title, since: now }
+      { agent: 'hermes', role: 'worker', state: 'work', title: '正在检查', taskTitle: p.tasks[0].title, since: now }
     ] })
     assert.equal(/handle|runId|terminalId|rawState|taskId|private-|[A-Z]:\\\\|未选项目|隐藏项目|过期 agent/.test(JSON.stringify(details)), false)
 
@@ -585,13 +585,13 @@ test('details sync shares current main and scoped live agents without local iden
     assert.equal(updated.projects[0].activity?.agents[0].title, '等你回复')
     assert.equal(updated.projects[0].activity?.truncated, true)
 
-    await coordinator.store.mutateWorkspace(w => { w.backup = { agent: 'codex', primary: session.handle, handle: 'private-spare', phase: 'active', since: now, cycle: 'test', history: [] } })
+    await coordinator.store.mutateWorkspace(w => { w.backup = { agent: 'gemini', primary: session.handle, handle: 'private-spare', phase: 'active', since: now, cycle: 'test', history: [] } })
     online = true
     live = [{ ...visible, title: '保存项目后更新' }]
     await worker.request('project.settings', { projectId: p.ref.id, revision: p.revision, roles: p.roles })
     const active = (await b.links.refresh()).peers[0].report!
     assert.equal(active.projects[0].activity?.agents[0].title, '保存项目后更新')
-    assert.deepEqual(active.mainAgent, { agent: 'codex', title: '备用主会话', online: 'online', activity: { state: 'work', since: now } })
+    assert.deepEqual(active.mainAgent, { agent: 'gemini', title: '备用主会话', online: 'online', activity: { state: 'work', since: now } })
   } finally { coordinator.stop(); b.links.stop(); await worker.deactivate() }
 })
 
@@ -626,20 +626,24 @@ test('invites expire/cancel, malformed and oversized requests fail closed, expli
     assert.equal(await post(s.listening, '/sync', { id: p.id, report: { ...malformed, workspaceId: 'wrong' }, exchange }, token), 400)
     assert.equal(await post(s.listening, '/sync', { id: p.id, report: { ...malformed, scope: 'none', projects: [{ secret: 'ignored' }] }, exchange }, token), 400)
     const valid = report(b.projects, { scope: 'details', allProjects: false, projectIds: ['p1'] }, p.workspaceId, 'B')
-    const agent = { agent: 'codex', role: 'session', state: 'work', since: Date.now(), title: '检查' }
+    const agent = { agent: 'A-_' + 'x'.repeat(97), role: 'session', state: 'work', since: Date.now(), title: '检查' }
     const project = { ...valid.projects[0], activity: { truncated: false, agents: [agent] } }
-    const packet = { ...valid, projects: [project] }
+    const mainAgent = { agent: 'qoder', title: '统筹', online: 'online' }
+    const packet = { ...valid, mainAgent, projects: [project] }
     assert.equal(await post(s.listening, '/sync', { id: p.id, report: packet, exchange }, token), 200)
     assert.deepEqual(project.tasks?.map(t => t.state), ['review', 'decision'])
     const accepted = (await a.links.snapshot()).peers[0].report
+    assert.deepEqual(accepted?.mainAgent, mainAgent)
+    assert.deepEqual(accepted?.projects[0].activity, project.activity)
     assert.deepEqual(accepted?.projects[0].tasks, project.tasks)
+    const invalidAgentIds = [[], '_agent', 'bad/agent', 'x'.repeat(101)]
     for (const changed of [
       ...[{ state: undefined }, { phase: 'blocked' }].map(change => ({ ...packet, projects: [{ ...project, tasks: [{ ...project.tasks![0], ...change }] }] })),
-      { ...packet, mainAgent: undefined }, { ...packet, mainAgent: { agent: [], title: '统筹', online: 'online' } },
-      { ...packet, mainAgent: { agent: 'claude', title: '统筹', online: 'somewhere' } },
+      { ...packet, mainAgent: undefined }, { ...packet, mainAgent: { ...mainAgent, online: 'somewhere' } },
       { ...packet, projects: [{ ...project, activity: undefined }] },
       { ...packet, projects: [{ ...project, tasks: [{ ...project.tasks![0], state: 'ready' }] }] },
-      ...[{ agent: 'invented' }, { role: 'owner' }, { state: 'online' }, { since: String(agent.since) }, { title: '甲'.repeat(201) }, { taskTitle: [{}] }]
+      ...invalidAgentIds.map(agent => ({ ...packet, mainAgent: { ...mainAgent, agent } })),
+      ...[...invalidAgentIds.map(agent => ({ agent })), { role: 'owner' }, { state: 'online' }, { since: String(agent.since) }, { title: '甲'.repeat(201) }, { taskTitle: [{}] }]
         .map(change => ({ ...packet, projects: [{ ...project, activity: { truncated: false, agents: [{ ...agent, ...change }] } }] })),
       { ...packet, projects: [{ ...project, activity: { truncated: true, agents: Array(21).fill(agent) } }] },
       { ...packet, projects: Array.from({ length: 6 }, (_, i) => ({ ...project, id: 'p' + i, activity: { truncated: false, agents: Array(20).fill(agent) } })) },

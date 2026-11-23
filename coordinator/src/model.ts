@@ -220,7 +220,7 @@ export function groupedAttention(items: Attention[]) {
 
 export const labels = { working: '进行中', decision: '待决定', review: '待验收', rework: '修改中', completed: '已完成', blocked: '受阻', paused: '已暂停' }
 export const roles = { design: '设计', code: '代码', review: '审查' }
-const agentNames: Record<string, string> = { claude: 'Claude', codex: 'Codex', opencode: 'OpenCode', qoder: 'Qoder CLI', gemini: 'Gemini', antigravity: 'Antigravity' }
+const agentNames: Record<string, string> = { claude: 'Claude', codex: 'Codex', opencode: 'OpenCode', qoder: 'Qoder CLI', gemini: 'Gemini', antigravity: 'Antigravity', hermes: 'Hermes' }
 export const agentName = (v = '') => Object.hasOwn(agentNames, v) ? agentNames[v] : v || '未知'
 export const scopes = { none: '不开放', summary: '项目摘要', details: '含任务详情' }
 export function isProjectShared(project: Pick<Project, 'ref' | 'hidden'>, sharing: Pick<import('./links').Sharing, 'scope' | 'allProjects' | 'projectIds'>): boolean {

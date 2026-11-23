@@ -351,8 +351,9 @@ export function createCoordinator(api: OrcaWorkerApi, runtime: CoordinatorRuntim
       ...(runtimeError ? { runtimeError } : {}) }
   }
   const workspaceId = (selector: string) => selector.replace(/^id:/, '')
+  // Legacy Orca sessions encode the agent before an underscore-separated UUID.
   const projectAgentKind = (p: Project) => p.mainSession && p.mainSession.handle === p.mainAgentHandle ? p.mainSession.agent
-    : /^orca_session_id:(claude|codex|opencode|antigravity)_/.exec(p.mainAgentHandle ?? '')?.[1]
+    : /^orca_session_id:([a-z0-9][a-z0-9_-]{0,99})_[a-f0-9]{8}(?:_[a-f0-9]{4}){3}_[a-f0-9]{12}$/i.exec(p.mainAgentHandle ?? '')?.[1]
   function projectBinding(p: Project, sessions?: AgentSession[]): import('./model').WorkspaceBinding {
     const handle = p.mainAgentHandle, takeover = takeoverView(p.takeover)
     const saved = p.mainSession?.handle === handle ? p.mainSession : undefined
