@@ -21,13 +21,13 @@
 - `read <projectId>` 返回项目摘要。project 含 ref（编号、名称、路径）、revision、runId、roles、每项任务的状态和待验收／待决定编号，以及未关联消息的前 120 个字符。lead 给出主备绑定，history 取最近 3 条，historyTotal 是保留的总条数。加 `--full` 读取完整项目，接管历史仍取最近 3 条，省略归档游标。
 - `read <projectId> --task <taskId>` 返回 `{projectId,revision,task}`，保留完整反馈历史、未丢弃验收项引用的成果，以及最近更新的 3 个不同名称成果的最新版本和最近 3 条执行记录。omittedArtifacts 和 omittedExecutions 分别是省略条数。加 `--full` 返回完整任务。归档任务另带 `archiveStatus: "已归档"`，再次 submit 同一编号会恢复并合并原任务。任务不存在时返回错误。
 - `lead-history [projectId] [--end <previousEnd>]`：按角色查接管记录，省略项目编号查工作间；用返回的 previousEnd 翻到更早一批。
-- `project-lead <projectId>`：项目的主会话（`binding`）、待接管状态和在线目标会话。
+- `project-lead <projectId>`：项目的主会话（`binding`）、主备启动偏好（`leadAgents`）、待接管状态和在线目标会话。
 - `main-read`：工作间主 agent 的绑定；`main-targets`：可接管的在线会话。
 - `connections`、`connection-read <名字>`、`connection-check <名字>`（只做无害查询）。
 
 ## 项目主 agent
 
-- `bind`：`{projectId,revision,requestId,runId}`。
+- `bind`：`{projectId,revision,requestId,runId}`，用于首次绑定或确认同一个 Run。更换已绑定 Run 使用 `project-lead-bind`。
 - `project-lead-bind`（stdin）：`{projectId,revision,requestId,runId,token}`，接到接管请求的会话用。先创建自己的协调 Run，用 `read <projectId>` 取当前 revision，再绑定。凭据 10 分钟后失效。绑定后读取项目任务、执行记录和待处理项。
 - `bind`、`submit`、`feedback`、`hide`、`restore`、`delete` 会自动带上当前 Orca 会话；没给 runId 时取当前会话的 Run。Run 与项目绑定一致时，插件记下这个会话，用来显示 agent 类型和打开主会话所在的工作区，没有记录时显示「未知」。它只用于显示和导航，不是授权依据。
 
@@ -70,7 +70,7 @@
 
 - `main-bind [--check]`（stdin）：`{revision,requestId,runId,token}`，首次绑定可省 token。`--check` 只核实、不生效；通过后重读 `main-read`，用最新 revision 和新的 requestId 正式绑定。绑定成功后，脚本在当前会话目录更新 `CLAUDE.md` 和 `AGENTS.md` 的角色卡。回执有 `roleCardWarning` 时绑定已生效，解决文件问题后用原请求重试。
 - `message`：`{projectId,revision?,requestId,runId,text}`，runId 必须是已绑定的工作间主 agent Run。消息成为项目的 workspace-agent 来源。项目还没有主会话时，回执显示「项目还没有主会话，已排队」，脚本尝试自动开主会话，绑定后由插件投递；`autoLaunch` 给出状态、会话 handle 和启动参数，或没开成的原因。已排队的消息重试时保留原 requestId。
-- `project-lead-switch`（stdin）：`{projectId,revision,mode,handle?,agent?}`，revision 取 `project-lead` 回执的 `binding.revision`。已有会话用 `mode:"existing"` 和该项目在线列表里的 handle。新开用 `mode:"new"`，省略 agent 时用代码项目模板的默认设置，也可选 codex 或 opencode。取消用 `mode:"cancel"`。
+- `project-lead-switch`（stdin）：`{projectId,revision,mode,handle?,agent?}`，revision 取 `project-lead` 回执的 `binding.revision`。已有会话用 `mode:"existing"` 和该项目在线列表里的 handle。新开用 `mode:"new"`，省略 agent 时使用 `leadAgents.primary`，也可从 `availableAgents` 选择本次启动的代理。取消用 `mode:"cancel"`。
 - `hide`、`restore`：`{projectId,revision}`。
 - `delete`：`{projectId,revision,confirm:projectId}`。插件先导出记录（回执里有 exportPath）；有打开的终端或会话就拒绝。只从 Orca 移除登记，磁盘文件和 Git 保留。
 - `connection-send`（stdin）：`{name,runId,requestId,contextId?,text}`。同一事项沿用 contextId。

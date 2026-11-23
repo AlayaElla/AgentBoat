@@ -209,7 +209,9 @@ async function setup(options = {}, hub) {
       if (name === 'project.settings') {
         const p = projects.find(p => p.ref.id === input.projectId);
         if (p.revision !== input.revision) throw Error('项目已更新');
-        p.roles = input.roles; p.revision++;
+        if (input.roles) p.roles = input.roles;
+        if (input.leadAgents) p.leadAgents = { ...(p.leadAgents ?? { primary: { agent: 'codex' }, backup: { agent: 'antigravity' } }), ...input.leadAgents };
+        p.revision++;
         return clone({ project: p });
       }
       if (name === 'project.lead') {
@@ -226,7 +228,8 @@ async function setup(options = {}, hub) {
             state: 'waiting', backupAgent: options.backupAgent, expiresAt: new Date(Date.now() + 600000).toISOString() };
         }
         const workspaceError = window.fixture.workspaceTarget.error;
-        return clone({ binding: binding(p), availableAgents: workspaceError ? [] : availableAgents, roleAgents: availableAgents, sessions: workspaceError ? [] : projectSessions, ...(workspaceError ? { workspaceError } : {}) });
+        return clone({ binding: binding(p), leadAgents: p.leadAgents ?? { primary: { agent: 'codex' }, backup: { agent: 'antigravity' } },
+          availableAgents: workspaceError ? [] : availableAgents, roleAgents: availableAgents, sessions: workspaceError ? [] : projectSessions, ...(workspaceError ? { workspaceError } : {}) });
       }
       if (name === 'project.expireArtifact') {
         const p = projects.find(p => p.ref.id === input.projectId);
@@ -1042,7 +1045,9 @@ try {
     await project();
     await page.getByRole('button', { name: '项目设置', exact: true }).click();
     const layer = currentLayer(), save = layer.getByRole('button', { name: '保存', exact: true });
-    assert.equal(await layer.getByLabel('Agent', { exact: true }).inputValue(), 'antigravity');
+    assert.equal(await layer.getByLabel('新会话代理', { exact: true }).inputValue(), '');
+    assert.equal(await layer.getByLabel('备用代理', { exact: true }).inputValue(), 'antigravity');
+    assert.equal(await layer.getByRole('button', { name: '新开一个主会话', exact: true }).isDisabled(), true);
     assert.equal(await save.isDisabled(), true);
     for (const label of ['设计', '代码', '审查']) {
       const picker = layer.getByLabel(label, { exact: true });
@@ -1053,18 +1058,34 @@ try {
     await page.waitForFunction(() => fixture.project.roles.review === 'antigravity');
     assert.deepEqual(await page.evaluate(() => fixture.project.roles), { design: 'antigravity', code: 'antigravity', review: 'antigravity' });
   });
+  await test('project lead preferences save only the chosen agents', async () => {
+    await setup({ projectLead: true });
+    await project();
+    await page.getByRole('button', { name: '项目设置', exact: true }).click();
+    const layer = currentLayer(), primary = layer.getByLabel('默认主用', { exact: true }), backup = layer.getByLabel('备用代理', { exact: true });
+    assert.equal(await primary.inputValue(), 'codex');
+    assert.equal(await backup.inputValue(), 'antigravity');
+    const save = layer.getByRole('button', { name: '保存主会话设置', exact: true });
+    await primary.selectOption('antigravity');
+    assert.equal(await save.isDisabled(), true);
+    await backup.selectOption('codex');
+    await save.click();
+    await page.waitForFunction(() => fixture.project.leadAgents?.primary.agent === 'antigravity');
+    assert.deepEqual(await page.evaluate(() => fixture.calls.find(c => c.name === 'project.settings').input.leadAgents),
+      { primary: { agent: 'antigravity' }, backup: { agent: 'codex' } });
+  });
   await test('waiting project offers only cancellation in both lead views and restores actions after cancellation or expiry', async () => {
     await setup({ projectUnbound: true, clock: true, backupAgent: 'codex' });
     await page.getByRole('button', { name: /^还没有任务的项目/ }).click();
     await project();
     await page.getByRole('button', { name: '项目设置', exact: true }).click();
     const layer = currentLayer(), cancel = layer.getByRole('button', { name: '取消', exact: true });
-    for (const label of ['Agent', '设计', '代码', '审查']) {
+    for (const label of ['新会话代理', '设计', '代码', '审查']) {
       assert.deepEqual(await layer.getByLabel(label, { exact: true }).locator('option').allTextContents(), ['Claude', 'Codex', 'Antigravity']);
     }
     const create = () => layer.getByRole('button', { name: '新开一个主会话', exact: true }).click();
     const checkWaiting = async () => {
-      await layer.getByText(/正在等 新的 claude 会话 接管，还剩 \d+ 分钟/i).waitFor();
+      await layer.getByText(/正在等 新的 codex 会话 接管，还剩 \d+ 分钟/i).waitFor();
       await layer.getByText('接管后会自动配一个 Codex 备用', { exact: true }).waitFor();
       assert.equal(await cancel.count(), 1);
       assert.equal(await layer.getByText(/还没有主会话/).count(), 0);

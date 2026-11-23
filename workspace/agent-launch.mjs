@@ -1,5 +1,48 @@
 import code from './templates/code.json' with { type: 'json' };
 
+import { createHash } from 'node:crypto';
+import { readFileSync } from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+
+const sorted = value => value && typeof value === 'object' && !Array.isArray(value)
+  ? Object.fromEntries(Object.keys(value).sort().map(key => [key, sorted(value[key])]))
+  : value;
+// Identify the previous shipped template by content so edits survive upgrades.
+const legacyCode = '56f70a0f23bdf928129bc1595e7774ac26c70245beca3218f24b52a0f6bc7d83';
+
+export function projectTemplate(id) {
+  if (typeof id !== 'string' || !/^[a-zA-Z0-9_-]{1,100}$/.test(id)) throw new Error('模板编号只允许字母、数字、下划线和连字符');
+  const directory = process.env.AGENTBOAT_HOME || path.join(os.homedir(), '.agentboat');
+  let value;
+  try { value = JSON.parse(readFileSync(path.join(directory, 'templates', id + '.json'), 'utf8').replace(/^\uFEFF/, '')); }
+  catch (error) { if (id === 'code' && error.code === 'ENOENT') return structuredClone(code); throw error; }
+  if (id === 'code' && createHash('sha256').update(JSON.stringify(sorted(value))).digest('hex') === legacyCode) return structuredClone(code);
+  return value;
+}
+
+export function projectAgentLaunch(value) {
+  if (typeof value?.agent !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,99}$/.test(value.agent)) throw new Error('需要有效的 Orca 代理编号');
+  const { agent, model, effort, surface } = value;
+  if (model !== undefined && (typeof model !== 'string' || !model.trim())) throw new Error('model 应为非空文本');
+  if (effort !== undefined && (typeof effort !== 'string' || !effort.trim() || !model)) throw new Error('effort 需要 model');
+  if (surface !== undefined && !['chat', 'terminal'].includes(surface)) throw new Error('surface 应为 chat 或 terminal');
+  return { agent, ...(model && { model }), ...(effort && { effort }), ...(surface && { surface }) };
+}
+
+export function templateLeadAgents(value) {
+  return {
+    primary: projectAgentLaunch(value.mainAgent),
+    backup: value.backupAgent === undefined ? projectAgentLaunch(code.backupAgent) :
+      value.backupAgent === null ? null : projectAgentLaunch(value.backupAgent),
+  };
+}
+
+export function projectLeadAgents(settings) {
+  if (settings?.primary && settings.backup !== undefined) return settings;
+  return { ...templateLeadAgents(projectTemplate('code')), ...settings };
+}
+
 export const backupDefaults = primary => code.backupAgents[primary === 'codex' ? 'claude' : 'codex'];
 
 export function availableBackup(primary, installed) {

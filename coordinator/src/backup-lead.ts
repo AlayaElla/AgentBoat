@@ -1,10 +1,10 @@
 import { randomBytes, randomUUID } from 'node:crypto'
 import { botHomeHandle } from './bot-runtime'
-import { availableBackup, backupDefaults } from '../../workspace/agent-launch.mjs'
+import { availableBackup, backupDefaults, projectLeadAgents } from '../../workspace/agent-launch.mjs'
 import { promptClientPath } from '../scripts/orca-cli.mjs'
 import { awaitingLeadControl, expectedPhases, backupInCharge, type AgentSession, type BackupLead, type ContactRoutes, type Delivery, type LeadAction, type Project, type Workspace } from './model'
 import type { CoordinatorRuntime } from './runtime'
-import { fail, fingerprint, ProjectStore, takeoverActive, text } from './store'
+import { fail, fingerprint, ProjectStore, resetBackup, takeoverActive, text } from './store'
 
 function ownerAlert(w: Workspace, message: string) {
   w.bot!.result = message
@@ -27,6 +27,8 @@ export function stopped(session: AgentSession | undefined, pendingSince: number 
   if (session?.online === 'online' && ['done', 'blocked', 'waiting'].includes(session.state ?? '') &&
     pendingSince !== undefined && now - pendingSince > 15 * 60_000) return '待处理事项已超过 15 分钟'
 }
+
+export const projectBackupBusy = (b?: BackupLead) => !!b && ['opening', 'taking', 'active', 'handoff', 'returning'].includes(b.phase)
 
 function record(r: Binding, message: string, ownerRun: string) {
   const b = r.backup!
@@ -163,12 +165,32 @@ export class BackupLeads {
       if (w.originalBot && current.agent !== w.originalBot.agent && bot.recoveryAt && now >= bot.recoveryAt && live?.online === 'online' && live.state === 'done') return this.switchBot(w, current, true, now)
       return
     }
+    if ('ref' in r && b?.phase === 'standby') {
+      let configured
+      try { configured = projectLeadAgents(r.leadAgents).backup }
+      catch { /* Keep an existing backup while its template is unreadable. */ }
+      if (configured !== undefined && configured?.agent !== b.agent) {
+        await this.updateBinding(r, row => resetBackup(row, session.handle))
+        this.changed(id)
+        return
+      }
+    }
     if (unopened(b)) {
       if (!session.agent) return this.missing(r, '无法识别主会话的 agent 类型', ownerRun)
       const installed = await this.runtime.installedAgents(session.workspace).catch(() => undefined)
       if (!installed) return this.missing(r, '无法读取 Orca 的可启动 agent 列表', ownerRun)
-      const backup = availableBackup(session.agent, installed)
-      if (!backup) return this.missing(r, installed.length ? '' : 'Orca 没有可启动的代理', ownerRun, !!installed.length)
+      let backup
+      if ('ref' in r) {
+        try { backup = projectLeadAgents(r.leadAgents).backup }
+        catch { return this.missing(r, '项目主会话模板无法读取，请核对本机模板', ownerRun) }
+        if (!backup) return this.missing(r, '', ownerRun, true)
+        if (backup.agent === session.agent) return this.missing(r, '备用代理与当前主用相同，请调整项目设置', ownerRun)
+        const agent = backup.agent
+        if (!installed.some(a => a.id === agent)) return this.missing(r, `当前工作区未启用备用代理 ${agent}`, ownerRun)
+      } else {
+        backup = availableBackup(session.agent, installed)
+        if (!backup) return this.missing(r, installed.length ? '' : 'Orca 没有可启动的代理', ownerRun, !!installed.length)
+      }
       const { agent, ...options } = backup
       const run = await this.runtime.runBinding(r.runId).catch(() => undefined)
       const saved = 'ref' in r ? r.mainAgentHandle : r.session?.handle
@@ -187,7 +209,7 @@ export class BackupLeads {
       } catch { /* The launch may have reached Orca. Preserve the claim. */ }
       await this.mutate(id, row => {
         if (row.backup?.cycle !== cycle) return
-        if (handle) { row.backup.handle = handle; row.backup.phase = 'standby'; delete row.backup.notified }
+        if (handle && handle !== row.backup.primary) { row.backup.handle = handle; row.backup.phase = 'standby'; delete row.backup.notified }
         else this.launchFailure(row, ownerRun)
       })
       this.changed(id)

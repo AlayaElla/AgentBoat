@@ -181,7 +181,7 @@ for (const scenario of ['removed', 'wrong-project', 'remote', 'truncated', 'list
   } finally { c.stop(); await worker.deactivate() }
 })
 
-test('matching project writes record display identity, resolve its workspace, and preserve binding checks', async () => {
+test('matching project writes fill missing display identity and preserve the recorded primary', async () => {
   const ref = refs[0], p = fresh(ref); p.runId = 'run_project'
   const own = { ...workspace, id: ref.workspace.replace(/^id:/, ''), projectId: ref.repoId }, lead = { ...own, id: 'lead-workspace' }
   let caller = 'orca_session_id:claude_project', c!: ReturnType<typeof testCoordinator>
@@ -194,26 +194,23 @@ test('matching project writes record display identity, resolve its workspace, an
   const submit = (handle: string, runId = 'run_project') => worker.request('project.agent', { operation: 'submit', projectId: ref.id, revision: (host.data().storage['project:p1'] as any).revision, requestId: crypto.randomUUID(), runId, caller: handle, task: { id: 't', title: 'Task', goal: 'Goal', phase: 'working' } })
   try {
     assert.equal((await worker.request('project.read', { projectId: ref.id })).mainAgent, undefined)
-    for (const kind of ['claude', 'codex']) {
-      caller = `orca_session_id:${kind}_project`
-      const result = await submit(caller)
-      assert.equal(result.project!.mainAgentHandle, caller); assert.equal(result.mainAgent, kind)
-      assert.deepEqual(result.workspaceTarget, { workspaceId: own.id })
-    }
+    const result = await submit(caller)
+    assert.equal(result.project!.mainAgentHandle, caller); assert.equal(result.mainAgent, 'claude')
+    assert.deepEqual(result.workspaceTarget, { workspaceId: own.id })
+    assert.equal((await submit('orca_session_id:codex_project')).mainAgent, 'claude')
     await worker.request('project.openMain', { projectId: ref.id })
     assert.deepEqual(host.callsOf('workspace.open').at(-1), { workspaceId: lead.id })
     assert.equal((await submit('orca_session_id:claude_other', 'run_other')).project!.mainAgentHandle, caller)
     caller = 'orca_session_id:uuid-without-agent-prefix'
-    assert.equal((await submit(caller)).mainAgent, undefined)
+    assert.equal((await submit(caller)).mainAgent, 'claude')
     host.respond('workspace.list', { workspaces: [own], truncated: false })
     assert.deepEqual((await worker.request('project.read', { projectId: ref.id })).workspaceTarget, { workspaceId: own.id })
     await assert.rejects(() => worker.request('project.agent', { operation: 'bind', projectId: ref.id, revision: (host.data().storage['project:p1'] as any).revision, requestId: 'refused', runId: 'run_forbidden', caller }), /existing Run check refused/)
-    const rebound = await worker.request('project.agent', { operation: 'bind', projectId: ref.id, revision: (host.data().storage['project:p1'] as any).revision, requestId: 'rebind', runId: 'run_next' })
-    assert.equal(rebound.project!.mainAgentHandle, undefined); assert.equal(rebound.mainAgent, undefined)
-    const bound = await worker.request('project.agent', { operation: 'bind', projectId: ref.id, revision: rebound.project!.revision, requestId: 'same-run', runId: 'run_next', caller: 'orca_session_id:claude_bound' })
+    await assert.rejects(() => worker.request('project.agent', { operation: 'bind', projectId: ref.id, revision: (host.data().storage['project:p1'] as any).revision, requestId: 'rebind', runId: 'run_next' }), /接管凭据/)
+    const bound = await worker.request('project.agent', { operation: 'bind', projectId: ref.id, revision: (host.data().storage['project:p1'] as any).revision, requestId: 'same-run', runId: 'run_project', caller: 'orca_session_id:claude_bound' })
     assert.equal(bound.mainAgent, 'claude')
-    const settings = await worker.request('project.settings', { projectId: ref.id, revision: bound.project!.revision, roles: bound.project!.roles, runId: 'run_next', caller: 'orca_session_id:codex_settings' })
-    assert.equal(settings.mainAgent, 'codex')
+    const settings = await worker.request('project.settings', { projectId: ref.id, revision: bound.project!.revision, roles: bound.project!.roles, runId: 'run_project', caller: 'orca_session_id:codex_settings' })
+    assert.equal(settings.mainAgent, 'claude')
     const before = structuredClone(host.data().storage['project:p1'])
     await assert.rejects(() => worker.request('project.agent', { operation: 'submit', projectId: ref.id, revision: (before as any).revision, requestId: 'invalid', runId: 'run_next', caller, task: {} }), /./)
     assert.deepEqual(host.data().storage['project:p1'], before)

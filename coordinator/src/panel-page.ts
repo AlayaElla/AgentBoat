@@ -1296,9 +1296,31 @@ function projectLeadSettings(id: string) {
   const waiting = waitingProjectCard(id, w)
   if (waiting) return section('主会话', waiting)
   const choose = (input: SwitchChoice) => chooseProjectLead(id, w.revision, input)
+  const agents = data.availableAgents ?? []
+  const { primary, backup } = data.leadAgents
+  const primaryLabel = '默认主用', backupLabel = '备用代理', newLabel = '新会话代理', noBackup = '(none)'
+  const backupOptions = { [noBackup]: '不设备用', ...Object.fromEntries(agents.map(a => [a.id, a.name])) }
+  const missingBackup = !!backup && !Object.hasOwn(backupOptions, backup.agent)
+  if (!Object.hasOwn(backupOptions, form[backupLabel])) form[backupLabel] = missingBackup ? '' : backup?.agent ?? noBackup
+  const primarySelect = agentSelect(agents, primaryLabel, primary.agent)
+  const launchSelect = agentSelect(agents, newLabel, primary.agent)
+  const newPrimary = form[primaryLabel], newBackup = form[backupLabel]
+  const duplicate = !!newBackup && [newPrimary, w.session?.agent].includes(newBackup)
+  const changes = {
+    ...(newPrimary && newPrimary !== primary.agent && { primary: { agent: newPrimary } }),
+    ...(newBackup && newBackup !== (backup?.agent ?? noBackup) && { backup: newBackup === noBackup ? null : { agent: newBackup } })
+  }
   return section('主会话', el('p', { class: 'any' }, leadDescription(w, '主会话')), backupHistory(w, id), leadChoices(w, data.sessions, choose, true),
-    section('新会话', data.availableAgents?.length ? agentSelect(data.availableAgents) : callout(data.workspaceError || catalogIssue(data.availableAgents)),
-      button('新开一个主会话', () => choose({ mode: 'new', agent: form.Agent }), 'primary', !data.availableAgents?.length)))
+    agents.length ? section('启动偏好', primarySelect,
+      select(backupLabel, backupOptions, form[backupLabel], () => render(), missingBackup ? `${agentName(backup.agent)} 已不可用，请选择` : undefined),
+      duplicate ? callout('主用与备用需要选择不同的代理', 'danger') : null,
+      button('保存主会话设置', () => act(async () => {
+        await req('project.settings', { projectId: id, revision: w.revision, leadAgents: changes })
+        delete form[newLabel]
+        markSaved(); await loadPage(); notice = '已保存'
+      }, false), '', duplicate || !Object.keys(changes).length)) : callout(data.workspaceError || catalogIssue(data.availableAgents)),
+    section('新会话', agents.length ? launchSelect : null,
+      button('新开一个主会话', () => choose({ mode: 'new', agent: form[newLabel] }), 'primary', !form[newLabel])))
 }
 function detailReadState(label: string) {
   if (!active.error) return callout(`正在读取${label}…`)

@@ -7,6 +7,7 @@ import { promptClientPath } from '../scripts/orca-cli.mjs'
 import type { OrcaWorkerApi } from 'orca/worker'
 import { defaultAgent, type AgentSession, type Delivery, type LeadSwitch, type MainTakeover, type Project, type StoredTakeover, type WorkspaceBinding } from './model'
 import type { CoordinatorRuntime } from './runtime'
+import type { AgentLaunch } from '../../workspace/agent-launch.mjs'
 import { ProjectStore, fail, fingerprint, takeoverActive, text, revision } from './store'
 
 const mainSecurityBoundary = 'Run 归属由会话自报；替换授权来自面板一次性凭据。同一系统用户的本机程序可读写插件数据。'
@@ -36,6 +37,8 @@ export async function switchLead(runtime: CoordinatorRuntime, input: LeadSwitch,
   role: keyof typeof roleReminder
   prompt: (token: string, expiresAt: string) => string
   subject?: string
+  launch?: AgentLaunch
+  startOnly?: boolean
 }) {
   const expected = revision(input.revision), { mutate, changed } = options
   async function clearPendingSoul(w: Binding, nextId?: string) {
@@ -48,7 +51,11 @@ export async function switchLead(runtime: CoordinatorRuntime, input: LeadSwitch,
     }
   }
   if (input.mode === 'cancel') {
-    await mutate(async w => { await clearPendingSoul(w); delete w.takeover }, expected)
+    await mutate(async w => {
+      if (options.role === 'project' && w.takeover?.state === 'sending') fail('正在启动项目主会话，请等启动回执')
+      await clearPendingSoul(w)
+      delete w.takeover
+    }, expected)
     changed()
     return
   }
@@ -64,9 +71,9 @@ export async function switchLead(runtime: CoordinatorRuntime, input: LeadSwitch,
     const w = targets.workspaces.find(w => w.workspace === input.workspace)
     if (!w) fail('目标工作区已不可用，请刷新后选择')
     const list = await runtime.installedAgents(w.workspace, true)
-    const id = input.agent ?? defaultAgent(list)
+    const id = input.agent ?? options.launch?.agent ?? defaultAgent(list)
     const selected = list.find(a => a.id === id)
-    if (!selected) fail('所选代理在当前工作区不可用，请刷新后选择')
+    if (!selected) fail(`代理 ${id || '未设置'} 在当前工作区不可用，请刷新后选择`)
     target = { handle: '', title: `新的 ${selected.name} 会话`, workspace: w.workspace, workspaceName: w.name, path: w.path, agent: selected.id, online: 'unknown' }
   }
   if (!target) fail('目标会话或工作区已不可用，请刷新后选择')
@@ -76,8 +83,11 @@ export async function switchLead(runtime: CoordinatorRuntime, input: LeadSwitch,
   await mutate(async w => {
     if (target.handle && (w.session?.handle ?? w.mainAgentHandle) === target.handle) fail('该会话已经是主会话')
     const prior = w.takeover
+    if (options.role === 'project' && prior?.state === 'sending') fail('正在启动项目主会话，请等启动回执')
+    if (options.startOnly && (takeoverActive(prior) || prior?.state === 'uncertain')) fail('项目主会话的接管请求已发起，请核对原会话')
     if (prior && takeoverActive(prior) &&
       (bot ? prior.bot?.id === bot.id : existing ? prior.target.handle === target.handle : prior.mode === input.mode && prior.target.workspace === target.workspace && prior.target.agent === target.agent)) fail('该会话的接管请求已发起')
+    if (options.role === 'project' && input.mode === 'new' && (takeoverActive(prior) || prior?.state === 'uncertain')) fail('请先核对并取消上一次接管请求')
     await clearPendingSoul(w, bot?.id)
     let binding: WorkspaceBinding['bot']
     if (bot) {
@@ -104,7 +114,7 @@ export async function switchLead(runtime: CoordinatorRuntime, input: LeadSwitch,
     if (bot) newHome = await runtime.bots!.newHome(bot.id)
     handle = bot ? (await runtime.botMail!('bot:' + bot.id, '请接管工作间主 agent', prompt, 'handoff')).recipient
       : existing ? (await runtime.requestTakeover(target.handle, prompt, options.subject), target.handle)
-      : await runtime.launchMain(target.workspace, target.agent, prompt)
+      : await runtime.launchMain(target.workspace, target.agent, prompt, options.launch?.agent === target.agent ? options.launch : undefined)
     if (bot && (!botHomeHandle(handle) || handle !== newHome)) fail('未确认新主对话的收件地址')
   } catch {
     await mutate(w => {

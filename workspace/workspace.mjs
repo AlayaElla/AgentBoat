@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import os from 'node:os';
 import { initialize as initializeSkills } from './project-skills.mjs';
-import { agentFlags, launchReceipt } from './agent-launch.mjs';
+import { agentFlags, launchReceipt, projectAgentLaunch, projectTemplate, templateLeadAgents } from './agent-launch.mjs';
 export { launchReceipt } from './agent-launch.mjs';
 
 export const root = fileURLToPath(new URL('../', import.meta.url));
@@ -54,12 +54,9 @@ function key(value) {
   return value;
 }
 export function template(id) {
-  const value = json(path.join(home, 'templates', `${key(id)}.json`));
-  for (const role of [value.mainAgent, ...Object.values(value.roles || {})]) {
-    if (typeof role?.agent !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,99}$/.test(role.agent)) throw new Error('模板需要有效的 Orca 代理编号');
-    if (role.effort && !role.model) throw new Error('effort 需要 model');
-    if (role.surface && !['chat', 'terminal'].includes(role.surface)) throw new Error('surface 应为 chat 或 terminal');
-  }
+  const value = projectTemplate(id);
+  templateLeadAgents(value);
+  for (const role of Object.values(value.roles || {})) projectAgentLaunch(role);
   if (['design', 'code', 'review'].some(k => !value.roles?.[k])) throw new Error('缺少角色 design/code/review');
   if (!value.mainAgent || !['empty', 'existing', 'clone'].includes(value.source?.kind)) throw new Error('模板缺少 mainAgent 或 source.kind');
   text(value.firstMessage, 'firstMessage');
@@ -125,19 +122,18 @@ function initIfNeeded() {
   if (!existsSync(path.join(home, 'requests')) || !existsSync(path.join(home, 'templates/code.json')) || !existsSync(path.join(home, 'memory/.git/index'))) init();
 }
 function launchProjectLead(j, t, project, goal) {
-  const ref = project.ref;
-  if (!ref.workspace) throw new Error('项目当前没有工作区，请先在 Orca 准备项目工作区');
+  const { ref, revision } = project;
   const context = { projectId: ref.id, repoId: ref.repoId, hostId: ref.hostId, path: ref.path, name: ref.name, roles: project.roles, template: t.id };
-  j.update('launching', { context, mainAgent: t.mainAgent });
-  const prompt = `${t.firstMessage}\n项目身份与分工：${JSON.stringify(context)}\n只在这个项目开启协作；读取 $orca-project-coordinator 和桥接说明。由你自己的会话创建 Run，再用 client.mjs read 现读版本并用 bind 绑定此 projectId，不能绑定工作间主 agent 或复用别的项目 Run。脚本路径：${promptClientPath()}。首轮完成绑定后简短回复项目编号与 Run；不要自行另起 agent。\n主人本次目标：${goal || '先开启项目协作，等待具体任务。'}`;
-  const launched = call(['agent', 'launch', '--worktree', ref.workspace, ...agentFlags(t.mainAgent), '--prompt', prompt], ref.path);
-  j.update('launch-returned', { launched });
-  if (t.mainAgent.surface === 'chat' && launched.outcome?.kind !== 'structured') {
-    throw new Error('Orca 未确认打开聊天会话，请核对启动回执，不要重复启动');
-  }
-  const handle = launchReceipt(launched);
-  j.update('awaiting-project-binding', { handle });
-  return handle;
+  j.update('launching', { context });
+  const { binding, leadAgents } = plugin('project.lead', { projectId: ref.id, revision, workspace: ref.workspace, mode: 'new', startOnly: true,
+    introduction: `${t.firstMessage}\n项目身份与分工：${JSON.stringify(context)}\n完成绑定后简短回复项目编号与 Run。`,
+    goal: goal || '先开启项目协作，等待具体任务。' });
+  const takeover = binding.takeover;
+  if (binding.runId && !takeover) return alreadyBound({ ref });
+  if (takeover?.state !== 'waiting' || !takeover.target.handle) throw new Error(takeover?.error || '项目主会话启动回执待核对');
+  const data = { handle: takeover.target.handle, mainAgent: leadAgents.primary };
+  j.update('awaiting-project-binding', data);
+  return { status: j.record.stage, projectName: ref.name, handle: data.handle, ...launchSettings(data.mainAgent), reused: false };
 }
 function currentWorkspaceMain(runId) {
   const caller = process.env.ORCA_AGENT_SESSION_ID ? `orca_session_id:${process.env.ORCA_AGENT_SESSION_ID}` : process.env.ORCA_TERMINAL_HANDLE;
@@ -148,7 +144,8 @@ function currentWorkspaceMain(runId) {
 }
 const alreadyBound = p => ({ status: 'already-bound', projectName: p.ref.name, reason: '项目已绑定主 agent' });
 const pendingSwitch = p => p.pendingLead && p.pendingLead.state !== 'expired' && ({
-  status: 'awaiting-project-binding', projectName: p.ref.name, handle: p.pendingLead.target.handle || undefined, reused: true, reason: '项目正在等待主会话接管'
+  status: p.pendingLead.state === 'uncertain' ? 'needs-inspection' : 'awaiting-project-binding', projectName: p.ref.name,
+  handle: p.pendingLead.target.handle || undefined, reused: true, reason: p.pendingLead.error || '项目正在等待主会话接管'
 });
 const launchSettings = ({ agent, model, effort, surface } = {}) => ({ agent, model, effort, surface });
 const bindingWindow = 10 * 60_000;
@@ -164,9 +161,10 @@ function startProjectLead(p, templateId, goal, createJournal) {
     try { prior = json(file); }
     catch { prior = { stage: 'needs-inspection', error: '启动日志未完整写入，请用原请求核对' }; }
     const at = Date.parse(prior.at) || statSync(file).mtimeMs;
-    if (prior.stage !== 'delegated-to-takeover' && Date.now() - at < bindingWindow) {
+    const legacyLaunchUnconfirmed = prior.mainAgent && !prior.handle;
+    if (prior.stage !== 'delegated-to-takeover' && (legacyLaunchUnconfirmed || Date.now() - at < bindingWindow)) {
       createJournal?.update(prior.stage, { context: prior.context, launched: prior.launched });
-      return { status: prior.stage === 'needs-inspection' ? 'needs-inspection' : 'awaiting-project-binding',
+      return { status: legacyLaunchUnconfirmed || prior.stage === 'needs-inspection' ? 'needs-inspection' : 'awaiting-project-binding',
         projectName: p.ref.name, handle: prior.handle, ...launchSettings(prior.mainAgent), reused: true, ...(prior.error ? { reason: prior.error } : {}) };
     }
   }
@@ -179,10 +177,21 @@ function startProjectLead(p, templateId, goal, createJournal) {
     const pending = pendingSwitch(latest);
     if (pending) { j.update('delegated-to-takeover', { handle: pending.handle }); return pending; }
     if (latest.ref.repoId !== p.ref.repoId || latest.ref.workspace !== p.ref.workspace || canonical(latest.ref.path) !== workspaceDirectory) throw new Error('项目身份或工作区已变化，请核对后再操作');
-    const t = template(templateId), handle = launchProjectLead(j, t, latest, goal);
-    createJournal?.update(j.record.stage, { context: j.record.context, launched: j.record.launched });
-    return { status: j.record.stage, projectName: latest.ref.name, handle, ...launchSettings(t.mainAgent), reused: false };
-  } catch (error) { j.update('needs-inspection', { error: error.message }); throw error; }
+    const result = launchProjectLead(j, template(templateId), latest, goal);
+    createJournal?.update(j.record.stage, { context: j.record.context, handle: j.record.handle });
+    return result;
+  } catch (error) {
+    j.update('needs-inspection', { error: error.message });
+    let latest;
+    try { latest = project(id); } catch { throw error; }
+    if (latest.runId) { j.update('already-bound'); return alreadyBound(latest); }
+    const pending = pendingSwitch(latest);
+    if (pending && latest.pendingLead.state !== 'uncertain') {
+      j.update('delegated-to-takeover', { handle: pending.handle });
+      return pending;
+    }
+    throw error;
+  }
 }
 export function autoProjectLead(id, runId, templateId = 'code') {
   const p = project(id);
@@ -266,10 +275,10 @@ export function create(input) {
         ...(base ? ['--worktree-base-path', base] : [])], destination);
     }
     j.update('settings', { projectId: ref.id, error: undefined });
-    if (!resume || !isDeepStrictEqual(current.roles, roles)) {
+    if (!resume || !current.leadAgents || !isDeepStrictEqual(current.roles, roles)) {
       const settings = resume ? current : bridge('read', ref.id).project;
       if (settings.runId) throw new Error('项目主会话已绑定，请用原请求核对并收尾');
-      plugin('project.settings', { projectId: ref.id, revision: settings.revision, roles });
+      plugin('project.settings', { projectId: ref.id, revision: settings.revision, roles, ...(settings.leadAgents ? {} : { template: templateId }) });
     }
     const latest = project(ref.id);
     if (latest.ref.repoId !== repo.id || canonical(latest.ref.path) !== canonical(destination)) throw new Error('项目身份已变化');

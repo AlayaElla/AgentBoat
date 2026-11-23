@@ -32,9 +32,9 @@ declare module 'orca' {
     'project.read': { input: { projectId: string }; output: Snapshot }
     'project.task': { input: { projectId: string; taskId: string }; output: Project['tasks'][number] | null }
     'project.archive': { input: { projectId: string; end?: number }; output: ArchivePage }
-    'project.lead': { input: { projectId: string } | (LeadSwitch & { projectId: string }); output: ProjectLead }
+    'project.lead': { input: { projectId: string } | (LeadSwitch & { projectId: string; startOnly?: boolean; goal?: string; introduction?: string }); output: ProjectLead }
     'project.openMain': { input: { projectId: string }; output: { opened: boolean; multipleConversations?: boolean } }
-    'project.settings': { input: { projectId: string; revision: number; roles: Project['roles']; runId?: string; caller?: string }; output: Snapshot }
+    'project.settings': { input: { projectId: string; revision: number; roles?: Project['roles']; leadAgents?: Project['leadAgents']; template?: string; runId?: string; caller?: string }; output: Snapshot }
     'project.feedback': { input: { projectId: string; revision?: number; requestId?: string; runId?: string; caller?: string; items: import('./store').FeedbackItem[] }; output: Snapshot }
     'project.deliver': { input: { projectId: string; deliveryId: string }; output: Snapshot }
     'project.expireArtifact': { input: { projectId: string; revision: number; taskId: string; artifactId: string }; output: Snapshot }

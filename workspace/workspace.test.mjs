@@ -23,6 +23,13 @@ test('初始化不覆盖模板；记忆按来源隔离、带日期、重复记�
     assert.equal(api.template('code').roles.code.agent, 'codex');
     const custom = path.join(testHome, 'templates/code.json');
     const value = JSON.parse(readFileSync(custom));
+    assert.equal(value.mainAgent.agent, 'codex');
+    assert.equal(value.backupAgent.agent, 'antigravity');
+    const old = { ...value, mainAgent: { agent: 'claude', surface: 'chat' } };
+    delete old.backupAgent;
+    writeFileSync(custom, '\uFEFF' + JSON.stringify(old));
+    assert.equal(api.template('code').mainAgent.agent, 'codex');
+    assert.equal(JSON.parse(readFileSync(custom, 'utf8').slice(1)).mainAgent.agent, 'claude');
     value.name = '自定义';
     value.mainAgent = { agent: 'antigravity' };
     writeFileSync(custom, JSON.stringify(value));
@@ -68,7 +75,9 @@ function handlePlugin(name, input, s, save) {
     case 'workspace.agent': return s.main;
     case 'project.settings':
       if (s.failSettings) throw Error('settings unavailable');
-      s.project.roles = input.roles; s.project.revision++; save(); return { project: s.project };
+      s.project.roles = input.roles;
+      if (input.template && !s.project.leadAgents) s.project.leadAgents = { primary: { agent: 'codex' }, backup: { agent: 'antigravity' } };
+      s.project.revision++; save(); return { project: s.project };
     case 'project.agent':
       if (input.operation === 'submit') {
         if (s.bindOnReceipt && input.requestId.endsWith('-receipt')) {
@@ -146,10 +155,21 @@ syncBuiltinESMExports();`);
   writeFileSync(path.join(release, '../current'), path.basename(release));
   const { cliBridge } = await import(pathToFileURL(path.join(release, 'coordinator/scripts/cli-bridge.mjs')));
   const host = cliBridge({ panels: { handle() {} } });
-  for (const name of ['workspace.agent', 'projects.list', 'project.agent', 'project.settings', 'workspace.message']) {
+  for (const name of ['workspace.agent', 'projects.list', 'project.agent', 'project.settings', 'project.lead', 'workspace.message']) {
     host.api.panels.handle(name, input => {
       appendFileSync(log, JSON.stringify(['installed', name]) + '\n');
       const s = read();
+      if (name === 'project.lead') {
+        assert.equal(input.startOnly, true);
+        assert.equal(input.workspace, s.ref.workspace);
+        assert.equal(s.project.runId, '');
+        const leadAgents = s.project.leadAgents ?? { primary: { agent: 'codex' }, backup: { agent: 'antigravity' } };
+        appendFileSync(log, JSON.stringify(['agent', 'launch', '--agent', leadAgents.primary.agent, '--prompt', path.join(profile, 'agentboat-current', input.introduction)]) + '\n');
+        const takeover = s.failLaunch ? { state: 'uncertain', target: { handle: '' }, error: '未确认 agent 收到提示词' }
+          : { state: 'waiting', target: { handle: 'orca_session_id:fake-project-lead' } };
+        s.lead = { takeover }; s.project.revision++; set(s);
+        return { binding: s.lead, leadAgents };
+      }
       return handlePlugin(name, input, s, () => set(s));
     });
   }
@@ -168,19 +188,20 @@ syncBuiltinESMExports();`);
     installedWorkspace: (op, payload) => command(path.join(release, 'workspace/workspace.mjs'), op, payload) };
 }
 
-test('first message initializes only its own home, opens a chat and reuses the pending launch until expiry', async t => {
+test('first message initializes only its own home, opens Codex and reuses the pending launch until expiry', async t => {
   const f = await fakeWorkspace(t);
-  const options = ['--agent', 'claude', '--surface', 'chat'];
+  const options = ['--agent', 'codex'];
   const first = await f.message('message-1');
   assert.equal(first.queued, '项目还没有主会话，已排队');
   assert.deepEqual(first.autoLaunch, { status: 'awaiting-project-binding', projectName: '现有项目', handle: 'orca_session_id:fake-project-lead',
-    agent: 'claude', surface: 'chat', reused: false });
+    agent: 'codex', reused: false });
   assert.equal(existsSync(path.join(f.home, 'templates/code.json')), true);
   assert.equal(existsSync(path.join(f.projectDir, '.git')), false);
   assert.equal((await f.message('message-2')).autoLaunch.reused, true);
   assert.equal(f.calls().filter(args => args[0] === 'agent').length, 1);
   const profile = path.join(f.home, 'projects/auto/p1/1.json');
   const pending = JSON.parse(readFileSync(profile)); pending.at = new Date(Date.now() - 11 * 60_000).toISOString(); writeFileSync(profile, JSON.stringify(pending));
+  const expired = f.read(); expired.lead.takeover.state = 'expired'; f.set(expired);
   assert.equal((await f.message('message-3')).autoLaunch.reused, false);
   assert.deepEqual(f.calls().filter(args => args[0] === 'agent').map(args => args.slice(args.indexOf('--agent'), args.indexOf('--prompt'))), [options, options]);
   assert.deepEqual(f.read().project.messages.map(m => m.requestId), ['message-1', 'message-2', 'message-3']);
@@ -226,8 +247,9 @@ test('an uncertain launch preserves the queued message and waits for inspection'
 test('manual create shares launch defaults and the same pending-project guard', async t => {
   const f = await fakeWorkspace(t);
   const lead = await f.workspace('create', { requestId: 'manual-create', path: f.projectDir, name: 'agentboat-demo-existing', source: { kind: 'existing' } });
-  assert.equal(lead.surface, 'chat'); assert.equal(lead.model, undefined); assert.equal(lead.effort, undefined);
-  assert.equal(lead.launched.outcome.sessionId, 'fake-project-lead');
+  assert.equal(lead.agent, 'codex'); assert.equal(lead.model, undefined); assert.equal(lead.effort, undefined);
+  assert.equal(lead.handle, 'orca_session_id:fake-project-lead');
+  assert.equal(f.read().project.leadAgents.backup.agent, 'antigravity');
   assert.equal((await f.message('after-manual')).autoLaunch.reused, true);
   assert.equal(f.calls().filter(args => args[0] === 'agent').length, 1);
 });
