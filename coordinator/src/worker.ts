@@ -22,6 +22,7 @@ import { cliBridge } from '../scripts/cli-bridge.mjs'
 import { applyDelta, type Sheets } from './feedback-drafts'
 import { roleRegistry } from './role-registry'
 import { escalationWait } from '../scripts/worker-reports.mjs'
+import type { ProjectArtifactRef } from './protocol'
 
 const activityInterval = 60_000
 
@@ -898,20 +899,35 @@ export function createCoordinator(api: OrcaWorkerApi, runtime: CoordinatorRuntim
     changed(ref.id)
     return { projects: refs, project: projectView(project) }
   })
-  orca.panels.handle('project.openArtifact', async input => {
-    const ref = await requireProject(input.projectId), p = await store.register(ref)
+  async function localArtifact(input: ProjectArtifactRef, needsWorkspace: boolean) {
+    const ref = await requireProject(input.projectId)
+    if (ref.hostId !== 'local') fail('请选择本项目的本机成果')
+    const p = await store.register(ref)
     const tasks = input.archiveEnd === undefined ? p.tasks : (await store.archive.page(p, input.archiveEnd)).tasks
     const a = tasks?.find(x => x.id === input.taskId)?.artifacts.find(x => x.id === input.artifactId)
     if (!a || /^https?:/i.test(a.url)) fail('请选择本项目的本机成果')
-    if (!ref.workspace) fail('这个项目当前没有工作区')
+    if (needsWorkspace && !ref.workspace) fail('这个项目当前没有工作区')
     const url = artifactUrl(a.url, ref.path)
     const [root, file] = await Promise.all([realpath(ref.path), realpath(url)]).catch(() => fail('成果文件不存在或无法访问'))
     artifactUrl(file, root)
-    if (!(await stat(file).catch(() => undefined))?.isFile()) fail('成果文件不存在或无法访问')
+    if (!path.relative(root, file)) fail('成果路径不属于当前项目')
+    const info = await stat(file).catch(() => fail('成果文件不存在或无法访问'))
+    return { ref, url, file, info }
+  }
+  orca.panels.handle('project.openArtifact', async input => {
+    const { ref, url, info } = await localArtifact(input, true)
+    if (!info.isFile()) fail('成果文件不存在或无法访问')
     const target = workspaceId(ref.workspace)
     // The host opens a tab in the target workspace without showing that workspace.
     await orca.host.call('editor.open', { workspaceId: target, path: path.relative(ref.path, url).split(path.sep).join('/') }, { signal: AbortSignal.timeout(readTimeout) })
     return orca.host.call('workspace.open', { workspaceId: target }, { signal: AbortSignal.timeout(readTimeout) })
+  })
+  orca.panels.handle('project.openArtifactFolder', async input => {
+    const { file, info } = await localArtifact(input, false)
+    const directory = info.isDirectory()
+    if (!directory && !info.isFile()) fail('成果文件不存在或无法访问')
+    await runtime.revealArtifact(file, directory)
+    return { opened: true }
   })
 
   let lastInventory: { at: number; sessions: AgentSession[] } | undefined

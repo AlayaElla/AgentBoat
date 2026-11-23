@@ -1,7 +1,7 @@
 import { LocalBots, quotaReceipt } from './bot-runtime'
 import { LeadContacts } from '../scripts/lead-contact.mjs'
 import type { LeadContact, ContactRoutes } from './model'
-import { execFile } from 'node:child_process'
+import { execFile, type ExecFileOptions } from 'node:child_process'
 import { promisify } from 'node:util'
 import { existsSync } from 'node:fs'
 import path from 'node:path'
@@ -18,6 +18,23 @@ import { activeUserDataPath, pluginKey, release } from '../scripts/orca-cli.mjs'
 
 export const readTimeout = 5000
 const execute = promisify(execFile)
+export async function revealArtifact(file: string, directory: boolean, platform = process.platform,
+  run: (command: string, args: string[], options: ExecFileOptions) => Promise<unknown> = execute) {
+  try {
+    if (platform === 'win32') {
+      const explorer = path.win32.join(process.env.SystemRoot || 'C:\\Windows', 'explorer.exe')
+      // Explorer splits unquoted commas, so quote only the path and leave /select, outside.
+      await run(explorer, [directory ? `"${file}"` : `/select,"${file}"`], { shell: false, windowsVerbatimArguments: true })
+    } else if (platform === 'darwin') {
+      await run('/usr/bin/open', directory ? [file] : ['-R', file], { shell: false })
+    } else {
+      await run('xdg-open', [directory ? file : path.posix.dirname(file)], { shell: false })
+    }
+  } catch (e) {
+    // Explorer can return 1 after passing the request to the running desktop.
+    if (platform !== 'win32' || (e as { code?: unknown } | null)?.code !== 1) throw e
+  }
+}
 export interface CoordinatorRuntime {
   bots?: Pick<LocalBots, 'list' | 'find' | 'home' | 'choices' | 'hasSideChat' | 'startChat' | 'writeSoul' | 'removeSoul'>
   botMail?(target: string, subject: string, body: string, type: 'handoff' | 'status', home?: string): Promise<{ recipient: string; quota?: ReturnType<typeof quotaReceipt> }>
@@ -31,6 +48,7 @@ export interface CoordinatorRuntime {
   requestTakeover(handle: string, prompt: string, subject?: string): Promise<void>
   launchMain(workspace: string, agent: string, prompt: string, options?: Omit<AgentLaunch, 'agent'>): Promise<string>
   openOverview(): Promise<void>
+  revealArtifact(file: string, directory: boolean): Promise<void>
   removeProject(ref: ProjectRef, host: HostApi<'worker'>): Promise<void>
   agents(projects: Project[], host: HostApi<'worker'>, main?: AgentSession): Promise<AgentsSnapshot>
   mail(runId: string, submitted?: (reports: WorkerReport[]) => Promise<Set<string>>): Promise<{ questions: OrcaQuestion[]; reports: WorkerReport[]; waiting?: { at: number; title: string; read?: boolean; report?: WorkerReport }[] }>
@@ -39,6 +57,7 @@ export interface CoordinatorRuntime {
 }
 export class OrcaRuntime implements CoordinatorRuntime {
   constructor(private executable: () => Promise<string>) {}
+  revealArtifact(file: string, directory: boolean) { return revealArtifact(file, directory) }
   bots = new LocalBots(args => this.call(args, readTimeout))
   async botMail(target: string, subject: string, body: string, type: 'handoff' | 'status', home?: string) {
     const result = await this.call(['orchestration', 'send', '--from', `plugin:${pluginKey}`, '--to', target, '--type', type, '--subject', subject, '--body', body])
