@@ -1,8 +1,14 @@
 import code from './templates/code.json' with { type: 'json' };
 
-export const projectLeadDefaults = code.mainAgent;
-
 export const backupDefaults = primary => code.backupAgents[primary === 'codex' ? 'claude' : 'codex'];
+
+export function availableBackup(primary, installed) {
+  const preferred = backupDefaults(primary);
+  if (installed.some(a => a.id === preferred.agent)) return preferred;
+  const others = installed.filter(a => a.id !== primary);
+  const choice = others.find(a => a.default) ?? others[0];
+  if (choice) return Object.hasOwn(code.backupAgents, choice.id) ? code.backupAgents[choice.id] : { agent: choice.id };
+}
 
 export function agentFlags(role) {
   return ['--agent', role.agent, ...(role.model ? ['--model', role.model] : []), ...(role.effort ? ['--effort', role.effort] : []), ...(role.surface ? ['--surface', role.surface] : [])];

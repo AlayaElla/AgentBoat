@@ -5,9 +5,8 @@ import { randomBytes, randomUUID } from 'node:crypto'
 import { existsSync } from 'node:fs'
 import { promptClientPath } from '../scripts/orca-cli.mjs'
 import type { OrcaWorkerApi } from 'orca/worker'
-import { agents, type AgentSession, type Delivery, type LeadSwitch, type MainTakeover, type Project, type StoredTakeover, type WorkspaceBinding } from './model'
+import { defaultAgent, type AgentSession, type Delivery, type LeadSwitch, type MainTakeover, type Project, type StoredTakeover, type WorkspaceBinding } from './model'
 import type { CoordinatorRuntime } from './runtime'
-import type { AgentLaunch } from '../../workspace/agent-launch.mjs'
 import { ProjectStore, fail, fingerprint, takeoverActive, text, revision } from './store'
 
 const mainSecurityBoundary = 'Run 归属由会话自报；替换授权来自面板一次性凭据。同一系统用户的本机程序可读写插件数据。'
@@ -37,7 +36,6 @@ export async function switchLead(runtime: CoordinatorRuntime, input: LeadSwitch,
   role: keyof typeof roleReminder
   prompt: (token: string, expiresAt: string) => string
   subject?: string
-  launch?: Omit<AgentLaunch, 'agent'>
 }) {
   const expected = revision(input.revision), { mutate, changed } = options
   async function clearPendingSoul(w: Binding, nextId?: string) {
@@ -58,12 +56,19 @@ export async function switchLead(runtime: CoordinatorRuntime, input: LeadSwitch,
   if (input.mode === 'bot' && (!bot || bot.paused || !['claude','codex'].includes(bot.agent))) fail('所选 bot 不可用')
   if (!bot && input.mode !== 'existing' && input.mode !== 'new') fail('请选择切换方式')
   const targets = await options.targets()
-  const existing = input.mode === 'existing', agent = input.agent ?? ''
-  const target = bot ? { handle: '', title: bot.name, workspace: '', workspaceName: '', path: '', agent: bot.agent, online: 'unknown' as const } : existing ? targets.sessions.find(s => s.handle === input.handle && s.online === 'online') : (() => {
+  const existing = input.mode === 'existing'
+  let target: AgentSession | undefined
+  if (bot) target = { handle: '', title: bot.name, workspace: '', workspaceName: '', path: '', agent: bot.agent, online: 'unknown' }
+  else if (existing) target = targets.sessions.find(s => s.handle === input.handle && s.online === 'online')
+  else {
     const w = targets.workspaces.find(w => w.workspace === input.workspace)
-    if (!w || !Object.hasOwn(agents, agent)) return
-    return { handle: '', title: `新的 ${agents[agent as keyof typeof agents]} 会话`, workspace: w.workspace, workspaceName: w.name, path: w.path, agent, online: 'unknown' as const }
-  })()
+    if (!w) fail('目标工作区已不可用，请刷新后选择')
+    const list = await runtime.installedAgents(w.workspace, true)
+    const id = input.agent ?? defaultAgent(list)
+    const selected = list.find(a => a.id === id)
+    if (!selected) fail('所选代理在当前工作区不可用，请刷新后选择')
+    target = { handle: '', title: `新的 ${selected.name} 会话`, workspace: w.workspace, workspaceName: w.name, path: w.path, agent: selected.id, online: 'unknown' }
+  }
   if (!target) fail('目标会话或工作区已不可用，请刷新后选择')
   if (!existsSync(promptClientPath())) fail('找不到接管脚本，请检查 AgentBoat 安装')
   const token = randomBytes(32).toString('base64url'), id = randomUUID(), expiresAt = new Date(Date.now() + 10 * 60_000).toISOString()
@@ -99,7 +104,7 @@ export async function switchLead(runtime: CoordinatorRuntime, input: LeadSwitch,
     if (bot) newHome = await runtime.bots!.newHome(bot.id)
     handle = bot ? (await runtime.botMail!('bot:' + bot.id, '请接管工作间主 agent', prompt, 'handoff')).recipient
       : existing ? (await runtime.requestTakeover(target.handle, prompt, options.subject), target.handle)
-      : await runtime.launchMain(target.workspace, target.agent, prompt, options.launch)
+      : await runtime.launchMain(target.workspace, target.agent, prompt)
     if (bot && (!botHomeHandle(handle) || handle !== newHome)) fail('未确认新主对话的收件地址')
   } catch {
     await mutate(w => {
@@ -205,10 +210,12 @@ export function mainAgent(orca: OrcaWorkerApi, store: ProjectStore, runtime: Coo
     } else if (input.operation !== 'read') fail('不支持的工作间操作')
     return read(input.operation === 'read' ? sample() : undefined)
   })
-  orca.panels.handle('workspace.agent.targets', async () => {
+  orca.panels.handle('workspace.agent.targets', async input => {
     const t = await runtime.targets('display')
-    const bots = await runtime.bots?.list().catch(() => undefined)
-    return { ...t, ...(bots ? { bots } : {}), sessions: t.sessions.filter(s => s.online === 'online') }
+    const agentWorkspace = (t.workspaces.find(w => w.workspace === input?.workspace) ?? t.workspaces[0])?.workspace ?? ''
+    const [bots, availableAgents] = await Promise.all([runtime.bots?.list().catch(() => undefined),
+      agentWorkspace ? runtime.installedAgents(agentWorkspace, true).catch(() => null) : []])
+    return { ...t, agentWorkspace, availableAgents, ...(bots ? { bots } : {}), sessions: t.sessions.filter(s => s.online === 'online') }
   })
   orca.panels.handle('workspace.agent.switch', async input => {
     await switchLead(runtime, input, {

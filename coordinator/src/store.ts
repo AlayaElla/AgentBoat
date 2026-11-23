@@ -335,8 +335,7 @@ export function submitTask(project: Project, raw: unknown): void {
     task.decisions.push({ id: did, question, options: strings(d.options ?? [], '选项', 10).map(x => text(x, '选项', 200)), history: [] })
   }
   for (const e of list(input.executions ?? [], '执行记录')) {
-    if (!['codex', 'claude'].includes(e.agent)) fail('执行代理应为 Codex 或 Claude')
-    const execution = { runId: text(e.runId, 'Run 编号', 200), taskId: text(e.taskId, 'Orca 任务编号', 200), dispatchId: text(e.dispatchId, '派工编号', 200), agent: e.agent as 'codex' | 'claude' }
+    const execution = { runId: text(e.runId, 'Run 编号', 200), taskId: text(e.taskId, 'Orca 任务编号', 200), dispatchId: text(e.dispatchId, '派工编号', 200), agent: text(e.agent, '执行代理', 100) }
     if (!task.executions.some(x => x.dispatchId === execution.dispatchId)) task.executions.push(execution)
   }
   for (const sourceId of strings(input.sourceIds ?? [], '来源编号')) {

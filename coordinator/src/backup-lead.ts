@@ -1,6 +1,6 @@
 import { randomBytes, randomUUID } from 'node:crypto'
 import { botHomeHandle } from './bot-runtime'
-import { backupDefaults } from '../../workspace/agent-launch.mjs'
+import { availableBackup, backupDefaults } from '../../workspace/agent-launch.mjs'
 import { promptClientPath } from '../scripts/orca-cli.mjs'
 import { awaitingLeadControl, expectedPhases, backupInCharge, type AgentSession, type BackupLead, type ContactRoutes, type Delivery, type LeadAction, type Project, type Workspace } from './model'
 import type { CoordinatorRuntime } from './runtime'
@@ -165,13 +165,11 @@ export class BackupLeads {
     }
     if (unopened(b)) {
       if (!session.agent) return this.missing(r, '无法识别主会话的 agent 类型', ownerRun)
-      const { agent, ...options } = backupDefaults(session.agent)
       const installed = await this.runtime.installedAgents(session.workspace).catch(() => undefined)
       if (!installed) return this.missing(r, '无法读取 Orca 的可启动 agent 列表', ownerRun)
-      if (!installed.includes(agent)) {
-        if (installed.includes('codex') || installed.includes('claude')) return this.missing(r, '', ownerRun, true)
-        return this.missing(r, 'Orca 没有可启动的 Claude 或 Codex', ownerRun)
-      }
+      const backup = availableBackup(session.agent, installed)
+      if (!backup) return this.missing(r, installed.length ? '' : 'Orca 没有可启动的代理', ownerRun, !!installed.length)
+      const { agent, ...options } = backup
       const run = await this.runtime.runBinding(r.runId).catch(() => undefined)
       const saved = 'ref' in r ? r.mainAgentHandle : r.session?.handle
       if (!run || !Number.isSafeInteger(run.generation) || (run.owner !== session.handle && !(run.owner === null && chat(session.handle) && saved === session.handle))) {

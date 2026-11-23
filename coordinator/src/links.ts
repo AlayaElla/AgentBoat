@@ -6,7 +6,7 @@ import { lookup } from 'node:dns'
 import { networkInterfaces } from 'node:os'
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto'
 import type { OrcaWorkerApi } from 'orca/worker'
-import { actingMain, blockedRevision, projectCounts, attention, agents, compareAgentActivity, groupedAttention, isProjectShared, isRecentAgent, labels, mainStatus, mainAgentStates, taskState, type AgentActivity, type AgentsSnapshot, type MainAgentActivity, type Project, type Task, type WorkspaceBinding } from './model'
+import { actingMain, blockedRevision, projectCounts, attention, compareAgentActivity, groupedAttention, isProjectShared, isRecentAgent, labels, mainStatus, mainAgentStates, taskState, type AgentActivity, type AgentsSnapshot, type MainAgentActivity, type Project, type Task, type WorkspaceBinding } from './model'
 import { fail, fingerprint, object, revision, strings, text, type FeedbackItem } from './store'
 import { LinkMessages, type IncomingMessage, type MessageExchange, type WireMessage } from './link-messages'
 import { LinkArtifacts, artifactRef, streamTimeout, type ArtifactExchange, type ArtifactRef } from './link-artifacts'
@@ -99,7 +99,8 @@ type Receipts = Omit<MessageExchange, 'messages'>
 const noReceipts: Receipts = { received: [] }
 const hasReceipts = (r: Receipts) => !!(r.received.length || r.progress?.length || r.rejected?.length)
 const maxPeers = 50, maxProjectAgents = 20, maxReportAgents = 100, maxActivityTitle = 200
-const knownAgent = (value: unknown): value is string => typeof value === 'string' && (value === '' || Object.hasOwn(agents, value))
+// Existing peers only accept these identifiers in shared reports.
+const knownAgent = (value: unknown): value is string => typeof value === 'string' && ['', 'claude', 'codex', 'opencode'].includes(value)
 const publicAgent = (value: string) => knownAgent(value) ? value : ''
 const canDelegate = (p: Sharing) => p.scope === 'details' && p.delegateFeedback === true
 

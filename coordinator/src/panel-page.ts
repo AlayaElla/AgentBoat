@@ -2,7 +2,7 @@ import type {} from 'orca/frame'
 import type { ArchivePage } from './protocol'
 import { previewArtifact } from './artifact-preview'
 import { artifactTitle, latestArtifacts } from './artifact-versions.mjs'
-import { actingMain, backupInCharge, blockedRevision, attention, projectSummary, agents, agentName, compareAgentActivity, groupedAttention, isProjectShared, isRecentAgent, labels, taskState, scopes, statuses, connectionStates, roles, mainStatus, mainAgentStates, waitingForProjectLead } from './model'
+import { actingMain, backupInCharge, blockedRevision, attention, projectSummary, defaultAgent, agentName, compareAgentActivity, groupedAttention, isProjectShared, isRecentAgent, labels, taskState, scopes, statuses, connectionStates, roles, mainStatus, mainAgentStates, waitingForProjectLead, type InstalledAgent } from './model'
 import type { Acceptance, AgentSession, Artifact, Attention, LeadSwitch, MainTakeover, Overview, Project, ProjectLead, ProjectWorkspace, WorkspaceBinding } from './model'
 import type { FeedbackItem } from './store'
 import type { AgentActivity, AgentsSnapshot, MainAgentActivity } from './model'
@@ -216,13 +216,20 @@ function input(label: string, initial: any = '', type = 'text', change?: (value:
   const caption = label.startsWith('决定 ') ? '你的决定' : feedback ? label.split(' ')[0] : label
   return el('label', { class: 'field' }, el('span', { class: 'lb' }, caption), e)
 }
-function select(label: string, options: Record<string, string>, initial: string, change?: (v: string) => void) {
+function select(label: string, options: Record<string, string>, initial: string, change?: (v: string) => void, placeholder?: string) {
   if (!(label in form)) form[label] = initial
   const fields = form
-  const s = el('select', { class: 'in', 'aria-label': label, 'data-focus': label, onchange: (e: Event) => { fields[label] = (e.target as HTMLSelectElement).value; if (fields === active.form) markDirty(); change?.(fields[label]) } }, Object.entries(options).map(([v, t]) => el('option', { value: v }, t))) as HTMLSelectElement
+  const s = el('select', { class: 'in', 'aria-label': label, 'data-focus': label, onchange: (e: Event) => { fields[label] = (e.target as HTMLSelectElement).value; if (fields === active.form) markDirty(); change?.(fields[label]) } }, placeholder ? el('option', { value: '', disabled: true }, placeholder) : null, Object.entries(options).map(([v, t]) => el('option', { value: v }, t))) as HTMLSelectElement
   s.value = form[label]
   return el('label', { class: 'field' }, el('span', { class: 'lb' }, label), el('span', { class: 'sel' }, s))
 }
+function agentSelect(list: InstalledAgent[], label = 'Agent', saved?: string) {
+  const options = Object.fromEntries(list.map(a => [a.id, a.name]))
+  if (!Object.hasOwn(options, form[label])) form[label] = saved === undefined ? defaultAgent(list) : Object.hasOwn(options, saved) ? saved : ''
+  return select(label, options, form[label], saved === undefined ? undefined : () => render(),
+    !form[label] && saved ? `${agentName(saved)} 已不可用，请选择` : undefined)
+}
+const catalogIssue = (list?: InstalledAgent[] | null) => list === null ? '无法读取 Orca 代理列表，请刷新重试' : '当前工作区没有可用代理'
 function check(label: string, checked: boolean, change: (v: boolean) => void, options: { type?: string; name?: string; value?: string; disabled?: boolean; 'data-focus'?: string } = {}) {
   return el('label', { class: 'opt' }, el('input', { type: 'checkbox', ...options, checked, onchange: (e: Event) => change((e.target as HTMLInputElement).checked) }), el('span', { class: 'any' }, label))
 }
@@ -282,11 +289,12 @@ async function loadPage(f = active, taskReads?: Map<string, Promise<FeedbackTask
     const [task, snapshot, connection, sessions, leadPanel, archive] = await Promise.all([
       taskRead, local && !taskRead ? req('project.read', { projectId: p.projectId }) : null,
       p.kind === 'connection' && p.id ? req('workspace.connections', { operation: 'read', connectionId: p.id, includeApprovalMode: false }) : null,
-      p.kind === 'main' ? req('workspace.agent.targets') : null,
+      p.kind === 'main' ? req('workspace.agent.targets', { workspace: f.form['工作区'] }) : null,
       p.kind === 'project-settings' && p.projectId ? req('project.lead', { projectId: p.projectId }) : undefined,
       p.kind === 'archive' || (p.kind === 'task' && p.end !== undefined) ? req('project.archive', { projectId: p.projectId, end: p.end }) : undefined
     ])
     if (request !== f.load) return
+    if (sessions) f.form['工作区'] = sessions.agentWorkspace
     f.data = { current: snapshot?.project ?? null, task, lead: snapshot?.lead, workspace: snapshot?.workspaceTarget, connection, targets: sessions, leadPanel, archive }
     f.error = undefined
     if (connection?.a2a && f.approvalMode === undefined) {
@@ -1004,7 +1012,8 @@ function projectPage() {
       archive.previousEnd ? button('更早一批', () => go({ kind: 'archive', projectId: p.ref.id, end: archive.previousEnd })) : null]
   }
   const reason = workspaceTarget && 'error' in workspaceTarget ? workspaceTarget.error : !workspaceTarget ? '正在查找项目工作区…' : ''
-  if (page.kind === 'project-settings') return [projectLeadSettings(p.ref.id), section('分工', ...Object.entries(roles).map(([k, title]) => select(title, { claude: 'Claude', codex: 'Codex' }, p.roles[k as keyof typeof roles])), button('保存', () => act(async () => { const s = await req('project.settings', { projectId: p.ref.id, revision: p.revision, roles: { design: form['设计'], code: form['代码'], review: form['审查'] } }); current = s.project; if (projectLeadPanel) projectLeadPanel.binding.revision = s.project.revision; markSaved(); notice = '已保存' }), 'primary')),
+  const roleAgents = projectLeadPanel?.roleAgents
+  if (page.kind === 'project-settings') return [projectLeadSettings(p.ref.id), section('分工', ...(roleAgents?.length ? Object.entries(roles).map(([k, title]) => agentSelect(roleAgents, title, p.roles[k as keyof typeof roles])) : [small(catalogIssue(roleAgents))]), button('保存', () => act(async () => { const s = await req('project.settings', { projectId: p.ref.id, revision: p.revision, roles: { design: form['设计'], code: form['代码'], review: form['审查'] } }); current = s.project; if (projectLeadPanel) projectLeadPanel.binding.revision = s.project.revision; markSaved(); notice = '已保存' }), 'primary', !roleAgents?.length || Object.values(roles).some(label => !form[label]))),
     section('开放给了谁', peers().filter(peer => peer.state === 'active' && isProjectShared(p, peer)).map(peer => small(peer.name))), small(`目录：${p.ref.path}`), button('导出记录', () => orca.files?.saveAs({ suggestedName: 'project-record.json', mimeType: 'application/json', data: JSON.stringify(p, null, 2) })),
     button(p.hidden ? '恢复显示' : '隐藏项目', () => act(async () => { await req('project.visibility', { projectId: p.ref.id, revision: p.revision, hidden: !p.hidden }); clearChoices(p.ref.id); await go({ kind: 'home' }, true); await refresh() })),
     section('删除项目', callout('先导出记录，再从 Orca 移除项目并删除工作间记录，磁盘文件保留。有打开的会话时会拒绝。'), check('确认删除这个项目的全部工作间记录', !!form.delete, v => { form.delete = v; render() }), button('删除项目', () => act(async () => { const result = await req('project.delete', { projectId: p.ref.id, revision: p.revision, confirm: p.ref.id }); clearChoices(p.ref.id); await go({ kind: 'home' }, true); await refresh(); notice = `已删除，记录已导出：${result.exportPath}` }), 'danger', !form.delete))]
@@ -1288,9 +1297,8 @@ function projectLeadSettings(id: string) {
   if (waiting) return section('主会话', waiting)
   const choose = (input: SwitchChoice) => chooseProjectLead(id, w.revision, input)
   return section('主会话', el('p', { class: 'any' }, leadDescription(w, '主会话')), backupHistory(w, id), leadChoices(w, data.sessions, choose, true),
-    section('新会话', select('Agent', agents, data.defaultAgent),
-      button('新开一个主会话', () => choose({ mode: 'new', agent: form.Agent }), 'primary', !!data.workspaceError),
-      data.workspaceError ? callout(data.workspaceError) : null))
+    section('新会话', data.availableAgents?.length ? agentSelect(data.availableAgents) : callout(data.workspaceError || catalogIssue(data.availableAgents)),
+      button('新开一个主会话', () => choose({ mode: 'new', agent: form.Agent }), 'primary', !data.availableAgents?.length)))
 }
 function detailReadState(label: string) {
   if (!active.error) return callout(`正在读取${label}…`)
@@ -1306,6 +1314,8 @@ function mainPage() {
   }
   const bots = (targets?.bots ?? []).filter((b: import('./model').BotTarget) => !b.paused && ['codex','claude'].includes(b.agent))
   const mode = bots.length ? form.mainMode ?? (w.bot ? 'bot' : 'new') : 'new'
+  const loadingAgents = targets?.agentWorkspace !== form['工作区']
+  const availableAgents = loadingAgents ? null : targets?.availableAgents
   return [el('p', { class: 'any' }, leadDescription(w, '主 agent')), w.bot ? el('p', {}, botStatus(w.bot)) : null,
     w.bot?.soul ? el('p', { class: 'any' }, '已写入职责说明', el('br'), w.bot.soul.backup ? '备份位置：' + w.bot.soul.backup : '原文件不存在，无需备份') : null,
     backupHistory(w), leadChoices(w, targets?.sessions, switchMain),
@@ -1315,9 +1325,9 @@ function mainPage() {
       ? [select('Bot', Object.fromEntries(bots.map((b: import('./model').BotTarget) => [b.id, b.name])), bots[0].id),
         button('设为主 bot', () => switchMain({ mode: 'bot', botId: form.Bot }), 'primary')]
       : [bots.length ? null : el('h2', { class: 'h2' }, '新会话'),
-        select('工作区', Object.fromEntries(workspaces.map((s: any) => [s.workspace, s.name + ' · ' + s.path])), workspaces[0]?.workspace ?? ''),
-        select('Agent', { claude: 'Claude', codex: 'Codex' }, 'claude'),
-        button('新开一个主 agent', () => switchMain({ mode: 'new', workspace: form['工作区'], agent: form.Agent }), 'primary', !workspaces.length)]) : null,
+        select('工作区', Object.fromEntries(workspaces.map((s: any) => [s.workspace, s.name + ' · ' + s.path])), targets.agentWorkspace, () => { delete form.Agent; render(); void loadPage().then(render) }),
+        availableAgents?.length ? agentSelect(availableAgents) : small(loadingAgents ? '正在读取可用代理…' : catalogIssue(availableAgents)),
+        button('新开一个主 agent', () => switchMain({ mode: 'new', workspace: form['工作区'], agent: form.Agent }), 'primary', !availableAgents?.length)]) : null,
     fold(active.key + '-binding', '绑定详情', () => el('dl', { class: 'kv' }, Object.entries({ Run: w.runId || '未绑定', 会话: w.session?.handle || '未知', 目录: w.session?.path || '未知', 绑定时间: w.boundAt || '未知', 授权边界: w.securityBoundary || '未知' }).map(([k, v]) => [el('dt', {}, k), el('dd', {}, v)])))]
 }
 function settingsPage() {

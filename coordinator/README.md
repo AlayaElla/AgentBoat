@@ -14,7 +14,7 @@ Orca 右侧的工作间是 HTML 面板，首页只有「等你处理」和「组
 
 状态栏与全局快捷键 Ctrl+Alt+Shift+J（macOS 为 Cmd+Option+Shift+J）打开首页。主 agent 的命令及输入格式见[桥接说明](skill/orca-project-coordinator/references/bridge.md)。
 
-主 agent 页直接列出在线会话，点「设为主 agent」或「换成它」即发出接管；也可直接新开主 agent，默认 Claude，可改 Codex。等待时可取消或改选其他会话，旧凭据随即失效；10 分钟内未绑定会显示原因。目标会话仍须核对身份、创建自己的 Run、先 `main-bind --check` 再正式绑定，一次性凭据不会写入 skill。
+主 agent 页直接列出在线会话，点「设为主 agent」或「换成它」即发出接管；也可直接新开主 agent，候选代理与默认项取自目标工作区的 Orca 设置。项目的设计、代码和审查分工也可选择该项目工作区已启用的代理。等待时可取消或改选其他会话，旧凭据随即失效；10 分钟内未绑定会显示原因。目标会话仍须核对身份、创建自己的 Run、先 `main-bind --check` 再正式绑定，一次性凭据不会写入 skill。
 
 ## 数据与归档
 

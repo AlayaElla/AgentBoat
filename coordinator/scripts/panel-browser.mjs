@@ -123,6 +123,7 @@ async function setup(options = {}, hub) {
     const hermes = { id: 'hermes', type: 'a2a', name: 'Hermes', enabled: true, state: 'unchecked', message: '' };
     if (options.bot) workspace.bot = { id: 'current', name: '当前 bot', agent: 'codex', reason: 'Claude 额度已用完', recoveryAt: now + 3600000, soul: { home: '/fixture/bots/current', backup: '/fixture/plugin-data/bot-soul-backups/original.md' } };
     if (options.coldMain) workspace.session.online = 'unknown';
+    const availableAgents = options.availableAgents ?? ['Claude', 'Codex', 'Antigravity'].map(name => ({ id: name.toLowerCase(), name, default: name === 'Claude' }));
     const sessions = ['甲', '乙'].map((name, i) => ({ handle: 'session-' + i, title: name + '会话', workspace: 'identity:test', workspaceName: '示例工作区', path: '/test/工作区 with spaces', agent: i ? 'codex' : 'claude', online: 'online' }));
     const projectSessions = [{ ...sessions[0], handle: 'project-session-0', title: '当前设计会话' },
       { ...sessions[1], handle: 'project-session-1', title: '编码会话' },
@@ -205,6 +206,12 @@ async function setup(options = {}, hub) {
         target.revision++;
         return { accepted: true };
       }
+      if (name === 'project.settings') {
+        const p = projects.find(p => p.ref.id === input.projectId);
+        if (p.revision !== input.revision) throw Error('项目已更新');
+        p.roles = input.roles; p.revision++;
+        return clone({ project: p });
+      }
       if (name === 'project.lead') {
         const p = projects.find(p => p.ref.id === input.projectId);
         if (input.mode) {
@@ -219,7 +226,7 @@ async function setup(options = {}, hub) {
             state: 'waiting', backupAgent: options.backupAgent, expiresAt: new Date(Date.now() + 600000).toISOString() };
         }
         const workspaceError = window.fixture.workspaceTarget.error;
-        return clone({ binding: binding(p), defaultAgent: 'claude', sessions: workspaceError ? [] : projectSessions, ...(workspaceError ? { workspaceError } : {}) });
+        return clone({ binding: binding(p), availableAgents: workspaceError ? [] : availableAgents, roleAgents: availableAgents, sessions: workspaceError ? [] : projectSessions, ...(workspaceError ? { workspaceError } : {}) });
       }
       if (name === 'project.expireArtifact') {
         const p = projects.find(p => p.ref.id === input.projectId);
@@ -314,7 +321,7 @@ async function setup(options = {}, hub) {
       if (name === 'workspace.connections' && options.hermes && input.operation === 'read') {
         return { connection: hermes, a2a: { url: 'http://127.0.0.1:1234', port: 5678, revision: 1, entries: [] } };
       }
-      if (name === 'workspace.agent.targets') return { ...(options.bot || options.availableBot ? { bots: [{ id: 'new-bot', name: '备用管家', agent: 'claude', paused: false }] } : options.emptyBots ? { bots: [] } : {}), sessions: clone(sessions), workspaces: [{ workspace: 'identity:test', name: '示例工作区', path: '/test/工作区 with spaces' }] };
+      if (name === 'workspace.agent.targets') return { agentWorkspace: 'identity:test', availableAgents, ...(options.bot || options.availableBot ? { bots: [{ id: 'new-bot', name: '备用管家', agent: 'claude', paused: false }] } : options.emptyBots ? { bots: [] } : {}), sessions: clone(sessions), workspaces: [{ workspace: 'identity:test', name: '示例工作区', path: '/test/工作区 with spaces' }] };
       if (name === 'workspace.agent.switch') {
         if (input.revision !== workspace.revision) throw Error('工作间已更新');
         workspace.revision++;
@@ -1030,12 +1037,31 @@ try {
     await currentLayer().getByRole('button', { name: '绑定已有会话', exact: true }).first().click();
     await currentLayer().getByRole('heading', { name: '在线会话', exact: true }).waitFor();
   });
+  await test('unavailable saved roles require an explicit replacement from the workspace catalog', async () => {
+    await setup({ availableAgents: [{ id: 'antigravity', name: 'Antigravity', default: true }] });
+    await project();
+    await page.getByRole('button', { name: '项目设置', exact: true }).click();
+    const layer = currentLayer(), save = layer.getByRole('button', { name: '保存', exact: true });
+    assert.equal(await layer.getByLabel('Agent', { exact: true }).inputValue(), 'antigravity');
+    assert.equal(await save.isDisabled(), true);
+    for (const label of ['设计', '代码', '审查']) {
+      const picker = layer.getByLabel(label, { exact: true });
+      assert.equal(await picker.inputValue(), '');
+      await picker.selectOption('antigravity');
+    }
+    await save.click();
+    await page.waitForFunction(() => fixture.project.roles.review === 'antigravity');
+    assert.deepEqual(await page.evaluate(() => fixture.project.roles), { design: 'antigravity', code: 'antigravity', review: 'antigravity' });
+  });
   await test('waiting project offers only cancellation in both lead views and restores actions after cancellation or expiry', async () => {
     await setup({ projectUnbound: true, clock: true, backupAgent: 'codex' });
     await page.getByRole('button', { name: /^还没有任务的项目/ }).click();
     await project();
     await page.getByRole('button', { name: '项目设置', exact: true }).click();
     const layer = currentLayer(), cancel = layer.getByRole('button', { name: '取消', exact: true });
+    for (const label of ['Agent', '设计', '代码', '审查']) {
+      assert.deepEqual(await layer.getByLabel(label, { exact: true }).locator('option').allTextContents(), ['Claude', 'Codex', 'Antigravity']);
+    }
     const create = () => layer.getByRole('button', { name: '新开一个主会话', exact: true }).click();
     const checkWaiting = async () => {
       await layer.getByText(/正在等 新的 claude 会话 接管，还剩 \d+ 分钟/i).waitFor();

@@ -35,7 +35,7 @@ async function fixture(project: Project, workspace?: Workspace, exports?: string
       },
       runBinding: async id => ({ owner: env.owner, generation: id === 'run_park' ? 1 : env.generation, objective: id === 'run_park' ? 'AgentBoat 备用待命 ' + (await c.store.get(project.ref.id)).backup?.cycle : undefined }),
       syncContacts: async jobs => { env.contacts = jobs.map(j => j.id); return Object.fromEntries(jobs.map(j => [j.id, { dispatch: 'ctx_contact' }])) },
-      installedAgents: async () => env.installed,
+      installedAgents: async () => env.installed.map(id => ({ id, name: id, default: id === 'codex' })),
       identify: async (handle, run, own) => { assert.equal(run, own); return env.sessions.find(s => s.handle === handle)! },
       mail: async runId => { env.mailRuns.push(runId); return { reports: [], questions: [], waiting: env.reports } },
       launchMain: async (workspace, agent, prompt, options) => {

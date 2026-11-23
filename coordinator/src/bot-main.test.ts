@@ -185,7 +185,7 @@ function botRuntime() {
     requestTakeover: async (target: string, body: string) => { env.sends.push({ target, body, type: 'control' }) },
     runBinding: async () => ({ owner: env.owner, generation: env.generation }),
     identify: async (handle: string) => env.sessions.find(s => s.handle === handle),
-    verifyRun: async () => {}, targets: async () => inventory(), installedAgents: async () => ['codex','claude'],
+    verifyRun: async () => {}, targets: async () => inventory(), installedAgents: async () => ['codex', 'claude'].map(id => ({ id, name: id, default: id === 'codex' })),
     launchMain: async (ws: string) => { env.launches.push(ws); return standby.handle },
     send: async (target: string, d: { body: string }) => { env.sends.push({ target, body: d.body, type: 'run' }); return {} }
   } as unknown as CoordinatorRuntime

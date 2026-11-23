@@ -6,7 +6,7 @@ import { promisify } from 'node:util'
 import { existsSync } from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
-import type { AgentSession, Delivery, ProjectRef } from './model'
+import type { AgentSession, Delivery, InstalledAgent, ProjectRef } from './model'
 import { fail, projectKey } from './store'
 import { readAgents, type AgentsSnapshot } from './agents'
 import type { Project } from './model'
@@ -24,7 +24,7 @@ export interface CoordinatorRuntime {
   projects(host: HostApi<'worker'>): Promise<ProjectRef[]>
   runBinding(id: string): Promise<{ owner: string | null; generation: number; objective?: string }>
   syncContacts(wanted: LeadContact[], workspaces?: string[]): Promise<ContactRoutes>
-  installedAgents(workspace: string): Promise<string[]>
+  installedAgents(workspace: string, fresh?: boolean): Promise<InstalledAgent[]>
   verifyRun(id: string, caller?: string): Promise<void>
   targets(mode?: 'sample' | 'display'): Promise<{ sessions: AgentSession[]; workspaces: { workspace: string; name: string; path: string; botHomeKey?: string }[] }>
   identify(handle: string, runId: string, currentRunId?: string): Promise<AgentSession>
@@ -99,10 +99,11 @@ export class OrcaRuntime implements CoordinatorRuntime {
   async syncContacts(wanted: LeadContact[], workspaces?: string[]): Promise<ContactRoutes> {
     return this.contacts.sync(wanted, await this.executable(), (args: string[]) => this.call(args), workspaces)
   }
-  async installedAgents(workspace: string): Promise<string[]> {
-    const { agents } = await this.list(['agent', 'installed', '--worktree', workspace], 60_000)
-    if (!Array.isArray(agents) || agents.some(a => typeof a?.id !== 'string')) fail('Orca 的可启动 agent 列表无效')
-    return agents.map(a => a.id)
+  async installedAgents(workspace: string, fresh = false): Promise<InstalledAgent[]> {
+    if (!workspace) fail('项目当前没有工作区')
+    const { agents } = await this.list(['agent', 'installed', '--worktree', workspace], 60_000, fresh)
+    if (!Array.isArray(agents) || agents.some(a => typeof a?.id !== 'string' || !a.id || typeof a.name !== 'string' || !a.name || typeof a.default !== 'boolean')) fail('Orca 的可启动 agent 列表无效')
+    return agents.map(({ id, name, default: preferred }) => ({ id, name, default: preferred }))
   }
   async verifyRun(id: string, caller?: string): Promise<void> {
     const { owner } = await this.runBinding(id)

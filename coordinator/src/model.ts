@@ -23,7 +23,7 @@ interface Decision {
 export interface Task {
   id: string; title: string; goal: string; progress: string
   phase: 'working' | 'ready' | 'completed' | 'blocked' | 'paused'
-  executions: { runId: string; taskId: string; dispatchId: string; agent: 'codex' | 'claude' }[]
+  executions: { runId: string; taskId: string; dispatchId: string; agent: string }[]
   artifacts: Artifact[]; acceptance: Acceptance[]; decisions: Decision[]; sourceIds: string[]
   updatedAt: string
   blockedRevision?: number
@@ -69,12 +69,12 @@ export interface Project {
   hidden?: boolean
   updatedAt?: string
   archive?: { id: string; start: number; end: number; taskCount?: number; last?: { revision: number; tasks: number; events: number; deliveries: number; requests: number; history: number } }
-  roles: { design: 'codex' | 'claude'; code: 'codex' | 'claude'; review: 'codex' | 'claude' }
+  roles: Record<'design' | 'code' | 'review', string>
   tasks: Task[]; events: SourceEvent[]; deliveries: Delivery[]; requests: { id: string; fingerprint: string }[]
 }
 export interface ConnectionState { state: 'off' | 'connecting' | 'connected' | 'error'; message: string }
 export interface Snapshot {
-  mainAgent?: keyof typeof agents
+  mainAgent?: string
   lead?: WorkspaceBinding
   workspaceTarget?: ProjectWorkspace
   projects: ProjectRef[]; project: Project | null; runtimeError?: string
@@ -121,10 +121,13 @@ export interface BotBinding {
 }
 export type StoredTakeover = MainTakeover & { tokenHash: string; mode?: 'existing' | 'new' | 'bot'; bot?: BotBinding }
 export type LeadSwitch = { revision: number; mode: 'existing' | 'new' | 'bot' | 'cancel'; botId?: string; handle?: string; workspace?: string; agent?: string }
+export interface InstalledAgent { id: string; name: string; default: boolean }
+export const defaultAgent = (list: InstalledAgent[]) => (list.find(a => a.default) ?? list[0])?.id ?? ''
 export interface ProjectLead {
   binding: WorkspaceBinding
   sessions: AgentSession[]
-  defaultAgent: string
+  availableAgents: InstalledAgent[] | null
+  roleAgents: InstalledAgent[] | null
   workspaceError?: string
 }
 export interface WorkspaceBinding {
@@ -211,8 +214,8 @@ export function groupedAttention(items: Attention[]) {
 
 export const labels = { working: '进行中', decision: '待决定', review: '待验收', rework: '修改中', completed: '已完成', blocked: '受阻', paused: '已暂停' }
 export const roles = { design: '设计', code: '代码', review: '审查' }
-export const agents = { claude: 'Claude', codex: 'Codex', opencode: 'OpenCode' }
-export const agentName = (v = '') => agents[v as keyof typeof agents] || v || '未知'
+const agentNames: Record<string, string> = { claude: 'Claude', codex: 'Codex', opencode: 'OpenCode', qoder: 'Qoder CLI', gemini: 'Gemini', antigravity: 'Antigravity' }
+export const agentName = (v = '') => Object.hasOwn(agentNames, v) ? agentNames[v] : v || '未知'
 export const scopes = { none: '不开放', summary: '项目摘要', details: '含任务详情' }
 export function isProjectShared(project: Pick<Project, 'ref' | 'hidden'>, sharing: Pick<import('./links').Sharing, 'scope' | 'allProjects' | 'projectIds'>): boolean {
   return !project.hidden && sharing.scope !== 'none' && (sharing.allProjects === true || sharing.projectIds.includes(project.ref.id))

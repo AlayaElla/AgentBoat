@@ -23,7 +23,7 @@ declare module 'orca' {
     'lead.history': { input: { projectId?: string; end?: number }; output: { history: import('./model').BackupLead['history']; previousEnd?: number } }
     'lead.retry': { input: { projectId?: string; revision: number; confirm: boolean }; output: { accepted: boolean } }
     'lead.control': { input: { runId: string; action: import('./model').LeadAction; caller: string; token: string; confirm?: boolean; currentRunId?: string; generation?: number; standbyRunId?: string; note?: string }; output: { useRun?: string; checkRun?: string; park?: string; done?: boolean } }
-    'workspace.agent.targets': { output: { bots?: import('./model').BotTarget[]; sessions: import('./model').AgentSession[]; workspaces: { workspace: string; name: string; path: string }[] } }
+    'workspace.agent.targets': { input: { workspace?: string } | undefined; output: { agentWorkspace: string; availableAgents: import('./model').InstalledAgent[] | null; bots?: import('./model').BotTarget[]; sessions: import('./model').AgentSession[]; workspaces: { workspace: string; name: string; path: string }[] } }
     'workspace.agent.switch': { input: LeadSwitch; output: WorkspaceBinding }
     'workspace.projectLead': { input: LeadSwitch & { projectId: string; runId: string }; output: ProjectLead }
     'workspace.entry': { output: { opened: boolean } }

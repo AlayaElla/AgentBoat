@@ -5,6 +5,6 @@ export interface AgentLaunch {
   surface?: 'chat' | 'terminal';
 }
 export function backupDefaults(primary: string): AgentLaunch;
-export const projectLeadDefaults: AgentLaunch;
+export function availableBackup(primary: string, installed: { id: string; default: boolean }[]): AgentLaunch | undefined;
 export function agentFlags(role: AgentLaunch): string[];
 export function launchReceipt(result: unknown): string;

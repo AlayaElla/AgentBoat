@@ -8,7 +8,7 @@ import { mainTargets, OrcaRuntime } from './runtime'
 import { roleReminder } from './main-agent'
 import path from 'node:path'
 import { existsSync } from 'node:fs'
-import { projectLeadDefaults } from '../../workspace/agent-launch.mjs'
+import { defaultAgent } from './model'
 
 const session: AgentSession = { handle: 'orca_session_id:test-next', title: '测试接管会话', workspace: 'identity:test-workspace', workspaceName: '测试工作区', path: '/test/workspace', agent: 'claude', online: 'online' }
 const tokenFrom = (prompt: string) => /一次性接管凭据：([^\n]+)/.exec(prompt)![1]
@@ -107,7 +107,7 @@ test('project lead switches only within its workspace and preserves tasks and qu
   } finally { c.stop(); await worker.deactivate() }
 })
 
-test('project lead new uses the shared template and an unavailable workspace blocks launch', async () => {
+test('project roles and new leads use the current workspace catalog and Orca launch preferences', async () => {
   const launches: string[][] = [], fakeCli = new OrcaRuntime(async () => 'never-start-a-real-process')
   ;(fakeCli as any).call = async (args: string[]) => {
     launches.push(args)
@@ -117,37 +117,41 @@ test('project lead new uses the shared template and an unavailable workspace blo
     'workspace.list': { workspaces: [testWorkspace], truncated: false }, 'agents.list': { agents: [] }
   } })
   let c!: ReturnType<typeof createCoordinator>, ref = projectRef
-  let installed = ['claude', 'codex']
+  let installed = ['claude', 'codex', 'antigravity', 'qoder']
   const worker = await mountWorker({ default: api => { c = createCoordinator(api, {
     projects: async () => [ref], launchMain: fakeCli.launchMain.bind(fakeCli),
-    installedAgents: async workspace => { assert.equal(workspace, projectWorkspaceId); return installed },
+    installedAgents: async workspace => { assert.equal(workspace, projectWorkspaceId); return installed.map(id => ({ id, name: id, default: id === 'qoder' })) },
     targets: async () => ({ sessions: [], workspaces: [{ workspace: projectWorkspaceId, name: '本项目', path: ref.path }] })
   }) } }, { host })
   const read = () => worker.request('project.lead', { projectId: ref.id })
   const launch = async (agent?: string) => worker.request('project.lead', { projectId: ref.id, revision: (await read()).binding.revision, mode: 'new', ...(agent ? { agent } : {}) })
   try {
-    assert.equal((await read()).defaultAgent, projectLeadDefaults.agent)
-    for (const choice of [undefined, 'codex', 'opencode']) {
+    assert.equal(defaultAgent((await read()).availableAgents!), 'qoder')
+    const roles = { design: 'antigravity', code: 'codex', review: 'qoder' }
+    const settings = await worker.request('project.settings', { projectId: ref.id, revision: (await read()).binding.revision, roles })
+    assert.deepEqual(settings.project!.roles, roles)
+    for (const choice of [undefined, 'codex', 'antigravity']) {
       const result = await launch(choice)
       assert.equal(result.binding.takeover?.target.handle, 'orca_session_id:fake-' + launches.length)
       assert.equal(result.binding.takeover?.state, 'waiting')
       assert.equal(result.binding.takeover?.backupAgent, choice === 'codex' ? 'claude' : 'codex')
-      const argv = launches.at(-1)!, agent = choice ?? projectLeadDefaults.agent
+      const argv = launches.at(-1)!, agent = choice ?? 'qoder'
       const flag = (k: string) => argv.includes('--' + k) ? argv[argv.indexOf('--' + k) + 1] : undefined
       assert.equal(flag('agent'), agent)
       assert.equal(flag('model'), undefined)
       assert.equal(flag('effort'), undefined)
-      assert.equal(flag('surface'), 'chat')
+      assert.equal(flag('surface'), undefined)
       assert.equal(flag('worktree'), projectWorkspaceId)
       await assert.rejects(() => launch(choice), /已发起/)
     }
     installed = ['codex']
-    assert.equal((await read()).binding.takeover?.backupAgent, undefined)
-    assert.equal((await worker.request('project.read', { projectId: ref.id })).lead?.takeover?.backupAgent, undefined)
+    assert.deepEqual((await read()).roleAgents?.map(a => a.id), ['codex'])
+    await assert.rejects(() => worker.request('project.settings', { projectId: ref.id, revision: (host.data().storage['project:p1'] as any).revision, roles }), /不可用/)
+    assert.deepEqual((await worker.request('project.read', { projectId: ref.id })).project?.roles, roles)
     await c.store.mutate(ref.id, undefined, project => { project.takeover!.state = 'sending' })
     await c.start()
     assert.equal((await read()).binding.takeover?.state, 'uncertain')
-    await assert.rejects(() => launch('opencode'), /已发起/)
+    await assert.rejects(() => launch('antigravity'), /不可用/)
     assert.equal(launches.length, 3)
     ref = { ...ref, workspace: '' }
     host.respond('workspace.list', { workspaces: [], truncated: false })

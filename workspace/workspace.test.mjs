@@ -24,7 +24,7 @@ test('初始化不覆盖模板；记忆按来源隔离、带日期、重复记�
     const custom = path.join(testHome, 'templates/code.json');
     const value = JSON.parse(readFileSync(custom));
     value.name = '自定义';
-    value.mainAgent = { agent: 'claude' };
+    value.mainAgent = { agent: 'antigravity' };
     writeFileSync(custom, JSON.stringify(value));
     api.init();
     assert.equal(api.template('code').name, '自定义');
@@ -128,6 +128,7 @@ cp.execFileSync = (executable, args, options) => {
       if (args.includes('--worktree-base-path')) s.repos[0].worktreeBasePath = arg('--worktree-base-path');
       save(); return done({});
     case 'orchestration run-current': return done({ run: { id: s.main.runId } });
+    case 'agent installed': return done({ agents: ['antigravity', 'claude', 'codex'].map(id => ({ id })) });
     case 'agent launch': return done({ outcome: { kind: 'structured', sessionId: 'fake-project-lead' }, prompt: { outcome: s.failLaunch ? 'unknown' : 'journaled' } });
     case 'worktree create': return done({ launch: { outcome: { kind: 'terminal', handle: 'fake-worker' }, prompt: { outcome: 'handed-to-terminal' } } });
   }
@@ -233,10 +234,10 @@ test('manual create shares launch defaults and the same pending-project guard', 
 
 for (const bindOnReceipt of [false, true]) test(`dispatch records its notice when binding ${bindOnReceipt ? 'races the receipt' : 'is still pending'}`, async t => {
   const f = await fakeWorkspace(t);
-  f.state.bindOnReceipt = bindOnReceipt; f.set();
+  f.state.bindOnReceipt = bindOnReceipt; f.state.project.roles.code = 'antigravity'; f.set();
   execFileSync('git', ['init', '--quiet'], { cwd: f.projectDir });
   execFileSync('git', ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '--allow-empty', '-m', 'fixture'], { cwd: f.projectDir });
-  const result = await f.workspace('dispatch', { projectId: 'p1', requestId: 'dispatch-1', role: 'code', name: 'agentboat-demo-worker', text: '只在隔离测试中处理', source: 'fake source' });
+  const result = await f.workspace('dispatch', { projectId: 'p1', requestId: 'dispatch-1', role: 'code', ...(bindOnReceipt ? { template: 'code' } : {}), name: 'agentboat-demo-worker', text: '只在隔离测试中处理', source: 'fake source' });
   assert.equal(result.autoLaunch.handle, 'orca_session_id:fake-project-lead');
   assert.equal(result.handle, 'fake-worker');
   assert.equal(result.notification.status, bindOnReceipt ? 'recorded' : 'queued');
@@ -244,6 +245,7 @@ for (const bindOnReceipt of [false, true]) test(`dispatch records its notice whe
   assert.ok(kinds.indexOf('agent launch') < kinds.indexOf('worktree create'));
   assert.equal(kinds.includes('orchestration send'), false);
   const launch = calls.find(args => args[0] === 'worktree');
+  assert.equal(launch[launch.indexOf('--agent') + 1], 'antigravity');
   assert.match(launch[launch.indexOf('--prompt') + 1], /绑定后送达/);
   assert.deepEqual(f.read().project.tasks.map(task => task.id), ['direct-dispatch-1', 'direct-dispatch-1']);
   assert.deepEqual(f.read().project.messages.map(m => [m.runId, m.requestId]), [['run_main', 'dispatch-1-notice']]);

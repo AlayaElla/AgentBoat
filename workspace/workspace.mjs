@@ -56,7 +56,7 @@ function key(value) {
 export function template(id) {
   const value = json(path.join(home, 'templates', `${key(id)}.json`));
   for (const role of [value.mainAgent, ...Object.values(value.roles || {})]) {
-    if (!['claude', 'codex'].includes(role?.agent)) throw new Error('代理应为 claude 或 codex');
+    if (typeof role?.agent !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,99}$/.test(role.agent)) throw new Error('模板需要有效的 Orca 代理编号');
     if (role.effort && !role.model) throw new Error('effort 需要 model');
     if (role.surface && !['chat', 'terminal'].includes(role.surface)) throw new Error('surface 应为 chat 或 terminal');
   }
@@ -301,7 +301,7 @@ export function dispatch(input) {
   initIfNeeded();
   const templateId = input.template || 'code', t = template(templateId);
   const role = input.role || 'code';
-  if (!t.roles[role]) throw new Error('模板中没有该角色');
+  if (!Object.hasOwn(t.roles, role) || !Object.hasOwn(p.roles, role)) throw new Error('项目或模板中没有该角色');
   const repo = call(['repo', 'show', '--repo', `id:${p.ref.repoId}`]).repo;
   if (repo.kind === 'folder') throw new Error('独立工作树需要 Git 仓库；请先由主人准备已有提交的仓库');
   run('git', ['rev-parse', '--verify', 'HEAD'], p.ref.path);
@@ -313,6 +313,10 @@ export function dispatch(input) {
     if (autoLaunch.status === 'needs-inspection') throw new Error(autoLaunch.reason || '项目主会话启动结果待核对');
     j.update('project-lead', { autoLaunch });
     p = project(p.ref.id);
+    const savedAgent = p.roles[role];
+    const launchRole = savedAgent === t.roles[role].agent ? t.roles[role] : { agent: savedAgent };
+    const { agents } = call(['agent', 'installed', '--worktree', p.ref.workspace], p.ref.path);
+    if (!agents?.some(a => a.id === launchRole.agent)) throw new Error(`当前工作区无法启动代理 ${launchRole.agent}，请检查 Orca 设置和项目分工`);
     const evidenceDir = path.join(p.ref.path, '.agentboat/assignments');
     mkdirSync(evidenceDir, { recursive: true });
     const provenance = path.join(evidenceDir, `${input.requestId}-source.md`);
@@ -325,7 +329,7 @@ export function dispatch(input) {
     j.update('launching', { taskId, sourcePath: provenance, sender });
     const prompt = `项目直接任务：${goal}\n来源：${source}；项目编号：${p.ref.id}；任务编号：${taskId}。只做此任务，保留他人改动，不再派子任务。完成后用 node ${JSON.stringify(promptClientPath())} read ${p.ref.id} 核对项目当前绑定的 runId，再从自己的会话用 orca orchestration send --to run:<runId> 回报成果与验证边界。尚未绑定时先保存回报，等项目主会话绑定后送达。不要改项目或工作间主 Run 的绑定。`;
     const launched = call(['worktree', 'create', '--repo', `id:${p.ref.repoId}`, '--name', name, '--no-parent',
-      '--setup', 'skip', ...agentFlags(t.roles[role]), '--prompt', prompt], p.ref.path);
+      '--setup', 'skip', ...agentFlags(launchRole), '--prompt', prompt], p.ref.path);
     j.update('launch-returned', { launched });
     const handle = launchReceipt(launched.launch);
     const launchFile = path.join(evidenceDir, `${input.requestId}-launch.json`);
@@ -333,7 +337,7 @@ export function dispatch(input) {
     const fresh = project(p.ref.id);
     submitDispatch(fresh, `${input.requestId}-receipt`, {
       id: taskId, title: input.title || name, goal, phase: 'working',
-      progress: `已启动 ${t.roles[role].agent}，提示词已送达；agent ${handle}。来源：${source}。启动回执不等于实际开工或完成。`,
+      progress: `已启动 ${launchRole.agent}，提示词已送达；agent ${handle}。来源：${source}。启动回执不等于实际开工或完成。`,
       artifacts: [{ id: `${taskId}-launch`, label: 'Orca 派活回执', url: launchFile, version: 'v1' }],
     });
     j.update('notifying', { handle });
