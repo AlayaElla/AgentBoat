@@ -3,7 +3,7 @@ import { botHomeHandle } from './bot-runtime'
 import { backupDefaults, projectLeadAgents } from '../../workspace/agent-launch.mjs'
 import { promptClientPath } from '../scripts/orca-cli.mjs'
 import { awaitingLeadControl, expectedPhases, backupInCharge, workspaceBackupInFlight, type AgentSession, type BackupLead, type BotTarget, type ContactRoutes, type Delivery, type LeadAction, type Project, type Workspace } from './model'
-import type { CoordinatorRuntime } from './runtime'
+import { targetOnline, type CoordinatorRuntime, type TargetInventory } from './runtime'
 import { fail, fingerprint, ProjectStore, resetBackup, takeoverActive, text } from './store'
 
 function ownerAlert(w: Workspace, message: string) {
@@ -64,12 +64,14 @@ export class BackupLeads {
   constructor(private store: ProjectStore, private runtime: CoordinatorRuntime, private visible: (id: string) => Promise<unknown>,
     private changed: (id: string) => void) {}
 
-  projectPrimaryUnavailable(b: BackupLead | undefined, sessions: AgentSession[]) {
+  projectPrimaryUnavailable(project: Project, inventory: TargetInventory) {
+    const b = project.backup
     if (b?.phase !== 'active' || !b.primary) return false
     // A contact's `closed` flag acknowledges our own cleanup. Only Orca's session error proves closure.
     const error = b.contact?.primary === b.primary ? this.routes[b.contact.id]?.error : undefined
     const sessionId = b.primary.slice('orca_session_id:'.length)
-    return offline(sessions.find(s => s.handle === b.primary)) ||
+    const workspace = project.mainSession?.handle === b.primary ? project.mainSession.workspace : b.contact?.workspace
+    return targetOnline(inventory, b.primary, workspace) === 'offline' ||
       (chat(b.primary) && !!error?.startsWith(`Agent session ${sessionId} has ended: its chat was closed.`))
   }
 
@@ -139,7 +141,8 @@ export class BackupLeads {
     if (!available(r) || !r.runId) return
     const id = key(r), b = r.backup
     const w = 'ref' in r ? undefined : r, bot = w?.bot
-    const live = inventory.sessions.find(s => s.handle === session.handle && s.workspace === session.workspace)
+    const live = inventory.sessions.find(s => s.handle === session.handle && s.workspace === session.workspace) ??
+      { ...session, online: targetOnline(inventory, session.handle, session.workspace) }
     if (w && bot) {
       if (w.botSwitch && await this.inventoryStatus(w, true, now)) return
       const oldest = pending.length ? Math.min(...pending.map(p => p.at)) : undefined

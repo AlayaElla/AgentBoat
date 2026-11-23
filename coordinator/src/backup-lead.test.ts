@@ -7,6 +7,7 @@ import { fingerprint, fresh, submitTask } from './store'
 import { refs } from './fixtures'
 import type { AgentSession, ContactRoutes, LeadAction, Project, Workspace } from './model'
 import { stopped } from './backup-lead'
+import { mainTargets, type TargetInventory } from './runtime'
 
 const now = Date.now(), minute = 60_000
 const primary: AgentSession = { handle: 'orca_session_id:claude_lead', workspace: refs[0].workspace, workspaceName: '项目', path: refs[0].path, title: '主用', online: 'online', agent: 'claude', state: 'done' }
@@ -26,6 +27,7 @@ async function fixture(project: Project, workspace?: Workspace, exports?: string
     'workspace.list': { workspaces: [{ id: project.ref.workspace.replace(/^id:/, ''), projectId: project.ref.repoId, hostId: 'local', path: project.ref.path, kind: 'worktree', name: '项目', branch: 'main' }], truncated: false }
   } })
   const env = { sessions: [main], inventoryFailed: false, available: true, failLaunch: false, owner: main.handle as string | null, generation: 1, installed: ['claude', 'codex'], spaces: [{ workspace: main.workspace, name: '项目', path: main.path }], launches: [] as { workspace: string; agent: string; options: unknown; prompt: string }[],
+    inventory: undefined as (() => TargetInventory) | undefined,
     contactRoute: { dispatch: 'ctx_contact' } as ContactRoutes[string], launchHandle: 'orca_session_id:backup',
     catalogReads: 0, contacts: [] as string[], mailRuns: [] as string[], controls: [] as { handle: string; prompt: string }[], deliveries: [] as string[], reports: [] as any[] }
   let c!: ReturnType<typeof testCoordinator>
@@ -34,12 +36,12 @@ async function fixture(project: Project, workspace?: Workspace, exports?: string
       projects: async () => { env.catalogReads++; return env.available ? [project.ref] : [] },
       targets: async () => {
         if (env.inventoryFailed) throw Error('inventory timed out')
-        return { sessions: env.sessions, workspaces: env.spaces }
+        return env.inventory?.() ?? { sessions: env.sessions, workspaces: env.spaces }
       },
       runBinding: async id => ({ owner: env.owner, generation: id === 'run_park' ? 1 : env.generation, objective: id === 'run_park' ? 'AgentBoat 备用待命 ' + (await c.store.get(project.ref.id)).backup?.cycle : undefined }),
       syncContacts: async jobs => { env.contacts = jobs.map(j => j.id); return Object.fromEntries(jobs.map(j => [j.id, env.contactRoute])) },
       installedAgents: async () => env.installed.map(id => ({ id, name: id, default: id === 'codex' })),
-      identify: async (handle, run, own) => { assert.equal(run, own); return env.sessions.find(s => s.handle === handle)! },
+      identify: async (handle, run, own) => { assert.equal(run, own); return (env.inventory?.() ?? env).sessions.find(s => s.handle === handle)! },
       mail: async runId => { env.mailRuns.push(runId); return { reports: [], questions: [], waiting: env.reports } },
       launchMain: async (workspace, agent, prompt, options) => {
         env.launches.push({ workspace, agent, prompt, options })
@@ -172,6 +174,66 @@ test('代管恢复要求可靠离线证据和匹配的 Run 归属', async () => 
     await assert.rejects(() => change('promote'), /项目已隐藏/)
     assert.equal((await c.store.get(p.ref.id)).mainAgentHandle, codexLead.handle)
     assert.equal(env.launches.length, 0)
+  } finally { await close() }
+})
+
+test('终端漏报或写前复核时活性变为未知，仍保留代管和原 Run', async () => {
+  const old = { ...codexLead, handle: 'term_original' }, p = activeProject()
+  p.mainAgentHandle = old.handle
+  p.mainSession = old
+  p.backup!.primary = old.handle
+  p.backup!.contact!.primary = old.handle
+  const { env, c, worker, close } = await fixture(p, undefined, undefined, old)
+  const next = 'orca_session_id:claude_next'
+  const worktree = { address: { environment: 'local', worktree: old.workspace }, path: old.path }
+  const onlineChats = [actingBackup.handle, next].map(handle => ({ paneKey: 'structured-agent-session-' + handle.split(':')[1] + ':pane', subagentObservation: 'live', agentType: 'antigravity' }))
+  const terminalPane = { paneKey: 'tab:leaf', agentType: 'codex' }
+  const terminal = { tabId: 'tab', leafId: 'leaf', handle: old.handle }
+  const inventory = (agents: object[], terminals: object[] = []) => mainTargets([{ ...worktree, agents: [...onlineChats, ...agents] }], terminals)
+  const missing = inventory([]), anonymous = inventory([terminalPane])
+  const unverified = [inventory([{ ...terminalPane, address: old.handle }]), anonymous, inventory([terminalPane], [terminal]), inventory([], [terminal])]
+  const input = { projectId: p.ref.id, revision: p.revision }
+  const change = (mode: 'promote' | 'new' | 'existing') => worker.request('project.lead', { ...input, mode, ...(mode === 'existing' ? { handle: next } : {}) })
+  const settings = () => worker.request('project.settings', { ...input, leadAgents: { backup: { agent: 'claude' } } })
+  env.owner = actingBackup.handle
+  env.generation = 2
+  env.installed.push('antigravity')
+  try {
+    for (const current of unverified) {
+      env.inventory = () => current
+      const read = await worker.request('project.lead', { projectId: p.ref.id })
+      assert.equal(read.binding.session?.online, 'unknown')
+      assert.equal(read.backupPrimaryUnavailable, undefined)
+      await assert.rejects(() => change('promote'), /原主会话仍可能接回/)
+      await assert.rejects(() => change('new'), /备用正在启动或处理/)
+      await assert.rejects(() => change('existing'), /备用正在启动或处理/)
+      await assert.rejects(settings, /备用正在启动或处理/)
+    }
+    for (const [operation, error] of [[() => change('promote'), /原主会话仍可能接回/],
+      [() => change('new'), /备用正在启动或处理/], [() => change('existing'), /备用正在启动或处理/], [settings, /备用正在启动或处理/]] as const) {
+      let reads = 0
+      env.inventory = () => reads++ ? anonymous : missing
+      await assert.rejects(operation, error)
+      assert.equal(reads, 2)
+    }
+    assert.equal(env.launches.length, 0)
+    assert.equal(env.controls.length, 0)
+    assert.equal((await c.store.get(p.ref.id)).revision, p.revision)
+
+    env.inventory = () => missing
+    const switched = await change('existing')
+    const token = /一次性接管凭据：([^\n]+)/.exec(env.controls[0].prompt)![1]
+    let reads = 0
+    // The recipient stays visible for identify, then the original terminal reappears during binding.
+    env.inventory = () => reads++ < 2 ? missing : anonymous
+    await assert.rejects(() => worker.request('project.agent', { ...input, operation: 'bind', revision: switched.binding.revision,
+      requestId: 'stale-recovery', runId: 'run_next', currentRunId: 'run_next', caller: next, token }), /原主会话仍可能接回/)
+    assert.equal(reads, 3)
+    const saved = await c.store.get(p.ref.id)
+    assert.equal(saved.runId, p.runId)
+    assert.equal(saved.mainAgentHandle, old.handle)
+    assert.deepEqual(saved.backup, p.backup)
+    assert.equal(saved.deliveries.length, 0)
   } finally { await close() }
 })
 test('主用绑定在其他项目工作区时，只在该工作区可用后原地补开备用', async () => {

@@ -35,6 +35,12 @@ export async function revealArtifact(file: string, directory: boolean, platform 
     if (platform !== 'win32' || (e as { code?: unknown } | null)?.code !== 1) throw e
   }
 }
+export interface TargetInventory {
+  sessions: AgentSession[]
+  workspaces: { workspace: string; name: string; path: string; botHomeKey?: string }[]
+  unidentifiedTerminalWorkspaces?: string[]
+  listedTerminalHandles?: string[]
+}
 export interface CoordinatorRuntime {
   bots?: Pick<LocalBots, 'list' | 'find' | 'home' | 'choices' | 'hasSideChat' | 'startChat' | 'writeSoul' | 'removeSoul'>
   botMail?(target: string, subject: string, body: string, type: 'handoff' | 'status', home?: string): Promise<{ recipient: string; quota?: ReturnType<typeof quotaReceipt> }>
@@ -43,7 +49,7 @@ export interface CoordinatorRuntime {
   syncContacts(wanted: LeadContact[], workspaces?: string[]): Promise<ContactRoutes>
   installedAgents(workspace: string, fresh?: boolean): Promise<InstalledAgent[]>
   verifyRun(id: string, caller?: string): Promise<void>
-  targets(mode?: 'sample' | 'display'): Promise<{ sessions: AgentSession[]; workspaces: { workspace: string; name: string; path: string; botHomeKey?: string }[] }>
+  targets(mode?: 'sample' | 'display'): Promise<TargetInventory>
   identify(handle: string, runId: string, currentRunId?: string): Promise<AgentSession>
   requestTakeover(handle: string, prompt: string, subject?: string): Promise<void>
   launchMain(workspace: string, agent: string, prompt: string, options?: Omit<AgentLaunch, 'agent'>): Promise<string>
@@ -54,6 +60,15 @@ export interface CoordinatorRuntime {
   mail(runId: string, submitted?: (reports: WorkerReport[]) => Promise<Set<string>>): Promise<{ questions: OrcaQuestion[]; reports: WorkerReport[]; waiting?: { at: number; title: string; read?: boolean; report?: WorkerReport }[] }>
   hermesApprovalMode(): Promise<string>
   send(runId: string, delivery: Delivery): Promise<{ requestId?: string }>
+}
+export function targetOnline(inventory: TargetInventory | undefined, handle: string, workspace?: string): AgentSession['online'] {
+  if (!inventory) return 'unknown'
+  const session = inventory.sessions.find(s => s.handle === handle)
+  if (session) return session.online
+  const unidentified = inventory.unidentifiedTerminalWorkspaces
+  if (!handle.startsWith('orca_session_id:') && (inventory.listedTerminalHandles?.includes(handle) ||
+    unidentified?.some(w => !workspace || w.replace(/^id:/, '') === workspace.replace(/^id:/, '')))) return 'unknown'
+  return 'offline'
 }
 export class OrcaRuntime implements CoordinatorRuntime {
   constructor(private executable: () => Promise<string>) {}
@@ -234,8 +249,9 @@ export function assertProjectIdle(ref: ProjectRef, ps: any, list: any) {
   if (rows.some((w: any) => (w.agents?.length ?? 0) > 0 || w.liveTerminalCount > 0 || w.unverifiableTerminalCount > 0 || w.hasAttachedPty) || list.terminals.some((t: any) => t.repoId === ref.repoId || rows.some((w: any) => t.worktreeId === w.worktreeId || t.workspaceId === w.worktreeId || t.tabId === w.worktreeId))) fail('这个项目还有打开的终端或会话，先关掉再删')
 }
 // Only runtime-issued handles and explicit liveness are used; saved activity alone is not online evidence.
-export function mainTargets(rows: any[], terminals: any[]) {
-  const sessions: AgentSession[] = [], workspaces: Awaited<ReturnType<CoordinatorRuntime['targets']>>['workspaces'] = []
+export function mainTargets(rows: any[], terminals: any[]): TargetInventory {
+  const sessions: AgentSession[] = [], workspaces: TargetInventory['workspaces'] = []
+  const unidentifiedTerminalWorkspaces = new Set<string>()
   for (const w of rows) {
     if (w.address?.environment !== 'local' || (w.hostId ?? 'local') !== 'local' || !w.address?.worktree || !w.path || w.isArchived) continue
     const workspace = w.address.worktree, name = w.displayName || w.repo || ''
@@ -244,14 +260,18 @@ export function mainTargets(rows: any[], terminals: any[]) {
       if (a.parentPaneKey) continue
       const match = /^structured-agent-session-(.+):[^:]+$/.exec(a.paneKey ?? '')
       const t = terminals.find(t => `${t.tabId}:${t.leafId}` === a.paneKey)
-      const handle = match ? `orca_session_id:${match[1]}` : t?.handle
-      if (!handle) continue
-      const live = match ? a.subagentObservation : t?.connected === true && t?.writable === true && !t?.orphaned ? 'live' : t?.connected === false ? 'exited' : undefined
+      const address = typeof a.address === 'string' ? a.address : undefined
+      const handle = match ? `orca_session_id:${match[1]}` : address || t?.handle
+      if (!handle) { unidentifiedTerminalWorkspaces.add(workspace); continue }
+      // The worktree row preserves identity when the terminal list misses it. Only the matching terminal can establish liveness.
+      const live = match ? a.subagentObservation : t?.handle !== handle ? undefined :
+        t.connected === true && t.writable === true && !t.orphaned ? 'live' : t.connected === false ? 'exited' : undefined
       sessions.push({ handle, title: a.conversationName || a.displayName || t?.paneTitle || t?.title || '', workspace, workspaceName: name, path: w.path,
         ...(a.state ? { state: a.state, ...(Number.isFinite(a.stateStartedAt) && { stateStartedAt: a.stateStartedAt }) } : {}),
         agent: a.agentType || t?.agentType || '', online: live === 'live' ? 'online' : live === 'exited' ? 'offline' : 'unknown' })
     }
   }
-  return { sessions, workspaces }
+  return { sessions, workspaces, unidentifiedTerminalWorkspaces: [...unidentifiedTerminalWorkspaces],
+    listedTerminalHandles: terminals.filter(t => t.connected !== false && typeof t.handle === 'string').map(t => t.handle) }
 }
 export { executable as defaultExecutable } from '../scripts/orca-cli.mjs'

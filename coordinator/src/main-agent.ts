@@ -238,7 +238,7 @@ export function mainAgent(orca: OrcaWorkerApi, store: ProjectStore, runtime: Coo
     const agentWorkspace = (t.workspaces.find(w => w.workspace === input?.workspace) ?? t.workspaces[0])?.workspace ?? ''
     const [bots, availableAgents] = await Promise.all([runtime.bots?.list().catch(() => undefined),
       agentWorkspace ? runtime.installedAgents(agentWorkspace, true).catch(() => null) : []])
-    return { ...t, agentWorkspace, availableAgents, ...(bots ? { bots } : {}), sessions: t.sessions.filter(s => s.online === 'online') }
+    return { workspaces: t.workspaces, agentWorkspace, availableAgents, ...(bots ? { bots } : {}), sessions: t.sessions.filter(s => s.online === 'online') }
   })
   orca.panels.handle('workspace.agent.switch', async input => {
     const w = await store.workspace()
