@@ -129,7 +129,8 @@ async function setup(options = {}, hub) {
       { ...sessions[1], handle: 'project-session-1', title: '编码会话' },
       { ...sessions[1], handle: 'project-session-2', title: '审查会话', agent: 'opencode' }];
     const binding = p => ({ ...(p.backup ? { backup: p.backup } : {}), revision: p.revision, runId: p.runId, ...(p.runId && p.activeSession ? { session: p.activeSession } : {}), ...(p.takeover ? { takeover: p.takeover } : {}) });
-    if (options.projectLead) project.activeSession = projectSessions[0];
+    if (options.projectLead || options.legacyCodexLead) project.activeSession = projectSessions[options.legacyCodexLead ? 1 : 0];
+    const leadDefaults = { primary: { agent: options.legacyCodexLead ? 'antigravity' : 'codex' }, backup: { agent: 'antigravity' } };
     const registered = () => projects.filter(p => !window.fixture.removedProjects?.includes(p.ref.id));
     const attention = () => registered().flatMap(p => p.tasks.flatMap(t => {
       const base = { projectId: p.ref.id, taskId: t.id, title: t.title };
@@ -210,7 +211,7 @@ async function setup(options = {}, hub) {
         const p = projects.find(p => p.ref.id === input.projectId);
         if (p.revision !== input.revision) throw Error('项目已更新');
         if (input.roles) p.roles = input.roles;
-        if (input.leadAgents) p.leadAgents = { ...(p.leadAgents ?? { primary: { agent: 'codex' }, backup: { agent: 'antigravity' } }), ...input.leadAgents };
+        if (input.leadAgents) p.leadAgents = { ...p.leadAgents, ...input.leadAgents };
         p.revision++;
         return clone({ project: p });
       }
@@ -228,7 +229,7 @@ async function setup(options = {}, hub) {
             state: 'waiting', backupAgent: options.backupAgent, expiresAt: new Date(Date.now() + 600000).toISOString() };
         }
         const workspaceError = window.fixture.workspaceTarget.error;
-        return clone({ binding: binding(p), leadAgents: p.leadAgents ?? { primary: { agent: 'codex' }, backup: { agent: 'antigravity' } },
+        return clone({ binding: binding(p), leadAgents: { ...leadDefaults, ...p.leadAgents },
           availableAgents: workspaceError ? [] : availableAgents, roleAgents: availableAgents, sessions: workspaceError ? [] : projectSessions, ...(workspaceError ? { workspaceError } : {}) });
       }
       if (name === 'project.expireArtifact') {
@@ -1062,6 +1063,7 @@ try {
   });
   await test('project lead preferences save only the chosen agents', async () => {
     await setup({ projectLead: true });
+    await page.evaluate(() => { fixture.project.leadAgents = { primary: { agent: 'codex' }, backup: { agent: 'antigravity' } }; });
     await project();
     await page.getByRole('button', { name: '项目设置', exact: true }).click();
     const layer = currentLayer(), primary = layer.getByLabel('默认主用', { exact: true }), backup = layer.getByLabel('备用代理', { exact: true });
@@ -1075,6 +1077,23 @@ try {
     await page.waitForFunction(() => fixture.project.leadAgents?.primary.agent === 'antigravity');
     assert.deepEqual(await page.evaluate(() => fixture.calls.find(c => c.name === 'project.settings').input.leadAgents),
       { primary: { agent: 'antigravity' }, backup: { agent: 'codex' } });
+  });
+  await test('legacy Codex lead shows its inherited backup without blocking primary preferences', async () => {
+    await setup({ legacyCodexLead: true });
+    await project();
+    await page.getByRole('button', { name: '项目设置', exact: true }).click();
+    const layer = currentLayer(), primary = layer.getByLabel('默认主用', { exact: true }), backup = layer.getByLabel('备用代理', { exact: true });
+    const save = layer.getByRole('button', { name: '保存主会话设置', exact: true });
+    assert.equal(await primary.inputValue(), 'antigravity');
+    assert.equal(await backup.inputValue(), 'antigravity');
+    assert.equal(await layer.getByText('主用与备用需要选择不同的代理', { exact: true }).count(), 0);
+    await primary.selectOption('claude');
+    await backup.selectOption('codex');
+    assert.equal(await save.isDisabled(), true);
+    await backup.selectOption('antigravity');
+    await save.click();
+    await page.waitForFunction(() => fixture.project.leadAgents?.primary.agent === 'claude');
+    assert.deepEqual(await page.evaluate(() => fixture.project.leadAgents), { primary: { agent: 'claude' } });
   });
   await test('waiting project offers only cancellation in both lead views and restores actions after cancellation or expiry', async () => {
     await setup({ projectUnbound: true, clock: true, backupAgent: 'codex' });

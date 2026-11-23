@@ -1301,15 +1301,16 @@ function projectLeadSettings(id: string) {
   const primaryLabel = '默认主用', backupLabel = '备用代理', newLabel = '新会话代理', noBackup = '(none)'
   const backupOptions = { [noBackup]: '不设备用', ...Object.fromEntries(agents.map(a => [a.id, a.name])) }
   const missingBackup = !!backup && !Object.hasOwn(backupOptions, backup.agent)
-  if (!Object.hasOwn(backupOptions, form[backupLabel])) form[backupLabel] = missingBackup ? '' : backup?.agent ?? noBackup
+  if (!active.dirty || !Object.hasOwn(backupOptions, form[backupLabel])) form[backupLabel] = missingBackup ? '' : backup?.agent ?? noBackup
   const primarySelect = agentSelect(agents, primaryLabel, primary.agent)
   const launchSelect = agentSelect(agents, newLabel, primary.agent)
   const newPrimary = form[primaryLabel], newBackup = form[backupLabel]
-  const duplicate = !!newBackup && [newPrimary, w.session?.agent].includes(newBackup)
   const changes = {
     ...(newPrimary && newPrimary !== primary.agent && { primary: { agent: newPrimary } }),
     ...(newBackup && newBackup !== (backup?.agent ?? noBackup) && { backup: newBackup === noBackup ? null : { agent: newBackup } })
   }
+  const duplicate = changes.backup ? [newPrimary, w.session?.agent].includes(newBackup)
+    : !('backup' in changes) && !!newPrimary && current?.leadAgents?.backup?.agent === newPrimary
   return section('主会话', el('p', { class: 'any' }, leadDescription(w, '主会话')), backupHistory(w, id), leadChoices(w, data.sessions, choose, true),
     agents.length ? section('启动偏好', primarySelect,
       select(backupLabel, backupOptions, form[backupLabel], () => render(), missingBackup ? `${agentName(backup.agent)} 已不可用，请选择` : undefined),

@@ -364,7 +364,7 @@ export function createCoordinator(api: OrcaWorkerApi, runtime: CoordinatorRuntim
     const binding = projectBinding(p, sessions), waiting = waitingForProjectLead(binding)
     if (waiting) {
       let backup
-      try { backup = projectLeadAgents(p.leadAgents).backup } catch { return binding }
+      try { backup = projectLeadAgents(p.leadAgents, waiting.target.agent).backup } catch { return binding }
       if (backup && backup.agent !== waiting.target.agent && await runtime.installedAgents(waiting.target.workspace)
         .then(list => list.some(a => a.id === backup.agent)).catch(() => false)) waiting.backupAgent = backup.agent
     }
@@ -400,7 +400,7 @@ export function createCoordinator(api: OrcaWorkerApi, runtime: CoordinatorRuntim
     const launchList = catalog(targets.workspace?.workspace)
     const [availableAgents, roleAgents, binding] = await Promise.all([launchList,
       targets.workspace?.workspace === ref.workspace ? launchList : catalog(ref.workspace), projectLeadView(p, targets.inventory?.sessions)])
-    return { binding, leadAgents: projectLeadAgents(p.leadAgents), availableAgents, roleAgents, sessions: targets.sessions,
+    return { binding, leadAgents: projectLeadAgents(p.leadAgents, binding.session?.agent), availableAgents, roleAgents, sessions: targets.sessions,
       ...(targets.error ? { workspaceError: targets.error } : {}) }
   }
   async function checkProjectLeadTarget(id: string, handle: string) {
@@ -754,6 +754,7 @@ export function createCoordinator(api: OrcaWorkerApi, runtime: CoordinatorRuntim
     }
     const template = input.template === undefined ? undefined : templateLeadAgents(projectTemplate(input.template))
     const choices: Partial<ProjectLeadAgents> = {}
+    let activeAgent: string | undefined
     if (raw) {
       try {
         if ('primary' in raw) choices.primary = projectAgentLaunch(raw.primary)
@@ -768,14 +769,14 @@ export function createCoordinator(api: OrcaWorkerApi, runtime: CoordinatorRuntim
       }
       const next = projectLeadAgents({ ...project.leadAgents, ...choices })
       if (next.backup?.agent === next.primary.agent) fail('默认主用与备用需要选择不同的代理')
-      const primary = scoped.inventory.sessions.find(s => s.handle === project.mainAgentHandle)?.agent || projectAgentKind(project)
-      if (choices.backup && choices.backup.agent === primary) fail('备用代理与当前主用相同')
+      activeAgent = projectBinding(project, scoped.inventory.sessions).session?.agent
+      if (choices.backup && choices.backup.agent === activeAgent) fail('备用代理与当前主用相同')
     }
     await store.mutate(id, revision(input.revision), p => {
       if (roles) p.roles = { design: roles.design, code: roles.code, review: roles.review }
       if (template && !p.leadAgents) p.leadAgents = template
       if (raw) {
-        if ('backup' in choices && !isDeepStrictEqual(choices.backup, projectLeadAgents(p.leadAgents).backup)) {
+        if ('backup' in choices && !isDeepStrictEqual(choices.backup, projectLeadAgents(p.leadAgents, activeAgent).backup)) {
           if (projectBackupBusy(p.backup)) fail('备用正在启动或处理，请稍后再更改')
           if (p.backup?.phase !== 'failed') resetBackup(p, p.mainAgentHandle ?? '')
         }

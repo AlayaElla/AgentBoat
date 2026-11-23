@@ -172,7 +172,7 @@ export class BackupLeads {
     if (w && !workspaceBackupInFlight(b)) return
     if ('ref' in r && b?.phase === 'standby') {
       let configured
-      try { configured = projectLeadAgents(r.leadAgents).backup }
+      try { configured = projectLeadAgents(r.leadAgents, session.agent).backup }
       catch { /* Keep an existing backup while its template is unreadable. */ }
       if (configured !== undefined && configured?.agent !== b.agent) {
         await this.updateBinding(r, row => resetBackup(row, session.handle))
@@ -185,7 +185,7 @@ export class BackupLeads {
       const installed = await this.runtime.installedAgents(session.workspace).catch(() => undefined)
       if (!installed) return this.missing(r, '无法读取 Orca 的可启动 agent 列表', ownerRun)
       let backup
-      try { backup = projectLeadAgents(r.leadAgents).backup }
+      try { backup = projectLeadAgents(r.leadAgents, session.agent).backup }
       catch { return this.missing(r, '项目主会话模板无法读取，请核对本机模板', ownerRun) }
       if (!backup) return this.missing(r, '', ownerRun, true)
       const { agent, ...options } = backup

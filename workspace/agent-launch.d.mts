@@ -14,4 +14,4 @@ export interface ProjectLeadAgents {
 export function projectTemplate(id: string): unknown;
 export function projectAgentLaunch(value: unknown): AgentLaunch;
 export function templateLeadAgents(value: unknown): ProjectLeadAgents;
-export function projectLeadAgents(settings?: Partial<ProjectLeadAgents>): ProjectLeadAgents;
+export function projectLeadAgents(settings?: Partial<ProjectLeadAgents>, activeAgent?: string): ProjectLeadAgents;
