@@ -113,6 +113,64 @@ test('project lead switches only within its workspace and preserves tasks and qu
   } finally { c.stop(); await worker.deactivate() }
 })
 
+for (const mode of ['new', 'existing'] as const) test(`离线主用由备用代管时可切换到独立 Run：${mode}`, async () => {
+  const p = fresh(projectRef), other = fresh(refs[1])
+  const dead = { ...projectSession, handle: 'orca_session_id:codex_dead', agent: 'codex', online: 'offline' as const }
+  const acting = { ...projectSession, handle: 'orca_session_id:antigravity_acting', agent: 'antigravity' }
+  const occupied = { ...projectSession, handle: 'orca_session_id:other_project' }
+  const history = [{ at: Date.now(), text: '备用已接管原 Run' }]
+  p.runId = 'run_old'
+  p.mainAgentHandle = dead.handle
+  p.mainSession = dead
+  p.backup = { primary: dead.handle, handle: acting.handle, agent: acting.agent, phase: 'active', cycle: 'active', since: Date.now(), generation: 2, history }
+  p.leadAgents = { primary: { agent: 'claude' }, backup: null }
+  other.mainAgentHandle = occupied.handle
+  const host = mockHost({ storage: { 'project:p1': p as any, 'project:p2': other as any }, results: {
+    'workspace.list': { workspaces: [testWorkspace], truncated: false }
+  } })
+  const sessions = [dead, acting, projectSession, occupied]
+  const requests: string[] = [], notices: { run: string; recipient: string; id: string; body: string }[] = []
+  const owner = (run: string) => run === p.runId ? acting.handle : projectSession.handle
+  let c!: ReturnType<typeof createCoordinator>
+  const worker = await mountWorker({ default: api => { c = createCoordinator(api, {
+    projects: async () => [projectRef, refs[1]],
+    targets: async () => ({ sessions, workspaces: [{ workspace: projectWorkspaceId, name: '本项目', path: p.ref.path }] }),
+    runBinding: async run => ({ owner: owner(run), generation: 2 }),
+    identify: async () => projectSession,
+    requestTakeover: async (handle, prompt) => { assert.equal(handle, projectSession.handle); requests.push(prompt) },
+    launchMain: async (workspace, agent, prompt) => {
+      assert.equal(workspace, projectSession.workspace); assert.equal(agent, projectSession.agent)
+      requests.push(prompt)
+      return projectSession.handle
+    },
+    send: async (run, d) => { notices.push({ run, recipient: owner(run), id: d.id, body: d.body }); return {} }
+  }) } }, { host })
+  try {
+    await assert.rejects(() => worker.request('project.lead', { projectId: p.ref.id, revision: p.revision, mode: 'existing', handle: occupied.handle }), /已用于其他主会话/)
+    const waiting = await worker.request('project.lead', { projectId: p.ref.id, revision: p.revision, mode, ...(mode === 'existing' ? { handle: projectSession.handle } : {}) })
+    assert.equal(waiting.binding.runId, p.runId)
+    assert.equal(waiting.binding.backup?.handle, acting.handle)
+    assert.equal(waiting.binding.backup?.phase, 'active')
+    assert.equal(waiting.binding.takeover?.state, 'waiting')
+    assert.equal(requests.length, 1)
+    assert.equal(notices.length, 0)
+    const result = await worker.request('project.agent', { projectId: p.ref.id, operation: 'bind', revision: waiting.binding.revision,
+      requestId: 'new-binding', runId: 'run_next', currentRunId: 'run_next', caller: projectSession.handle, token: tokenFrom(requests[0]) })
+    assert.equal(result.project?.runId, 'run_next')
+    assert.equal(result.project?.mainAgentHandle, projectSession.handle)
+    assert.equal(result.lead?.takeover, undefined)
+    assert.equal(result.lead?.backup?.primary, projectSession.handle)
+    assert.equal(result.lead?.backup?.handle, undefined)
+    assert.deepEqual(result.lead?.backup?.history, history)
+    await c.flush(p.ref.id)
+    assert.equal(notices.length, 1)
+    assert.equal(notices[0].run, p.runId)
+    assert.equal(notices[0].recipient, acting.handle)
+    assert.equal(notices[0].id, `retired:${waiting.binding.takeover?.id}`)
+    assert.match(notices[0].body, /请停止派活/)
+  } finally { c.stop(); await worker.deactivate() }
+})
+
 test('project roles and new leads use the current workspace catalog and Orca launch preferences', async () => {
   const launches: string[][] = [], fakeCli = new OrcaRuntime(async () => 'never-start-a-real-process')
   ;(fakeCli as any).call = async (args: string[]) => {

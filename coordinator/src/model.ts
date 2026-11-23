@@ -133,6 +133,7 @@ export interface ProjectLead {
   availableAgents: InstalledAgent[] | null
   roleAgents: InstalledAgent[] | null
   workspaceError?: string
+  backupPrimaryUnavailable?: boolean
 }
 export interface WorkspaceBinding {
   revision: number; runId: string; session?: AgentSession; boundAt?: string

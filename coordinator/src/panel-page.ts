@@ -4,6 +4,7 @@ import { previewArtifact } from './artifact-preview'
 import { artifactTitle, latestArtifacts } from './artifact-versions.mjs'
 import { actingMain, backupInCharge, blockedRevision, attention, projectSummary, defaultAgent, agentName, compareAgentActivity, groupedAttention, isProjectShared, isRecentAgent, labels, taskState, scopes, statuses, connectionStates, roles, mainStatus, mainAgentStates, waitingForProjectLead, type InstalledAgent } from './model'
 import type { Acceptance, AgentSession, Artifact, Attention, LeadSwitch, MainTakeover, Overview, Project, ProjectLead, ProjectWorkspace, WorkspaceBinding } from './model'
+import type { ProjectLeadSwitch } from './protocol'
 import type { FeedbackItem } from './store'
 import type { AgentActivity, AgentsSnapshot, MainAgentActivity } from './model'
 import type { DelegatedFeedback, FeedbackTask, LinksSnapshot, SharedReport, Sharing } from './links'
@@ -1261,6 +1262,7 @@ function leadDescription(binding: WorkspaceBinding | undefined, label: string) {
   return [binding?.backup ? '主用 ' + agentName(s.agent) : agentName(s.agent), s.title, status, backup].filter(Boolean).join(' · ')
 }
 type SwitchChoice = Omit<LeadSwitch, 'revision'>
+type ProjectSwitchChoice = Omit<ProjectLeadSwitch, 'revision'>
 function pendingLead(t: MainTakeover | undefined, cancel?: () => unknown) {
   if (!t) return null
   const minutes = t.state === 'expired' ? 0 : Math.max(0, Math.ceil((Date.parse(t.expiresAt) - Date.now()) / 60000))
@@ -1268,7 +1270,7 @@ function pendingLead(t: MainTakeover | undefined, cancel?: () => unknown) {
   return card(callout(minutes ? `${status}，还剩 ${minutes} 分钟` : '对方没在有效期内完成绑定', !minutes || t.error ? 'danger' : ''),
     minutes && t.backupAgent ? small(`接管后会自动配一个 ${agentName(t.backupAgent)} 备用`) : null, cancel ? button('取消', cancel) : null)
 }
-function leadChoices(w: WorkspaceBinding, sessions: AgentSession[] | undefined, choose: (input: SwitchChoice) => unknown, project = false) {
+function leadChoices(w: WorkspaceBinding, sessions: AgentSession[] | undefined, choose: (input: SwitchChoice & { mode: 'cancel' | 'existing' }) => unknown, project = false) {
   const label = project ? '主会话' : '主 agent'
   return [pendingLead(w.takeover, () => choose({ mode: 'cancel' })),
     section('在线会话', sessions?.map(s => card(row(el('span', { class: 'grow any' }, s.title || agentName(s.agent)),
@@ -1276,7 +1278,7 @@ function leadChoices(w: WorkspaceBinding, sessions: AgentSession[] | undefined, 
     small(project ? agentName(s.agent) : `${agentName(s.agent)} · ${s.workspaceName} · ${s.path}`))),
     !sessions ? detailReadState('在线会话') : !sessions.length ? small('没有可接管的在线会话') : null)]
 }
-function chooseProjectLead(id: string, revision: number, input: SwitchChoice) {
+function chooseProjectLead(id: string, revision: number, input: ProjectSwitchChoice) {
   return act(async () => {
     const { binding }: ProjectLead = await req('project.lead', { projectId: id, revision, ...input })
     for (const f of stack) {
@@ -1295,7 +1297,10 @@ function projectLeadSettings(id: string) {
   const w = data.binding
   const waiting = waitingProjectCard(id, w)
   if (waiting) return section('主会话', waiting)
-  const choose = (input: SwitchChoice) => chooseProjectLead(id, w.revision, input)
+  const choose = (input: ProjectSwitchChoice) => chooseProjectLead(id, w.revision, input)
+  const actingBackup = data.backupPrimaryUnavailable ? w.backup : undefined
+  const backupSession = data.sessions.find(s => s.handle === actingBackup?.handle)
+  const primaryAgent = actingBackup ? backupSession?.agent || actingBackup.agent : w.session?.agent
   const agents = data.availableAgents ?? []
   const { primary, backup } = data.leadAgents
   const primaryLabel = '默认主用', backupLabel = '备用代理', newLabel = '新会话代理', noBackup = '(none)'
@@ -1305,12 +1310,14 @@ function projectLeadSettings(id: string) {
   const primarySelect = agentSelect(agents, primaryLabel, primary.agent)
   const launchSelect = agentSelect(agents, newLabel, primary.agent)
   const newPrimary = form[primaryLabel], newBackup = form[backupLabel]
-  const duplicate = !!newBackup && [newPrimary, w.session?.agent].includes(newBackup)
+  const duplicate = !!newBackup && [newPrimary, primaryAgent].includes(newBackup)
   const changes = {
     ...(newPrimary && newPrimary !== primary.agent && { primary: { agent: newPrimary } }),
     ...(newBackup && newBackup !== (backup?.agent ?? noBackup) && { backup: newBackup === noBackup ? null : { agent: newBackup } })
   }
-  return section('主会话', el('p', { class: 'any' }, leadDescription(w, '主会话')), backupHistory(w, id), leadChoices(w, data.sessions, choose, true),
+  return section('主会话', el('p', { class: 'any' }, leadDescription(w, '主会话')),
+    backupSession && w.takeover?.state !== 'sending' ? button('将当前代管备用转正为主会话', () => choose({ mode: 'promote' }), 'primary') : null,
+    backupHistory(w, id), leadChoices(w, data.sessions.filter(s => s.handle !== backupSession?.handle), choose, true),
     agents.length ? section('启动偏好', primarySelect,
       select(backupLabel, backupOptions, form[backupLabel], () => render(), missingBackup ? `${agentName(backup.agent)} 已不可用，请选择` : undefined),
       duplicate ? callout('主用与备用需要选择不同的代理', 'danger') : null,

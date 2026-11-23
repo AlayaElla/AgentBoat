@@ -3,9 +3,9 @@ import os from 'node:os'
 import path from 'node:path'
 import { assert, mockHost, mountWorker, test } from 'orca/testing'
 import { testCoordinator } from './test-runtime'
-import { fingerprint, fresh } from './store'
+import { fingerprint, fresh, submitTask } from './store'
 import { refs } from './fixtures'
-import type { AgentSession, LeadAction, Project, Workspace } from './model'
+import type { AgentSession, ContactRoutes, LeadAction, Project, Workspace } from './model'
 import { stopped } from './backup-lead'
 
 const now = Date.now(), minute = 60_000
@@ -22,8 +22,11 @@ test('在线主用存在超过十五分钟的待办且已知不在工作时才�
 })
 
 async function fixture(project: Project, workspace?: Workspace, exports?: string, main = primary) {
-  const host = mockHost({ storage: { ['project:' + project.ref.id]: project as any, ...(workspace ? { workspace: workspace as any } : {}) } })
+  const host = mockHost({ storage: { ['project:' + project.ref.id]: project as any, ...(workspace ? { workspace: workspace as any } : {}) }, results: {
+    'workspace.list': { workspaces: [{ id: project.ref.workspace.replace(/^id:/, ''), projectId: project.ref.repoId, hostId: 'local', path: project.ref.path, kind: 'worktree', name: '项目', branch: 'main' }], truncated: false }
+  } })
   const env = { sessions: [main], inventoryFailed: false, available: true, failLaunch: false, owner: main.handle as string | null, generation: 1, installed: ['claude', 'codex'], spaces: [{ workspace: main.workspace, name: '项目', path: main.path }], launches: [] as { workspace: string; agent: string; options: unknown; prompt: string }[],
+    contactRoute: { dispatch: 'ctx_contact' } as ContactRoutes[string], launchHandle: 'orca_session_id:backup',
     catalogReads: 0, contacts: [] as string[], mailRuns: [] as string[], controls: [] as { handle: string; prompt: string }[], deliveries: [] as string[], reports: [] as any[] }
   let c!: ReturnType<typeof testCoordinator>
   const worker = await mountWorker({ default: api => {
@@ -34,15 +37,15 @@ async function fixture(project: Project, workspace?: Workspace, exports?: string
         return { sessions: env.sessions, workspaces: env.spaces }
       },
       runBinding: async id => ({ owner: env.owner, generation: id === 'run_park' ? 1 : env.generation, objective: id === 'run_park' ? 'AgentBoat 备用待命 ' + (await c.store.get(project.ref.id)).backup?.cycle : undefined }),
-      syncContacts: async jobs => { env.contacts = jobs.map(j => j.id); return Object.fromEntries(jobs.map(j => [j.id, { dispatch: 'ctx_contact' }])) },
+      syncContacts: async jobs => { env.contacts = jobs.map(j => j.id); return Object.fromEntries(jobs.map(j => [j.id, env.contactRoute])) },
       installedAgents: async () => env.installed.map(id => ({ id, name: id, default: id === 'codex' })),
       identify: async (handle, run, own) => { assert.equal(run, own); return env.sessions.find(s => s.handle === handle)! },
       mail: async runId => { env.mailRuns.push(runId); return { reports: [], questions: [], waiting: env.reports } },
       launchMain: async (workspace, agent, prompt, options) => {
         env.launches.push({ workspace, agent, prompt, options })
         if (env.failLaunch) throw Error('模拟启动回执丢失')
-        env.sessions.push({ ...main, handle: 'orca_session_id:backup', title: '备用', agent })
-        return 'orca_session_id:backup'
+        env.sessions.push({ ...main, handle: env.launchHandle, title: '备用', agent })
+        return env.launchHandle
       },
       requestTakeover: async (handle, prompt) => { env.controls.push({ handle, prompt }) },
       send: async (run, d) => { env.deliveries.push([run, env.owner, d.subject].join('|')); return {} }
@@ -58,6 +61,119 @@ async function fixture(project: Project, workspace?: Workspace, exports?: string
 }
 const bound = () => ({ ...fresh(refs[0]), leadAgents: { primary: { agent: 'claude' }, backup: { agent: 'codex' } },
   runId: 'run_project', mainAgentHandle: primary.handle, mainSession: primary })
+
+const codexLead = { ...primary, handle: 'orca_session_id:codex_original', agent: 'codex' }
+const actingBackup = { ...primary, handle: 'orca_session_id:antigravity_acting', title: '代管会话', agent: 'antigravity' }
+const closedChat = 'Agent session codex_original has ended: its chat was closed. No message was sent.'
+const activeProject = (): Project => ({ ...bound(), mainAgentHandle: codexLead.handle, mainSession: codexLead,
+  leadAgents: { primary: { agent: 'codex' }, backup: { agent: 'antigravity' } }, backup: {
+    primary: codexLead.handle, handle: actingBackup.handle, agent: actingBackup.agent, phase: 'active', cycle: 'active-cycle', since: now, generation: 2,
+    history: [{ at: now, text: '备用已接管原 Run' }], contact: { id: 'contact', workspace: primary.workspace, primary: codexLead.handle, projectId: refs[0].id }
+  } })
+
+for (const mode of ['promote', 'existing'] as const) test(`代管备用转正沿用原 Run：${mode}`, async () => {
+  const p = activeProject()
+  submitTask(p, { id: 'task', title: '正在执行', goal: '保留工作', phase: 'working', executions: [{ runId: p.runId, taskId: 'task_worker', dispatchId: 'ctx_worker', agent: 'codex' }] })
+  p.takeover = { id: 'pending', state: 'waiting', target: primary, tokenHash: fingerprint('unused'), expiresAt: new Date(now + minute).toISOString() }
+  const { env, poll, c, worker, close } = await fixture(p, { version: 1, revision: 0, runId: 'run_owner', requests: [] }, undefined, codexLead)
+  const read = () => worker.request('project.lead', { projectId: p.ref.id })
+  const preferences = { primary: { agent: 'antigravity' }, backup: { agent: 'codex' } }
+  env.sessions = mode === 'promote' ? [actingBackup] : [codexLead, actingBackup]
+  if (mode === 'existing') env.contactRoute = { error: closedChat }
+  env.owner = mode === 'promote' ? null : actingBackup.handle
+  env.generation = 2
+  env.launchHandle = 'orca_session_id:codex_new_backup'
+  env.installed.push('antigravity')
+  try {
+    await poll()
+    const before = await read()
+    assert.equal(before.backupPrimaryUnavailable, true)
+    assert.equal(before.binding.backup?.phase, 'active')
+    const saved = await worker.request('project.settings', { projectId: p.ref.id, revision: before.binding.revision, leadAgents: preferences })
+    assert.deepEqual(saved.project?.leadAgents, preferences)
+    assert.deepEqual((await c.store.get(p.ref.id)).backup, p.backup)
+    assert.equal(env.launches.length, 0)
+    const request = { projectId: p.ref.id, revision: saved.project!.revision, mode }
+    await assert.rejects(() => worker.request('workspace.projectLead', { ...request, mode: 'promote', runId: 'run_other' }), /已绑定的工作间主 agent Run/)
+    const switched = mode === 'promote'
+      ? await worker.request('project.lead', request)
+      : await worker.request('workspace.projectLead', { ...request, handle: actingBackup.handle, runId: 'run_owner' })
+    assert.equal(switched.binding.runId, p.runId)
+    assert.deepEqual(switched.binding.session, actingBackup)
+    assert.equal(switched.binding.takeover, undefined)
+    assert.deepEqual(switched.binding.backup?.history.slice(0, 1), p.backup?.history)
+    assert.match(switched.binding.backup!.history.at(-1)!.text, /原主会话已不可用.*代管会话.*转正为主会话/)
+    await poll()
+    await c.store.mutate(p.ref.id, undefined, row => { row.deliveries.push({ id: 'still-working', subject: '排队事项', body: '保留 Run', state: 'pending' }) })
+    await c.flush(p.ref.id)
+    const after = await c.store.get(p.ref.id)
+    assert.equal(after.mainAgentHandle, actingBackup.handle)
+    assert.deepEqual(after.mainSession, actingBackup)
+    assert.deepEqual(after.tasks, p.tasks)
+    assert.equal(after.backup?.primary, actingBackup.handle)
+    assert.equal(after.backup?.phase, 'standby')
+    assert.equal(after.backup?.handle, env.launchHandle)
+    assert.equal(after.backup?.contact, undefined)
+    assert.deepEqual(env.contacts, [])
+    assert.deepEqual(env.launches.map(l => l.agent), ['codex'])
+    assert.ok(env.deliveries.includes([p.runId, env.owner, '排队事项'].join('|')))
+    assert.equal(after.deliveries.some(d => d.id.startsWith('retired:')), false)
+    const updated = await worker.request('project.settings', { projectId: p.ref.id, revision: after.revision, leadAgents: { backup: { agent: 'claude' } } })
+    assert.equal(updated.project?.leadAgents?.backup?.agent, 'claude')
+  } finally { await close() }
+})
+
+test('代管恢复要求可靠离线证据和匹配的 Run 归属', async () => {
+  const p = activeProject(), { env, c, poll, worker, close } = await fixture(p, undefined, undefined, codexLead)
+  const read = () => worker.request('project.lead', { projectId: p.ref.id })
+  const change = async (mode: 'promote' | 'new' | 'existing') => worker.request('project.lead', {
+    projectId: p.ref.id, mode, revision: (await read()).binding.revision, handle: actingBackup.handle
+  })
+  const settings = async () => worker.request('project.settings', { projectId: p.ref.id, revision: (await read()).binding.revision, leadAgents: { backup: { agent: 'claude' } } })
+  env.sessions = [actingBackup]
+  env.installed.push('antigravity')
+  try {
+    for (const phase of ['opening', 'taking', 'handoff', 'returning'] as const) {
+      await c.store.mutate(p.ref.id, undefined, row => { row.backup!.phase = phase })
+      await assert.rejects(() => change('promote'), /正在代管项目 Run/)
+      await assert.rejects(() => change('new'), /备用正在启动或处理/)
+      await assert.rejects(() => change('existing'), /备用正在启动或处理/)
+      await assert.rejects(settings, /备用正在启动或处理/)
+    }
+    await c.store.mutate(p.ref.id, undefined, row => { row.backup!.phase = 'active' })
+    for (const [online, route] of [
+      ['online', { error: '联络 Run 暂时不可用' }], ['unknown', { error: closedChat.replace('codex_original', 'another_chat') }],
+      ['online', { closed: true }], ['unknown', {}]
+    ] as const) {
+      env.sessions = [{ ...codexLead, online }, actingBackup]
+      env.contactRoute = route
+      await poll()
+      assert.equal((await read()).backupPrimaryUnavailable, undefined)
+      await assert.rejects(() => change('promote'), /原主会话仍可能接回/)
+      await assert.rejects(() => change('new'), /备用正在启动或处理/)
+      await assert.rejects(() => change('existing'), /备用正在启动或处理/)
+      await assert.rejects(settings, /备用正在启动或处理/)
+    }
+    env.inventoryFailed = true
+    assert.equal((await read()).backupPrimaryUnavailable, undefined)
+    await assert.rejects(() => change('promote'), /inventory timed out/)
+    env.inventoryFailed = false
+    env.sessions = [{ ...codexLead, online: 'offline' }, actingBackup]
+    assert.equal((await read()).backupPrimaryUnavailable, true)
+    env.owner = 'other-coordinator'
+    env.generation = 2
+    await assert.rejects(() => change('promote'), /Run 归属/)
+    env.owner = null
+    env.generation = 3
+    await assert.rejects(() => change('promote'), /Run 归属/)
+    env.sessions[1] = { ...actingBackup, workspace: 'another-workspace' }
+    await assert.rejects(() => change('promote'), /不在项目工作区内在线/)
+    await c.store.mutate(p.ref.id, undefined, row => { row.hidden = true })
+    await assert.rejects(() => change('promote'), /项目已隐藏/)
+    assert.equal((await c.store.get(p.ref.id)).mainAgentHandle, codexLead.handle)
+    assert.equal(env.launches.length, 0)
+  } finally { await close() }
+})
 test('主用绑定在其他项目工作区时，只在该工作区可用后原地补开备用', async () => {
   const p = { ...bound(), ref: refs[1] }, { env, poll, c, close } = await fixture(p)
   try {

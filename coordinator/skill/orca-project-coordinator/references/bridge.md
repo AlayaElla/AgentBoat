@@ -71,6 +71,7 @@
 - `main-bind [--check]`（stdin）：`{revision,requestId,runId,token}`，首次绑定可省 token。`--check` 只核实、不生效；通过后重读 `main-read`，用最新 revision 和新的 requestId 正式绑定。绑定成功后，脚本在当前会话目录更新 `CLAUDE.md` 和 `AGENTS.md` 的角色卡。回执有 `roleCardWarning` 时绑定已生效，解决文件问题后用原请求重试。
 - `message`：`{projectId,revision?,requestId,runId,text}`，runId 必须是已绑定的工作间主 agent Run。消息成为项目的 workspace-agent 来源。项目还没有主会话时，回执显示「项目还没有主会话，已排队」，脚本尝试自动开主会话，绑定后由插件投递；`autoLaunch` 给出状态、会话 handle 和启动参数，或没开成的原因。已排队的消息重试时保留原 requestId。
 - `project-lead-switch`（stdin）：`{projectId,revision,mode,handle?,agent?}`，revision 取 `project-lead` 回执的 `binding.revision`。已有会话用 `mode:"existing"` 和该项目在线列表里的 handle。新开用 `mode:"new"`，省略 agent 时使用 `leadAgents.primary`，也可从 `availableAgents` 选择本次启动的代理。取消用 `mode:"cancel"`。
+- 原主会话不可用、备用已稳定代管时，用 `mode:"promote"` 将当前在线备用转正，沿用原 Run 和收件箱。传入该备用 handle 的 `mode:"existing"` 也会转正。换成其他会话或新开主会话时，目标用 `project-lead-bind` 绑定新 Run，原 Run 收到切换通知。代管期间保存的备用偏好会在转正或切换后生效。
 - `hide`、`restore`：`{projectId,revision}`。
 - `delete`：`{projectId,revision,confirm:projectId}`。插件先导出记录（回执里有 exportPath）；有打开的终端或会话就拒绝。只从 Orca 移除登记，磁盘文件和 Git 保留。
 - `connection-send`（stdin）：`{name,runId,requestId,contextId?,text}`。同一事项沿用 contextId。

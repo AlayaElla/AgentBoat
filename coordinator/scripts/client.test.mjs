@@ -59,6 +59,8 @@ syncBuiltinESMExports();`);
       { encoding:'utf8', windowsHide:true, input:JSON.stringify(input), env:{ ...process.env, ORCA_AGENT_SESSION_ID:'project-chat' } }));
     const switchInput = { projectId:'p1', revision:2, mode:'new', agent:'codex', runId:'run_forged' };
     assert.deepEqual(projectLead('project-lead-switch', switchInput), { ok:true, handler:'workspace.projectLead', input:{ ...switchInput, runId:'run_self' } });
+    const promotion = { projectId:'p1', revision:2, mode:'promote' };
+    assert.deepEqual(projectLead('project-lead-switch', promotion), { ok:true, handler:'workspace.projectLead', input:{ ...promotion, runId:'run_self' } });
     const bindInput = { projectId:'p1', revision:3, requestId:'project-bind', runId:'run_self', token:'test-only' };
     assert.deepEqual(projectLead('project-lead-bind', bindInput), { ok:true, handler:'project.agent', input:{
       ...bindInput, operation:'bind', caller:'orca_session_id:project-chat', currentRunId:'run_self' } });
