@@ -1516,6 +1516,7 @@ function render() {
 }
 document.addEventListener('pointerdown', e => { if (artifactMenu && !artifactMenu.node.contains(e.target as Node)) closeArtifactMenu() }, true)
 window.addEventListener('resize', () => closeArtifactMenu())
+window.addEventListener('scroll', () => closeArtifactMenu(), true)
 document.addEventListener('keydown', e => {
   if (e.isComposing || e.keyCode === 229 || !(e.key === 'Escape' || e.altKey && e.key === 'ArrowLeft') || busy) return
   if (e.key === 'Escape' && artifactMenu) closeArtifactMenu(true)
