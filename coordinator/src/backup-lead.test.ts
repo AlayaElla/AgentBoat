@@ -177,6 +177,38 @@ test('代管恢复要求可靠离线证据和匹配的 Run 归属', async () => 
   } finally { await close() }
 })
 
+test('备用代管时保存继承的备用偏好，会复核首轮漏报的原主会话', async () => {
+  const p = activeProject()
+  delete p.leadAgents
+  const { env, c, worker, close } = await fixture(p, undefined, undefined, codexLead)
+  let reads = 0
+  env.inventory = () => ({ sessions: reads++ ? [codexLead, actingBackup] : [actingBackup], workspaces: env.spaces })
+  try {
+    await assert.rejects(() => worker.request('project.settings', { projectId: p.ref.id, revision: p.revision,
+      leadAgents: { backup: { agent: 'codex' } } }), /备用正在启动或处理/)
+    assert.equal(reads, 2)
+    assert.deepEqual(await c.store.get(p.ref.id), p)
+  } finally { await close() }
+})
+
+for (const [field, update] of [['归属', { owner: 'other-coordinator' }], ['代次', { generation: 3 }]] as const) {
+  test(`转正复核会话时 Run ${field}变化，保留原项目绑定`, async () => {
+    const p = activeProject(), { env, c, worker, close } = await fixture(p, undefined, undefined, codexLead)
+    env.owner = null
+    env.generation = 2
+    let reads = 0
+    env.inventory = () => {
+      if (++reads === 2) Object.assign(env, update)
+      return { sessions: [actingBackup], workspaces: env.spaces }
+    }
+    try {
+      await assert.rejects(() => worker.request('project.lead', { projectId: p.ref.id, revision: p.revision, mode: 'promote' }), /Run 归属/)
+      assert.equal(reads, 2)
+      assert.deepEqual(await c.store.get(p.ref.id), p)
+    } finally { await close() }
+  })
+}
+
 test('终端漏报或写前复核时活性变为未知，仍保留代管和原 Run', async () => {
   const old = { ...codexLead, handle: 'term_original' }, p = activeProject()
   p.mainAgentHandle = old.handle

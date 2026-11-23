@@ -445,11 +445,11 @@ export function createCoordinator(api: OrcaWorkerApi, runtime: CoordinatorRuntim
         const target = scoped?.sessions.find(s => s.handle === backup.handle && s.handle !== backup.primary)
         if (!target) fail('当前代管备用不在项目工作区内在线，请刷新后重试')
         await checkProjectLeadTarget(id, target.handle)
-        await backups.verifyProjectPromotion(project.runId, backup, target)
         const current = await confirmProjectRecovery(project, scoped?.inventory)
         if (!current) fail('原主会话仍可能接回 Run，请等主用接回')
         const session = current.sessions.find(s => s.handle === target.handle && s.workspace === target.workspace && s.agent === target.agent && s.online === 'online')
         if (!session) fail('当前代管备用不在项目工作区内在线，请刷新后重试')
+        await backups.verifyProjectPromotion(project.runId, backup, session)
         project.mainAgentHandle = session.handle
         project.mainSession = session
         delete project.takeover
@@ -813,25 +813,21 @@ export function createCoordinator(api: OrcaWorkerApi, runtime: CoordinatorRuntim
     }
     await store.mutate(id, revision(input.revision), async p => {
       if (roles) p.roles = { design: roles.design, code: roles.code, review: roles.review }
+      let inventory = scoped?.inventory
+      if (inventory && 'backup' in choices && !isDeepStrictEqual(choices.backup, p.leadAgents?.backup) && projectBackupBusy(p.backup)) {
+        const current = await confirmProjectRecovery(p, inventory)
+        if (!current) fail('备用正在启动或处理，请稍后再更改')
+        inventory = current
+      }
       if (template && !p.leadAgents) p.leadAgents = template
-      if (scoped) {
-        let inventory = scoped.inventory
-        let primaryUnavailable = backups.projectPrimaryUnavailable(p, inventory)
-        let primary = primaryUnavailable ? inventory.sessions.find(s => s.handle === p.backup?.handle)?.agent || p.backup?.agent
+      if (inventory) {
+        const primaryUnavailable = backups.projectPrimaryUnavailable(p, inventory)
+        const primary = primaryUnavailable ? inventory.sessions.find(s => s.handle === p.backup?.handle)?.agent || p.backup?.agent
           : projectBinding(p, inventory).session?.agent
-        let changingBackup = 'backup' in choices && !isDeepStrictEqual(choices.backup, projectLeadAgents(p.leadAgents, primary).backup)
-        if (changingBackup && projectBackupBusy(p.backup)) {
-          const current = await confirmProjectRecovery(p, inventory)
-          if (!current) fail('备用正在启动或处理，请稍后再更改')
-          inventory = current
-          primaryUnavailable = backups.projectPrimaryUnavailable(p, inventory)
-          primary = primaryUnavailable ? inventory.sessions.find(s => s.handle === p.backup?.handle)?.agent || p.backup?.agent
-            : projectBinding(p, inventory).session?.agent
-          changingBackup = 'backup' in choices && !isDeepStrictEqual(choices.backup, projectLeadAgents(p.leadAgents, primary).backup)
-        }
         const next = projectLeadAgents({ ...p.leadAgents, ...choices })
         if (next.backup?.agent === next.primary.agent) fail('默认主用与备用需要选择不同的代理')
         if (choices.backup && choices.backup.agent === primary) fail('备用代理与当前主用相同')
+        const changingBackup = 'backup' in choices && !isDeepStrictEqual(choices.backup, projectLeadAgents(p.leadAgents, primary).backup)
         if (changingBackup && !primaryUnavailable && p.backup?.phase !== 'failed') resetBackup(p, p.mainAgentHandle ?? '')
         p.leadAgents = { ...p.leadAgents, ...choices }
       }
