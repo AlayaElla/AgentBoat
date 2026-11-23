@@ -2,7 +2,7 @@ import { randomBytes, randomUUID } from 'node:crypto'
 import { botHomeHandle } from './bot-runtime'
 import { availableBackup, backupDefaults } from '../../workspace/agent-launch.mjs'
 import { promptClientPath } from '../scripts/orca-cli.mjs'
-import { awaitingLeadControl, expectedPhases, backupInCharge, type AgentSession, type BackupLead, type ContactRoutes, type Delivery, type LeadAction, type Project, type Workspace } from './model'
+import { awaitingLeadControl, expectedPhases, backupInCharge, workspaceBackupInFlight, type AgentSession, type BackupLead, type BotTarget, type ContactRoutes, type Delivery, type LeadAction, type Project, type Workspace } from './model'
 import type { CoordinatorRuntime } from './runtime'
 import { fail, fingerprint, ProjectStore, takeoverActive, text } from './store'
 
@@ -46,8 +46,8 @@ export class BackupLeads {
   private inventoryUnavailable = false
   async inventoryStatus(w: Workspace, available: boolean, now = Date.now()) {
     this.inventoryUnavailable = !available
-    if (w.botSwitch && now >= w.botSwitch.until && !takeoverActive(w.takeover)) {
-      await this.stopBot(w, 'bot 切换超时，主对话未接回 Run')
+    if (w.botSwitch && !w.botStopped && now >= w.botSwitch.until && !takeoverActive(w.takeover)) {
+      await this.stopBot(w, 'bot 切换超时，接收会话未确认接回 Run')
       return true
     }
     return false
@@ -85,11 +85,12 @@ export class BackupLeads {
 
   canSend(r: Binding, d: Delivery) {
     if (!('ref' in r) && r.bot && this.inventoryUnavailable && !d.ownerAlert) return false
+    if (d.control && !('ref' in r) && (!workspaceBackupInFlight(r.backup) || !awaitingLeadControl(r.backup, d.control))) return false
     return !d.control || !takeoverActive(r.takeover) && !!this.controlTarget(r.backup, d.control)
   }
 
   async missing(r: Binding, reason: string, ownerRun: string, single = false) {
-    if (!('ref' in r) && r.bot) return
+    if (!('ref' in r)) return
     if (!unopened(r.backup)) return
     const phase = single ? 'single' : 'unavailable'
     const notify = !single && !!ownerRun && !r.backup?.notified?.includes(reason)
@@ -105,6 +106,7 @@ export class BackupLeads {
   }
 
   async retry(id: string, revision: number, confirm: boolean) {
+    if (!id) fail('工作间请在主 agent 面板选择 bot 和代理')
     if (confirm !== true || !Number.isSafeInteger(revision)) fail('请确认重新开备用')
     if (id) await this.visible(id)
     await this.mutate(id, row => {
@@ -126,19 +128,21 @@ export class BackupLeads {
       const oldest = pending.length ? Math.min(...pending.map(p => p.at)) : undefined
       const reason = stopped(live, oldest === undefined ? undefined : Math.max(oldest, w.botReceipt?.confirmedAt ?? 0), now)
       const api = this.runtime.bots
-      let current: import('./model').BotTarget | undefined, home: string | undefined
+      let current: BotTarget | undefined, home: string | undefined
       try {
         current = await api?.find(bot.id)
-        if (current && !current.paused) home = await api!.home(current)
+        if (current && !current.paused && !w.botSwitch) {
+          home = bot.side ? await api!.hasSideChat(current, session.handle) ? session.handle : undefined : await api!.home(current)
+        }
       } catch {
         if (reason && !w.botSwitch && !w.botStopped) await this.stopBot(w, reason + '，无法核对 bot 主对话')
         return
       }
       if (w.botSwitch) {
-        if (!current || current.paused || current.agent !== w.botSwitch.agent) await this.stopBot(w, 'bot 切换中再次停住')
+        if (!current || current.paused || !w.botSwitch.side && current.agent !== w.botSwitch.agent) await this.stopBot(w, 'bot 切换中再次停住')
         return
       }
-      if (current && home && home !== session.handle) {
+      if (!bot.side && current && home && home !== session.handle) {
         const next = inventory.sessions.find(s => s.handle === home && s.workspace === session.workspace && s.agent === current.agent && s.online === 'online')
         if (next && (await this.runtime.runBinding(w.runId)).owner === home) {
           await this.store.mutateWorkspace(row => {
@@ -157,12 +161,13 @@ export class BackupLeads {
         !current ? '找不到已绑定的 bot' : current.paused ? 'bot 已暂停' : '已绑定的 bot 主对话不可用', current?.name)
       if (w.botQuota?.home === home) {
         if (w.originalBot) return this.stopBot(w, '替换后的 agent 再次用完额度', current.name)
-        return this.switchBot(w, current, false, now)
+        return this.switchBot(w, current, now)
       }
       if (reason) return this.stopBot(w, reason + '，未收到额度用完的回执', current.name)
-      if (w.originalBot && current.agent !== w.originalBot.agent && bot.recoveryAt && now >= bot.recoveryAt && live?.online === 'online' && live.state === 'done') return this.switchBot(w, current, true, now)
+      if (w.originalBot && session.agent !== w.originalBot.agent && bot.recoveryAt && now >= bot.recoveryAt && live?.online === 'online' && live.state === 'done') return this.switchBot(w, current, now, w.originalBot.agent, true)
       return
     }
+    if (w && !workspaceBackupInFlight(b)) return
     if (unopened(b)) {
       if (!session.agent) return this.missing(r, '无法识别主会话的 agent 类型', ownerRun)
       const installed = await this.runtime.installedAgents(session.workspace).catch(() => undefined)
@@ -276,50 +281,68 @@ export class BackupLeads {
   }
 
   private async stopBot(w: Workspace, reason: string, name = w.bot?.name || w.bot?.id) {
+    const swap = w.botSwitch && (await this.store.workspace()).botSwitch
+    const keepReceipt = !!swap?.recipient && swap.cycle === w.botSwitch?.cycle && await this.runtime.runBinding(w.runId)
+      .then(run => run.owner === swap.recipient || run.generation !== swap.generation).catch(() => true)
     await this.store.mutateWorkspace(row => {
       if (!row.bot || row.bot.id !== w.bot?.id || row.runId !== w.runId || row.session?.handle !== w.session?.handle ||
         row.botSwitch?.cycle !== w.botSwitch?.cycle || row.botQuota?.home !== w.botQuota?.home || row.botStopped || !available(row)) return
-      delete row.botSwitch; delete row.botQuota
+      if (!keepReceipt) delete row.botSwitch
+      delete row.botQuota
       row.botStopped = true
-      ownerAlert(row, `${reason}。工作间已暂停自动处理，等待主人。请到 设置 → Bots → ${name} → Agent 手动切换并核对 Run，或在面板切回普通会话。`)
+      ownerAlert(row, `${reason}。工作间已暂停自动处理，等待主人。` +
+        (keepReceipt ? '请在接收会话重新确认原 Run 回执。' : `请在工作间主 agent 面板为 ${name} 选择可用代理，或切回普通会话。`))
     })
     this.changed('')
   }
 
-  private async switchBot(w: Workspace, bot: import('./model').BotTarget, returning: boolean, now: number) {
-    const api = this.runtime.bots!, original = w.originalBot
+  async chooseBotAgent(w: Workspace, botId: string, agent: string) {
+    if (!w.bot || w.bot.id !== botId || !w.session || w.botSwitch || !available(w)) fail('请等当前工作间接管结束')
+    if (agent === w.session.agent && !w.botStopped) fail('该代理已负责此工作间')
+    const bot = await this.runtime.bots?.find(botId)
+    if (!bot || bot.paused) fail('所选 bot 不可用')
+    await this.switchBot(w, bot, Date.now(), agent, false, true)
+  }
+
+  private async switchBot(w: Workspace, bot: BotTarget, now: number, selected?: string, returning = false, manual = false) {
+    const api = this.runtime.bots!
     const oldHome = w.session!.handle
-    const agent = returning ? original?.agent ?? bot.agent : backupDefaults(bot.agent).agent
     const token = randomBytes(32).toString('base64url'), cycle = randomUUID()
     let claimed: Workspace | undefined
     try {
-      const saved = await api.original(bot)
+      const choices = await api.choices(bot)
+      const primary = w.session!.agent, preferred = backupDefaults(primary).agent
+      const agent = selected ?? (choices.includes(preferred) ? preferred : choices.find(a => a !== primary))
+      if (!agent || !choices.includes(agent)) fail('该 bot 没有可切换的代理')
       const run = await this.runtime.runBinding(w.runId)
-      if (!Number.isSafeInteger(run.generation) || run.owner !== null && run.owner !== oldHome) throw Error('Run 归属已变化')
+      if (!Number.isSafeInteger(run.generation) || run.owner !== null && run.owner !== oldHome) fail('Run 归属已变化，请先核对协调者')
       claimed = await this.store.mutateWorkspace(row => {
-        row.originalBot ??= saved
-        if (!returning) {
-          row.bot!.reason = bot.agent + ' 额度已用完'
+        if (manual) {
+          delete row.originalBot; delete row.bot!.reason; delete row.bot!.recoveryAt
+        } else if (!returning) {
+          row.originalBot ??= { agent: primary }
+          row.bot!.reason = primary + ' 额度已用完'
           if (row.botQuota?.recoveryAt) row.bot!.recoveryAt = row.botQuota.recoveryAt
           else delete row.bot!.recoveryAt
         }
-        row.botSwitch = { cycle, until: now + probeWait, oldHome, agent, returning, credential: fingerprint(token), generation: run.generation }
-        delete row.botQuota
+        row.botSwitch = { cycle, until: now + probeWait, oldHome, agent, returning, side: true, ...(manual ? { manual: true } : {}), credential: fingerprint(token), generation: run.generation }
+        delete row.bot!.result
+        delete row.botQuota; delete row.botStopped
       }, w.revision)
-      await api.update(bot, agent, returning ? original?.launch : undefined, saved)
+      const next = await api.startChat(bot, agent)
+      if (!botHomeHandle(next) || next === oldHome) fail('收件地址未切换')
       const latest = await this.store.workspace()
       if (latest.botSwitch?.cycle !== cycle || !available(latest)) return
+      await this.store.mutateWorkspace(row => { row.botSwitch!.recipient = next }, latest.revision)
       const prompt = `请接回工作间协调 Run，完成后读 overview。一次性命令：\nnode ${JSON.stringify(promptClientPath())} lead-take ${w.runId} ${token}`
-      const { recipient, quota } = await this.runtime.botMail!('bot:' + bot.id, '接回工作间协调 Run', prompt, 'handoff')
+      const { recipient, quota } = await this.runtime.botMail!(next, '接回工作间协调 Run', prompt, 'handoff')
       if (quota) return this.stopBot(claimed, '新主对话也停在额度上限', bot.name)
-      if (!botHomeHandle(recipient) || recipient === oldHome) throw Error('收件地址未切换')
-      await this.store.mutateWorkspace(row => {
-        if (row.botSwitch?.cycle === cycle) row.botSwitch.recipient = recipient
-      })
+      if (recipient !== next) fail('未确认 bot 对话的收件地址')
       this.changed('')
-    } catch {
+    } catch (error) {
       if (claimed) await this.stopBot(claimed, 'bot 切换失败或回执无法核对', bot.name)
-      else if ((await this.store.workspace()).revision === w.revision) await this.stopBot(w, 'bot 或 Run 记录无法核对，切换失败', bot.name)
+      else if (manual) throw error
+      else if ((await this.store.workspace()).revision === w.revision) await this.stopBot(w, '切换失败：' + (error as Error).message, bot.name)
     }
   }
 
@@ -353,6 +376,7 @@ export class BackupLeads {
     await this.mutate(id, r => {
       const b = r.backup
       if (!available(r) || !b || !awaitingLeadControl(b, c) || r.runId !== d.targetRunId) return
+      if (!id && !workspaceBackupInFlight(b)) return
       target = this.controlTarget(b, c) || fail('主用的联络 Dispatch 尚未就绪')
       b.credential = fingerprint(token)
       probing = b.phase === 'probing'
@@ -379,7 +403,7 @@ export class BackupLeads {
     if (id) await this.visible(id)
     const b = r.backup
     const swap = !('ref' in r) && r.botSwitch || undefined
-    const botTake = !!swap && action === 'take' && caller === swap.recipient && Date.now() < swap.until && hash === swap.credential
+    const botTake = !!swap && action === 'take' && caller === swap.recipient && hash === swap.credential
     if (!available(r)) fail('调用会话与当前绑定不符')
     if (roles.some(other => other !== r && other.runId && (('ref' in other ? other.mainAgentHandle : other.session?.handle) === caller || other.backup?.handle === caller))) fail('此会话同时绑定其他角色，请先核对')
     if (!('ref' in r) && r.bot) {
@@ -388,13 +412,16 @@ export class BackupLeads {
     } else {
       if (!b || caller !== (action === 'take' || action === 'handoff' ? b.handle : b.primary)) fail('调用会话与当前绑定不符')
       if (b.consumed === hash) return { done: true }
+      if (!id && !workspaceBackupInFlight(b)) fail('工作间备用已停用')
       if (!expectedPhases[action].includes(b.phase) || hash !== b.credential) fail('凭据已失效')
     }
     let homeSession: AgentSession | undefined
     if (botTake) {
       const current = await this.runtime.bots!.find(workspace.bot!.id)
-      if (!current || current.paused || current.agent !== swap!.agent || caller === swap!.oldHome || await this.runtime.bots!.home(current) !== caller) fail('收件地址不是新的 bot 主对话')
-      homeSession = (await this.runtime.targets()).sessions.find(s => s.handle === caller && s.agent === current.agent && s.workspace === workspace.session!.workspace && s.online === 'online')
+      const api = this.runtime.bots!
+      if (!current || current.paused || caller === swap!.oldHome || !(swap!.side ? await api.hasSideChat(current, caller)
+        : current.agent === swap!.agent && await api.home(current) === caller)) fail('收件地址不是新的 bot 对话')
+      homeSession = (await this.runtime.targets()).sessions.find(s => s.handle === caller && s.agent === swap!.agent && s.workspace === workspace.session!.workspace && s.online === 'online')
       if (!homeSession) fail('新主对话尚未就绪')
     }
     let transferGeneration: number | undefined
@@ -403,6 +430,7 @@ export class BackupLeads {
       if (!Number.isSafeInteger(generation)) fail('Run 接管回执缺少代次')
       const previous = swap ? swap.oldHome : action === 'take' ? b!.primary : b!.handle
       const baseline = swap?.generation ?? b?.generation
+      if (swap && (workspace.botStopped || Date.now() >= swap.until) && (generation <= swap.generation || owner !== caller && !input.confirm)) fail('接管已暂停，请核对已执行的 Run 回执')
       if (owner !== caller) {
         if (input.confirm) {
           // A chat supplies its own run-current receipt. run-show independently corroborates its generation.
@@ -427,13 +455,13 @@ export class BackupLeads {
     await this.mutate(id, row => {
       const b = row.backup!
       if (homeSession && swap && !('ref' in row) && transferGeneration !== undefined) {
-        if (Date.now() >= swap.until) fail('接管已超时')
         row.session = homeSession
+        if (swap.side) row.bot!.side = true
         row.botReceipt = { consumed: hash, confirmedAt: Date.now() }
-        delete row.botSwitch
-        const result = (swap.returning ? '已切回 ' : '已切换至 ') + swap.agent + '，bot 主对话已接管 Run。'
+        delete row.botSwitch; delete row.botStopped
+        const result = (swap.returning ? '已切回 ' : '已切换至 ') + swap.agent + '，bot 对话已接管 Run。'
         const recovery = row.bot!.recoveryAt
-        ownerAlert(row, result + (swap.returning ? '无需操作。' : recovery ? `预计 ${new Date(recovery).toLocaleString()} 恢复，空闲时自动切回，无需操作。` : '恢复时间未知，请在额度恢复后手动选择主 agent。'))
+        ownerAlert(row, result + (swap.manual || swap.returning ? '' : recovery ? `预计 ${new Date(recovery).toLocaleString()} 恢复，空闲时自动切回。` : '恢复时间未知，可在额度恢复后从面板切回。'))
         if (swap.returning) { delete row.originalBot; delete row.bot!.reason; delete row.bot!.recoveryAt }
         return
       }

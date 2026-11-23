@@ -19,7 +19,7 @@ import { activeUserDataPath, pluginKey, release } from '../scripts/orca-cli.mjs'
 export const readTimeout = 5000
 const execute = promisify(execFile)
 export interface CoordinatorRuntime {
-  bots?: Pick<LocalBots, 'list' | 'find' | 'home' | 'original' | 'update' | 'newHome' | 'writeSoul' | 'removeSoul'>
+  bots?: Pick<LocalBots, 'list' | 'find' | 'home' | 'choices' | 'hasSideChat' | 'startChat' | 'writeSoul' | 'removeSoul'>
   botMail?(target: string, subject: string, body: string, type: 'handoff' | 'status', home?: string): Promise<{ recipient: string; quota?: ReturnType<typeof quotaReceipt> }>
   projects(host: HostApi<'worker'>): Promise<ProjectRef[]>
   runBinding(id: string): Promise<{ owner: string | null; generation: number; objective?: string }>
@@ -44,6 +44,7 @@ export class OrcaRuntime implements CoordinatorRuntime {
     const result = await this.call(['orchestration', 'send', '--from', `plugin:${pluginKey}`, '--to', target, '--type', type, '--subject', subject, '--body', body])
     const recipient = result.message?.to_handle
     if (typeof recipient !== 'string' || !recipient || !result.message.id) fail('bot 投递回执待核对')
+    if (target.startsWith('orca_session_id:') && recipient !== target) fail('bot 投递收件地址待核对')
     return { recipient, quota: quotaReceipt(result, home ?? recipient) }
   }
   private async call(args: string[], timeout = 25000): Promise<any> {

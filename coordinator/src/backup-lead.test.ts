@@ -3,7 +3,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { assert, mockHost, mountWorker, test } from 'orca/testing'
 import { testCoordinator } from './test-runtime'
-import { fresh } from './store'
+import { fingerprint, fresh } from './store'
 import { refs } from './fixtures'
 import type { AgentSession, LeadAction, Project, Workspace } from './model'
 import { stopped } from './backup-lead'
@@ -357,19 +357,53 @@ test('无绑定、隐藏和移除的项目跳过；启动失败记录一次；�
   } finally { await close() }
 })
 
-test('工作间绑定后成对创建，Codex 主用配 Claude，重启前的启动请求不重开', async () => {
+test('普通工作间不打开备用，旧探测保留且停止发出', async () => {
   const p = fresh(refs[0]), { c, env, worker, close } = await fixture(p)
   try {
     env.sessions[0] = { ...primary, agent: 'codex' }
     await worker.request('workspace.agent', { operation: 'bind', revision: 0, requestId: 'first', caller: primary.handle, runId: 'run_workspace', currentRunId: 'run_workspace' })
     await c.checkBackups()
-    assert.equal(env.launches.length, 1)
-    assert.equal(env.launches[0].agent, 'claude')
-    const binding = await worker.request('workspace.agent', { operation: 'read' })
-    assert.equal(binding.backup?.handle, 'orca_session_id:backup')
-    await c.store.mutateWorkspace(w => { w.backup!.phase = 'opening'; delete w.backup!.handle })
+    assert.equal((await c.store.workspace()).backup, undefined)
+    await c.store.mutateWorkspace(w => {
+      w.backup = { primary: primary.handle, handle: 'orca_session_id:spare', phase: 'probing', agent: 'claude', cycle: 'old', since: now, history: [] }
+      w.retired = [{ id: 'old-probe', targetRunId: w.runId, subject: '旧探测', body: '未发出', state: 'pending', control: { action: 'ready', cycle: 'old', handle: primary.handle } }]
+    })
     await c.checkBackups()
-    assert.equal((await c.store.workspace()).backup?.phase, 'failed')
-    assert.equal(env.launches.length, 1)
+    const binding = await worker.request('workspace.agent', { operation: 'read' })
+    assert.equal(binding.backup, undefined)
+    assert.equal((await c.store.workspace()).retired?.[0].state, 'pending')
+    assert.deepEqual(env.controls, [])
+    assert.deepEqual(env.launches, [])
+    await assert.rejects(() => worker.request('lead.retry', { revision: binding.revision, confirm: true }), /工作间/)
+  } finally { await close() }
+})
+
+test('升级时已发出的工作间接管保留原 Run 和消息，交回后不再启动备用', async () => {
+  const p = fresh(refs[0]), spare = { ...primary, handle: 'orca_session_id:codex_spare', agent: 'codex' }
+  const { c, env, worker, close } = await fixture(p, {
+    version: 1, revision: 0, requests: [], runId: 'run_workspace', session: primary,
+    backup: { primary: primary.handle, handle: spare.handle, phase: 'taking', agent: spare.agent, cycle: 'legacy', since: now, history: [], generation: 1, credential: fingerprint('take') },
+    retired: [{ id: 'matter', targetRunId: 'run_workspace', state: 'uncertain', subject: '原业务消息', body: '消息正文' }]
+  })
+  try {
+    env.sessions.push(spare)
+    const input = { action: 'take' as const, runId: 'run_workspace', caller: spare.handle, token: 'take' }
+    const read = () => worker.request('workspace.agent', { operation: 'read' })
+    assert.equal((await read()).backup?.phase, 'taking')
+    await assert.rejects(async () => worker.request('workspace.agent.switch', { mode: 'existing', revision: (await read()).revision, handle: spare.handle }), /接管结束/)
+    assert.deepEqual(await worker.request('lead.control', input), { useRun: input.runId })
+    env.owner = spare.handle; env.generation++
+    assert.deepEqual(await worker.request('lead.control', input), { done: true })
+    await new Promise(resolve => setImmediate(resolve))
+    assert.equal((await read()).backup?.phase, 'active')
+    await c.store.mutateWorkspace(w => { w.backup!.phase = 'returning'; w.backup!.credential = fingerprint('resume') })
+    env.owner = primary.handle; env.generation++
+    assert.deepEqual(await worker.request('lead.control', { ...input, action: 'resume', caller: primary.handle, token: 'resume' }), { done: true })
+    await c.checkBackups()
+    const w = await c.store.workspace()
+    assert.equal(w.runId, input.runId)
+    assert.equal(w.retired?.find(m => m.id === 'matter')?.body, '消息正文')
+    assert.equal((await read()).backup, undefined)
+    assert.deepEqual(env.launches, [])
   } finally { await close() }
 })

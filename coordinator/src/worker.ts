@@ -6,7 +6,7 @@ import { realpath, stat } from 'node:fs/promises'
 import { Connections } from './connections'
 import { checkedPanels } from './panel-result'
 import type { OrcaWorkerApi } from 'orca/worker'
-import { takeoverActive, waitingForProjectLead, actingMain, type AgentSession, type LeadSwitch, type Project, type ProjectLead, type ProjectRef, type Snapshot, type SourceEvent, type Delivery, type MessagingSnapshot } from './model'
+import { takeoverActive, waitingForProjectLead, actingMain, workspaceBackupInFlight, type AgentSession, type LeadSwitch, type Project, type ProjectLead, type ProjectRef, type Snapshot, type SourceEvent, type Delivery, type MessagingSnapshot } from './model'
 import { FeishuSources, notifyFeishu, type MessageTransport } from './feishu'
 import { OrcaRuntime, defaultExecutable, readTimeout, type CoordinatorRuntime } from './runtime'
 import { ProjectStore, artifactUrl, expireArtifact, fail, feedback, fingerprint, fresh, maxMessageLength, notifyWorkspace, object, overview, resetBackup, retainRecent, receiveEvent, submitTask, strings, text, revision, mergeProjects, feishuConfig, verifyTakeover } from './store'
@@ -871,6 +871,7 @@ export function createCoordinator(api: OrcaWorkerApi, runtime: CoordinatorRuntim
     for (const r of [w, ...projects]) {
       if (stoppedChecks || !r.runId || takeoverActive(r.takeover)) continue
       const project = 'ref' in r ? r : undefined
+      if (!project && !w.bot && !workspaceBackupInFlight(w.backup)) continue
       if (!inventory) {
         await backups.missing(r, '无法读取 Orca 工作区和会话列表', w.runId).catch(() => {})
         continue

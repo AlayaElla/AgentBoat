@@ -2,7 +2,7 @@ import { botHomeHandle } from './bot-runtime'
 import { randomUUID } from 'node:crypto'
 import path from 'node:path'
 import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
-import { actingMain, backupInCharge, attention, groupedAttention, labels, projectCounts, type Messaging, type Project, type Workspace } from './model'
+import { actingMain, backupInCharge, workspaceBackupInFlight, attention, groupedAttention, labels, projectCounts, type Messaging, type Project, type Workspace } from './model'
 
 type Role = { bot?: boolean; standby?: boolean; role: 'workspace-main'; directory: string; summary?: string } | { standby?: boolean; role: 'project-lead'; projectId: string; runId: string; summary?: string }
 const chat = (value?: string, agent?: string) => /^orca_session_id:(?:claude|codex)_[\w-]+$/.test(value ?? '') ||
@@ -18,7 +18,7 @@ export function roleRegistry(file: string, read: () => Promise<{
       const { workspace, projects, current, mailbox } = await read()
       const visible = current?.filter(p => !p.hidden)
       const sessions: Record<string, Role> = {}
-      const spare = !workspace.bot && workspace.backup
+      const spare = !workspace.bot && workspaceBackupInFlight(workspace.backup) && workspace.backup
       if (spare && spare.handle && workspace.session && chat(spare.handle, spare.agent)) sessions[spare.handle] = { role: 'workspace-main', directory: workspace.session.path, standby: true }
       const main = actingMain(workspace)
       const botHome = workspace.bot && botHomeHandle(workspace.session?.handle) ? workspace.session : undefined

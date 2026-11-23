@@ -4,7 +4,7 @@ import { pluginDataPath } from '../scripts/orca-cli.mjs'
 import { mkdir, writeFile } from 'node:fs/promises'
 import type { StorageApi } from 'orca'
 import { ProjectArchive } from './project-archive'
-import { takeoverActive, blockedRevision, attention, projectSummary, taskState, type Acceptance, type Artifact, type Project, type ProjectRef, type SourceEvent, type Task, type Workspace, type Overview, type Messaging, type AgentSession, type StoredTakeover } from './model'
+import { takeoverActive, blockedRevision, attention, projectSummary, taskState, workspaceBackupInFlight, type Acceptance, type Artifact, type Project, type ProjectRef, type SourceEvent, type Task, type Workspace, type Overview, type Messaging, type AgentSession, type StoredTakeover } from './model'
 
 export function retainRecent<T>(rows: T[], finished: T[], limit = 100, pinned?: (row: T) => boolean) {
   const expired = new Set(finished.slice(0, -limit))
@@ -165,6 +165,7 @@ export class ProjectStore {
       if ((await this.all()).some(p => p.runId === runId)) fail('该 Run 已绑定项目；请在当前会话创建独立的工作间主 agent Run')
       if (w.runId || w.takeover || token) {
         const t = verifyTakeover(w.takeover, token, session, w.runId, runId)
+        if (w.botSwitch || workspaceBackupInFlight(w.backup)) fail('请等当前工作间接管结束')
         if (checkOnly) return w
         if (w.bot && w.bot.id !== t.bot?.id) {
           try {
@@ -178,7 +179,7 @@ export class ProjectStore {
           }
         }
         w.retired ??= []
-        if (w.botStopped) for (const d of w.retired) {
+        for (const d of w.retired) {
           if (d.id.startsWith('bot-mail:') && d.state === 'pending' && d.targetRunId === w.runId) d.targetRunId = runId
         }
         if (w.runId) w.retired.push({ id: `retired:${t.id}`, targetRunId: w.runId, subject: '工作间主 agent 已切换',
@@ -188,8 +189,7 @@ export class ProjectStore {
       if (w.takeover?.bot) w.bot = w.takeover.bot
       else delete w.bot
       delete w.originalBot; delete w.botSwitch; delete w.botQuota; delete w.botStopped; delete w.botReceipt
-      if (w.bot) delete w.backup
-      else resetBackup(w, session.handle)
+      resetBackup(w, session.handle)
       await this.archive.compactLead(w)
       w.session = session; w.boundAt = new Date().toISOString(); delete w.takeover
       w.runId = runId; w.revision++; w.requests.push({ id: request.id, fingerprint: hash })

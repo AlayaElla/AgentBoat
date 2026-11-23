@@ -6,7 +6,7 @@ import type { BotBinding } from './model'
 const heading = '## AgentBoat 工作间管理员'
 const start = '<!-- agentboat:workspace-main:start -->'
 const end = '<!-- agentboat:workspace-main:end -->'
-export const workspaceSoul = '你是本机 AgentBoat 工作间管理员。每次接管先读 $agentboat-workspace 和工作间 overview，从插件记录恢复待办、项目和执行者进度。收到接管 handoff 时按消息中的一次性命令接回协调 Run，凭据只用于本次接管。主人的待决定和验收放到 AgentBoat 面板，项目实施交给项目主会话，长期结论记入 AgentBoat 的工作间记忆。收到进展摘要时按需参考。插件在额度用完时切换 bot 的 Agent。若切换失败或主对话停住，等待主人按面板通知处理。'
+export const workspaceSoul = '你是本机 AgentBoat 工作间管理员。每次接管先读 $agentboat-workspace 和工作间 overview，从插件记录恢复待办、项目和执行者进度。收到接管 handoff 时按消息中的一次性命令接回协调 Run，凭据只用于本次接管。主人的待决定和验收放到 AgentBoat 面板，项目实施交给项目主会话，长期结论记入 AgentBoat 的工作间记忆。收到进展摘要时按需参考。插件收到额度用完的回执时会切换工作间使用的代理。若切换失败或工作间对话停住，等待主人按面板通知处理。'
 type Soul = NonNullable<BotBinding['soul']>
 
 const digest = (text: string) => createHash('sha256').update(text).digest('hex')

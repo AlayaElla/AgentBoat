@@ -1,14 +1,13 @@
 import { randomUUID } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
 import { createConnection } from 'node:net'
-import { isDeepStrictEqual } from 'node:util'
 import path from 'node:path'
 import { activeUserDataPath, pluginDataPath } from '../scripts/orca-cli.mjs'
 import type { BotBinding, BotTarget } from './model'
 import { updateBotSoul } from './bot-soul'
 
 type Call = (args: string[]) => Promise<any>
-type Rpc = (method: 'bots.list' | 'bots.update', params?: object) => Promise<any>
+type Rpc = (method: 'bots.list' | 'bots.agentChoices' | 'agentSession.createSupport' | 'bots.session.start', params?: object) => Promise<any>
 export const botHomeHandle = (value: unknown): value is string =>
   typeof value === 'string' && /^orca_session_id:[\da-f]{8}(?:-[\da-f]{4}){3}-[\da-f]{12}$/i.test(value)
 
@@ -62,12 +61,34 @@ function target({ id, name, agent, paused }: BotTarget): BotTarget {
 export class LocalBots {
   constructor(private call: Call, private rpc: Rpc = localRpc, private data = pluginDataPath()) {}
   async list(): Promise<BotTarget[]> {
-    const { bots } = await this.call(['bot', 'list'])
+    const { bots, botsEnabled } = await this.rpc('bots.list')
     if (!Array.isArray(bots)) throw Error('本机 bot 列表不完整')
-    return bots.filter(b => !b.server && (!b.hostId || b.hostId === 'local')).map(target)
+    const local = bots.filter(b => b.hostId === 'local' && !b.paused)
+    if (botsEnabled === false || !local.length) return []
+    const agents = await this.agentChoices()
+    return Promise.all(local.map(async row => ({ ...target(row), agents: await this.available(row.folderWorkspaceId, agents) })))
+  }
+  private async agentChoices(): Promise<string[]> {
+    const { agents } = await this.rpc('bots.agentChoices')
+    if (!Array.isArray(agents) || agents.some(agent => typeof agent !== 'string' || !agent)) throw Error('Orca bot 代理列表不完整')
+    return [...new Set(agents)]
+  }
+  private async available(folder: unknown, agents: string[]) {
+    if (typeof folder !== 'string' || !folder) return []
+    const checks = await Promise.all(agents.map(async agent => {
+      const result = await this.rpc('agentSession.createSupport', { worktree: 'folder:' + folder, agent }).catch(() => undefined)
+      return result?.supported === true ? agent : ''
+    }))
+    return checks.filter(Boolean)
   }
   private async record(id: string) {
-    return (await this.rpc('bots.list')).bots.find((b: any) => b.id === id && b.hostId === 'local')
+    const { bots, botsEnabled } = await this.rpc('bots.list')
+    return botsEnabled === false ? undefined : bots.find((b: any) => b.id === id && b.hostId === 'local')
+  }
+  async choices(bot: BotTarget) {
+    const row = await this.record(bot.id)
+    if (!row || row.paused || row.agent !== bot.agent) throw Error('bot 已暂停或发生变化')
+    return this.available(row.folderWorkspaceId, await this.agentChoices())
   }
   async find(id: string) {
     const bot = await this.record(id)
@@ -86,35 +107,28 @@ export class LocalBots {
     if (!folder) throw Error('请手动核对旧 bot 的家目录和 SOUL.md')
     await updateBotSoul(bot.id, folder, this.data, undefined, bot.soul)
   }
-  async home(bot: BotTarget) {
+  private async chats(bot: BotTarget): Promise<{ id: string; home: boolean; closed: boolean }[]> {
     const result = await this.call(['bot', 'chats', '--bot', bot.id])
-    if (!Array.isArray(result.chats)) throw Error('bot 主对话无法核对')
-    const homes = result.chats.filter((c: any) => c.home === true && !c.closed)
+    if (!Array.isArray(result.chats)) throw Error('bot 对话列表无法核对')
+    return result.chats.filter((c: any) => c.closed === false)
+  }
+  async home(bot: BotTarget) {
+    const homes = (await this.chats(bot)).filter(c => c.home === true)
     if (!homes.length) return
     const handle = 'orca_session_id:' + homes[0].id
     if (homes.length !== 1 || !botHomeHandle(handle)) throw Error('bot 主对话标识无效')
     return handle
   }
-  async newHome(id: string) {
-    const result = await this.call(['bot', 'new-chat', '--bot', id])
+  async hasSideChat(bot: BotTarget, handle: string) {
+    return botHomeHandle(handle) && (await this.chats(bot)).some(c => c.home === false && 'orca_session_id:' + c.id === handle)
+  }
+  async startChat(bot: BotTarget, agent: string) {
+    if (!(await this.choices(bot)).includes(agent)) throw Error('该代理在所选 bot 中不可用')
+    // The Home Chat reset retires its previous session and drops unread bot requests.
+    const result = await this.rpc('bots.session.start', { botId: bot.id, agent })
     const handle = 'orca_session_id:' + result.sessionId
-    if (!botHomeHandle(handle)) throw Error('请在 Orca 核对新开的 bot 主对话')
+    if (!botHomeHandle(handle) || !await this.hasSideChat(bot, handle)) throw Error('请在 Orca 核对 bot 对话的启动回执')
     return handle
-  }
-  async original(bot: BotTarget) {
-    const full = await this.record(bot.id)
-    if (!full || full.paused !== false || full.agent !== bot.agent) throw Error('bot 已暂停或发生变化')
-    if (full.launch != null && (typeof full.launch !== 'object' || Array.isArray(full.launch))) throw Error('bot 启动设置无法核对')
-    return { agent: bot.agent, ...(full.launch ? { launch: full.launch as Record<string, unknown> } : {}) }
-  }
-  async update(bot: BotTarget, agent: string, launch?: Record<string, unknown>, expected?: Awaited<ReturnType<LocalBots['original']>>) {
-    if (!['claude', 'codex'].includes(agent)) throw Error('不支持此 agent')
-    const before = await this.original(bot)
-    if (expected && !isDeepStrictEqual(before, expected)) throw Error('切换前 bot 启动设置已变化')
-    await this.rpc('bots.update', { botId: bot.id, updates: { agent, ...(launch ? { launch } : {}) } })
-    const current = (await this.list()).find(b => b.id === bot.id)
-    if (!current || current.paused || current.agent !== agent) throw Error('agent 切换未确认')
-    return current
   }
 }
 

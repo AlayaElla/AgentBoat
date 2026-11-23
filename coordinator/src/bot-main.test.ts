@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os'
 import { testCoordinator } from './test-runtime'
 import { BackupLeads } from './backup-lead'
 import { mainAgent } from './main-agent'
-import { ProjectStore } from './store'
+import { fingerprint, ProjectStore } from './store'
 import { mainTargets, OrcaRuntime, type CoordinatorRuntime } from './runtime'
 import type { AgentSession, BotTarget } from './model'
 
@@ -125,39 +125,43 @@ test('插件 handoff 使用实际收件回执，缺失消息编号时保留未�
   await assert.rejects(() => runtime.botMail('bot:bot-1','接管','模拟','handoff'), /回执/)
 })
 
-test('本机 bot 名单与远端隔离；每次更新先读完整记录，仅写 agent 和原 launch', async () => {
-  let current = { ...initial }
-  const calls: any[] = [], launch = { model: 'original', effort: 'high' }
+test('bot 代理由宿主选项和该 bot 工作区启动支持共同决定，启动独立对话并核实归属', async () => {
+  const current = { ...initial, agent: 'antigravity', hostId: 'local', folderWorkspaceId: 'one' }
+  const calls: any[] = []
+  let opened = second
   const cli = async (args: string[]) => {
-    if (args[1] === 'list') return { bots: [current, { ...current, server: { name: 'Mac' }, id: 'another' }] }
-    assert.equal(args.at(-1), initial.id)
-    if (args[1] === 'new-chat') return { sessionId: second.slice('orca_session_id:'.length) }
-    return { bot: '读取之间发生改名', chats: [{ id: 'side', home: false }, { id: first.slice(16), home: true }] }
+    assert.deepEqual(args, ['bot', 'chats', '--bot', initial.id])
+    return { chats: [{ id: second.slice(16), home: false, closed: false }, { id: first.slice(16), home: true, closed: false }] }
   }
   const api = new LocalBots(cli, async (method, params: any) => {
     calls.push([method, params])
-    if (method === 'bots.list') return { bots: [{ ...current, hostId: 'local', launch, permissionMode: 'keep' }] }
-    current = { ...current, agent: params.updates.agent, name: '新名' }
-    return { bot: current }
+    if (method === 'bots.list') return { bots: [current, { ...current, id: 'elsewhere', hostId: 'mac' }] }
+    if (method === 'bots.agentChoices') return { agents: ['antigravity', 'omp', 'grok'] }
+    if (method === 'agentSession.createSupport') {
+      assert.equal(params.worktree, 'folder:one')
+      return { supported: params.agent !== 'omp' }
+    }
+    return { sessionId: opened.slice(16) }
   })
-  const original = await api.original(initial)
-  assert.deepEqual(await api.list(), [initial])
-  assert.equal(await api.home(initial), first)
-  assert.equal(await api.newHome(initial.id), second)
-  const other = await api.update(initial, 'codex')
-  await api.update(other, original.agent, original.launch)
-  assert.deepEqual(calls.filter(([m]) => m === 'bots.update').map(([,p]) => p), [
-    { botId: initial.id, updates: { agent: 'codex' } }, { botId: initial.id, updates: { agent: 'claude', launch } }])
-  assert.deepEqual(calls.map(([m]) => m), ['bots.list','bots.list','bots.update','bots.list','bots.update'])
+  assert.deepEqual((await api.list()).map(b => [b.id, b.agents]), [[initial.id, ['antigravity', 'grok']]])
+  assert.equal(await api.home(current), first)
+  await assert.rejects(() => api.startChat(current, 'omp'), /不可用/)
+  assert.equal(await api.startChat(current, 'antigravity'), second)
+  opened = first
+  await assert.rejects(() => api.startChat(current, 'grok'), /启动回执/)
+  assert.deepEqual(calls.filter(([method]) => method === 'bots.session.start'), [
+    ['bots.session.start', { botId: initial.id, agent: 'antigravity' }], ['bots.session.start', { botId: initial.id, agent: 'grok' }]])
 })
 
 function botRuntime() {
   const env = { current: { ...initial } as BotTarget | undefined, home: first as string | undefined, owner: null as string | null,
-    soulActions: [] as string[], soulError: '', resetError: false, resetTo: first,
-    generation: 2, reject: false, next: second, warning: '', resets: [] as string[], sends: [] as { target: string; body: string; type: string }[], updates: [] as any[], sessions: [primary, standby], launches: [] as string[] }
+    soulActions: [] as string[], soulError: '', startTo: first as string | undefined, sideChats: new Set<string>(), choices: ['claude', 'codex', 'antigravity', 'grok'],
+    generation: 2, reject: false, next: second, warning: '', sends: [] as { target: string; body: string; type: string }[], starts: [] as string[], sessions: [primary, standby], launches: [] as string[] }
   const inventory = () => ({ sessions: env.sessions, workspaces: [primary, standby].map(s => ({ workspace: s.workspace, path: s.path, name: s.title })) })
   const runtime = {
-    bots: { find: async (id: string) => env.current?.id === id ? env.current : undefined, home: async () => env.home, list: async () => env.current ? [env.current] : [],
+    bots: { find: async (id: string) => env.current?.id === id ? env.current : undefined, home: async () => env.home,
+      list: async () => env.current ? [{ ...env.current, agents: env.choices }] : [],
+      choices: async () => env.choices, hasSideChat: async (_: BotTarget, handle: string) => env.sideChats.has(handle),
       writeSoul: async (bot: BotTarget) => {
         env.soulActions.push('write ' + bot.id)
         if (env.soulError) throw Error(env.soulError)
@@ -167,15 +171,12 @@ function botRuntime() {
         if (env.soulError) throw Error(env.soulError)
         env.soulActions.push('remove ' + bot.id)
       },
-      newHome: async (id: string) => {
-        env.soulActions.push('reset ' + id); env.resets.push(id)
-        if (env.resetError) throw Error('reset failed')
-        return env.resetTo
-      },
-      original: async () => ({ agent: 'claude', launch: { model: 'saved' } }),
-      update: async (_: BotTarget, agent: string, launch?: object) => {
-        env.updates.push([agent, launch]); if (env.reject) throw Error('refused')
-        return env.current = { ...initial, agent }
+      startChat: async (bot: BotTarget, agent: string) => {
+        env.soulActions.push(`start ${bot.id} ${agent}`); env.starts.push(agent)
+        if (env.reject) throw Error('refused')
+        const handle = env.startTo ?? env.next
+        env.sideChats.add(handle)
+        return handle
       } },
     botMail: async (target: string, subject: string, body: string, type: string) => {
       env.soulActions.push('mail ' + target)
@@ -213,6 +214,8 @@ async function setup() {
     await store.mutateMessaging(m => { m.feishu = { enabled: true, appId: 'fake', chatIds: ['owner'], senderIds: [] } })
     await poll()
     env.next = second
+    env.startTo = undefined
+    env.starts.length = 0
   }
   return { env, worker, store, backups, main, poll, bind }
 }
@@ -241,7 +244,7 @@ test('bot ignores delivered Feishu mail, uncertain notifications and read questi
   } finally { c.stop(); await worker.deactivate() }
 })
 
-test('先写职责再开主对话、投递并核对收件地址，准备失败时允许取消', async () => {
+test('先写职责再开独立对话，投递并核对收件地址，准备失败时允许取消', async () => {
   const { env, worker, store } = await setup()
   const choose = async () => worker.request('workspace.agent.switch', { mode: 'bot', revision: (await store.workspace()).revision, botId: initial.id })
   const cancel = async () => worker.request('workspace.agent.switch', { mode: 'cancel', revision: (await store.workspace()).revision })
@@ -249,18 +252,18 @@ test('先写职责再开主对话、投递并核对收件地址，准备失败�
     env.soulError = '请修复 SOUL.md 标记'
     await assert.rejects(choose, /SOUL.md/)
     assert.equal((await store.workspace()).takeover, undefined)
-    env.soulError = ''; env.resetError = true
-    assert.match((await choose()).takeover!.error!, /新主对话未确认/)
+    env.soulError = ''; env.reject = true
+    assert.match((await choose()).takeover!.error!, /对话启动未确认/)
     assert.equal(env.sends.length, 0)
     await cancel()
-    env.resetError = false
+    env.reject = false
     const mismatch = await choose()
     assert.equal(mismatch.takeover!.state, 'uncertain')
-    assert.equal(mismatch.takeover!.target.handle, '')
+    assert.equal(mismatch.takeover!.target.handle, first)
     await cancel()
     env.soulActions.length = 0; env.next = first
     assert.equal((await choose()).takeover!.state, 'waiting')
-    assert.deepEqual(env.soulActions, ['write bot-1', 'reset bot-1', 'mail bot:bot-1'])
+    assert.deepEqual(env.soulActions, ['write bot-1', 'start bot-1 claude', 'mail ' + first])
     await cancel()
     assert.equal(env.soulActions.at(-1), 'remove bot-1')
   } finally { await worker.deactivate() }
@@ -271,7 +274,7 @@ test('从原 bot 换到另一个 bot，正式接管通过才清理原职责', as
   try {
     await bind()
     env.current = { ...initial, id: 'bot-2' }
-    env.resetTo = env.next = env.home = second
+    env.next = second
     env.sessions = [{ ...primary, handle: second }, standby]
     await worker.request('workspace.agent.switch', { mode: 'bot', botId: 'bot-2', revision: (await store.workspace()).revision })
     const input = { operation: 'bind' as const, revision: (await store.workspace()).revision, runId: 'run_two', currentRunId: 'run_two',
@@ -290,6 +293,57 @@ test('从原 bot 换到另一个 bot，正式接管通过才清理原职责', as
     assert.ok(result.bot?.soul?.backup)
     await worker.request('workspace.agent', input)
     assert.equal(env.soulActions.filter(s => s === 'remove bot-1').length, 1)
+  } finally { await worker.deactivate() }
+})
+
+test('Antigravity 可绑定为工作间 bot，同一 bot 可用其他宿主代理接回原 Run', async () => {
+  const { env, worker, store, backups, main, bind } = await setup()
+  try {
+    env.current!.agent = 'antigravity'
+    env.sessions[0] = { ...primary, agent: 'antigravity' }
+    await bind()
+    const choose = async (agent: string) => worker.request('workspace.agent.switch', { mode: 'bot', revision: (await store.workspace()).revision, botId: initial.id, agent })
+    await assert.rejects(() => choose('kimi'), /没有可切换/)
+    assert.deepEqual(env.starts, [])
+    assert.equal((await choose('grok')).switchingBotAgent, 'grok')
+    await main.deliver('run_bot', { id: 'pending', subject: '留言', body: '继续处理', state: 'pending' })
+    assert.deepEqual(env.starts, ['grok'])
+    assert.ok(env.sideChats.has(first))
+    const sent = env.sends.at(-1)!
+    assert.equal(sent.target, second)
+    env.sessions.push({ ...primary, handle: second, agent: 'grok' })
+    const take = { action: 'take' as const, caller: second, runId: 'run_bot', token: sent.body.split(' ').at(-1)! }
+    assert.deepEqual(await backups.command(take), { useRun: 'run_bot' })
+    env.owner = second; env.generation++
+    assert.deepEqual(await backups.command(take), { done: true })
+    await main.flushRetired()
+    assert.equal(env.sends.find(s => s.body === '继续处理')?.target, 'run:run_bot')
+    const saved = await worker.request('workspace.agent', { operation: 'read' })
+    assert.equal(saved.bot?.agent, 'grok')
+    assert.equal(saved.session?.handle, second)
+    assert.equal(saved.switchingBotAgent, undefined)
+    assert.equal(env.current!.agent, 'antigravity')
+  } finally { await worker.deactivate() }
+})
+
+test('旧版已经投递的 bot Home 接管请求可在升级后接回原 Run', async () => {
+  const { env, worker, store, backups, bind } = await setup()
+  try {
+    await bind()
+    env.current!.agent = 'codex'; env.home = second
+    env.sessions.push({ ...primary, handle: second, agent: 'codex' })
+    await store.mutateWorkspace(w => {
+      delete w.bot!.side
+      w.botSwitch = { cycle: 'old', oldHome: first, agent: 'codex', until: Date.now() - 1,
+        credential: fingerprint('issued'), generation: env.generation, recipient: second, returning: false }
+    })
+    env.owner = second; env.generation++
+    await backups.inventoryStatus(await store.workspace(), true)
+    assert.ok((await store.workspace()).botStopped)
+    assert.deepEqual(await backups.command({ action: 'take', caller: second, runId: 'run_bot', token: 'issued' }), { done: true })
+    assert.equal((await store.workspace()).session?.handle, second)
+    assert.equal((await store.workspace()).botStopped, undefined)
+    assert.deepEqual(env.starts, [])
   } finally { await worker.deactivate() }
 })
 
@@ -325,10 +379,11 @@ test('面板绑定、无需备用、切换宽限、凭据接回原 Run、到点�
     assert.ok((await store.workspace()).botSwitch)
     await confirm(second, 'codex')
     env.sessions[0] = { ...env.sessions[0], state: 'working' }
-    await poll(); assert.equal(env.updates.length, 1)
+    await poll(); assert.equal(env.starts.length, 1)
     env.sessions[0].state = 'done'; env.next = third
     await poll(); await confirm(third, 'claude')
-    assert.deepEqual(env.updates, [['codex', undefined], ['claude', { model: 'saved' }]])
+    assert.deepEqual(env.starts, ['codex', 'claude'])
+    assert.equal(env.current!.agent, 'claude')
     assert.equal((await store.workspace()).originalBot, undefined)
     assert.equal((await store.messaging()).deliveries.filter(d => d.external?.chatId === 'owner').length, 2)
   } finally { await worker.deactivate() }
@@ -346,7 +401,7 @@ test('同名和改名按 ID 识别，额度恢复时间未知时等主人，面�
     await main.deliver('run_bot', { id: 'request', subject: '请处理', body: '请处理', state: 'pending' })
     env.warning = ''
     await poll()
-    assert.equal(env.sends.at(-1)?.target, 'bot:bot-1')
+    assert.equal(env.sends.at(-1)?.target, second)
     const token = env.sends.at(-1)!.body.split(' ').at(-1)!
     env.home = second; env.owner = second; env.generation++
     env.sessions = [{ ...primary, handle: second, agent: 'codex' }, standby]
@@ -354,7 +409,7 @@ test('同名和改名按 ID 识别，额度恢复时间未知时等主人，面�
     await backups.command(input)
     assert.deepEqual(await backups.command(input), { done: true })
     await poll()
-    assert.equal(env.updates.length, 1)
+    assert.equal(env.starts.length, 1)
     assert.match((await read()).bot!.result!, /恢复时间未知/)
     env.current = { ...initial, name: '新名字', id: 'different' }
     assert.equal((await read()).bot?.name, initial.name)
@@ -396,7 +451,7 @@ for (const [issue, reason] of [
     assert.equal(botSwitch, undefined)
     assert.equal(botStopped, true)
     assert.match(bot!.result!, new RegExp(reason))
-    assert.match(bot!.result!, /等待主人.*设置 → Bots → 统筹 → Agent.*面板切回普通会话/)
+    assert.match(bot!.result!, /等待主人.*为 统筹 选择可用代理.*切回普通会话/)
     assert.deepEqual((await store.messaging()).deliveries.filter(d => d.external?.chatId === 'owner').map(d => d.body), [bot!.result])
     const count = env.sends.length
     await main.deliver('run_bot', { id: 'later', body: '新事项', subject: '待处理', state: 'pending' })

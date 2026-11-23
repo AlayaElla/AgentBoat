@@ -1242,7 +1242,7 @@ function backupDescription(binding: WorkspaceBinding) {
 function backupHistory(w: WorkspaceBinding, projectId?: string) {
   const b = w.backup
   if (!b) return null
-  const retry = b.phase === 'failed' ? [
+  const retry = projectId && b.phase === 'failed' ? [
     check('已核对工作区会话，确认重新开备用', !!form['retry-' + b.cycle], v => { form['retry-' + b.cycle] = v; render() }),
     button('重新开备用', () => act(async () => {
       await req('lead.retry', { projectId, revision: w.revision, confirm: true })
@@ -1312,22 +1312,34 @@ function mainPage() {
     catch (e) { error = (e as Error).message }
     await refresh()
   }
-  const bots = (targets?.bots ?? []).filter((b: import('./model').BotTarget) => !b.paused && ['codex','claude'].includes(b.agent))
+  const bots: import('./model').BotTarget[] = targets?.bots ?? []
+  const bot = bots.find(b => b.id === form.Bot) ?? bots.find(b => b.id === w.bot?.id) ?? bots[0]
+  const botAgents = bot?.agents ?? []
+  const currentBot = !!bot && bot.id === w.bot?.id
+  const selected = botAgents.includes(form['Bot 代理']) ? form['Bot 代理'] : botAgents.find(a => a === (currentBot ? w.session?.agent : bot?.agent)) ?? botAgents[0]
+  if (selected) form['Bot 代理'] = selected
+  if (bot) form.Bot = bot.id
+  const switching = !!(w.backup || w.switchingBotAgent)
   const mode = bots.length ? form.mainMode ?? (w.bot ? 'bot' : 'new') : 'new'
   const loadingAgents = targets?.agentWorkspace !== form['工作区']
   const availableAgents = loadingAgents ? null : targets?.availableAgents
   return [el('p', { class: 'any' }, leadDescription(w, '主 agent')), w.bot ? el('p', {}, botStatus(w.bot)) : null,
+    w.switchingBotAgent && !w.botStopped ? callout(`等待 ${agentName(w.switchingBotAgent)} 接管`) : null,
+    w.backup ? callout('原接管正在处理，完成后可更换主 agent') : null,
     w.bot?.soul ? el('p', { class: 'any' }, '已写入职责说明', el('br'), w.bot.soul.backup ? '备份位置：' + w.bot.soul.backup : '原文件不存在，无需备份') : null,
-    backupHistory(w), leadChoices(w, targets?.sessions, switchMain),
+    backupHistory(w), switching ? pendingLead(w.takeover, () => switchMain({ mode: 'cancel' })) : leadChoices(w, targets?.sessions, switchMain),
     active.error && targets ? detailReadState('在线会话') : null,
     bots.length ? tabButtons('切换方式', [{ id: 'bot', name: 'bot' }, { id: 'new', name: '新会话' }], mode, id => { form.mainMode = id; render() }) : null,
     targets ? el('div', { class: 'sec', role: bots.length ? 'tabpanel' : undefined, id: active.key + '-tab' }, mode === 'bot'
-      ? [select('Bot', Object.fromEntries(bots.map((b: import('./model').BotTarget) => [b.id, b.name])), bots[0].id),
-        button('设为主 bot', () => switchMain({ mode: 'bot', botId: form.Bot }), 'primary')]
+      ? [select('Bot', Object.fromEntries(bots.map(b => [b.id, b.name])), bot!.id, () => { delete form['Bot 代理']; render() }),
+        botAgents.length ? select('Bot 代理', Object.fromEntries(botAgents.map(id => [id, agentName(id)])), selected ?? '', () => render()) : callout('该 bot 暂无可启动的代理'),
+        button(currentBot ? '切换代理' : '设为主 bot', () => switchMain({ mode: 'bot', botId: bot!.id, agent: selected }), 'primary',
+          switching || !selected || currentBot && selected === w.session?.agent && !w.botStopped)]
       : [bots.length ? null : el('h2', { class: 'h2' }, '新会话'),
         select('工作区', Object.fromEntries(workspaces.map((s: any) => [s.workspace, s.name + ' · ' + s.path])), targets.agentWorkspace, () => { delete form.Agent; render(); void loadPage().then(render) }),
         availableAgents?.length ? agentSelect(availableAgents) : small(loadingAgents ? '正在读取可用代理…' : catalogIssue(availableAgents)),
-        button('新开一个主 agent', () => switchMain({ mode: 'new', workspace: form['工作区'], agent: form.Agent }), 'primary', !availableAgents?.length)]) : null,
+        button('新开一个主 agent', () => switchMain({ mode: 'new', workspace: form['工作区'], agent: form.Agent }), 'primary', switching || !availableAgents?.length),
+        targets.bots === undefined ? small('无法读取 Orca bot 的可用代理') : null]) : null,
     fold(active.key + '-binding', '绑定详情', () => el('dl', { class: 'kv' }, Object.entries({ Run: w.runId || '未绑定', 会话: w.session?.handle || '未知', 目录: w.session?.path || '未知', 绑定时间: w.boundAt || '未知', 授权边界: w.securityBoundary || '未知' }).map(([k, v]) => [el('dt', {}, k), el('dd', {}, v)])))]
 }
 function settingsPage() {
