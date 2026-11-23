@@ -97,6 +97,7 @@ export const expectedPhases: Record<LeadAction, BackupLead['phase'][]> = {
 export const awaitingLeadControl = (b: BackupLead | undefined, c: NonNullable<Delivery['control']>) =>
   b?.cycle === c.cycle && expectedPhases[c.action].includes(b.phase)
 export const backupInCharge = (b?: BackupLead) => !!b && ['active', 'handoff', 'returning'].includes(b.phase)
+export const workspaceBackupInFlight = (b?: BackupLead) => backupInCharge(b) || b?.phase === 'taking' && !!b.credential
 export interface AgentSession {
   handle: string; title: string; workspace: string; workspaceName: string; path: string; agent: string
   state?: string; stateStartedAt?: number
@@ -114,10 +115,11 @@ export const takeoverActive = (t?: MainTakeover) => !!t && t.state !== 'expired'
 export function waitingForProjectLead(binding?: WorkspaceBinding) {
   return !binding?.runId && takeoverActive(binding?.takeover) ? binding?.takeover : undefined
 }
-export interface BotTarget { id: string; name: string; agent: string; paused: boolean }
+export interface BotTarget { id: string; name: string; agent: string; paused: boolean; agents?: string[] }
 export interface BotBinding {
   id: string; name?: string; agent?: string; paused?: boolean
   soul?: { home: string; backup?: string; padding?: { prefix: string; length: number } }
+  side?: true
   reason?: string; recoveryAt?: number; result?: string
 }
 export type StoredTakeover = MainTakeover & { tokenHash: string; mode?: 'existing' | 'new' | 'bot'; bot?: BotBinding }
@@ -136,6 +138,8 @@ export interface WorkspaceBinding {
   revision: number; runId: string; session?: AgentSession; boundAt?: string
   backup?: BackupLead
   bot?: BotBinding
+  botStopped?: boolean
+  switchingBotAgent?: string
   projectNames?: string[]; takeover?: MainTakeover
   previousNotice?: Delivery['state']
   securityBoundary?: string
@@ -143,10 +147,9 @@ export interface WorkspaceBinding {
 }
 export interface Workspace extends WorkspaceBinding {
   version: 1; requests: { id: string; fingerprint: string }[]
-  botStopped?: boolean
   botReceipt?: { consumed: string; confirmedAt: number }
   originalBot?: { agent: string; launch?: Record<string, unknown> }
-  botSwitch?: { cycle: string; oldHome: string; agent: string; until: number; credential: string; generation: number; recipient?: string; returning: boolean }
+  botSwitch?: { cycle: string; oldHome: string; agent: string; until: number; credential: string; generation: number; recipient?: string; returning: boolean; side?: true; manual?: true }
   botQuota?: { home: string; recoveryAt?: number }
 
   takeover?: StoredTakeover

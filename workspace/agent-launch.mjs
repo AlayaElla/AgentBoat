@@ -8,8 +8,11 @@ import path from 'node:path';
 const sorted = value => value && typeof value === 'object' && !Array.isArray(value)
   ? Object.fromEntries(Object.keys(value).sort().map(key => [key, sorted(value[key])]))
   : value;
-// Identify the previous shipped template by content so edits survive upgrades.
-const legacyCode = '56f70a0f23bdf928129bc1595e7774ac26c70245beca3218f24b52a0f6bc7d83';
+// Exact shipped templates, including installations made before backupAgents existed.
+const legacyCode = new Set([
+  '56f70a0f23bdf928129bc1595e7774ac26c70245beca3218f24b52a0f6bc7d83',
+  'eec41a8178853129932232b33af900a66dace7e22c9c1f04d42a61f433ea5408',
+]);
 
 export function projectTemplate(id) {
   if (typeof id !== 'string' || !/^[a-zA-Z0-9_-]{1,100}$/.test(id)) throw new Error('模板编号只允许字母、数字、下划线和连字符');
@@ -17,7 +20,7 @@ export function projectTemplate(id) {
   let value;
   try { value = JSON.parse(readFileSync(path.join(directory, 'templates', id + '.json'), 'utf8').replace(/^\uFEFF/, '')); }
   catch (error) { if (id === 'code' && error.code === 'ENOENT') return structuredClone(code); throw error; }
-  if (id === 'code' && createHash('sha256').update(JSON.stringify(sorted(value))).digest('hex') === legacyCode) return structuredClone(code);
+  if (id === 'code' && legacyCode.has(createHash('sha256').update(JSON.stringify(sorted(value))).digest('hex'))) return structuredClone(code);
   return value;
 }
 
@@ -44,14 +47,6 @@ export function projectLeadAgents(settings) {
 }
 
 export const backupDefaults = primary => code.backupAgents[primary === 'codex' ? 'claude' : 'codex'];
-
-export function availableBackup(primary, installed) {
-  const preferred = backupDefaults(primary);
-  if (installed.some(a => a.id === preferred.agent)) return preferred;
-  const others = installed.filter(a => a.id !== primary);
-  const choice = others.find(a => a.default) ?? others[0];
-  if (choice) return Object.hasOwn(code.backupAgents, choice.id) ? code.backupAgents[choice.id] : { agent: choice.id };
-}
 
 export function agentFlags(role) {
   return ['--agent', role.agent, ...(role.model ? ['--model', role.model] : []), ...(role.effort ? ['--effort', role.effort] : []), ...(role.surface ? ['--surface', role.surface] : [])];

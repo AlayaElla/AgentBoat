@@ -5,7 +5,7 @@ import { randomBytes, randomUUID } from 'node:crypto'
 import { existsSync } from 'node:fs'
 import { promptClientPath } from '../scripts/orca-cli.mjs'
 import type { OrcaWorkerApi } from 'orca/worker'
-import { defaultAgent, type AgentSession, type Delivery, type LeadSwitch, type MainTakeover, type Project, type StoredTakeover, type WorkspaceBinding } from './model'
+import { defaultAgent, workspaceBackupInFlight, type AgentSession, type Delivery, type LeadSwitch, type MainTakeover, type Project, type StoredTakeover, type WorkspaceBinding } from './model'
 import type { CoordinatorRuntime } from './runtime'
 import type { AgentLaunch } from '../../workspace/agent-launch.mjs'
 import { ProjectStore, fail, fingerprint, takeoverActive, text, revision } from './store'
@@ -60,12 +60,16 @@ export async function switchLead(runtime: CoordinatorRuntime, input: LeadSwitch,
     return
   }
   const bot = input.mode === 'bot' && options.role === 'workspace' && input.botId ? await runtime.bots?.find(input.botId) : undefined
-  if (input.mode === 'bot' && (!bot || bot.paused || !['claude','codex'].includes(bot.agent))) fail('所选 bot 不可用')
+  if (input.mode === 'bot' && (!bot || bot.paused)) fail('所选 bot 不可用')
   if (!bot && input.mode !== 'existing' && input.mode !== 'new') fail('请选择切换方式')
   const targets = await options.targets()
   const existing = input.mode === 'existing'
   let target: AgentSession | undefined
-  if (bot) target = { handle: '', title: bot.name, workspace: '', workspaceName: '', path: '', agent: bot.agent, online: 'unknown' }
+  if (bot) {
+    const agent = input.agent ?? bot.agent
+    if (!(await runtime.bots!.choices(bot)).includes(agent)) fail('该代理在所选 bot 中不可用')
+    target = { handle: '', title: bot.name, workspace: '', workspaceName: '', path: '', agent, online: 'unknown' }
+  }
   else if (existing) target = targets.sessions.find(s => s.handle === input.handle && s.online === 'online')
   else {
     const w = targets.workspaces.find(w => w.workspace === input.workspace)
@@ -94,7 +98,7 @@ export async function switchLead(runtime: CoordinatorRuntime, input: LeadSwitch,
       const priorBot = prior?.bot?.id === bot.id ? prior.bot : w.bot
       try {
         const soul = await runtime.bots!.writeSoul(bot, targets.workspaces, priorBot?.id === bot.id ? priorBot.soul : undefined)
-        binding = { id: bot.id, name: bot.name, soul }
+        binding = { id: bot.id, name: bot.name, soul, side: true }
       } catch (e) {
         if (!prior || w.takeover) throw e
         // The previous pending bot was already cleaned up. Persist its cancellation.
@@ -109,18 +113,25 @@ export async function switchLead(runtime: CoordinatorRuntime, input: LeadSwitch,
   if (preparationError) throw preparationError
   const prompt = `${options.prompt(token, expiresAt)}\n\n${roleReminder[options.role]}`
   let handle: string
-  let newHome: string | undefined
+  let botChat: string | undefined
   try {
-    if (bot) newHome = await runtime.bots!.newHome(bot.id)
-    handle = bot ? (await runtime.botMail!('bot:' + bot.id, '请接管工作间主 agent', prompt, 'handoff')).recipient
+    if (bot) {
+      botChat = await runtime.bots!.startChat(bot, target.agent)
+      if (!botHomeHandle(botChat)) fail('bot 对话的启动回执无效')
+      await mutate(w => {
+        if (w.takeover?.id !== id) fail('接管请求已变化')
+        w.takeover.target.handle = botChat!
+      })
+    }
+    handle = botChat ? (await runtime.botMail!(botChat, '请接管工作间主 agent', prompt, 'handoff')).recipient
       : existing ? (await runtime.requestTakeover(target.handle, prompt, options.subject), target.handle)
       : await runtime.launchMain(target.workspace, target.agent, prompt, options.launch?.agent === target.agent ? options.launch : undefined)
-    if (bot && (!botHomeHandle(handle) || handle !== newHome)) fail('未确认新主对话的收件地址')
+    if (botChat && handle !== botChat) fail('未确认 bot 对话的收件地址')
   } catch {
     await mutate(w => {
       if (w.takeover?.id !== id) return
       w.takeover.state = 'uncertain'
-      w.takeover.error = bot && !newHome ? '职责说明已写入，新主对话未确认。请核对 bot 主对话后取消并重试' : '接管请求未能确认送达，请核对目标会话后重试'
+      w.takeover.error = bot && !botChat ? '职责说明已写入，bot 对话启动未确认。请在 Orca 核对该 bot 的对话' : '接管请求未能确认送达，请核对目标会话后重试'
     })
     changed()
     return
@@ -142,8 +153,9 @@ export function mainAgent(orca: OrcaWorkerApi, store: ProjectStore, runtime: Coo
     const activity = sample?.ok && sample.main?.handle === s?.handle ? sample.main?.status : undefined
     const online = sample ? activity?.state === 'offline' ? 'offline' : activity && activity.state !== 'unknown' ? 'online' : 'unknown' : s ? await runtime.targets().then(t => t.sessions.find(x => x.handle === s.handle)?.online ?? 'offline' as const).catch(() => 'unknown' as const) : 'unknown'
     const current = w.bot && await runtime.bots?.find(w.bot.id).catch(() => undefined)
-    return { revision: w.revision, runId: w.runId, ...(w.bot ? { bot: { ...w.bot, ...current } } : {}),
-      ...(w.backup ? { backup: backupView(w.backup) } : {}), securityBoundary: mainSecurityBoundary,
+    return { revision: w.revision, runId: w.runId, ...(w.bot ? { bot: { ...w.bot, ...current, ...(w.bot.side && s ? { agent: s.agent } : {}) } } : {}),
+      ...(w.botSwitch ? { switchingBotAgent: w.botSwitch.agent } : {}), ...(w.botStopped ? { botStopped: true } : {}),
+      ...(workspaceBackupInFlight(w.backup) ? { backup: backupView(w.backup) } : {}), securityBoundary: mainSecurityBoundary,
       ...(s ? { session: { ...s, online: w.botSwitch ? 'unknown' : online } } : {}), ...(w.boundAt ? { boundAt: w.boundAt } : {}),
       ...(w.runId ? { projectNames: (list ?? await projects()).filter(p => !p.hidden && p.runId === w.runId).map(p => p.ref.name) } : {}),
       ...(previous ? { previousNotice: previous.state } : {}),
@@ -211,7 +223,8 @@ export function mainAgent(orca: OrcaWorkerApi, store: ProjectStore, runtime: Coo
       if (pending) {
         if (!pending.soul) fail('此接管请求尚未写入职责说明，请在面板重新选择 bot')
         const current = await runtime.bots?.find(pending.id)
-        if (!current || current.paused || current.agent !== session.agent || await runtime.bots!.home(current) !== caller) fail('当前会话不是所选 bot 的主对话')
+        if (!current || current.paused || !(pending.side ? await runtime.bots!.hasSideChat(current, caller)
+          : current.agent === session.agent && await runtime.bots!.home(current) === caller)) fail('当前会话不属于所选 bot 的接管对话')
       }
       await store.bindWorkspace(revision(input.revision), runId, { id: text(input.requestId, '请求编号', 200), input }, session, input.token, input.checkOnly, runtime.bots)
       if (input.checkOnly) return { ...await read(), check: { canTakeOver: true, message: '可以接管；本次只核实，凭据和绑定均未改变', runId, session } }
@@ -228,9 +241,20 @@ export function mainAgent(orca: OrcaWorkerApi, store: ProjectStore, runtime: Coo
     return { ...t, agentWorkspace, availableAgents, ...(bots ? { bots } : {}), sessions: t.sessions.filter(s => s.online === 'online') }
   })
   orca.panels.handle('workspace.agent.switch', async input => {
+    const w = await store.workspace()
+    const expected = revision(input.revision)
+    if (w.revision !== expected) fail('工作间已更新，请刷新后再提交')
+    if (input.mode === 'bot' && w.bot && w.bot.id === input.botId) {
+      await backups.chooseBotAgent(w, w.bot.id, text(input.agent, '代理', 100))
+      await flushRetired()
+      return read()
+    }
     await switchLead(runtime, input, {
       role: 'workspace',
-      targets: () => runtime.targets(), mutate: (update, expected) => store.mutateWorkspace(update, expected), changed,
+      targets: () => runtime.targets(), mutate: (update, expected) => store.mutateWorkspace(row => {
+        if (input.mode !== 'cancel' && (row.botSwitch || workspaceBackupInFlight(row.backup))) fail('请等当前工作间接管结束')
+        return update(row)
+      }, expected), changed,
       prompt: (token, expiresAt) => `开启工作间管理。主人已在项目协作面板发起切换，请由当前会话接管工作间主 agent。先读 $agentboat-workspace；自己创建新的协调 Run。接管脚本绝对路径：${JSON.stringify(promptClientPath())}\n用 node 调用此路径的 main-read，再以最新 revision 和唯一 requestId 调用 main-bind --check；检查通过后重读 main-read，以最新 revision 和新的 requestId 正式 main-bind。main-bind 从标准输入接收 JSON；caller 由脚本从当前 Orca 环境取得，不要填写别人的会话或 Run。一次性接管凭据：${token}\n有效至：${expiresAt}\n仅用于本次接管，不保存到文件或记忆，不转发。绑定成功后先读取 overview 补齐之前的待办；已经送达原主 agent 的通知不会补发。`
     })
     await flushRetired()

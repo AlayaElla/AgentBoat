@@ -324,11 +324,11 @@ async function setup(options = {}, hub) {
       if (name === 'workspace.connections' && options.hermes && input.operation === 'read') {
         return { connection: hermes, a2a: { url: 'http://127.0.0.1:1234', port: 5678, revision: 1, entries: [] } };
       }
-      if (name === 'workspace.agent.targets') return { agentWorkspace: 'identity:test', availableAgents, ...(options.bot || options.availableBot ? { bots: [{ id: 'new-bot', name: '备用管家', agent: 'claude', paused: false }] } : options.emptyBots ? { bots: [] } : {}), sessions: clone(sessions), workspaces: [{ workspace: 'identity:test', name: '示例工作区', path: '/test/工作区 with spaces' }] };
+      if (name === 'workspace.agent.targets') return { agentWorkspace: 'identity:test', availableAgents, ...(options.bot || options.availableBot ? { bots: [{ id: 'new-bot', name: '工作管家', agent: 'antigravity', paused: false, agents: ['antigravity', 'grok'] }] } : options.emptyBots ? { bots: [] } : {}), sessions: clone(sessions), workspaces: [{ workspace: 'identity:test', name: '示例工作区', path: '/test/工作区 with spaces' }] };
       if (name === 'workspace.agent.switch') {
         if (input.revision !== workspace.revision) throw Error('工作间已更新');
         workspace.revision++;
-        if (input.mode === 'bot') workspace.takeover = { id: 'selection', target: { title: '备用管家' }, state: 'waiting', expiresAt: new Date(Date.now() + 600000).toISOString() };
+        if (input.mode === 'bot') workspace.takeover = { id: 'selection', target: { title: '工作管家' }, state: 'waiting', expiresAt: new Date(Date.now() + 600000).toISOString() };
         else if (input.mode === 'cancel') delete workspace.takeover;
         else workspace.takeover = { id: String(workspace.revision), target: input.mode === 'new' ? { title: '新的 ' + input.agent + ' 会话' } : sessions.find(s => s.handle === input.handle), state: 'waiting', expiresAt: new Date(Date.now() + 600000).toISOString() };
         if (window.fixture.delaySwitch) { window.fixture.delaySwitch = false; window.fixture.emit(); await new Promise(r => { window.fixture.finishSwitch = r; }); }
@@ -512,10 +512,12 @@ try {
     assert.equal(await layer.getByLabel('Bot', { exact: true }).count(), 0);
     assert.equal(await layer.getByRole('button', { name: '设为主 bot' }).count(), 0);
     await botTab.click();
+    assert.equal(await layer.getByLabel('Bot 代理').inputValue(), 'antigravity');
+    assert.deepEqual(await layer.getByLabel('Bot 代理').locator('option').evaluateAll(options => options.map(o => o.value)), ['antigravity', 'grok']);
     await layer.getByRole('button', { name: '设为主 bot' }).click();
-    await currentLayer().getByText(/正在等 备用管家 接管/).waitFor();
+    await currentLayer().getByText(/正在等 工作管家 接管/).waitFor();
     const choice = await page.evaluate(() => fixture.calls.find(c => c.name === 'workspace.agent.switch').input);
-    assert.deepEqual(choice, { revision: 1, mode: 'bot', botId: 'new-bot' });
+    assert.deepEqual(choice, { revision: 1, mode: 'bot', botId: 'new-bot', agent: 'antigravity' });
   });
   await test('普通主会话默认选新会话，可切换到本机 bot', async () => {
     await setup({ availableBot: true });
@@ -1170,22 +1172,17 @@ try {
     }
   });
   else console.log('SKIP v8 mockup pages: private docs/design/workspace-mockup-v8.html is absent');
-  await test('主会话卡片区分单 agent 和故障，只有确认后才能重开备用', async () => {
+  await test('工作间旧接管期间暂停切换，且没有重开备用操作', async () => {
     await setup({ width: 400 });
-    await page.evaluate(() => { fixture.workspace.backup = { phase: 'single', history: [], cycle: 'c', agent: 'codex' }; fixture.emit(); });
+    await page.evaluate(() => { fixture.workspace.backup = { phase: 'returning', history: [], cycle: 'c', agent: 'codex' }; fixture.emit(); });
     await page.getByRole('button', { name: '设置', exact: true }).click();
     await page.getByRole('button', { name: '管理主 agent', exact: true }).click();
-    await currentLayer().getByText(/只有一种 agent，不配备用/).waitFor();
+    await currentLayer().getByText(/原接管正在处理/).waitFor();
     assert.equal(await currentLayer().getByRole('button', { name: '重新开备用' }).count(), 0);
-    await page.evaluate(() => { Object.assign(fixture.workspace.backup, { phase: 'failed', problem: '启动回执待核对' }); fixture.emit(); });
-    await currentLayer().getByText(/没有备用：启动回执待核对/).waitFor();
-    const retry = currentLayer().getByRole('button', { name: '重新开备用' });
-    assert.equal(await retry.isDisabled(), true);
-    await currentLayer().getByRole('checkbox', { name: /确认重新开备用/ }).check();
-    await retry.click();
-    await currentLayer().getByText(/备用 Codex · 待命/).waitFor();
-    assert.equal(await currentLayer().getByText(/没有备用/).count(), 0);
-    assert.equal(await page.evaluate(() => fixture.calls.filter(c => c.name === 'lead.retry').length), 1);
+    assert.equal(await currentLayer().getByRole('button', { name: '新开一个主 agent' }).isDisabled(), true);
+    await page.evaluate(() => { delete fixture.workspace.backup; fixture.emit(); });
+    await currentLayer().getByText(/原接管正在处理/).waitFor({ state: 'detached' });
+    assert.equal(await currentLayer().getByRole('button', { name: '新开一个主 agent' }).isEnabled(), true);
   });
   for (const unbound of [true, false]) {
     await setup({ unbound, emptyBots: unbound, width: 300 });

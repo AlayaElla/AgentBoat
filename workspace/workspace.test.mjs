@@ -30,6 +30,10 @@ test('初始化不覆盖模板；记忆按来源隔离、带日期、重复记�
     writeFileSync(custom, '\uFEFF' + JSON.stringify(old));
     assert.equal(api.template('code').mainAgent.agent, 'codex');
     assert.equal(JSON.parse(readFileSync(custom, 'utf8').slice(1)).mainAgent.agent, 'claude');
+    old.mainAgent = old.backupAgents.claude;
+    delete old.backupAgents;
+    writeFileSync(custom, JSON.stringify(old));
+    assert.equal(api.template('code').mainAgent.agent, 'codex');
     value.name = '自定义';
     value.mainAgent = { agent: 'antigravity' };
     writeFileSync(custom, JSON.stringify(value));
