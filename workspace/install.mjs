@@ -76,20 +76,23 @@ function hookPlans(home, codexHome, repository, inspect = false) {
   return [claude, codex];
 }
 
-function skills(home, repository) {
+export function skillTargets(home) {
   return ['agentboat-workspace', 'orca-project-coordinator'].map(name => ({
-    name, source: path.join(repository, name === 'agentboat-workspace' ? 'workspace' : 'coordinator', 'skill', name),
-    target: path.join(home, '.agents/skills', name), link: path.join(home, '.claude/skills', name)
+    name, source: path.join(name === 'agentboat-workspace' ? 'workspace' : 'coordinator', 'skill', name),
+    installed: path.join(home, '.agents/skills', name), claudeLink: path.join(home, '.claude/skills', name),
+    antigravity: path.join(home, '.gemini/config/skills', name)
   }));
 }
 
 const stat = file => lstatSync(file, { throwIfNoEntry: false });
-function skillTree(directory, repository) {
-  const tree = new Map();
+function skillTree(directory, repository, previous) {
+  const tree = new Map(previous);
   for (const entry of readdirSync(directory, { withFileTypes: true })) {
     const file = path.join(directory, entry.name);
-    if (entry.isDirectory()) tree.set(entry.name, skillTree(file, repository));
-    else if (entry.isFile()) {
+    if (entry.isDirectory()) {
+      const existing = tree.get(entry.name);
+      tree.set(entry.name, skillTree(file, repository, existing instanceof Map ? existing : undefined));
+    } else if (entry.isFile()) {
       const bytes = readFileSync(file);
       tree.set(entry.name, repository && entry.name.endsWith('.md')
         ? Buffer.from(bytes.toString('utf8').replaceAll('{{AGENTBOAT_REPO}}', () => repository)) : bytes);
@@ -113,37 +116,51 @@ function writeTree(directory, tree) {
 
 export function install(home = os.homedir(), codexHome = path.join(home, '.codex')) {
   const repository = installationRoot().replaceAll('\\', '/');
-  const installed = skills(home, repository);
-  // Refuse a foreign directory before changing the installed skill; never request admin rights.
-  for (const { target, link } of installed) {
-    const entry = stat(link);
-    if (entry && (!entry.isSymbolicLink() || realpathSync(link) !== realpathSync(target))) throw new Error(`Claude 位置已有其他内容，未覆盖：${link}`);
-    if (stat(target) && !stat(target).isDirectory()) throw new Error(`安装目标必须是普通目录：${target}`);
+  const targets = skillTargets(home);
+  for (const { name, installed, claudeLink, antigravity } of targets) {
+    const entry = stat(claudeLink);
+    if (entry && (!entry.isSymbolicLink() || realpathSync(claudeLink) !== realpathSync(installed))) throw Error(`Claude 位置已有其他内容，未覆盖：${claudeLink}`);
+    if (stat(installed) && !stat(installed).isDirectory()) throw Error(`安装目标必须是普通目录：${installed}`);
+    if (stat(antigravity)) {
+      const owner = skillOwner(antigravity, name);
+      const previous = skillOwner(installed, name);
+      if (!owner || ![repository, previous].some(root => root && sameProfile(owner, root)))
+        throw Error(`Antigravity 位置已有其他内容，未覆盖：${antigravity}`);
+    }
   }
   const hooks = hookPlans(home, codexHome, repository).map(plan => plan());
-  for (const { source, target, link } of installed) {
-    writeTree(target, skillTree(source, repository));
-    mkdirSync(path.dirname(link), { recursive: true });
-    if (!existsSync(link)) symlinkSync(target, link, process.platform === 'win32' ? 'junction' : 'dir');
+  for (const { source, installed, claudeLink, antigravity } of targets) {
+    const tree = skillTree(path.join(repository, source), repository);
+    writeTree(installed, tree);
+    mkdirSync(path.dirname(claudeLink), { recursive: true });
+    if (!existsSync(claudeLink)) symlinkSync(installed, claudeLink, process.platform === 'win32' ? 'junction' : 'dir');
+    // agy ignores skill directory junctions on Windows.
+    writeTree(antigravity, tree);
   }
   hooks.forEach(plan => plan.write());
-  return { repository, skills: installed.map(({ target, link }) => ({ installed: target, claudeLink: link })),
+  return { repository, skills: targets.map(({ installed, claudeLink, antigravity }) => ({ installed, claudeLink, antigravity })),
     codexHooks: path.join(codexHome, 'hooks.json'), codexTrust: '在 Codex CLI 输入 /hooks，查看并信任三条 AgentBoat hook。' };
 }
-function ownedSkill(directory, name, repository) {
+function skillOwner(directory, name) {
   const file = path.join(directory, 'SKILL.md');
-  if (!stat(directory)?.isDirectory() || !stat(file)?.isFile()) return false;
+  if (!stat(directory)?.isDirectory() || !stat(file)?.isFile()) return;
   const text = readFileSync(file, 'utf8').replaceAll('\r\n', '\n');
   const frontmatter = /^---\n([\s\S]*?)\n---(?:\n|$)/.exec(text)?.[1];
   // Profiles share the skill directory; setup embeds the selected profile's entry.
   const root = /"([^"\n]+)\/coordinator\/scripts\/client\.mjs"/.exec(text)?.[1];
-  return frontmatter?.split('\n').includes('name: ' + name) && root && sameProfile(root, repository);
+  if (frontmatter?.split('\n').includes('name: ' + name) && root && path.isAbsolute(root)) return root;
+}
+
+function ownedSkill(directory, name, repository) {
+  const root = skillOwner(directory, name);
+  return root && sameProfile(root, repository);
 }
 
 export function refreshInstalledSkills(entry, home = os.homedir(), codexHome = process.env.CODEX_HOME || path.join(home, '.codex')) {
   const repository = entry.replaceAll('\\', '/');
   let configured = false, backup;
-  for (const { name, source, target } of skills(home, repository)) {
+  const targets = skillTargets(home).flatMap(skill => [skill.installed, skill.antigravity].map(target => ({ ...skill, target })));
+  for (const { name, source, target, antigravity } of targets) {
     try {
       const parent = path.dirname(target), prefix = '.' + name + '-refresh-';
       if (!stat(parent)?.isDirectory()) continue;
@@ -162,8 +179,8 @@ export function refreshInstalledSkills(entry, home = os.homedir(), codexHome = p
       }
       if (!ownedSkill(target, name, repository)) continue;
       configured = true;
-      const desired = skillTree(source, repository);
       const original = skillTree(target);
+      const desired = skillTree(path.join(repository, source), repository, target === antigravity ? original : undefined);
       if (isDeepStrictEqual(original, desired)) continue;
       if (!backup) {
         const root = path.join(home, '.agentboat/backups');
@@ -175,7 +192,8 @@ export function refreshInstalledSkills(entry, home = os.homedir(), codexHome = p
         const next = path.join(stage, 'next');
         writeTree(next, desired);
         if (!ownedSkill(next, name, repository)) throw Error('新版 SKILL.md 的身份或入口不匹配');
-        cpSync(target, path.join(backup, name), { recursive: true, verbatimSymlinks: true });
+        const archive = target === antigravity ? path.join(backup, 'antigravity', name) : path.join(backup, name);
+        cpSync(target, archive, { recursive: true, verbatimSymlinks: true });
         renameSync(target, old);
         try {
           if (!isDeepStrictEqual(skillTree(old), original)) throw Error('skill 在刷新期间已更改');

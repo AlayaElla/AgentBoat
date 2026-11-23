@@ -63,22 +63,28 @@ test('one setup survives two worker upgrades, old version pruning and separate O
   await run([path.join(stable, 'setup.mjs')], 'yes\n');
   const skill = path.join(home, '.agents/skills/agentboat-workspace/SKILL.md');
   const projectSkill = path.join(home, '.agents/skills/orca-project-coordinator/SKILL.md');
+  const agySkill = path.join(home, '.gemini/config/skills/agentboat-workspace/SKILL.md');
+  const agyProjectSkill = path.join(home, '.gemini/config/skills/orca-project-coordinator/SKILL.md');
   const hook = JSON.parse(readFileSync(path.join(home, '.claude/settings.json'))).hooks.Stop[0].hooks[0].args[0];
   assert.equal(hook, path.join(stable, 'workspace/harness/hook.mjs'));
-  for (const file of [skill, projectSkill, path.join(home, '.codex/hooks.json')])
+  for (const file of [skill, projectSkill, agySkill, agyProjectSkill, path.join(home, '.codex/hooks.json')])
     assert.ok(readFileSync(file, 'utf8').includes(stable.replaceAll('\\', '/')));
   const second = version('b');
   const guide = path.join(second, 'workspace/skill/agentboat-workspace/SKILL.md');
   writeFileSync(guide, readFileSync(guide, 'utf8') + '\nfixture upgrade');
   await activateEntry(second);
   assert.match(readFileSync(skill, 'utf8'), /fixture upgrade$/);
+  assert.deepEqual(readFileSync(agySkill), readFileSync(skill));
   const oldSkill = readFileSync(projectSkill, 'utf8').replaceAll(stable.replaceAll('\\', '/'), first.replaceAll('\\', '/'));
   writeFileSync(projectSkill, oldSkill);
+  writeFileSync(agyProjectSkill, oldSkill);
   const latest = version('c');
   rmSync(first, { recursive: true });
   await activateEntry(latest);
   assert.doesNotMatch(readFileSync(skill, 'utf8'), /fixture upgrade$/);
+  assert.deepEqual(readFileSync(agySkill), readFileSync(skill));
   assert.equal(readFileSync(projectSkill, 'utf8'), oldSkill);
+  assert.equal(readFileSync(agyProjectSkill, 'utf8'), oldSkill);
   assert.equal(realpathSync(stable), latest);
   assert.ok(!existsSync(path.join(temp, 'other-profile/agentboat-current')));
   const docs = ['workspace/README.md', 'coordinator/LINKS.md', 'coordinator/skill/orca-project-coordinator/references/bridge.md'];

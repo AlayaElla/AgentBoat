@@ -14,15 +14,21 @@ const agentboat = path.join(home, '.agentboat');
 const claude = path.join(home, '.claude', 'settings.json');
 const hooks = path.join(codex, 'hooks.json');
 const skill = path.join(home, '.agents', 'skills', 'agentboat-workspace', 'SKILL.md');
+const agySkill = path.join(home, '.gemini/config/skills/agentboat-workspace/SKILL.md');
+const personal = path.join(home, '.gemini/config/skills/personal/SKILL.md');
 const settings = { hooks: { Stop: [{ hooks: [{ type: 'command', command: 'existing-test-hook' }] }] } };
 const original = JSON.stringify(settings);
-for (const file of [claude, hooks, skill]) mkdirSync(path.dirname(file), { recursive: true });
+for (const file of [claude, hooks, skill, personal]) mkdirSync(path.dirname(file), { recursive: true });
 writeFileSync(claude, original);
 writeFileSync(hooks, original);
 writeFileSync(skill, 'previous skill');
+writeFileSync(personal, 'personal skill');
 
-assert.match(run('\n'), /已取消/);
+const preview = run('\n');
+assert.match(preview, /已取消/);
+assert.ok(preview.includes(path.dirname(agySkill)));
 assert.equal(existsSync(agentboat), false);
+assert.equal(existsSync(agySkill), false);
 assert.equal(readFileSync(claude, 'utf8'), original);
 assert.equal(readFileSync(hooks, 'utf8'), original);
 assert.equal(readFileSync(skill, 'utf8'), 'previous skill');
@@ -33,13 +39,20 @@ assert.equal(readFileSync(path.join(backups, backup, '.claude/settings.json'), '
 assert.equal(readFileSync(path.join(backups, backup, '.codex/hooks.json'), 'utf8'), original);
 assert.equal(readFileSync(path.join(backups, backup, '.agents/skills/agentboat-workspace/SKILL.md'), 'utf8'), 'previous skill');
 assert.ok(readFileSync(skill, 'utf8').includes(path.dirname(setup).replaceAll('\\', '/')));
+assert.deepEqual(readFileSync(agySkill), readFileSync(skill));
+assert.equal(readFileSync(personal, 'utf8'), 'personal skill');
 for (const file of [claude, hooks]) {
   const result = JSON.parse(readFileSync(file, 'utf8'));
   assert.deepEqual(result.hooks.Stop.slice(0, 1), settings.hooks.Stop);
   assert.match(JSON.stringify(result.hooks.Stop[1]), /agentboat-role-harness/);
 }
 const after = [claude, hooks].map(file => readFileSync(file, 'utf8'));
+const previous = readFileSync(agySkill, 'utf8') + '\nold';
+writeFileSync(agySkill, previous);
 run('yes\n');
+const nextBackup = readdirSync(backups).find(name => name !== backup);
+assert.equal(readFileSync(path.join(backups, nextBackup, path.relative(home, agySkill)), 'utf8'), previous);
+assert.deepEqual(readFileSync(agySkill), readFileSync(skill));
 assert.deepEqual([claude, hooks].map(file => readFileSync(file, 'utf8')), after);
 assert.equal(existsSync(path.join(codex, 'config.toml')), false);
-console.log('PASS setup consent, backups, both hooks, and repeat setup');
+console.log('PASS setup consent, backups, both hooks, Antigravity, and repeat setup');

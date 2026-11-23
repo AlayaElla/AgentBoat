@@ -7,9 +7,9 @@ node workspace/workspace.mjs init
 node workspace/workspace.mjs templates
 ```
 
-以上命令从 AgentBoat 入口目录运行。正式版入口是当前 Orca 用户数据目录下的 `agentboat-current`。首次设置通过此目录的 `setup.mjs` 安装两份 skill 和 hooks。升级会自动刷新已安装的 skill，只有收到 hooks 变化提醒时才需要重跑首次设置。
+以上命令从 AgentBoat 入口目录运行。正式版入口是当前 Orca 用户数据目录下的 `agentboat-current`。首次设置通过此目录的 `setup.mjs` 安装两份 skill 和 hooks。升级会自动刷新已安装的 skill。已有安装首次启用 Antigravity，或收到 hooks 变化提醒时，重跑首次设置。
 
-两份 skill 位于 `~/.agents/skills/`，Claude 通过 `~/.claude/skills/` 的目录链接读取；Windows 使用 junction。安装器遇到其他 Claude 链接或目录会拒绝覆盖。skill 全文在 [skill/agentboat-workspace/SKILL.md](skill/agentboat-workspace/SKILL.md)，加载后说“开启工作间管理”。
+两份 skill 位于 `~/.agents/skills/`，Claude 通过 `~/.claude/skills/` 的目录链接读取，Windows 使用 junction。Antigravity 从 `~/.gemini/config/skills/` 读取完整副本。安装器发现 Claude 或 Antigravity 的同名位置被其他内容占用时会停止。安装后打开新的 Orca agent 会话，加载 skill 后说“开启工作间管理”。[工作间 skill 全文](skill/agentboat-workspace/SKILL.md)
 
 安装器会向 `~/.claude/settings.json` 和 `~/.codex/hooks.json` 各合并三条 AgentBoat hook。Codex 使用自定义 `CODEX_HOME` 时写入该目录。修改前在原文件旁备份为 `*.agentboat-*.bak`，保留已有 hooks。它们只对插件已登记的 Orca 管理员会话生效。
 

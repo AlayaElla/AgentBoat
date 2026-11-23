@@ -37,7 +37,9 @@ entry="${ORCA_USER_DATA_PATH:-$orca_data}/agentboat-current"
 node "$entry/setup.mjs"
 ```
 
-命令会列出将写入的两个 skill 目录及 Claude 链接（`~/.agents/skills`、`~/.claude/skills`），还有 `~/.claude/settings.json` 和 `~/.codex/hooks.json`（设置了 `CODEX_HOME` 时使用该目录）。输入 `yes` 后先把已有内容备份到 `~/.agentboat/backups/setup-*`，再同步 skill 并合并 hooks。打开新的 agent 会话加载 skill。在 Codex CLI 输入 `/hooks`，核对并信任 AgentBoat 的 hooks。
+命令会列出两份角色 skill 的安装路径，包括 `~/.agents/skills`、`~/.claude/skills` 下的链接和 `~/.gemini/config/skills` 下的 Antigravity 副本。输入 `yes` 后先把已有内容备份到 `~/.agentboat/backups/setup-*`，再同步 skill 并合并 `~/.claude/settings.json` 和 `~/.codex/hooks.json` 中的 hooks（设置了 `CODEX_HOME` 时使用该目录）。
+
+已有安装首次启用 Antigravity 时，运行一次上述首次设置，再在目标工作区打开新的 Orca Antigravity 会话。也可在 agy 终端用 `/skills` 核对 `agentboat-workspace` 和 `orca-project-coordinator`。使用 Codex CLI 时，在新会话中输入 `/hooks`，核对并信任 AgentBoat 的 hooks。[Antigravity 官方技能文档](https://antigravity.google/docs/skills#cli-skill-locations)
 
 ## 开始使用
 
@@ -55,7 +57,7 @@ orca plugin update alayaella.agentboat
 
 有新权限时按 Orca 回执审核。插件启动时会按该 Orca 配置的 `current` 更新 `agentboat-current`（Windows 目录联接，macOS 或 Linux 目录符号链接）。已在运行的会话可继续使用同一个 `agentboat-current/coordinator/scripts/client.mjs`，相关说明和 hooks 也随入口更新。入口被删除时，重启插件即可重建；若该位置已有其他内容，先将其移开。
 
-升级会自动刷新已安装的两份 skill，开启新会话即可加载。只有工作间主 agent 收到 hooks 变化提醒时，才需要重跑首次设置，并在 Codex 的 `/hooks` 中核对登记。
+升级会自动刷新已安装的两份 skill，开启新会话即可加载。收到 hooks 变化提醒时，重跑首次设置，并在 Codex 的 `/hooks` 中核对登记。
 
 ## 维护
 
