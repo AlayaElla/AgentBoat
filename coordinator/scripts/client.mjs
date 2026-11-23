@@ -8,7 +8,7 @@ import { writeMainRoleCards } from './main-role-card.mjs';
 
 const [operation, argument, flag, taskId, extra] = process.argv.slice(2);
 // Internal callers pass handler data on stdin. The workspace hook excludes option-prefixed commands.
-const internal = operation === '--workspace-request' && ['project.settings', 'workspace.message', 'workspace.connections'].includes(argument) && !flag;
+const internal = operation === '--workspace-request' && ['project.settings', 'project.lead', 'workspace.message', 'workspace.connections'].includes(argument) && !flag;
 const brief = operation === 'overview' && argument === '--brief';
 const readOptions = operation === 'read' ? parseArgs({ args: process.argv.slice(4), options: { full: { type: 'boolean' }, task: { type: 'string' } } }).values : {};
 if (operation === 'overview' && (argument && !brief || flag)) throw new Error('用法：node client.mjs overview [--brief]');
@@ -36,6 +36,7 @@ const input = internal ? readInput(0) : history ? { projectId: historyProject, e
   : operation === 'project-lead' ? { projectId: argument }
   : operation === 'main-targets' ? null
   : { ...readInput(operation === 'main-bind' || leadBind || leadSwitch ? 0 : argument), ...(['message', 'feedback', 'feishu-reply', 'project-lead-switch'].includes(operation) ? {} : { operation: operation === 'main-bind' || leadBind ? 'bind' : operation }) };
+if (internal && argument === 'project.lead' && (input.mode !== 'new' || input.startOnly !== true)) throw new Error('此入口仅用于自动启动未绑定的项目主会话');
 if (operation === 'main-bind' || leadBind || leadSwitch) {
   if (argument && (operation !== 'main-bind' || argument !== '--check')) throw new Error('请从标准输入传入绑定或切换请求');
   if (!caller) throw new Error('请在对应的 Orca 会话中调用该命令');

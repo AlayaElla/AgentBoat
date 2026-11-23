@@ -1,5 +1,6 @@
 import { needsLeadCompaction } from './project-archive'
-import { BackupLeads, backupView } from './backup-lead'
+import { BackupLeads, backupView, projectBackupBusy } from './backup-lead'
+import { isDeepStrictEqual } from 'node:util'
 import os from 'node:os'
 import path from 'node:path'
 import { realpath, stat } from 'node:fs/promises'
@@ -15,7 +16,7 @@ import { fileErrorText, incomingHash, linkMessageHistory } from './link-messages
 import { LinkFiles } from './link-files'
 import { groupedAttention, isProjectShared, type OwnerQuestion } from './model'
 import { mainAgent, roleReminder, switchLead, takeoverView, recoverTakeover } from './main-agent'
-import { availableBackup } from '../../workspace/agent-launch.mjs'
+import { projectAgentLaunch, projectLeadAgents, projectTemplate, templateLeadAgents, type ProjectLeadAgents } from '../../workspace/agent-launch.mjs'
 import { promptClientPath, refreshReleaseSetup, pluginVersionLabel, release, roleRegistryPath } from '../scripts/orca-cli.mjs'
 import { cliBridge } from '../scripts/cli-bridge.mjs'
 import { applyDelta, type Sheets } from './feedback-drafts'
@@ -349,7 +350,7 @@ export function createCoordinator(api: OrcaWorkerApi, runtime: CoordinatorRuntim
   }
   const workspaceId = (selector: string) => selector.replace(/^id:/, '')
   const projectAgentKind = (p: Project) => p.mainSession && p.mainSession.handle === p.mainAgentHandle ? p.mainSession.agent
-    : /^orca_session_id:(claude|codex|opencode)_/.exec(p.mainAgentHandle ?? '')?.[1]
+    : /^orca_session_id:(claude|codex|opencode|antigravity)_/.exec(p.mainAgentHandle ?? '')?.[1]
   function projectBinding(p: Project, sessions?: AgentSession[]): import('./model').WorkspaceBinding {
     const handle = p.mainAgentHandle, takeover = takeoverView(p.takeover)
     const saved = p.mainSession?.handle === handle ? p.mainSession : undefined
@@ -362,9 +363,10 @@ export function createCoordinator(api: OrcaWorkerApi, runtime: CoordinatorRuntim
   async function projectLeadView(p: Project, sessions?: AgentSession[]) {
     const binding = projectBinding(p, sessions), waiting = waitingForProjectLead(binding)
     if (waiting) {
-      const installed = await runtime.installedAgents(waiting.target.workspace).catch(() => undefined)
-      const backup = installed && availableBackup(waiting.target.agent, installed)
-      if (backup) waiting.backupAgent = backup.agent
+      let backup
+      try { backup = projectLeadAgents(p.leadAgents).backup } catch { return binding }
+      if (backup && backup.agent !== waiting.target.agent && await runtime.installedAgents(waiting.target.workspace)
+        .then(list => list.some(a => a.id === backup.agent)).catch(() => false)) waiting.backupAgent = backup.agent
     }
     return binding
   }
@@ -382,7 +384,7 @@ export function createCoordinator(api: OrcaWorkerApi, runtime: CoordinatorRuntim
   }
   async function projectLeadTargets(ref: ProjectRef, p: Project) {
     const inventory = await runtime.targets()
-    const session = inventory.sessions.find(s => s.handle === p.mainAgentHandle)
+    const session = projectBinding(p, inventory.sessions).session
     const target = await projectWorkspace(ref, session)
     const workspaces = 'workspaceId' in target ? inventory.workspaces.filter(w => workspaceId(w.workspace) === target.workspaceId) : []
     const workspace = workspaces[0]
@@ -398,30 +400,54 @@ export function createCoordinator(api: OrcaWorkerApi, runtime: CoordinatorRuntim
     const launchList = catalog(targets.workspace?.workspace)
     const [availableAgents, roleAgents, binding] = await Promise.all([launchList,
       targets.workspace?.workspace === ref.workspace ? launchList : catalog(ref.workspace), projectLeadView(p, targets.inventory?.sessions)])
-    return { binding, availableAgents, roleAgents, sessions: targets.sessions,
+    return { binding, leadAgents: projectLeadAgents(p.leadAgents), availableAgents, roleAgents, sessions: targets.sessions,
       ...(targets.error ? { workspaceError: targets.error } : {}) }
   }
-  async function switchProjectLead(id: string, input: LeadSwitch, ownerRun?: string) {
+  async function checkProjectLeadTarget(id: string, handle: string) {
+    const workspace = await store.workspace()
+    const pending = (t?: Project['takeover']) => takeoverActive(t) && t?.target.handle === handle
+    if (workspace.session?.handle === handle || workspace.backup?.handle === handle || pending(workspace.takeover) ||
+      (await store.all()).some(p => p.ref.id !== id && (p.mainAgentHandle === handle || p.backup?.handle === handle || pending(p.takeover)))) {
+      fail('该会话已用于其他主会话或备用')
+    }
+  }
+  async function switchProjectLead(id: string, input: LeadSwitch & { startOnly?: boolean; goal?: string; introduction?: string }, ownerRun?: string) {
     const ref = await requireProject(id), p = await store.register(ref)
+    if (input.startOnly && input.mode !== 'new') fail('自动启动需要新会话')
+    if (input.startOnly && input.workspace !== ref.workspace) fail('项目工作区已变化，请核对后再操作')
     const scoped = input.mode === 'cancel' ? undefined : await projectLeadTargets(ref, p)
     if (scoped?.error) fail(scoped.error)
-    await switchLead(runtime, { ...input, workspace: scoped?.workspace?.workspace }, {
+    const launch = input.mode === 'new' ? projectLeadAgents(p.leadAgents).primary : undefined
+    const goal = input.goal === undefined ? '' : text(input.goal, '项目目标', maxMessageLength)
+    const introduction = input.introduction === undefined ? '' : text(input.introduction, '项目模板开场语', maxMessageLength)
+    await switchLead(runtime, { ...input, revision: input.startOnly ? p.revision : input.revision, workspace: scoped?.workspace?.workspace,
+      agent: input.startOnly ? undefined : input.agent }, {
       role: 'project',
+      launch, startOnly: input.startOnly,
       targets: async () => ({ sessions: scoped?.sessions ?? [], workspaces: scoped?.workspaces ?? [] }),
       mutate: (update, expected) => store.mutate(id, expected, async project => {
         if (ownerRun !== undefined && (!ownerRun || (await store.workspace()).runId !== ownerRun)) fail('请使用已绑定的工作间主 agent Run')
+        if (expected !== undefined && input.mode !== 'cancel') {
+          if (project.hidden) fail('项目已隐藏，请先恢复显示')
+          if (input.startOnly && project.runId) fail('项目已绑定主会话')
+          if (projectBackupBusy(project.backup)) fail('备用正在启动或处理，请等主用接回后再切换')
+          if (input.mode === 'existing' && input.handle) {
+            if (project.backup?.handle === input.handle) fail('该会话已是当前项目的备用')
+            await checkProjectLeadTarget(id, input.handle)
+          }
+        }
         await update(project)
       }),
       changed: () => changed(id),
       subject: '【项目协作】请接管项目主会话',
-      prompt: (token, expiresAt) => `主人请当前会话接管项目「${ref.name}」（projectId: ${id}）。开启项目协作，先读 $orca-project-coordinator 和桥接说明，自己创建新的协调 Run。接管脚本绝对路径：${JSON.stringify(promptClientPath())}\n用 node 调用此脚本的 read ${id} 取得最新 revision，再调用 project-lead-bind，从标准输入传入 {projectId,revision,requestId,runId,token}。启动回执未确认时稍后重读再试。一次性接管凭据：${token}\n有效至：${expiresAt}\n凭据仅用于本次接管，不保存或转发。绑定成功后读该项目记录，接手任务、执行记录和待处理项；保留已有分工和用户决定。`
+      prompt: (token, expiresAt) => `主人请当前会话接管项目「${ref.name}」（projectId: ${id}）。开启项目协作，先读 $orca-project-coordinator 和桥接说明，自己创建新的协调 Run。接管脚本绝对路径：${JSON.stringify(promptClientPath())}\n用 node 调用此脚本的 read ${id} 取得最新 revision，再调用 project-lead-bind，从标准输入传入 {projectId,revision,requestId,runId,token}。启动回执未确认时稍后重读再试。一次性接管凭据：${token}\n有效至：${expiresAt}\n凭据仅用于本次接管，不保存或转发。绑定成功后读该项目记录，接手任务、执行记录和待处理项；保留已有分工和用户决定。${introduction ? '\n' + introduction : ''}${goal ? '\n主人本次目标：' + goal : ''}`
     })
     defer(id)
     return readProjectLead(id)
   }
   function rememberProjectCaller(project: Project, input: { runId?: string; caller?: string }) {
     // Self-reported identity is display/navigation metadata, never authorization evidence.
-    if (project.runId && input.runId === project.runId && input.caller && (!project.backup?.primary || project.backup.primary === input.caller)) project.mainAgentHandle = text(input.caller, '调用会话', 500)
+    if (project.runId && input.runId === project.runId && input.caller && !project.mainAgentHandle && !project.backup?.primary) project.mainAgentHandle = text(input.caller, '调用会话', 500)
   }
   async function ingest(appId: string, event: SourceEvent): Promise<void> {
     const work = inbound.then(() => ingestOne(appId, event))
@@ -717,11 +743,47 @@ export function createCoordinator(api: OrcaWorkerApi, runtime: CoordinatorRuntim
   orca.panels.handle('project.settings', async input => {
     const id = text(input.projectId, '项目编号', 200)
     const project = await ensure(id)
-    const roles = object(input.roles)
-    const installed = await runtime.installedAgents(project.ref.workspace, true)
-    if (['design', 'code', 'review'].some(k => !installed.some(a => a.id === roles[k]))) fail('分工中有当前工作区不可用的代理，请刷新后选择')
-    await store.mutate(id, revision(input.revision), p => { p.roles = { design: roles.design, code: roles.code, review: roles.review }; rememberProjectCaller(p, input) })
-    changed(id)
+    const roles = input.roles === undefined ? undefined : object(input.roles)
+    const raw = input.leadAgents === undefined ? undefined : object(input.leadAgents)
+    if (raw && input.template !== undefined) fail('请选择项目代理设置或模板')
+    if (input.template !== undefined && project.runId) fail('只在立项时应用项目模板')
+    if (!roles && !raw) fail('没有可保存的项目设置')
+    if (roles) {
+      const installed = await runtime.installedAgents(project.ref.workspace, true)
+      if (['design', 'code', 'review'].some(k => !installed.some(a => a.id === roles[k]))) fail('分工中有当前工作区不可用的代理，请刷新后选择')
+    }
+    const template = input.template === undefined ? undefined : templateLeadAgents(projectTemplate(input.template))
+    const choices: Partial<ProjectLeadAgents> = {}
+    if (raw) {
+      try {
+        if ('primary' in raw) choices.primary = projectAgentLaunch(raw.primary)
+        if ('backup' in raw) choices.backup = raw.backup === null ? null : projectAgentLaunch(raw.backup)
+      } catch (e) { fail((e as Error).message) }
+      if (!Object.keys(choices).length) fail('请选择要保存的主用或备用代理')
+      const scoped = await projectLeadTargets(project.ref, project)
+      if (!scoped.workspace) fail(scoped.error || '找不到项目工作区')
+      const installed = await runtime.installedAgents(scoped.workspace.workspace, true)
+      for (const choice of [choices.primary, choices.backup]) {
+        if (choice && !installed.some(a => a.id === choice.agent)) fail(`代理 ${choice.agent} 在当前工作区不可用，请刷新后选择`)
+      }
+      const next = projectLeadAgents({ ...project.leadAgents, ...choices })
+      if (next.backup?.agent === next.primary.agent) fail('默认主用与备用需要选择不同的代理')
+      const primary = scoped.inventory.sessions.find(s => s.handle === project.mainAgentHandle)?.agent || projectAgentKind(project)
+      if (choices.backup && choices.backup.agent === primary) fail('备用代理与当前主用相同')
+    }
+    await store.mutate(id, revision(input.revision), p => {
+      if (roles) p.roles = { design: roles.design, code: roles.code, review: roles.review }
+      if (template && !p.leadAgents) p.leadAgents = template
+      if (raw) {
+        if ('backup' in choices && !isDeepStrictEqual(choices.backup, projectLeadAgents(p.leadAgents).backup)) {
+          if (projectBackupBusy(p.backup)) fail('备用正在启动或处理，请稍后再更改')
+          if (p.backup?.phase !== 'failed') resetBackup(p, p.mainAgentHandle ?? '')
+        }
+        p.leadAgents = { ...p.leadAgents, ...choices }
+      }
+      rememberProjectCaller(p, input)
+    })
+    changed(id); deferBackupCheck()
     return snapshot(id)
   })
   async function recordFeedback(input: Record<string, any>, expected: number | undefined, remote?: { source: string; connectionId: string; authorize: (p: Project) => void }) {
@@ -765,9 +827,9 @@ export function createCoordinator(api: OrcaWorkerApi, runtime: CoordinatorRuntim
     let takeoverSession: AgentSession | undefined
     if (input.operation === 'bind') {
       const runId = text(input.runId, 'Run 编号', 200)
-      const caller = input.token === undefined ? undefined : text(input.caller, '调用会话', 500)
+      const caller = input.caller === undefined && input.token === undefined ? undefined : text(input.caller, '调用会话', 500)
       await runtime.verifyRun(runId, caller)
-      if (caller) takeoverSession = await runtime.identify(caller, runId, input.currentRunId)
+      if (caller && input.token !== undefined) takeoverSession = await runtime.identify(caller, runId, input.currentRunId)
     }
     const written = await store.mutate(id, revision(input.revision), async p => {
       if (input.operation === 'bind') {
@@ -775,6 +837,7 @@ export function createCoordinator(api: OrcaWorkerApi, runtime: CoordinatorRuntim
         if ((await store.all()).some(x => x.ref.id !== id && x.runId === input.runId)) fail('该主会话 Run 已绑定其他项目')
         if (takeoverSession) {
           const t = verifyTakeover(p.takeover, input.token, takeoverSession, p.runId, input.runId!)
+          await checkProjectLeadTarget(id, takeoverSession.handle)
           const ref = await requireProject(id)
           const workspace = await projectWorkspace(ref, takeoverSession)
           if (!('workspaceId' in workspace) || workspace.workspaceId !== workspaceId(takeoverSession.workspace)) fail('目标会话已经离开项目工作区')
@@ -782,9 +845,11 @@ export function createCoordinator(api: OrcaWorkerApi, runtime: CoordinatorRuntim
             body: `项目「${p.ref.name}」的主会话已换成「${takeoverSession.title || takeoverSession.handle}」。你不再是主会话。请停止派活，把进行中的情况交给新主会话。`, state: 'pending' })
           resetBackup(p, takeoverSession.handle)
           p.mainSession = takeoverSession
+          p.mainAgentHandle = takeoverSession.handle
           delete p.takeover
         } else if (p.runId !== input.runId) {
-          if (takeoverActive(p.takeover)) fail('项目正在等待接管，请使用本次接管凭据')
+          if (p.runId || takeoverActive(p.takeover) || p.takeover?.state === 'uncertain' || p.takeover?.state === 'sending') fail('请通过项目设置发起主会话切换，并使用本次接管凭据')
+          if (input.caller) await checkProjectLeadTarget(id, text(input.caller, '调用会话', 500))
           resetBackup(p, '')
           delete p.mainAgentHandle
           delete p.mainSession

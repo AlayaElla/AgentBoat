@@ -21,9 +21,9 @@ test('在线主用存在超过十五分钟的待办且已知不在工作时才�
   assert.equal(stopped({ ...primary, online: 'unknown' }, 1, now), undefined)
 })
 
-async function fixture(project: Project, workspace?: Workspace, exports?: string) {
+async function fixture(project: Project, workspace?: Workspace, exports?: string, main = primary) {
   const host = mockHost({ storage: { ['project:' + project.ref.id]: project as any, ...(workspace ? { workspace: workspace as any } : {}) } })
-  const env = { sessions: [primary], inventoryFailed: false, available: true, failLaunch: false, owner: primary.handle as string | null, generation: 1, installed: ['claude', 'codex'], spaces: [{ workspace: primary.workspace, name: '项目', path: primary.path }], launches: [] as { workspace: string; agent: string; options: unknown; prompt: string }[],
+  const env = { sessions: [main], inventoryFailed: false, available: true, failLaunch: false, owner: main.handle as string | null, generation: 1, installed: ['claude', 'codex'], spaces: [{ workspace: main.workspace, name: '项目', path: main.path }], launches: [] as { workspace: string; agent: string; options: unknown; prompt: string }[],
     catalogReads: 0, contacts: [] as string[], mailRuns: [] as string[], controls: [] as { handle: string; prompt: string }[], deliveries: [] as string[], reports: [] as any[] }
   let c!: ReturnType<typeof testCoordinator>
   const worker = await mountWorker({ default: api => {
@@ -41,7 +41,7 @@ async function fixture(project: Project, workspace?: Workspace, exports?: string
       launchMain: async (workspace, agent, prompt, options) => {
         env.launches.push({ workspace, agent, prompt, options })
         if (env.failLaunch) throw Error('模拟启动回执丢失')
-        env.sessions.push({ ...primary, handle: 'orca_session_id:backup', title: '备用', agent })
+        env.sessions.push({ ...main, handle: 'orca_session_id:backup', title: '备用', agent })
         return 'orca_session_id:backup'
       },
       requestTakeover: async (handle, prompt) => { env.controls.push({ handle, prompt }) },
@@ -52,11 +52,12 @@ async function fixture(project: Project, workspace?: Workspace, exports?: string
   const command = (action: LeadAction, note?: string, receipt: { confirm?: boolean; currentRunId?: string; generation?: number; standbyRunId?: string } = {}) => {
     const msg = [...env.controls].reverse().find(m => m.prompt.includes(' lead-' + action + ' '))!
     const token = msg.prompt.split(' lead-' + action + ' ')[1].split(' ')[1]
-    return worker.request('lead.control', { action, runId: project.runId, caller: msg.handle === 'dispatch:ctx_contact' ? primary.handle : msg.handle, token, note, ...receipt })
+    return worker.request('lead.control', { action, runId: project.runId, caller: msg.handle === 'dispatch:ctx_contact' ? main.handle : msg.handle, token, note, ...receipt })
   }
   return { c, worker, env, poll, command, close: async () => { c.stop(); await worker.deactivate() } }
 }
-const bound = () => ({ ...fresh(refs[0]), runId: 'run_project', mainAgentHandle: primary.handle, mainSession: primary })
+const bound = () => ({ ...fresh(refs[0]), leadAgents: { primary: { agent: 'claude' }, backup: { agent: 'codex' } },
+  runId: 'run_project', mainAgentHandle: primary.handle, mainSession: primary })
 test('主用绑定在其他项目工作区时，只在该工作区可用后原地补开备用', async () => {
   const p = { ...bound(), ref: refs[1] }, { env, poll, c, close } = await fixture(p)
   try {
@@ -73,21 +74,26 @@ test('主用绑定在其他项目工作区时，只在该工作区可用后原�
   } finally { await close() }
 })
 
-test('在线主用探测满十分钟未确认才接管原 Run，随后可恢复交回', async () => {
-  const p = bound(), { env, poll, command, c, close } = await fixture(p)
+for (const agent of ['codex', 'antigravity']) test('项目主用探测超时后接管和交回原 Run：' + agent, async () => {
+  const main = { ...primary, agent, handle: `orca_session_id:${agent}_lead` }
+  const p: Project = { ...fresh(refs[0]), runId: 'run_project', mainAgentHandle: main.handle, mainSession: main }
+  if (agent === 'antigravity') p.leadAgents = { primary: { agent }, backup: { agent: 'codex' } }
+  const { env, poll, command, c, close } = await fixture(p, undefined, undefined, main)
+  env.installed.push('antigravity')
   const realNow = Date.now
   let clock = now
   Date.now = () => clock
   try {
     await Promise.all([poll(), poll()])
     assert.equal(env.launches.length, 1)
-    assert.deepEqual(env.launches[0].options, { model: 'gpt-6.2-astra', effort: 'xhigh', surface: 'chat' })
+    assert.equal(env.launches[0].agent, agent === 'codex' ? 'antigravity' : 'codex')
+    assert.deepEqual(env.launches[0].options, {})
     assert.equal(env.controls.length, 0)
     env.reports.push({ at: now - 16 * minute, title: '执行者已完成', report: { id: 'msg_1', body: '完成', at: now - 16 * minute, taskId: 't', dispatchId: 'd', runId: p.runId } })
     await c.refreshQuestions()
     await poll()
     assert.equal(env.controls.length, 1)
-    assert.equal(env.controls[0].handle, primary.handle)
+    assert.equal(env.controls[0].handle, main.handle)
     assert.ok(env.controls[0].prompt.includes('lead-ready'))
     clock += 10 * minute - 1
     await poll()
@@ -104,7 +110,7 @@ test('在线主用探测满十分钟未确认才接管原 Run，随后可恢复�
     env.generation = 2
     // Orca changed its owner just before the plugin restarted; recover from run-show.
     const interrupted = await c.store.get(p.ref.id)
-    const reboot = await fixture(interrupted)
+    const reboot = await fixture(interrupted, undefined, undefined, main)
     try {
       reboot.env.owner = env.owner; reboot.env.sessions = env.sessions
       await reboot.poll()
@@ -129,7 +135,7 @@ test('在线主用探测满十分钟未确认才接管原 Run，随后可恢复�
     await command('handoff', '已验收 A，剩 B'); await c.flush(p.ref.id)
     assert.ok(env.controls.at(-1)!.prompt.includes('剩 B'))
     assert.deepEqual(await command('resume'), { useRun: p.runId })
-    env.owner = primary.handle
+    env.owner = main.handle
     await command('resume'); await command('resume')
     assert.equal((await c.store.get(p.ref.id)).backup?.phase, 'standby')
     assert.equal(env.controls.length, 5)
@@ -272,19 +278,22 @@ test('没有备用的原因按角色通知一次，原因修复后自动清除',
   } finally { await close() }
 })
 
-for (const agent of ['claude', 'codex']) test('仅有 ' + agent + ' 时静默，装上另一家后自动补开', async () => {
-  const p = bound(), { c, env, poll, close } = await fixture(p)
+for (const agent of ['claude', 'codex', 'antigravity']) test('项目备用缺失或重复时等待配置恢复，主用 ' + agent, async () => {
+  const p: Project = bound()
+  delete p.leadAgents
+  const { c, env, poll, close } = await fixture(p)
   try {
     env.installed = [agent]
     env.sessions = [{ ...primary, agent }]
     await poll(); await poll()
     const row = await c.store.get(p.ref.id)
-    assert.equal(row.backup?.phase, 'single')
-    assert.equal(row.backup?.problem, undefined)
+    assert.equal(row.backup?.phase, 'unavailable')
+    assert.match(row.backup?.problem ?? '', agent === 'antigravity' ? /与当前主用相同/ : /未启用备用代理 antigravity/)
     assert.deepEqual(row.backup?.history, [])
     assert.equal(row.deliveries.length, 0)
     assert.equal(env.launches.length, 0)
-    const other = agent === 'codex' ? 'claude' : 'codex'
+    const other = agent === 'antigravity' ? 'codex' : 'antigravity'
+    if (agent === 'antigravity') await c.store.mutate(p.ref.id, undefined, p => { p.leadAgents = { backup: { agent: other } } })
     env.installed.push(other)
     await poll(); await poll()
     assert.deepEqual(env.launches.map(l => l.agent), [other])

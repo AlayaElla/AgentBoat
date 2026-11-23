@@ -28,9 +28,11 @@ test('project lead switches only within its workspace and preserves tasks and qu
   p.deliveries.push({ id: 'queued', subject: '队列', body: '给当前项目主会话', state: 'pending' })
   other.runId = 'run_taken'
   const old: AgentSession = { ...projectSession, handle: p.mainAgentHandle, title: '当前会话' }
-  const replacement: AgentSession = { ...projectSession, handle: 'terminal-opencode', title: '替补会话', agent: 'opencode' }
+  const replacement: AgentSession = { ...projectSession, handle: 'orca_session_id:antigravity_replacement', title: '替补会话', agent: 'antigravity' }
   const outsider = { ...projectSession, handle: 'other-workspace', workspace: 'identity:elsewhere' }
-  let sessions = [old, projectSession, replacement, outsider]
+  const occupied = { ...projectSession, handle: 'orca_session_id:codex_other_project', agent: 'codex' }
+  other.mainAgentHandle = occupied.handle
+  let sessions = [old, projectSession, replacement, outsider, occupied]
   const host = mockHost({ storage: { 'project:p1': p as any, 'project:p2': other as any, workspace: { version: 1, revision: 0, runId: 'run_owner', requests: [] } }, results: {
     'workspace.list': { workspaces: [testWorkspace, { ...testWorkspace, id: outsider.workspace, projectId: refs[1].repoId }], truncated: false },
     'agents.list': { agents: [] }
@@ -56,9 +58,10 @@ test('project lead switches only within its workspace and preserves tasks and qu
   try {
     await assert.rejects(() => worker.request('project.agent', { operation: 'bind', projectId: 'p1', revision: p.revision, requestId: 'conflicting-bind', runId: 'run_owner' }), /独立的项目 Run/)
     const start = await read()
-    assert.deepEqual(start.sessions.map(s => s.handle), [old.handle, projectSession.handle, replacement.handle])
+    assert.deepEqual(start.sessions.map(s => s.handle), [old.handle, projectSession.handle, replacement.handle, occupied.handle])
     assert.deepEqual(start.binding.session, old)
     await assert.rejects(() => choose(outsider.handle), /不可用/)
+    await assert.rejects(() => choose(occupied.handle), /已用于其他主会话/)
     await assert.rejects(() => worker.request('workspace.projectLead', { projectId: 'p1', revision: 0, mode: 'existing', handle: projectSession.handle, runId: 'run_other' }), /已绑定的工作间主 agent Run/)
     assert.equal(requests.length, 0)
     const first = await worker.request('workspace.projectLead', { projectId: 'p1', revision: 0, mode: 'existing', handle: projectSession.handle, runId: 'run_owner' })
@@ -92,6 +95,9 @@ test('project lead switches only within its workspace and preserves tasks and qu
     sessions.push(replacement)
     const bound = await bind(final.binding.revision, 3, 'run_next')
     assert.equal(bound.project?.runId, 'run_next')
+    assert.equal(bound.project?.mainAgentHandle, replacement.handle)
+    assert.equal(bound.lead?.session?.agent, 'antigravity')
+    await assert.rejects(() => worker.request('project.agent', { operation: 'bind', projectId: 'p1', revision: bound.project!.revision, requestId: 'unsafe-rebind', runId: 'run_other' }), /接管凭据/)
     assert.equal(bound.lead?.takeover, undefined)
     assert.equal(bound.lead?.session?.title, replacement.title)
     assert.deepEqual(bound.project?.tasks, p.tasks)
@@ -130,12 +136,13 @@ test('project roles and new leads use the current workspace catalog and Orca lau
     const roles = { design: 'antigravity', code: 'codex', review: 'qoder' }
     const settings = await worker.request('project.settings', { projectId: ref.id, revision: (await read()).binding.revision, roles })
     assert.deepEqual(settings.project!.roles, roles)
-    for (const choice of [undefined, 'codex', 'antigravity']) {
+    assert.deepEqual((await read()).leadAgents, { primary: { agent: 'codex' }, backup: { agent: 'antigravity' } })
+    for (const choice of [undefined, 'antigravity']) {
       const result = await launch(choice)
       assert.equal(result.binding.takeover?.target.handle, 'orca_session_id:fake-' + launches.length)
       assert.equal(result.binding.takeover?.state, 'waiting')
-      assert.equal(result.binding.takeover?.backupAgent, choice === 'codex' ? 'claude' : 'codex')
-      const argv = launches.at(-1)!, agent = choice ?? 'qoder'
+      assert.equal(result.binding.takeover?.backupAgent, choice === 'antigravity' ? undefined : 'antigravity')
+      const argv = launches.at(-1)!, agent = choice ?? 'codex'
       const flag = (k: string) => argv.includes('--' + k) ? argv[argv.indexOf('--' + k) + 1] : undefined
       assert.equal(flag('agent'), agent)
       assert.equal(flag('model'), undefined)
@@ -143,7 +150,19 @@ test('project roles and new leads use the current workspace catalog and Orca lau
       assert.equal(flag('surface'), undefined)
       assert.equal(flag('worktree'), projectWorkspaceId)
       await assert.rejects(() => launch(choice), /已发起/)
+      await worker.request('project.lead', { projectId: ref.id, revision: result.binding.revision, mode: 'cancel' })
     }
+    const saveLead = async (leadAgents: import('./model').Project['leadAgents']) =>
+      worker.request('project.settings', { projectId: ref.id, revision: (await read()).binding.revision, leadAgents })
+    await assert.rejects(() => saveLead({ backup: { agent: 'codex' } }), /需要选择不同/)
+    await saveLead({ primary: { agent: 'antigravity' }, backup: { agent: 'codex' } })
+    const fresh = await read()
+    const auto = { projectId: ref.id, revision: fresh.binding.revision, workspace: projectWorkspaceId, mode: 'new' as const, startOnly: true }
+    const manual = { projectId: auto.projectId, revision: auto.revision, mode: auto.mode }
+    const double = await Promise.allSettled([worker.request('project.lead', auto), worker.request('project.lead', manual)])
+    assert.equal(double.filter(r => r.status === 'fulfilled').length, 1)
+    assert.equal((await read()).binding.takeover?.target.agent, 'antigravity')
+    assert.equal((await read()).binding.takeover?.backupAgent, 'codex')
     installed = ['codex']
     assert.deepEqual((await read()).roleAgents?.map(a => a.id), ['codex'])
     await assert.rejects(() => worker.request('project.settings', { projectId: ref.id, revision: (host.data().storage['project:p1'] as any).revision, roles }), /不可用/)

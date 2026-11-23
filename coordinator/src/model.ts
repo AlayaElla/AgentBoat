@@ -65,6 +65,7 @@ export interface Project {
   backup?: BackupLead
   mainAgentHandle?: string
   mainSession?: AgentSession
+  leadAgents?: Partial<import('../../workspace/agent-launch.mjs').ProjectLeadAgents>
   takeover?: StoredTakeover
   hidden?: boolean
   updatedAt?: string
@@ -125,6 +126,7 @@ export interface InstalledAgent { id: string; name: string; default: boolean }
 export const defaultAgent = (list: InstalledAgent[]) => (list.find(a => a.default) ?? list[0])?.id ?? ''
 export interface ProjectLead {
   binding: WorkspaceBinding
+  leadAgents: import('../../workspace/agent-launch.mjs').ProjectLeadAgents
   sessions: AgentSession[]
   availableAgents: InstalledAgent[] | null
   roleAgents: InstalledAgent[] | null

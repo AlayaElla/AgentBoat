@@ -25,7 +25,7 @@ node workspace/workspace.mjs templates
 
 ## 模板与立项
 
-默认 [templates/code.json](templates/code.json) 在 Claude 聊天会话中启动项目主 agent，模型和推理强度跟随各自的 Orca 设置。设计由 Claude 负责，代码和审查由 Codex 负责，来源为 `empty`。模板可设置 `agent`、`model`、`effort` 和 `surface`，其中 `effort` 需要 `model`。手动立项和自动开项目主会话共用模板的启动参数。
+默认 [templates/code.json](templates/code.json) 使用 Codex 启动项目主会话，备用使用 Antigravity。设计由 Claude 负责，代码和审查由 Codex 负责，来源为 `empty`。项目设置可以从对应工作区启用的 Orca 代理中修改主备。立项、自动启动和面板新开会话均按项目设置启动，未设置时使用本机默认模板。模板字段 `mainAgent` 和 `backupAgent` 支持 `agent`、`model`、`effort` 和 `surface`，其中 `effort` 需要 `model`，`backupAgent: null` 停用备用。模型、强度和会话类型未填时跟随 Orca。原样保留的旧内置模板自动采用新默认值，定制模板原样读取。
 
 保存 UTF-8 JSON 后调用（支持 BOM）：
 
