@@ -909,8 +909,8 @@ export function createCoordinator(api: OrcaWorkerApi, runtime: CoordinatorRuntim
     if (needsWorkspace && !ref.workspace) fail('这个项目当前没有工作区')
     const url = artifactUrl(a.url, ref.path)
     const [root, file] = await Promise.all([realpath(ref.path), realpath(url)]).catch(() => fail('成果文件不存在或无法访问'))
-    artifactUrl(file, root)
-    if (!path.relative(root, file)) fail('成果路径不属于当前项目')
+    const relative = path.relative(root, file)
+    if (!relative || relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) fail('成果路径不属于当前项目')
     const info = await stat(file).catch(() => fail('成果文件不存在或无法访问'))
     return { ref, url, file, info }
   }

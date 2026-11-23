@@ -368,6 +368,14 @@ const openReview = async (title = '页面交付') => {
   await body.getByRole('button', { name: '通过', exact: true }).first().waitFor();
   return body;
 };
+const rightClickArtifact = async entry => {
+  await entry.evaluate(async el => {
+    await Promise.all((el.closest('.xp')?.getAnimations() ?? []).map(animation => animation.finished));
+    el.scrollIntoView({ block: 'nearest', behavior: 'instant' });
+    await new Promise(resolve => requestAnimationFrame(resolve));
+  });
+  await entry.click({ button: 'right' });
+};
 try {
   await setup({ inboxBatch: true, width: 400 });
   await test('background overview retries silently, retains content on failure and clears the notice after recovery', async () => {
@@ -797,6 +805,16 @@ try {
       await menu.getByRole('menuitem', { name: '打开所在文件夹' }).click();
       assert.deepEqual(await page.evaluate(() => fixture.calls.filter(c => c.name === 'project.openArtifactFolder').map(c => c.input)),
         [{ projectId: 'p1', taskId: 't1', artifactId: 'new' }]);
+      await panel.evaluate(el => { el.style.minHeight = '100vh'; });
+      await rightClickArtifact(entry);
+      await menu.waitFor();
+      assert.ok(await panel.evaluate(el => {
+        const layer = el.closest('.layer'), before = layer.scrollTop;
+        layer.scrollTop = layer.scrollHeight;
+        return layer.scrollTop > before;
+      }));
+      await menu.waitFor({ state: 'detached' });
+      await panel.evaluate(el => { el.style.minHeight = ''; });
       await entry.click();
       assert.equal(await panel.getByRole('button', { name: /旧版本/ }).count(), 0);
       await panel.getByRole('button', { name: '标为过期', exact: true }).click();
@@ -825,12 +843,12 @@ try {
       const entry = body.getByRole('button', { name: '打开成果 · 设计文档', exact: true });
       const menu = page.getByRole('menu', { name: '成果操作' });
       assert.match(await entry.getAttribute('title'), /右键打开所在文件夹/);
-      await entry.click({ button: 'right' });
+      await rightClickArtifact(entry);
       await menu.waitFor();
       await page.keyboard.press('Escape');
       await menu.waitFor({ state: 'detached' });
       assert.equal(await entry.evaluate(el => el === document.activeElement), true);
-      await entry.press('Shift+F10');
+      await page.keyboard.press('Shift+F10');
       await page.keyboard.press('Enter');
       assert.deepEqual(await page.evaluate(() => fixture.calls.filter(c => c.name === 'project.openArtifactFolder').map(c => c.input)), [expected('md')]);
       await body.getByRole('button', { name: '打开成果 · 网页预览', exact: true }).click({ button: 'right' });
@@ -849,10 +867,10 @@ try {
       await detail.getByRole('button', { name: '打开成果 · 样稿 v9', exact: true }).click();
       await detail.getByRole('button', { name: /^成果 / }).click();
       const taskEntry = detail.getByRole('button', { name: '设计文档 · v1', exact: true });
-      await taskEntry.click({ button: 'right' });
+      await rightClickArtifact(taskEntry);
       await activeHeader().getByRole('heading', { name: '移动端交付', exact: true }).click();
       await menu.waitFor({ state: 'detached' });
-      await taskEntry.click({ button: 'right' });
+      await rightClickArtifact(taskEntry);
       await page.keyboard.press('ArrowDown');
       await page.keyboard.press('Enter');
       assert.deepEqual(await calls(), ['md', 'html', 'html', 'html', 'md'].map(expected));
@@ -877,7 +895,7 @@ try {
     await currentLayer().getByRole('button', { name: /^成果 / }).click();
     const archiveEntry = currentLayer().getByRole('button', { name: '验收文档 · v1' });
     const target = { projectId: 'p1', taskId: 't1', artifactId: 'md', archiveEnd: 50 };
-    await archiveEntry.click({ button: 'right' });
+    await rightClickArtifact(archiveEntry);
     await page.getByRole('menuitem', { name: '打开所在文件夹' }).click();
     await archiveEntry.click();
     assert.deepEqual(await page.evaluate(() => fixture.calls.filter(c => c.name.startsWith('project.openArtifact')).slice(-2).map(c => c.input)), [target, target]);

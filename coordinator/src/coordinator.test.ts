@@ -326,7 +326,9 @@ test('remove uses exact setup, checks every session and terminal, and fails clos
 
 test('local artifact actions validate registered paths and archived tasks before opening', async () => {
   const temp = await mkdtemp(path.join(os.tmpdir(), 'agentboat-artifacts-'))
-  const dir = path.join(temp, 'project'), outside = path.join(temp, 'outside')
+  const dir = path.join(temp, 'project')
+  // A trailing non-breaking space survives Windows filesystem operations and is removed by trim().
+  const outside = dir + '\u00a0'
   const ref = { ...refs[1], path: dir }, p = fresh(ref)
   const remote = { ...ref, id: 'remote', hostId: 'remote-host' }
   const files = ['设计稿.md', '样稿 v9.html', 'missing.md']
@@ -337,6 +339,7 @@ test('local artifact actions validate registered paths and archived tasks before
     await mkdir(docs, { recursive: true })
     await mkdir(outside)
     await symlink(outside, link, process.platform === 'win32' ? 'junction' : 'dir')
+    assert.ok((await realpath(link)).endsWith('\u00a0'))
     for (const name of files.slice(0, 2)) await writeFile(path.join(docs, name), 'fixture')
     const artifact = (id: string, url: string) => ({ id, label: id, version: 'v1', url })
     submitTask(p, { ...deliverable, artifacts: [
@@ -364,6 +367,7 @@ test('local artifact actions validate registered paths and archived tasks before
       assert.deepEqual(await reveal('a1'), { opened: true })
       await assert.rejects(() => reveal('a2'), /成果文件不存在或无法访问/)
       for (const id of ['outside', 'link', 'root']) await assert.rejects(() => reveal(id), /成果路径不属于当前项目/)
+      await assert.rejects(() => open('link'), /成果路径不属于当前项目/)
       await assert.rejects(() => reveal('web'), /请选择本项目的本机成果/)
       await assert.rejects(() => reveal('a0', remote.id), /请选择本项目的本机成果/)
       workspace = ''
