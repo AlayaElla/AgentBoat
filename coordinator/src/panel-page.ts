@@ -1,5 +1,5 @@
 import type {} from 'orca/frame'
-import type { ArchivePage } from './protocol'
+import type { ArchivePage, ProjectArtifactRef } from './protocol'
 import { previewArtifact } from './artifact-preview'
 import { artifactTitle, latestArtifacts } from './artifact-versions.mjs'
 import { actingMain, backupInCharge, blockedRevision, attention, projectSummary, defaultAgent, agentName, compareAgentActivity, groupedAttention, isProjectShared, isRecentAgent, labels, taskState, scopes, statuses, connectionStates, roles, mainStatus, mainAgentStates, waitingForProjectLead, type InstalledAgent } from './model'
@@ -166,7 +166,7 @@ function updateNode(old: Node, next: Node) {
   }
   for (const { name } of Array.from(old.attributes)) if (name !== 'data-navigating' && !next.hasAttribute(name)) old.removeAttribute(name)
   for (const { name, value } of Array.from(next.attributes)) if (old.getAttribute(name) !== value) old.setAttribute(name, value)
-  for (const event of ['onclick', 'onchange', 'oninput', 'onkeydown'] as const) (old as any)[event] = next[event]
+  for (const event of ['onclick', 'onchange', 'oninput', 'onkeydown', 'oncontextmenu'] as const) (old as any)[event] = next[event]
   if (next.dataset.skip !== undefined) return
   updateChildren(old, next)
   if (old instanceof HTMLInputElement && next instanceof HTMLInputElement) {
@@ -240,7 +240,7 @@ function projectTabs(projectId: string, views: Partial<Record<'inbox' | 'tasks' 
   const names = { inbox: '待处理', tasks: '任务', artifacts: '成果', agents: 'Agent', messages: '消息' }
   const entries = Object.entries(views) as [keyof typeof names, ProjectTab][]
   const [selected, view] = entries.find(([id]) => id === tabOf(projectId)) ?? entries[0]
-  return [tabButtons('项目页面', entries.map(([id, { count }]) => ({ id, name: names[id], count })), selected, id => { tabsOf[projectId] = id; remember(); render() }),
+  return [tabButtons('项目页面', entries.map(([id, { count }]) => ({ id, name: names[id], count })), selected, id => { closeArtifactMenu(); tabsOf[projectId] = id; remember(); render() }),
     el('div', { role: 'tabpanel', id: active.key + '-tab', class: 'stack g3 fade', 'data-key': selected }, view.body())]
 }
 function tabButtons(label: string, entries: { id: string; name: string; count?: number }[], selected: string, choose: (id: string) => void) {
@@ -272,6 +272,7 @@ async function act(work: () => Promise<void>, completionNotice = true) {
   }
 }
 function useFrame(f: Frame) {
+  if (active !== f) closeArtifactMenu()
   active = f; page = f.page; form = f.form
   current = f.data?.current ?? null; projectLead = f.data?.lead; projectLeadPanel = f.data?.leadPanel
   workspaceTarget = f.data?.workspace; detail = f.data?.connection; targets = f.data?.targets
@@ -743,6 +744,58 @@ function openArtifact(projectId: string, taskId: string, artifact: Artifact, arc
     }
   }, false)
 }
+function openArtifactFolder(input: ProjectArtifactRef, label: string) {
+  return act(async () => {
+    try {
+      if (!(await req('project.openArtifactFolder', input)).opened) throw Error('文件管理器未打开')
+    } catch (e) {
+      toastAction = { label: '重试', run: () => openArtifactFolder(input, label) }
+      throw Error(`打不开「${label}」所在文件夹：${e instanceof Error ? e.message : '请在 Orca 桌面应用中重试'}`)
+    }
+  }, false)
+}
+let artifactMenu: { node: HTMLElement; opener: HTMLElement } | undefined
+function closeArtifactMenu(restoreFocus = false) {
+  if (!artifactMenu) return
+  const { node, opener } = artifactMenu
+  artifactMenu = undefined
+  node.remove()
+  if (restoreFocus) opener.focus({ preventScroll: true })
+}
+function artifactEntry(entry: HTMLElement, projectId: string, taskId: string, artifact: Artifact, archiveEnd?: number) {
+  const ref = current?.ref.id === projectId ? current.ref : all.projects.find(p => p.ref.id === projectId)?.ref
+  if (isRemote(projectId) || ref?.hostId !== 'local' || !artifact.url || /^https?:/i.test(artifact.url)) return entry
+  entry.title += ' · 右键打开所在文件夹'
+  entry.setAttribute('aria-haspopup', 'menu')
+  function show(opener: HTMLElement, x: number, y: number) {
+    closeArtifactMenu()
+    const action = (label: string, run: () => void) => el('button', { type: 'button', class: 'btn text', role: 'menuitem', tabIndex: -1,
+      onclick: () => { clickedAction = ''; closeArtifactMenu(true); run() } }, label)
+    const folder = action('打开所在文件夹', () => openArtifactFolder({ projectId, taskId, artifactId: artifact.id, archiveEnd }, artifact.label))
+    const open = action('打开成果', () => { opener.click() })
+    const node = el('div', { class: 'artifact-menu', role: 'menu', 'aria-label': '成果操作', onkeydown: (e: KeyboardEvent) => {
+      if (e.key === 'Tab') { closeArtifactMenu(true); return }
+      if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return
+      e.preventDefault()
+      const next = document.activeElement === folder ? open : folder
+      next.focus()
+    } }, folder, open)
+    artifactMenu = { node, opener }
+    document.body.append(node)
+    const { width, height } = node.getBoundingClientRect()
+    node.style.left = `${Math.max(4, Math.min(x, innerWidth - width - 4))}px`
+    node.style.top = `${Math.max(4, Math.min(y, innerHeight - height - 4))}px`
+    folder.focus({ preventScroll: true })
+  }
+  entry.oncontextmenu = e => { e.preventDefault(); if (!busy) show(e.currentTarget as HTMLElement, e.clientX, e.clientY) }
+  entry.onkeydown = e => {
+    if (busy || !(e.key === 'ContextMenu' || e.shiftKey && e.key === 'F10')) return
+    e.preventDefault()
+    const opener = e.currentTarget as HTMLElement, bounds = opener.getBoundingClientRect()
+    show(opener, bounds.left, bounds.bottom)
+  }
+  return entry
+}
 const feedbackActions: Record<string, string> = { passed: '通过', changes_requested: '需要修改', discarded: '丢弃' }
 const acceptanceStatuses: Record<string, string> = { pending: '待验收', passed: '已通过', changes_requested: '需要修改', discarded: '已丢弃' }
 function feedbackCards(projectId: string, tasks: FeedbackTask[], title = '要你处理', only?: Attention['kind']) {
@@ -784,7 +837,7 @@ function feedbackCards(projectId: string, tasks: FeedbackTask[], title = '要你
     }), acceptance.map(a => {
       const k = key(t.id, 'acceptance', a.id), draft = choices(projectId)[k], base = acceptanceDraft(t.id, a)
       return keyed(card(row(el('h3', { class: 'h2 any grow' }, a.title), tag(`第 ${a.revision} 版`)), el('p', { class: 'any' }, a.details),
-        t.artifacts.filter(ar => a.artifactIds.includes(ar.id)).map(ar => button(`打开成果 · ${ar.label}`, () => openArtifact(projectId, t.id, ar), 'sm')),
+        t.artifacts.filter(ar => a.artifactIds.includes(ar.id)).map(ar => artifactEntry(button(`打开成果 · ${ar.label}`, () => openArtifact(projectId, t.id, ar), 'sm'), projectId, t.id, ar)),
         row(...Object.keys(feedbackActions).map(result => resultButton(base, draft, result)),
           draft ? button('撤销', () => removeChoice(projectId, k), 'text sm') : null), noteField(k, draft)), k)
     }), blocked ? keyed(card(callout(t.progress || t.goal || '任务受阻', 'danger'),
@@ -992,7 +1045,8 @@ function artifactTab(projectId: string, tasks: { id: string; title: string; arti
         delete form.expiring
       }), 'danger sm'), button('取消', () => { delete form.expiring; render() }, 'sm'))
         : button('标为过期', () => { form.expiring = key; render() }, 'text sm')
-      return keyed(card(item(artifactTitle(artifact), summary, artifact.url || isRemote(projectId) ? () => openArtifact(projectId, task.id, artifact) : undefined), controls), key)
+      const entry = item(artifactTitle(artifact), summary, artifact.url || isRemote(projectId) ? () => openArtifact(projectId, task.id, artifact) : undefined)
+      return keyed(card(artifactEntry(entry, projectId, task.id, artifact), controls), key)
     })
   } }
 }
@@ -1025,7 +1079,7 @@ function projectPage() {
     const latest = new Map(latestArtifacts(archive?.tasks ?? p.tasks, true).map(({ artifact }) => [artifact.url || artifact, artifact.version]))
     const artifacts = t.artifacts.map(a => {
       const title = [artifactTitle(a), latest.get(a.url || a) !== a.version && '旧版本', a.expired && '已过期'].filter(Boolean).join(' · ')
-      return button(title, () => openArtifact(p.ref.id, t.id, a, archive?.end), 'sm')
+      return artifactEntry(button(title, () => openArtifact(p.ref.id, t.id, a, archive?.end), 'sm'), p.ref.id, t.id, a, archive?.end)
     })
     const workers = projectAgents(p.ref.id).filter(a => a.taskId === t.id && a.state !== 'done')
     const messages = archive ? [] : p.events.filter(e => t.sourceIds.includes(e.id) || e.taskId === t.id)
@@ -1458,10 +1512,14 @@ function render() {
     el('div', { class: 'pane-layers' }, frames.map(f => layer(f, f === active)))) : null
   root.setAttribute('aria-busy', String(busy))
   updateChildren(root, el('div', {}, header, el('div', { class: `layers${wideInbox && !atHome ? ' has-pane' : ''}`, 'data-key': 'layers', inert: busy }, homeLayer, pane), dock()))
+  if (artifactMenu && (!artifactMenu.opener.isConnected || !artifactMenu.opener.hasAttribute('aria-haspopup') || artifactMenu.opener.closest('[inert]'))) closeArtifactMenu()
 }
+document.addEventListener('pointerdown', e => { if (artifactMenu && !artifactMenu.node.contains(e.target as Node)) closeArtifactMenu() }, true)
+window.addEventListener('resize', () => closeArtifactMenu())
 document.addEventListener('keydown', e => {
   if (e.isComposing || e.keyCode === 229 || !(e.key === 'Escape' || e.altKey && e.key === 'ArrowLeft') || busy) return
-  if (trayOpen) { trayOpen = false; render() }
+  if (e.key === 'Escape' && artifactMenu) closeArtifactMenu(true)
+  else if (trayOpen) { trayOpen = false; render() }
   else if (active !== homeFrame) back()
   else if (e.key === 'Escape' && expandedRows.size && !wideInbox) { expandedRows.clear(); render() }
   else return

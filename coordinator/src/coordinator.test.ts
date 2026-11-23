@@ -4,12 +4,12 @@ import { refs, deliverable, sample } from './fixtures'
 import { fresh, feedback, fingerprint, submitTask, ProjectStore, overview, notifyWorkspace } from './store'
 import { report } from './links'
 import { notifyFeishu } from './feishu'
-import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, readdir, realpath, rm, symlink, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import type { OrcaWorkerApi } from 'orca/worker'
 import type { CoordinatorRuntime } from './runtime'
-import { assertProjectIdle, OrcaRuntime } from './runtime'
+import { assertProjectIdle, OrcaRuntime, revealArtifact } from './runtime'
 import { attention, groupedAttention, taskState } from './model'
 import { inboxLimit, openRunMail, questionWait, questionMaxAge } from '../scripts/orca-questions.mjs'
 import { escalationWait, projectSubmissions, reportSubmitted, reportWait, workerReport } from '../scripts/worker-reports.mjs'
@@ -324,31 +324,51 @@ test('remove uses exact setup, checks every session and terminal, and fails clos
   assert.deepEqual(calls.find(a => a[1] === 'setup-delete'), ['project', 'setup-delete', '--setup', 'exact', '--force'])
 })
 
-test('artifact opening uses the project workspace and a relative file path, and rejects missing files', async () => {
-  const dir = await mkdtemp(path.join(os.tmpdir(), 'agentboat-artifacts-'))
+test('local artifact actions validate registered paths and archived tasks before opening', async () => {
+  const temp = await mkdtemp(path.join(os.tmpdir(), 'agentboat-artifacts-'))
+  const dir = path.join(temp, 'project'), outside = path.join(temp, 'outside')
   const ref = { ...refs[1], path: dir }, p = fresh(ref)
+  const remote = { ...ref, id: 'remote', hostId: 'remote-host' }
   const files = ['设计稿.md', '样稿 v9.html', 'missing.md']
   const docs = path.join(dir, 'design files')
+  const link = path.join(dir, 'outside-link'), revealed: [string, boolean][] = []
   let c!: ReturnType<typeof createCoordinator>, workspace = ref.workspace
   try {
-    await mkdir(docs)
+    await mkdir(docs, { recursive: true })
+    await mkdir(outside)
+    await symlink(outside, link, process.platform === 'win32' ? 'junction' : 'dir')
     for (const name of files.slice(0, 2)) await writeFile(path.join(docs, name), 'fixture')
-    submitTask(p, { ...deliverable, artifacts: files.map((name, i) => ({ id: `a${i}`, label: name, version: 'v1', url: path.join(docs, name) })), acceptance: [] })
+    const artifact = (id: string, url: string) => ({ id, label: id, version: 'v1', url })
+    submitTask(p, { ...deliverable, artifacts: [
+      ...files.map((name, i) => artifact(`a${i}`, path.join(docs, name))), artifact('directory', docs), artifact('root', dir),
+      artifact('web', 'https://example.com/preview'), artifact('link', link)
+    ], acceptance: [] })
+    p.tasks[0].artifacts.push(artifact('outside', `${dir}${path.sep}..${path.sep}outside`))
     const host = mockHost({ storage: { 'project:p2': p as any }, results: {
       'editor.open': async (input: any) => {
         await readFile(path.join(dir, input.path))
         return { opened: true }
       }, 'workspace.open': { opened: true }
     } })
-    const worker = await mountWorker({ default: api => { c = createCoordinator(api, { projects: async () => [refs[0], { ...ref, workspace }] }, undefined, path.join(dir, 'exports')) } }, { host })
+    const worker = await mountWorker({ default: api => { c = createCoordinator(api, {
+      projects: async () => [refs[0], { ...ref, workspace }, remote],
+      revealArtifact: async (file, directory) => { revealed.push([file, directory]) }
+    }, undefined, path.join(dir, 'exports')) } }, { host })
     try {
       const open = (artifactId: string, projectId = ref.id) => worker.request('project.openArtifact', { projectId, taskId: deliverable.id, artifactId })
+      const reveal = (artifactId: string, projectId = ref.id) => worker.request('project.openArtifactFolder', { projectId, taskId: deliverable.id, artifactId })
       assert.deepEqual(await open('a0'), { opened: true })
       assert.deepEqual(await open('a1'), { opened: true })
       await assert.rejects(() => open('a2'), /成果文件不存在或无法访问/)
       await assert.rejects(() => open('a0', refs[0].id), /请选择本项目的本机成果/)
+      assert.deepEqual(await reveal('a1'), { opened: true })
+      await assert.rejects(() => reveal('a2'), /成果文件不存在或无法访问/)
+      for (const id of ['outside', 'link', 'root']) await assert.rejects(() => reveal(id), /成果路径不属于当前项目/)
+      await assert.rejects(() => reveal('web'), /请选择本项目的本机成果/)
+      await assert.rejects(() => reveal('a0', remote.id), /请选择本项目的本机成果/)
       workspace = ''
       await assert.rejects(() => open('a0'), /这个项目当前没有工作区/)
+      assert.deepEqual(await reveal('directory'), { opened: true })
       const workspaceId = ref.workspace.slice(3)
       assert.deepEqual(host.calls.filter(c => c.method === 'editor.open' || c.method === 'workspace.open'), files.slice(0, 2).flatMap(name => [
         { method: 'editor.open', params: { workspaceId, path: `design files/${name}` } }, { method: 'workspace.open', params: { workspaceId } }
@@ -360,10 +380,35 @@ test('artifact opening uses the project workspace and a relative file path, and 
       })
       const archived = { projectId: ref.id, taskId: deliverable.id, artifactId: 'a1', archiveEnd: saved.archive!.end }
       assert.deepEqual(await worker.request('project.openArtifact', archived), { opened: true })
+      assert.deepEqual(await worker.request('project.openArtifactFolder', archived), { opened: true })
       await assert.rejects(() => open('a1'), /请选择本项目的本机成果/)
       await assert.rejects(() => worker.request('project.openArtifact', { ...archived, archiveEnd: 1 }), /归档批次不存在/)
+      const file = await realpath(path.join(docs, files[1]))
+      assert.deepEqual(revealed, [[file, false], [await realpath(docs), true], [file, false]])
     } finally { c.stop(); await worker.deactivate() }
-  } finally { await rm(dir, { recursive: true, force: true }) }
+  } finally { await rm(temp, { recursive: true, force: true }) }
+})
+
+test('artifact reveal passes native paths as arguments and accepts Explorer exit code 1', async () => {
+  const windows = 'C:\\设计, 文件', unix = '/project/设计, 文件'
+  const explorer = path.win32.join(process.env.SystemRoot || 'C:\\Windows', 'explorer.exe')
+  for (const [platform, file, command, fileArgs, dirArgs] of [
+    ['win32', windows, explorer, [`/select,"${windows}\\稿件.txt"`], [`"${windows}"`]],
+    ['darwin', unix, '/usr/bin/open', ['-R', `${unix}/稿件.txt`], [unix]],
+    ['linux', unix, 'xdg-open', [unix], [unix]]
+  ] as const) {
+    const calls: unknown[] = [], tail = platform === 'win32' ? '\\稿件.txt' : '/稿件.txt'
+    const run: NonNullable<Parameters<typeof revealArtifact>[3]> = async (command, args, options) => {
+      calls.push([command, args, options])
+      if (platform === 'win32') throw Object.assign(new Error('Explorer delegated'), { code: 1 })
+    }
+    await revealArtifact(file + tail, false, platform, run)
+    await revealArtifact(file, true, platform, run)
+    const options = platform === 'win32' ? { shell: false, windowsVerbatimArguments: true } : { shell: false }
+    assert.deepEqual(calls, [[command, fileArgs, options], [command, dirArgs, options]])
+  }
+  const missing = async () => { throw Object.assign(new Error('missing executable'), { code: 'ENOENT' }) }
+  await assert.rejects(() => revealArtifact(windows, true, 'win32', missing), /missing executable/)
 })
 
 test('attention counts reviews per task and excludes rework consistently', () => {

@@ -84,8 +84,9 @@ async function setup(options = {}, hub) {
         other.tasks[0].artifacts = [
           { id: 'md', label: '设计文档', version: 'v1', url: '/example/docs/design.md' },
           { id: 'html', label: '样稿 v9', version: 'v9', url: '/example/docs/preview.html' },
+          { id: 'web', label: '网页预览', version: 'v1', url: 'https://example.com/preview' },
         ];
-        other.tasks[0].acceptance[0].artifactIds = ['md', 'html'];
+        other.tasks[0].acceptance[0].artifactIds = ['md', 'html', 'web'];
       }
       projects.push(other);
       project.tasks.push({ ...clone(task), id: 't3', title: '动效交付', acceptance: [acceptance('a3')] },
@@ -262,11 +263,11 @@ async function setup(options = {}, hub) {
         return { method: f.method || 'direct', key: 'test-file', name: f.name, size: atob(f.data).length, type: f.type };
       }
       if (name === 'workspace.readLinkArtifact') return window.fixture.peerFile.data;
-      if (name === 'project.openArtifact') {
+      if (name === 'project.openArtifact' || name === 'project.openArtifactFolder') {
         const target = input.archiveEnd === 50 && input.projectId === 'p1' && input.taskId === archivedTask.id ? archivedTask :
           projects.find(p => p.ref.id === input.projectId)?.tasks.find(t => t.id === input.taskId);
         if (!target?.artifacts.some(a => a.id === input.artifactId)) throw Error('请选择本项目的本机成果');
-        if (window.fixture.workspaceTarget.error) throw Error(window.fixture.workspaceTarget.error);
+        if (name === 'project.openArtifact' && window.fixture.workspaceTarget.error) throw Error(window.fixture.workspaceTarget.error);
         if (window.fixture.artifactError) throw Error(window.fixture.artifactError);
         return { opened: true };
       }
@@ -802,7 +803,15 @@ try {
       const titles = () => panel.locator('.item').evaluateAll(nodes => nodes.map(n => n.getAttribute('aria-label')));
       assert.deepEqual(await titles(), ['原稿']);
       assert.match(await panel.innerText(), /页面交付、插画 · 登记/);
-      await panel.getByRole('button', { name: '原稿', exact: true }).click();
+      const entry = panel.getByRole('button', { name: '原稿', exact: true });
+      assert.equal(await entry.evaluate(el => el.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: innerWidth - 1, clientY: innerHeight - 1 }))), false);
+      const menu = page.getByRole('menu', { name: '成果操作' }), viewport = page.viewportSize();
+      const bounds = await menu.boundingBox();
+      assert.ok(bounds.x >= 0 && bounds.y >= 0 && bounds.x + bounds.width <= viewport.width && bounds.y + bounds.height <= viewport.height);
+      await menu.getByRole('menuitem', { name: '打开所在文件夹' }).click();
+      assert.deepEqual(await page.evaluate(() => fixture.calls.filter(c => c.name === 'project.openArtifactFolder').map(c => c.input)),
+        [{ projectId: 'p1', taskId: 't1', artifactId: 'new' }]);
+      await entry.click();
       assert.equal(await panel.getByRole('button', { name: /旧版本/ }).count(), 0);
       await panel.getByRole('button', { name: '标为过期', exact: true }).click();
       await panel.getByRole('button', { name: '取消' }).click();
@@ -827,7 +836,20 @@ try {
       const body = await openReview('移动端交付');
       const calls = () => page.evaluate(() => fixture.calls.filter(c => c.name === 'project.openArtifact').map(c => c.input));
       const expected = artifactId => ({ projectId: 'p2', taskId: 't2', artifactId });
-      await body.getByRole('button', { name: '打开成果 · 设计文档', exact: true }).click();
+      const entry = body.getByRole('button', { name: '打开成果 · 设计文档', exact: true });
+      const menu = page.getByRole('menu', { name: '成果操作' });
+      assert.match(await entry.getAttribute('title'), /右键打开所在文件夹/);
+      await entry.click({ button: 'right' });
+      await menu.waitFor();
+      await page.keyboard.press('Escape');
+      await menu.waitFor({ state: 'detached' });
+      assert.equal(await entry.evaluate(el => el === document.activeElement), true);
+      await entry.press('Shift+F10');
+      await page.keyboard.press('Enter');
+      assert.deepEqual(await page.evaluate(() => fixture.calls.filter(c => c.name === 'project.openArtifactFolder').map(c => c.input)), [expected('md')]);
+      await body.getByRole('button', { name: '打开成果 · 网页预览', exact: true }).click({ button: 'right' });
+      assert.equal(await menu.count(), 0);
+      await entry.click();
       await page.evaluate(() => { fixture.artifactError = '成果文件不存在或无法访问'; });
       await body.getByRole('button', { name: '打开成果 · 样稿 v9', exact: true }).click();
       const error = page.getByRole('alert').filter({ hasText: '打不开「样稿 v9」：成果文件不存在或无法访问' });
@@ -840,7 +862,13 @@ try {
       const detail = currentLayer();
       await detail.getByRole('button', { name: '打开成果 · 样稿 v9', exact: true }).click();
       await detail.getByRole('button', { name: /^成果 / }).click();
-      await detail.getByRole('button', { name: '设计文档 · v1', exact: true }).click();
+      const taskEntry = detail.getByRole('button', { name: '设计文档 · v1', exact: true });
+      await taskEntry.click({ button: 'right' });
+      await activeHeader().getByRole('heading', { name: '移动端交付', exact: true }).click();
+      await menu.waitFor({ state: 'detached' });
+      await taskEntry.click({ button: 'right' });
+      await page.keyboard.press('ArrowDown');
+      await page.keyboard.press('Enter');
       assert.deepEqual(await calls(), ['md', 'html', 'html', 'html', 'md'].map(expected));
     });
   }
@@ -861,9 +889,12 @@ try {
     await currentLayer().getByRole('region', { name: '决定' }).getByText('第一版').waitFor();
     assert.doesNotMatch(await currentLayer().innerText(), /历史原文|现在谁在做/);
     await currentLayer().getByRole('button', { name: /^成果 / }).click();
-    await currentLayer().getByRole('button', { name: '验收文档 · v1' }).click();
-    assert.deepEqual(await page.evaluate(() => fixture.calls.filter(c => c.name === 'project.openArtifact').at(-1)?.input),
-      { projectId: 'p1', taskId: 't1', artifactId: 'md', archiveEnd: 50 });
+    const archiveEntry = currentLayer().getByRole('button', { name: '验收文档 · v1' });
+    const target = { projectId: 'p1', taskId: 't1', artifactId: 'md', archiveEnd: 50 };
+    await archiveEntry.click({ button: 'right' });
+    await page.getByRole('menuitem', { name: '打开所在文件夹' }).click();
+    await archiveEntry.click();
+    assert.deepEqual(await page.evaluate(() => fixture.calls.filter(c => c.name.startsWith('project.openArtifact')).slice(-2).map(c => c.input)), [target, target]);
     await back();
     await currentLayer().getByRole('button', { name: '更早一批' }).click();
     await currentLayer().getByText('这批没有归档任务').waitFor();
@@ -1388,6 +1419,8 @@ try {
     const artifacts = currentLayer().getByRole('tabpanel');
     assert.equal(await artifacts.getByText('设计原稿 · v1', { exact: true }).count(), 1);
     assert.equal(await artifacts.getByRole('button', { name: /旧版本|标为过期/ }).count(), 0);
+    await artifacts.getByRole('button', { name: '设计原稿 · v1' }).click({ button: 'right' });
+    assert.equal(await page.getByRole('menu', { name: '成果操作' }).count(), 0);
     const openFile = async (name, type, data) => {
       await page.evaluate(f => { fixture.peerFile = f; }, { name, type, data });
       await artifacts.getByRole('button', { name: '设计原稿 · v1' }).click();
