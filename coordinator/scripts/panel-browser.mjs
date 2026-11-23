@@ -130,6 +130,11 @@ async function setup(options = {}, hub) {
       { ...sessions[1], handle: 'project-session-2', title: '审查会话', agent: 'opencode' }];
     const binding = p => ({ ...(p.backup ? { backup: p.backup } : {}), revision: p.revision, runId: p.runId, ...(p.runId && p.activeSession ? { session: p.activeSession } : {}), ...(p.takeover ? { takeover: p.takeover } : {}) });
     if (options.projectLead) project.activeSession = projectSessions[0];
+    if (options.projectBackupRecovery) {
+      project.activeSession = { ...projectSessions[0], agent: 'codex' };
+      projectSessions[1] = { ...projectSessions[1], agent: 'antigravity', title: '代管会话' };
+      project.backup = { primary: project.activeSession.handle, handle: projectSessions[1].handle, agent: 'antigravity', phase: 'active', history: [] };
+    }
     const registered = () => projects.filter(p => !window.fixture.removedProjects?.includes(p.ref.id));
     const attention = () => registered().flatMap(p => p.tasks.flatMap(t => {
       const base = { projectId: p.ref.id, taskId: t.id, title: t.title };
@@ -216,6 +221,7 @@ async function setup(options = {}, hub) {
       }
       if (name === 'project.lead') {
         const p = projects.find(p => p.ref.id === input.projectId);
+        const backupPrimaryUnavailable = () => p.backup?.phase === 'active' && p.activeSession?.online === 'offline';
         if (input.mode) {
           if (p.revision !== input.revision) throw Error('项目已更新');
           if (window.fixture.delayProjectSwitch) {
@@ -224,12 +230,20 @@ async function setup(options = {}, hub) {
           }
           p.revision++;
           if (input.mode === 'cancel') delete p.takeover;
+          else if (input.mode === 'promote') {
+            if (!backupPrimaryUnavailable()) throw Error('原主会话仍可能接回 Run');
+            p.activeSession = projectSessions.find(s => s.handle === p.backup.handle);
+            delete p.backup;
+            delete p.takeover;
+          }
           else p.takeover = { id: String(p.revision), target: input.mode === 'new' ? { title: '新的 ' + input.agent + ' 会话' } : projectSessions.find(s => s.handle === input.handle),
             state: 'waiting', backupAgent: options.backupAgent, expiresAt: new Date(Date.now() + 600000).toISOString() };
         }
         const workspaceError = window.fixture.workspaceTarget.error;
         return clone({ binding: binding(p), leadAgents: p.leadAgents ?? { primary: { agent: 'codex' }, backup: { agent: 'antigravity' } },
-          availableAgents: workspaceError ? [] : availableAgents, roleAgents: availableAgents, sessions: workspaceError ? [] : projectSessions, ...(workspaceError ? { workspaceError } : {}) });
+          availableAgents: workspaceError ? [] : availableAgents, roleAgents: availableAgents,
+          sessions: workspaceError ? [] : projectSessions.filter(s => s.handle !== p.activeSession?.handle || p.activeSession.online === 'online'),
+          ...(backupPrimaryUnavailable() ? { backupPrimaryUnavailable: true } : {}), ...(workspaceError ? { workspaceError } : {}) });
       }
       if (name === 'project.expireArtifact') {
         const p = projects.find(p => p.ref.id === input.projectId);
@@ -1075,6 +1089,32 @@ try {
     await page.waitForFunction(() => fixture.project.leadAgents?.primary.agent === 'antigravity');
     assert.deepEqual(await page.evaluate(() => fixture.calls.find(c => c.name === 'project.settings').input.leadAgents),
       { primary: { agent: 'antigravity' }, backup: { agent: 'codex' } });
+  });
+  await test('an offline primary lets its acting backup become primary and keeps the Run', async () => {
+    await setup({ projectLead: true, projectBackupRecovery: true });
+    await project();
+    await page.getByRole('button', { name: '项目设置', exact: true }).click();
+    const layer = currentLayer(), promote = layer.getByRole('button', { name: '将当前代管备用转正为主会话', exact: true });
+    const backup = layer.getByLabel('备用代理', { exact: true }), save = layer.getByRole('button', { name: '保存主会话设置', exact: true });
+    await backup.waitFor();
+    assert.equal(await promote.count(), 0);
+    await page.evaluate(() => { fixture.project.activeSession.online = 'offline'; fixture.emit(); });
+    await promote.waitFor();
+    await layer.getByLabel('默认主用', { exact: true }).selectOption('antigravity');
+    await backup.selectOption('codex');
+    await save.click();
+    await page.waitForFunction(() => fixture.project.leadAgents?.backup.agent === 'codex');
+    assert.equal(await page.evaluate(() => fixture.project.backup.phase), 'active');
+    const runId = await page.evaluate(() => fixture.project.runId);
+    await page.evaluate(() => { fixture.delayProjectSwitch = true; });
+    await promote.click();
+    await page.waitForFunction(() => !!fixture.finishProjectSwitch);
+    assert.equal(await promote.isDisabled(), true);
+    await page.evaluate(() => fixture.finishProjectSwitch());
+    await promote.waitFor({ state: 'hidden' });
+    await layer.getByText(/Antigravity · 代管会话 · 在线/).waitFor();
+    assert.equal(await page.evaluate(() => fixture.project.runId), runId);
+    assert.equal(await page.evaluate(() => fixture.calls.find(c => c.name === 'project.lead' && c.input.mode).input.mode), 'promote');
   });
   await test('waiting project offers only cancellation in both lead views and restores actions after cancellation or expiry', async () => {
     await setup({ projectUnbound: true, clock: true, backupAgent: 'codex' });

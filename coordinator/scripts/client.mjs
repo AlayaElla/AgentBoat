@@ -37,6 +37,7 @@ const input = internal ? readInput(0) : history ? { projectId: historyProject, e
   : operation === 'main-targets' ? null
   : { ...readInput(operation === 'main-bind' || leadBind || leadSwitch ? 0 : argument), ...(['message', 'feedback', 'feishu-reply', 'project-lead-switch'].includes(operation) ? {} : { operation: operation === 'main-bind' || leadBind ? 'bind' : operation }) };
 if (internal && argument === 'project.lead' && (input.mode !== 'new' || input.startOnly !== true)) throw new Error('此入口仅用于自动启动未绑定的项目主会话');
+if (leadSwitch && !['existing', 'new', 'promote', 'cancel'].includes(input.mode)) throw new Error('请选择 existing、new、promote 或 cancel');
 if (operation === 'main-bind' || leadBind || leadSwitch) {
   if (argument && (operation !== 'main-bind' || argument !== '--check')) throw new Error('请从标准输入传入绑定或切换请求');
   if (!caller) throw new Error('请在对应的 Orca 会话中调用该命令');

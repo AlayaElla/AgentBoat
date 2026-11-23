@@ -1,5 +1,6 @@
 import type { Snapshot, Project, ProjectRef, Overview, WorkspaceBinding, MessagingSnapshot, LeadSwitch, ProjectLead } from './model'
 import type { DelegatedFeedback, FeedbackReply, LinksSnapshot, Sharing } from './links'
+export type ProjectLeadSwitch = Omit<LeadSwitch, 'mode'> & { mode: Exclude<LeadSwitch['mode'], 'bot'> | 'promote' }
 export interface ArchivePage {
   end: number; previousEnd?: number; tasks: Project['tasks']
   deliveries: number; events: number; requests: number; history: number
@@ -25,14 +26,14 @@ declare module 'orca' {
     'lead.control': { input: { runId: string; action: import('./model').LeadAction; caller: string; token: string; confirm?: boolean; currentRunId?: string; generation?: number; standbyRunId?: string; note?: string }; output: { useRun?: string; checkRun?: string; park?: string; done?: boolean } }
     'workspace.agent.targets': { input: { workspace?: string } | undefined; output: { agentWorkspace: string; availableAgents: import('./model').InstalledAgent[] | null; bots?: import('./model').BotTarget[]; sessions: import('./model').AgentSession[]; workspaces: { workspace: string; name: string; path: string }[] } }
     'workspace.agent.switch': { input: LeadSwitch; output: WorkspaceBinding }
-    'workspace.projectLead': { input: LeadSwitch & { projectId: string; runId: string }; output: ProjectLead }
+    'workspace.projectLead': { input: ProjectLeadSwitch & { projectId: string; runId: string }; output: ProjectLead }
     'workspace.entry': { output: { opened: boolean } }
     'workspace.message': { input: { projectId: string; revision?: number; requestId: string; runId: string; text: string }; output: Snapshot & { queued?: string } }
     'projects.list': { output: { projects: ProjectRef[]; error?: string } }
     'project.read': { input: { projectId: string }; output: Snapshot }
     'project.task': { input: { projectId: string; taskId: string }; output: Project['tasks'][number] | null }
     'project.archive': { input: { projectId: string; end?: number }; output: ArchivePage }
-    'project.lead': { input: { projectId: string } | (LeadSwitch & { projectId: string; startOnly?: boolean; goal?: string; introduction?: string }); output: ProjectLead }
+    'project.lead': { input: { projectId: string } | (ProjectLeadSwitch & { projectId: string; startOnly?: boolean; goal?: string; introduction?: string }); output: ProjectLead }
     'project.openMain': { input: { projectId: string }; output: { opened: boolean; multipleConversations?: boolean } }
     'project.settings': { input: { projectId: string; revision: number; roles?: Project['roles']; leadAgents?: Project['leadAgents']; template?: string; runId?: string; caller?: string }; output: Snapshot }
     'project.feedback': { input: { projectId: string; revision?: number; requestId?: string; runId?: string; caller?: string; items: import('./store').FeedbackItem[] }; output: Snapshot }

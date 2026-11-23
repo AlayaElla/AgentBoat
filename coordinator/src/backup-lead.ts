@@ -64,6 +64,21 @@ export class BackupLeads {
   constructor(private store: ProjectStore, private runtime: CoordinatorRuntime, private visible: (id: string) => Promise<unknown>,
     private changed: (id: string) => void) {}
 
+  projectPrimaryUnavailable(b: BackupLead | undefined, sessions: AgentSession[]) {
+    if (b?.phase !== 'active' || !b.primary) return false
+    // A contact's `closed` flag acknowledges our own cleanup. Only Orca's session error proves closure.
+    const error = b.contact?.primary === b.primary ? this.routes[b.contact.id]?.error : undefined
+    const sessionId = b.primary.slice('orca_session_id:'.length)
+    return offline(sessions.find(s => s.handle === b.primary)) ||
+      (chat(b.primary) && !!error?.startsWith(`Agent session ${sessionId} has ended: its chat was closed.`))
+  }
+
+  async verifyProjectPromotion(runId: string, backup: BackupLead, session: AgentSession) {
+    const { owner, generation } = await this.runtime.runBinding(runId)
+    if (!Number.isSafeInteger(generation) || (owner !== session.handle &&
+      !(owner === null && chat(session.handle) && generation === backup.generation))) fail('Run 归属与当前代管备用不符，请核对后再转正')
+  }
+
   private mutate(id: string, update: (r: Binding) => void, revision?: number) {
     return id ? this.store.mutate(id, revision, update) : this.store.mutateWorkspace(update, revision)
   }

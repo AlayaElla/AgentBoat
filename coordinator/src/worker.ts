@@ -7,7 +7,8 @@ import { realpath, stat } from 'node:fs/promises'
 import { Connections } from './connections'
 import { checkedPanels } from './panel-result'
 import type { OrcaWorkerApi } from 'orca/worker'
-import { takeoverActive, waitingForProjectLead, actingMain, workspaceBackupInFlight, type AgentSession, type LeadSwitch, type Project, type ProjectLead, type ProjectRef, type Snapshot, type SourceEvent, type Delivery, type MessagingSnapshot } from './model'
+import { takeoverActive, waitingForProjectLead, actingMain, workspaceBackupInFlight, type AgentSession, type Project, type ProjectLead, type ProjectRef, type Snapshot, type SourceEvent, type Delivery, type MessagingSnapshot } from './model'
+import type { ProjectLeadSwitch } from './protocol'
 import { FeishuSources, notifyFeishu, type MessageTransport } from './feishu'
 import { OrcaRuntime, defaultExecutable, readTimeout, type CoordinatorRuntime } from './runtime'
 import { ProjectStore, artifactUrl, expireArtifact, fail, feedback, fingerprint, fresh, maxMessageLength, notifyWorkspace, object, overview, resetBackup, retainRecent, receiveEvent, submitTask, strings, text, revision, mergeProjects, feishuConfig, verifyTakeover } from './store'
@@ -401,6 +402,7 @@ export function createCoordinator(api: OrcaWorkerApi, runtime: CoordinatorRuntim
     const [availableAgents, roleAgents, binding] = await Promise.all([launchList,
       targets.workspace?.workspace === ref.workspace ? launchList : catalog(ref.workspace), projectLeadView(p, targets.inventory?.sessions)])
     return { binding, leadAgents: projectLeadAgents(p.leadAgents), availableAgents, roleAgents, sessions: targets.sessions,
+      ...(!p.hidden && p.runId && targets.inventory && backups.projectPrimaryUnavailable(p.backup, targets.inventory.sessions) ? { backupPrimaryUnavailable: true } : {}),
       ...(targets.error ? { workspaceError: targets.error } : {}) }
   }
   async function checkProjectLeadTarget(id: string, handle: string) {
@@ -411,26 +413,54 @@ export function createCoordinator(api: OrcaWorkerApi, runtime: CoordinatorRuntim
       fail('该会话已用于其他主会话或备用')
     }
   }
-  async function switchProjectLead(id: string, input: LeadSwitch & { startOnly?: boolean; goal?: string; introduction?: string }, ownerRun?: string) {
+  async function switchProjectLead(id: string, input: ProjectLeadSwitch & { startOnly?: boolean; goal?: string; introduction?: string }, ownerRun?: string) {
     const ref = await requireProject(id), p = await store.register(ref)
     if (input.startOnly && input.mode !== 'new') fail('自动启动需要新会话')
     if (input.startOnly && input.workspace !== ref.workspace) fail('项目工作区已变化，请核对后再操作')
     const scoped = input.mode === 'cancel' ? undefined : await projectLeadTargets(ref, p)
     if (scoped?.error) fail(scoped.error)
+    const authorize = async () => {
+      if (ownerRun !== undefined && (!ownerRun || (await store.workspace()).runId !== ownerRun)) fail('请使用已绑定的工作间主 agent Run')
+    }
+    const primaryUnavailable = (project: Project) => !!scoped && backups.projectPrimaryUnavailable(project.backup, scoped.inventory.sessions)
+    const mode = input.mode === 'existing' && input.handle && input.handle === p.backup?.handle && primaryUnavailable(p) ? 'promote' : input.mode
+    if (mode === 'promote') {
+      await store.mutate(id, revision(input.revision), async project => {
+        await authorize()
+        if (project.hidden) fail('项目已隐藏，请先恢复显示')
+        const backup = project.backup
+        if (!project.runId || backup?.phase !== 'active') fail('只有正在代管项目 Run 的备用可以转正')
+        if (!primaryUnavailable(project)) fail('原主会话仍可能接回 Run，请等主用接回')
+        if (project.takeover?.state === 'sending') fail('正在启动项目主会话，请等启动回执')
+        const session = scoped?.sessions.find(s => s.handle === backup.handle && s.handle !== backup.primary)
+        if (!session) fail('当前代管备用不在项目工作区内在线，请刷新后重试')
+        await checkProjectLeadTarget(id, session.handle)
+        await backups.verifyProjectPromotion(project.runId, backup, session)
+        project.mainAgentHandle = session.handle
+        project.mainSession = session
+        delete project.takeover
+        const name = session.title ? `${session.title}（${session.handle}）` : session.handle
+        backup.history.push({ at: Date.now(), text: `原主会话已不可用，已将代管备用 ${name} 转正为主会话` })
+        resetBackup(project, session.handle)
+      })
+      changed(id)
+      defer(id); deferBackupCheck()
+      return readProjectLead(id)
+    }
     const launch = input.mode === 'new' ? projectLeadAgents(p.leadAgents).primary : undefined
     const goal = input.goal === undefined ? '' : text(input.goal, '项目目标', maxMessageLength)
     const introduction = input.introduction === undefined ? '' : text(input.introduction, '项目模板开场语', maxMessageLength)
-    await switchLead(runtime, { ...input, revision: input.startOnly ? p.revision : input.revision, workspace: scoped?.workspace?.workspace,
+    await switchLead(runtime, { ...input, mode, revision: input.startOnly ? p.revision : input.revision, workspace: scoped?.workspace?.workspace,
       agent: input.startOnly ? undefined : input.agent }, {
       role: 'project',
       launch, startOnly: input.startOnly,
       targets: async () => ({ sessions: scoped?.sessions ?? [], workspaces: scoped?.workspaces ?? [] }),
       mutate: (update, expected) => store.mutate(id, expected, async project => {
-        if (ownerRun !== undefined && (!ownerRun || (await store.workspace()).runId !== ownerRun)) fail('请使用已绑定的工作间主 agent Run')
+        await authorize()
         if (expected !== undefined && input.mode !== 'cancel') {
           if (project.hidden) fail('项目已隐藏，请先恢复显示')
           if (input.startOnly && project.runId) fail('项目已绑定主会话')
-          if (projectBackupBusy(project.backup)) fail('备用正在启动或处理，请等主用接回后再切换')
+          if (projectBackupBusy(project.backup) && !primaryUnavailable(project)) fail('备用正在启动或处理，请等主用接回后再切换')
           if (input.mode === 'existing' && input.handle) {
             if (project.backup?.handle === input.handle) fail('该会话已是当前项目的备用')
             await checkProjectLeadTarget(id, input.handle)
@@ -754,31 +784,34 @@ export function createCoordinator(api: OrcaWorkerApi, runtime: CoordinatorRuntim
     }
     const template = input.template === undefined ? undefined : templateLeadAgents(projectTemplate(input.template))
     const choices: Partial<ProjectLeadAgents> = {}
+    let scoped: Awaited<ReturnType<typeof projectLeadTargets>> | undefined
     if (raw) {
       try {
         if ('primary' in raw) choices.primary = projectAgentLaunch(raw.primary)
         if ('backup' in raw) choices.backup = raw.backup === null ? null : projectAgentLaunch(raw.backup)
       } catch (e) { fail((e as Error).message) }
       if (!Object.keys(choices).length) fail('请选择要保存的主用或备用代理')
-      const scoped = await projectLeadTargets(project.ref, project)
+      scoped = await projectLeadTargets(project.ref, project)
       if (!scoped.workspace) fail(scoped.error || '找不到项目工作区')
       const installed = await runtime.installedAgents(scoped.workspace.workspace, true)
       for (const choice of [choices.primary, choices.backup]) {
         if (choice && !installed.some(a => a.id === choice.agent)) fail(`代理 ${choice.agent} 在当前工作区不可用，请刷新后选择`)
       }
-      const next = projectLeadAgents({ ...project.leadAgents, ...choices })
-      if (next.backup?.agent === next.primary.agent) fail('默认主用与备用需要选择不同的代理')
-      const primary = scoped.inventory.sessions.find(s => s.handle === project.mainAgentHandle)?.agent || projectAgentKind(project)
-      if (choices.backup && choices.backup.agent === primary) fail('备用代理与当前主用相同')
     }
     await store.mutate(id, revision(input.revision), p => {
       if (roles) p.roles = { design: roles.design, code: roles.code, review: roles.review }
       if (template && !p.leadAgents) p.leadAgents = template
-      if (raw) {
-        if ('backup' in choices && !isDeepStrictEqual(choices.backup, projectLeadAgents(p.leadAgents).backup)) {
-          if (projectBackupBusy(p.backup)) fail('备用正在启动或处理，请稍后再更改')
-          if (p.backup?.phase !== 'failed') resetBackup(p, p.mainAgentHandle ?? '')
-        }
+      if (scoped) {
+        const sessions = scoped.inventory.sessions
+        const primaryUnavailable = backups.projectPrimaryUnavailable(p.backup, sessions)
+        const changingBackup = 'backup' in choices && !isDeepStrictEqual(choices.backup, projectLeadAgents(p.leadAgents).backup)
+        if (changingBackup && projectBackupBusy(p.backup) && !primaryUnavailable) fail('备用正在启动或处理，请稍后再更改')
+        const next = projectLeadAgents({ ...p.leadAgents, ...choices })
+        if (next.backup?.agent === next.primary.agent) fail('默认主用与备用需要选择不同的代理')
+        const primary = primaryUnavailable ? sessions.find(s => s.handle === p.backup?.handle)?.agent || p.backup?.agent
+          : sessions.find(s => s.handle === p.mainAgentHandle)?.agent || projectAgentKind(p)
+        if (choices.backup && choices.backup.agent === primary) fail('备用代理与当前主用相同')
+        if (changingBackup && !primaryUnavailable && p.backup?.phase !== 'failed') resetBackup(p, p.mainAgentHandle ?? '')
         p.leadAgents = { ...p.leadAgents, ...choices }
       }
       rememberProjectCaller(p, input)
