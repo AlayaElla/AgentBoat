@@ -30,6 +30,9 @@ after(() => {
 test('code 模板提供默认主备和分工，旧原版读取时升级，定制模板原样保留', () => {
   const expectedLeads = { primary: { agent: 'antigravity' }, backup: { agent: 'codex' } };
   assert.deepEqual(projectLeadAgents(), expectedLeads);
+  assert.deepEqual(projectLeadAgents({}, 'codex').backup, { agent: 'antigravity' });
+  assert.deepEqual(projectLeadAgents({ backup: { agent: 'codex' } }, 'codex').backup, { agent: 'codex' });
+  assert.equal(projectLeadAgents({ backup: null }, 'codex').backup, null);
   api.init();
   const local = path.join(testHome, 'templates/code.json');
   assert.deepEqual(JSON.parse(readFileSync(local, 'utf8')), code);
@@ -69,6 +72,13 @@ test('code 模板提供默认主备和分工，旧原版读取时升级，定制
   assert.deepEqual(projectLeadAgents(), { primary: v036.mainAgent, backup: null });
   assert.equal(readFileSync(local, 'utf8'), contents);
   assert.throws(() => api.template('../escape'));
+});
+
+test('模板省略备用时使用与主用不同的代理', () => {
+  assert.deepEqual(templateLeadAgents({ mainAgent: { agent: 'codex' } }),
+    { primary: { agent: 'codex' }, backup: { agent: 'antigravity' } });
+  assert.deepEqual(templateLeadAgents({ mainAgent: { agent: 'claude' } }),
+    { primary: { agent: 'claude' }, backup: { agent: 'codex' } });
 });
 
 test('记忆按来源隔离、带日期、重复记录拒绝追加', () => {

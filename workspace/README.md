@@ -25,7 +25,7 @@ node workspace/workspace.mjs templates
 
 ## 模板与立项
 
-默认 [templates/code.json](templates/code.json) 使用 Antigravity 启动项目主会话，备用使用 Codex。设计由 Antigravity 负责，代码和审查由 Codex 负责，来源为 `empty`。项目设置可以从对应工作区启用的 Orca 代理中修改主备。立项、自动启动和面板新开会话均按项目设置启动，未设置时使用本机默认模板。模板字段 `mainAgent` 和 `backupAgent` 支持 `agent`、`model`、`effort` 和 `surface`，其中 `effort` 需要 `model`，`backupAgent: null` 停用备用。模型、强度和会话类型未填时跟随 Orca。原样保留的旧内置模板在读取时自动采用新默认值，定制模板原样读取。
+默认 [templates/code.json](templates/code.json) 使用 Antigravity 启动项目主会话，备用使用 Codex。设计由 Antigravity 负责，代码和审查由 Codex 负责，来源为 `empty`。项目设置可以从对应工作区启用的 Orca 代理中修改主备。立项、自动启动和面板新开会话均按项目设置启动，未设置时使用本机默认模板。模板字段 `mainAgent` 和 `backupAgent` 支持 `agent`、`model`、`effort` 和 `surface`，其中 `effort` 需要 `model`，`backupAgent: null` 停用备用。省略 `backupAgent` 时，模板会选择与主用不同的代理。已绑定项目未保存备用偏好时，默认备用会避开当前主会话的代理。模型、强度和会话类型未填时跟随 Orca。原样保留的旧内置模板在读取时自动采用新默认值，定制模板原样读取。
 
 保存 UTF-8 JSON 后调用（支持 BOM）：
 

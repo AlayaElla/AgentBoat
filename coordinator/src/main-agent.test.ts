@@ -171,6 +171,33 @@ for (const mode of ['new', 'existing'] as const) test(`离线主用由备用代�
   } finally { c.stop(); await worker.deactivate() }
 })
 
+test('legacy Codex lead keeps its standby when polling and saving the effective backup', async () => {
+  const main = { ...projectSession, handle: 'orca_session_id:legacy-main', agent: 'codex' }
+  const standby = { ...projectSession, handle: 'orca_session_id:legacy-standby', agent: 'antigravity' }
+  const backup = { primary: main.handle, handle: standby.handle, agent: standby.agent, phase: 'standby' as const,
+    cycle: 'existing', since: Date.now(), history: [] }
+  const p = { ...fresh(projectRef), runId: 'run_legacy', mainAgentHandle: main.handle, backup }
+  const host = mockHost({ storage: { 'project:p1': p as any }, results: {
+    'workspace.list': { workspaces: [testWorkspace], truncated: false }
+  } })
+  let c!: ReturnType<typeof createCoordinator>
+  const worker = await mountWorker({ default: api => { c = createCoordinator(api, {
+    projects: async () => [projectRef],
+    targets: async () => ({ sessions: [main, standby], workspaces: [{ workspace: projectWorkspaceId, name: projectRef.name, path: projectRef.path }] })
+  }) } }, { host })
+  const read = () => worker.request('project.lead', { projectId: projectRef.id })
+  const saveLead = async (leadAgents: typeof p.leadAgents) =>
+    worker.request('project.settings', { projectId: projectRef.id, revision: (await read()).binding.revision, leadAgents })
+  try {
+    await c.checkBackups()
+    assert.deepEqual((await c.store.get(projectRef.id)).backup, backup)
+    assert.deepEqual((await read()).leadAgents, { primary: { agent: 'antigravity' }, backup: { agent: 'antigravity' } })
+    await assert.rejects(() => saveLead({ backup: { agent: 'codex' } }), /与当前主用相同/)
+    await saveLead({ primary: { agent: 'codex' }, backup: { agent: 'antigravity' } })
+    assert.deepEqual((await c.store.get(projectRef.id)).backup, backup)
+  } finally { c.stop(); await worker.deactivate() }
+})
+
 test('project roles and new leads use the current workspace catalog and Orca launch preferences', async () => {
   const launches: string[][] = [], fakeCli = new OrcaRuntime(async () => 'never-start-a-real-process')
   ;(fakeCli as any).call = async (args: string[]) => {
@@ -199,7 +226,7 @@ test('project roles and new leads use the current workspace catalog and Orca lau
       const result = await launch(choice)
       assert.equal(result.binding.takeover?.target.handle, 'orca_session_id:fake-' + launches.length)
       assert.equal(result.binding.takeover?.state, 'waiting')
-      assert.equal(result.binding.takeover?.backupAgent, choice === 'codex' ? undefined : 'codex')
+      assert.equal(result.binding.takeover?.backupAgent, choice === 'codex' ? 'antigravity' : 'codex')
       const argv = launches.at(-1)!, agent = choice ?? 'antigravity'
       const flag = (k: string) => argv.includes('--' + k) ? argv[argv.indexOf('--' + k) + 1] : undefined
       assert.equal(flag('agent'), agent)

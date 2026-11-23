@@ -35,17 +35,27 @@ export function projectAgentLaunch(value) {
   return { agent, ...(model && { model }), ...(effort && { effort }), ...(surface && { surface }) };
 }
 
+const defaultProjectBackup = primary => projectAgentLaunch(primary === code.backupAgent.agent ? code.mainAgent : code.backupAgent);
+
 export function templateLeadAgents(value) {
+  const primary = projectAgentLaunch(value.mainAgent);
   return {
-    primary: projectAgentLaunch(value.mainAgent),
-    backup: value.backupAgent === undefined ? projectAgentLaunch(code.backupAgent) :
+    primary,
+    backup: value.backupAgent === undefined ? defaultProjectBackup(primary.agent) :
       value.backupAgent === null ? null : projectAgentLaunch(value.backupAgent),
   };
 }
 
-export function projectLeadAgents(settings) {
+export function projectLeadAgents(settings, activeAgent) {
   if (settings?.primary && settings.backup !== undefined) return settings;
-  return { ...templateLeadAgents(projectTemplate('code')), ...settings };
+  const defaults = templateLeadAgents(projectTemplate('code'));
+  const primary = settings?.primary ?? defaults.primary;
+  let backup = settings?.backup;
+  if (backup === undefined) {
+    const agent = activeAgent || primary.agent;
+    backup = defaults.backup?.agent === agent ? defaultProjectBackup(agent) : defaults.backup;
+  }
+  return { primary, backup };
 }
 
 export const backupDefaults = primary => code.backupAgents[primary === 'codex' ? 'claude' : 'codex'];

@@ -367,7 +367,7 @@ export function createCoordinator(api: OrcaWorkerApi, runtime: CoordinatorRuntim
     const binding = projectBinding(p, sessions), waiting = waitingForProjectLead(binding)
     if (waiting) {
       let backup
-      try { backup = projectLeadAgents(p.leadAgents).backup } catch { return binding }
+      try { backup = projectLeadAgents(p.leadAgents, waiting.target.agent).backup } catch { return binding }
       if (backup && backup.agent !== waiting.target.agent && await runtime.installedAgents(waiting.target.workspace)
         .then(list => list.some(a => a.id === backup.agent)).catch(() => false)) waiting.backupAgent = backup.agent
     }
@@ -403,8 +403,10 @@ export function createCoordinator(api: OrcaWorkerApi, runtime: CoordinatorRuntim
     const launchList = catalog(targets.workspace?.workspace)
     const [availableAgents, roleAgents, binding] = await Promise.all([launchList,
       targets.workspace?.workspace === ref.workspace ? launchList : catalog(ref.workspace), projectLeadView(p, targets.inventory?.sessions)])
-    return { binding, leadAgents: projectLeadAgents(p.leadAgents), availableAgents, roleAgents, sessions: targets.sessions,
-      ...(!p.hidden && p.runId && targets.inventory && backups.projectPrimaryUnavailable(p.backup, targets.inventory.sessions) ? { backupPrimaryUnavailable: true } : {}),
+    const primaryUnavailable = !p.hidden && !!p.runId && !!targets.inventory && backups.projectPrimaryUnavailable(p.backup, targets.inventory.sessions)
+    const effectiveAgent = primaryUnavailable ? targets.inventory?.sessions.find(s => s.handle === p.backup?.handle)?.agent || p.backup?.agent : binding.session?.agent
+    return { binding, leadAgents: projectLeadAgents(p.leadAgents, effectiveAgent), availableAgents, roleAgents, sessions: targets.sessions,
+      ...(primaryUnavailable ? { backupPrimaryUnavailable: true } : {}),
       ...(targets.error ? { workspaceError: targets.error } : {}) }
   }
   async function checkProjectLeadTarget(id: string, handle: string) {
@@ -806,12 +808,12 @@ export function createCoordinator(api: OrcaWorkerApi, runtime: CoordinatorRuntim
       if (scoped) {
         const sessions = scoped.inventory.sessions
         const primaryUnavailable = backups.projectPrimaryUnavailable(p.backup, sessions)
-        const changingBackup = 'backup' in choices && !isDeepStrictEqual(choices.backup, projectLeadAgents(p.leadAgents).backup)
+        const primary = primaryUnavailable ? sessions.find(s => s.handle === p.backup?.handle)?.agent || p.backup?.agent
+          : projectBinding(p, sessions).session?.agent
+        const changingBackup = 'backup' in choices && !isDeepStrictEqual(choices.backup, projectLeadAgents(p.leadAgents, primary).backup)
         if (changingBackup && projectBackupBusy(p.backup) && !primaryUnavailable) fail('备用正在启动或处理，请稍后再更改')
         const next = projectLeadAgents({ ...p.leadAgents, ...choices })
         if (next.backup?.agent === next.primary.agent) fail('默认主用与备用需要选择不同的代理')
-        const primary = primaryUnavailable ? sessions.find(s => s.handle === p.backup?.handle)?.agent || p.backup?.agent
-          : sessions.find(s => s.handle === p.mainAgentHandle)?.agent || projectAgentKind(p)
         if (choices.backup && choices.backup.agent === primary) fail('备用代理与当前主用相同')
         if (changingBackup && !primaryUnavailable && p.backup?.phase !== 'failed') resetBackup(p, p.mainAgentHandle ?? '')
         p.leadAgents = { ...p.leadAgents, ...choices }
