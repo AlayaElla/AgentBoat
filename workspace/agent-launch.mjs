@@ -16,6 +16,7 @@ const legacyCode = new Set([
   'eec41a8178853129932232b33af900a66dace7e22c9c1f04d42a61f433ea5408',
   'cccc5131c10a09c55a1f0d581504402b32f2bc636c9e7f5d4eb8c6b657abc20d', // v0.1.36
   'c0d7285a2f691d1ba8cd44af2d78f0bf36c544bb51306fce8337398e393db555', // v0.1.37
+  '08c81d9ef3ff6edefaec30c9c872640122050e915966632c350d2d91879bf81e', // v0.1.38–v0.1.42
 ]);
 
 export function projectTemplate(id) {

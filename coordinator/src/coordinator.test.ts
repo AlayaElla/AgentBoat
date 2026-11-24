@@ -786,7 +786,7 @@ test('concurrent requests, replay and project boundaries preserve records', asyn
   const host = mockHost()
   const worker = await mountWorker({ default: (orca: OrcaWorkerApi) => { createCoordinator(orca, runtime) } }, { host })
   const initial = await worker.request('project.read', { projectId: 'p1' })
-  assert.deepEqual(initial.project!.roles, { design: 'antigravity', code: 'codex', review: 'codex' })
+  assert.deepEqual(initial.project!.roles, { design: 'codex', code: 'codex', review: 'codex' })
   assert.equal(initial.project!.leadAgents, undefined)
   assert.deepEqual((await worker.request('project.lead', { projectId: 'p1' })).leadAgents,
     { primary: { agent: 'antigravity' }, backup: { agent: 'codex' } })
