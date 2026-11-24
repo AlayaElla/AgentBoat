@@ -130,6 +130,33 @@ test('a failed swap rolls back and startup reclaims an exited process lock to re
   assert.ok(!fs.existsSync(lock));
 });
 
+test('setup reclaims a reused PID only when the process creation identity differs', t => {
+  const { home, codex } = refreshFixture(t);
+  const config = options(home, codex), lock = path.join(realpathSync(home), '.agentboat-setup.lock');
+  const rename = fs.renameSync;
+  let identity;
+  const observe = t.mock.method(fs, 'renameSync', (from, to) => {
+    if (to === lock) identity = readFileSync(path.join(from, readdirSync(from)[0]), 'utf8');
+    return rename(from, to);
+  });
+  syncBuiltinESMExports();
+  try { applySetup(undefined, config); }
+  finally { observe.mock.restore(); syncBuiltinESMExports(); }
+  assert.ok(identity);
+  mkdirSync(lock);
+  const record = path.join(lock, 'pid-' + process.pid + '-11111111-1111-1111-1111-111111111111');
+  for (const sameOrUnknown of [identity, 'invalid identity']) {
+    writeFileSync(record, sameOrUnknown);
+    assert.throws(() => applySetup(undefined, config), error => error.message.includes('确认持有进程退出') && error.message.includes(lock));
+    assert.equal(readFileSync(record, 'utf8'), sameOrUnknown);
+  }
+  const reused = identity.replace(/\d(?=[^\d]*$)/, digit => digit === '9' ? '8' : '9');
+  assert.notEqual(reused, identity);
+  writeFileSync(record, reused);
+  assert.deepEqual(applySetup(undefined, config).completed, []);
+  assert.ok(!fs.existsSync(lock));
+});
+
 test('hook drift compares owned events, matchers and commands without writing either config', t => {
   const { refresh, home, codex } = refreshFixture(t);
   for (const file of [path.join(home, '.claude/settings.json'), path.join(codex, 'hooks.json')]) {
@@ -335,6 +362,63 @@ test('preview restores an interrupted hook commit before preparing another confi
   assert.equal(previewSetup(config).confirmation, undefined);
   assert.deepEqual(readFileSync(hooks), original);
   assert.ok(!fs.existsSync(stage));
+});
+
+test('hooks preflight rejects ENOTSUP before moving the original and keeps a failed rollback recoverable', t => {
+  const { home, codex } = refreshFixture(t);
+  const hooks = path.join(codex, 'hooks.json'), config = options(home, codex);
+  const live = path.join(realpathSync(codex), 'hooks.json');
+  const original = JSON.parse(readFileSync(hooks, 'utf8'));
+  original.hooks.Stop[0].hooks[0].timeout = 45;
+  const bytes = JSON.stringify(original);
+  writeFileSync(hooks, bytes);
+  const plan = previewSetup(config), link = fs.linkSync;
+  let failProbe = true;
+  const fail = t.mock.method(fs, 'linkSync', (from, to) => {
+    if (failProbe ? path.dirname(to) === path.dirname(live) : to === live)
+      throw Object.assign(Error('ENOTSUP: fixture filesystem does not support hard links'), { code: 'ENOTSUP' });
+    return link(from, to);
+  });
+  const stages = () => readdirSync(codex).filter(name => name.startsWith('.hooks.json-agentboat-'));
+  syncBuiltinESMExports();
+  try {
+    assert.throws(() => applySetup(plan.confirmation, config), /原文件保留.*hooks\.json[\s\S]*ENOTSUP/);
+    assert.equal(readFileSync(hooks, 'utf8'), bytes);
+    assert.deepEqual(stages(), []);
+    failProbe = false;
+    assert.throws(() => applySetup(plan.confirmation, config), /ENOTSUP[\s\S]*被移走的原内容保存在/);
+    assert.ok(!fs.existsSync(hooks));
+    const [name] = stages(), stage = path.join(codex, name);
+    assert.equal(readFileSync(path.join(stage, 'old'), 'utf8'), bytes);
+    assert.ok(fs.existsSync(path.join(stage, 'owner')));
+    assert.ok(fs.existsSync(path.join(stage, 'next')));
+  } finally { fail.mock.restore(); syncBuiltinESMExports(); }
+  assert.deepEqual(previewSetup(config).paths, [hooks]);
+  assert.equal(readFileSync(hooks, 'utf8'), bytes);
+  assert.deepEqual(stages(), []);
+});
+
+test('preview completes interrupted relinking of old hooks after authenticating the owner', t => {
+  const { home, codex, repository } = refreshFixture(t);
+  const hooks = path.join(codex, 'hooks.json'), config = options(home, codex), original = readFileSync(hooks);
+  const stage = mkdtempSync(path.join(codex, '.hooks.json-agentboat-'));
+  const old = path.join(stage, 'old'), owner = path.join(stage, 'owner');
+  writeFileSync(path.join(stage, 'next'), 'staged replacement');
+  writeFileSync(owner, 'foreign');
+  fs.renameSync(hooks, old);
+  fs.linkSync(old, hooks);
+  assert.equal(fs.statSync(hooks).nlink, 2);
+  assert.match(previewSetup(config).error, /归属未知/);
+  assert.equal(fs.statSync(hooks).nlink, 2);
+  writeFileSync(owner, JSON.stringify([repository, path.join(realpathSync(codex), 'hooks.json')]));
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const plan = previewSetup(config);
+    assert.equal(plan.error, undefined);
+    assert.equal(plan.confirmation, undefined);
+    assert.equal(fs.statSync(hooks).nlink, 1);
+    assert.deepEqual(readFileSync(hooks), original);
+    assert.ok(!fs.existsSync(stage));
+  }
 });
 
 test('installer renders both skills in a moved repository, links Claude and copies to Antigravity', async () => {

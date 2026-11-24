@@ -202,23 +202,30 @@ function restoreFile(old, file) {
   unlinkSync(old);
 }
 
+const sameInode = (a, b) => a?.isFile() && b?.isFile() && a.dev === b.dev && a.ino === b.ino;
+
 function hookRecovery(file, repository) {
   const info = stat(file);
   if (info && (!info.isFile() || info.nlink === 1)) return;
   for (const stage of stages(file, 'agentboat')) {
     const old = path.join(stage, 'old'), next = path.join(stage, 'next'), owner = path.join(stage, 'owner');
-    const staged = stat(next);
-    if (!staged?.isFile() || (info ? !isDeepStrictEqual(identity(info), identity(staged)) : !stat(old))) continue;
+    const current = path.join(stage, 'current');
+    const linked = info && [old, next, current].find(candidate => sameInode(info, stat(candidate)));
+    if (info ? !linked : !stat(next)?.isFile() || !stat(old)) continue;
     const location = path.join(resolvedParent(path.dirname(file)), path.basename(file));
     if (!stat(owner)?.isFile() || readFileSync(owner, 'utf8') !== JSON.stringify([repository, location]))
       throw Error('hooks 有其他 Orca 配置或归属未知的中断记录：' + stage);
-    const current = path.join(stage, 'current');
-    if (stat(current)) throw Error('上次 hooks 回滚中断，请核对保留的文件：' + current + ' → ' + file);
+    if (stat(current) && linked !== current) throw Error('上次 hooks 回滚中断，请核对保留的文件：' + current + ' → ' + file);
     return () => {
-      if (!info) restoreFile(old, location);
-      else if (!isDeepStrictEqual(identity(lstatSync(location)), identity(lstatSync(next))))
-        throw Error('hooks 在恢复期间已更改：' + file);
-      unlinkSync(next);
+      if (!info) {
+        restoreFile(old, location);
+        rmSync(next, { force: true });
+      } else {
+        const live = stat(location);
+        if (!sameInode(info, live) || !sameInode(live, stat(linked))) throw Error('hooks 在恢复期间已更改：' + file);
+        if (linked !== next) rmSync(next, { force: true });
+        unlinkSync(linked);
+      }
       unlinkSync(owner);
       if (!stat(old)) rmdirSync(stage);
     };
@@ -309,10 +316,40 @@ export function previewSetup({ home = os.homedir(), env = process.env, codexHome
   }
 }
 
+const processIdentityFormat = process.platform === 'win32' ? /^\d{18,19}$/ :
+  process.platform === 'linux' ? /^[a-f0-9-]{36}\/\d+$/ : /^\w{3} \w{3} +\d{1,2} \d{2}:\d{2}:\d{2} \d{4}\s+\S.*$/;
+
+function readProcessIdentity(pid) {
+  const opts = { encoding: 'utf8', timeout: 4000, windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] };
+  try {
+    let value;
+    if (process.platform === 'win32') {
+      const system = envValue(process.env, 'SystemRoot') || 'C:\\Windows';
+      value = execFileSync(path.join(system, 'System32/WindowsPowerShell/v1.0/powershell.exe'),
+        ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command',
+          '(Get-Process -ErrorAction Stop -Id ' + pid + ').StartTime.ToUniversalTime().Ticks'], opts).trim();
+    } else if (process.platform === 'linux') {
+      const proc = readFileSync('/proc/' + pid + '/stat', 'utf8');
+      const start = proc.slice(proc.lastIndexOf(')') + 1).trim().split(/\s+/)[19];
+      value = readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim() + '/' + start;
+    } else if (process.platform === 'darwin') {
+      // shortcut: ps reports whole seconds, use a native process identity if this blocks recovery.
+      value = execFileSync('/bin/ps', ['-p', String(pid), '-o', 'lstart=', '-o', 'comm='],
+        { ...opts, env: { ...process.env, LC_ALL: 'C', TZ: 'UTC' } }).trim();
+    }
+    if (processIdentityFormat.test(value ?? '')) return value;
+  } catch {}
+}
+
+let ownProcessIdentity;
+function processIdentity(pid) {
+  return pid === process.pid ? ownProcessIdentity ??= readProcessIdentity(pid) ?? '' : readProcessIdentity(pid);
+}
+
 function withSetupLock(home, operation) {
   // Shared by all profiles and CODEX_HOME choices under this system account.
   const lock = path.join(realpathSync(home), '.agentboat-setup.lock');
-  const busy = () => Error('有另一次 AgentBoat 设置正在进行，或锁的归属无法确认：' + lock);
+  const busy = () => Error('有另一次 AgentBoat 设置正在进行，或无法确认锁持有者。若已确认持有进程退出，可移除锁目录后重试：' + lock);
   const stage = mkdtempSync(lock + '-');
   const owner = 'pid-' + process.pid + '-' + randomUUID();
   const removeEmpty = () => {
@@ -320,7 +357,7 @@ function withSetupLock(home, operation) {
     catch (error) { if (!['ENOENT', 'ENOTEMPTY', 'EEXIST'].includes(error.code)) throw error; }
   };
   try {
-    writeFileSync(path.join(stage, owner), '', { flag: 'wx', mode: 0o600, flush: true });
+    writeFileSync(path.join(stage, owner), processIdentity(process.pid), { flag: 'wx', mode: 0o600, flush: true });
     // Publish the owner and directory together. An empty directory can only be between removals.
     for (let attempt = 0; attempt < 5; attempt++) {
       const entry = stat(lock);
@@ -340,9 +377,24 @@ function withSetupLock(home, operation) {
       if (owners.length) {
         const pid = Number(/^pid-([1-9]\d*)-[a-f0-9-]{36}$/.exec(owners[0])?.[1]);
         if (owners.length !== 1 || !Number.isInteger(pid) || pid > 0x7fffffff) throw busy();
-        try { process.kill(pid, 0); throw busy(); }
-        catch (error) { if (error.code !== 'ESRCH') throw busy(); }
-        try { unlinkSync(path.join(lock, owners[0])); }
+        const record = path.join(lock, owners[0]);
+        let exited = false;
+        try { process.kill(pid, 0); }
+        catch (error) {
+          if (error.code !== 'ESRCH') throw busy();
+          exited = true;
+        }
+        if (!exited) {
+          let recorded;
+          try {
+            if (!lstatSync(record).isFile()) throw busy();
+            recorded = readFileSync(record, 'utf8');
+          }
+          catch (error) { if (error.code === 'ENOENT') continue; throw busy(); }
+          const actual = processIdentity(pid);
+          if (!processIdentityFormat.test(recorded) || !actual || actual === recorded) throw busy();
+        }
+        try { unlinkSync(record); }
         catch (error) { if (error.code === 'ENOENT') continue; throw error; }
       }
       removeEmpty();
@@ -390,16 +442,26 @@ function saveHook(plan, repository) {
   const { before, desired, file } = plan, { location, entries, value } = before;
   const stage = mkdtempSync(path.join(path.dirname(location), '.' + path.basename(location) + '-agentboat-'));
   const old = path.join(stage, 'old'), next = path.join(stage, 'next'), owner = path.join(stage, 'owner');
+  const probe = stage + '.probe';
   const edited = () => Error('hooks 在写入期间已更改，请重新核对：' + file);
   const verifyOld = () => {
     if (!entries) return;
     const actual = snapshot(old, 'hook');
     if (!isDeepStrictEqual(actual.entries, entries) || !isDeepStrictEqual(actual.value, value)) throw edited();
   };
-  let published = false;
+  let published = false, keepRecovery = false, probeLinked = false;
   try {
     writeFileSync(owner, JSON.stringify([repository, location]), { flag: 'wx', mode: 0o600, flush: true });
     writeFileSync(next, desired, { flag: 'wx', mode: entries ? entries[0][2] & 0o777 : 0o600, flush: true });
+    if (entries) {
+      try {
+        linkSync(next, probe);
+        probeLinked = true;
+        unlinkSync(probe);
+        probeLinked = false;
+      }
+      catch (error) { throw Error('无法在 hooks 目录验证硬链接，原文件保留：' + file + '\n' + error.message); }
+    }
     assertUnchanged(plan);
     if (entries) renameSync(location, old);
     verifyOld();
@@ -408,6 +470,7 @@ function saveHook(plan, repository) {
     published = true;
     try { verifyOld(); }
     catch (error) {
+      keepRecovery = true;
       const current = path.join(stage, 'current');
       renameSync(location, current);
       if (isDeepStrictEqual(identity(lstatSync(current)), identity(lstatSync(next))) && readFileSync(current).equals(desired)) {
@@ -417,21 +480,29 @@ function saveHook(plan, repository) {
         try { restoreFile(current, location); }
         catch { throw Error(error.message + '\n并发内容保存在：' + current); }
       }
+      keepRecovery = false;
       throw error;
     }
     if (entries) return old;
   } catch (error) {
     if (!stat(old)) throw error;
     if (!published && !stat(location)) {
-      try { restoreFile(old, location); }
+      keepRecovery = true;
+      try { restoreFile(old, location); keepRecovery = false; }
       catch { throw Error(error.message + '\n被移走的原内容保存在：' + old); }
     }
-    if (stat(old)) throw Error(error.message + '\n被移走的原内容保存在：' + old);
+    if (stat(old)) {
+      keepRecovery = true;
+      throw Error(error.message + '\n被移走的原内容保存在：' + old);
+    }
     throw error;
   } finally {
-    rmSync(next, { force: true });
-    rmSync(owner, { force: true });
-    if (!stat(old) && !stat(path.join(stage, 'current'))) rmdirSync(stage);
+    if (!keepRecovery) {
+      if (probeLinked) rmSync(probe, { force: true });
+      rmSync(next, { force: true });
+      rmSync(owner, { force: true });
+      if (!stat(old) && !stat(path.join(stage, 'current'))) rmdirSync(stage);
+    }
   }
 }
 
