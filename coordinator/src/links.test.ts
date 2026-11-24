@@ -41,8 +41,9 @@ test('delegated feedback applies once in both directions and rechecks sharing on
     const project = sample().project!
     project.tasks[0].artifacts.push({ id: 'local', label: '本机设计稿', version: 'v1', url: '/private/design.md' })
     project.tasks[0].acceptance[0].artifactIds.push('local')
+    const second = { ...structuredClone(project), ref: refs[1] }
     const hidden = { ...fresh({ ...refs[1], id: 'hidden' }), hidden: true }
-    const host = mockHost({ storage: { 'project:p1': project as any, 'project:hidden': hidden as any,
+    const host = mockHost({ storage: { 'project:p1': project as any, 'project:p2': second as any, 'project:hidden': hidden as any,
       workspace: { version: 1, revision: 1, runId: `workspace-${name}`, requests: [] } } })
     const notices: [string, string][] = []
     let c!: ReturnType<typeof createCoordinator>
@@ -53,6 +54,7 @@ test('delegated feedback applies once in both directions and rechecks sharing on
     return { c, worker, notices, project }
   }
   const a = await open('甲工作间'), b = await open('乙工作间')
+  let resumeReports = () => {}
   const { project } = a, [review, decision] = project.tasks, check = review.acceptance[0], d = decision.decisions[0]
   const items: FeedbackItem[] = [{ taskId: review.id, kind: 'acceptance', itemId: check.id, itemRevision: check.revision, fingerprint: check.fingerprint, result: 'passed' },
     { taskId: decision.id, kind: 'decision', itemId: d.id, fingerprint: fingerprint([d.question, d.options]), answer: d.options[0] },
@@ -118,17 +120,68 @@ test('delegated feedback applies once in both directions and rechecks sharing on
     assert.ok((await a.c.store.get('p1')).deliveries.every(d => !d.body.includes('你是工作间管理员') && !d.body.includes('你是项目管理员')))
 
     // The inviter has no endpoint for the joiner; its request rides the existing long poll.
-    await share(b, true)
+    await share(b, true, 'details', ['p1', 'p2'])
     assert.equal((await a.c.links.snapshot()).peers[0].endpoint, '')
+    const listener = a.c.links as any, dialer = b.c.links as any
+    const until = async (condition: () => boolean | Promise<boolean>) => {
+      const deadline = Date.now() + 3000
+      while (!await condition()) { assert.ok(Date.now() < deadline, 'timed out waiting for link update'); await delay(10) }
+    }
+    await until(() => listener.waiters.has(id))
+    let watcherRequestedReport = false
+    const dialerSync = dialer.sync.bind(dialer)
+    dialer.sync = (peerId: string, signal?: AbortSignal, feedbackOnly?: boolean) => {
+      if (signal && !feedbackOnly) watcherRequestedReport = true
+      return dialerSync(peerId, signal, feedbackOnly)
+    }
+    const held = new Promise<void>(resolve => { resumeReports = resolve })
+    let dialerReporting = false
+    for (const side of [listener, dialer]) {
+      const localReport = side.localReport.bind(side)
+      side.localReport = async (...args: unknown[]) => {
+        if (side === dialer) dialerReporting = true
+        await held
+        return localReport(...args)
+      }
+    }
+    const refresh = b.c.links.refresh()
+    await until(() => dialerReporting)
+    await a.c.store.mutate('p1', undefined, p => { p.tasks[0].title = '新的普通项目报告' })
+    const mutateReverse = b.c.store.mutate.bind(b.c.store)
+    let loseReceipt = true
+    const previousVersion = listener.version(id)
+    b.c.store.mutate = async (...args) => {
+      const saved = await mutateReverse(...args)
+      if (args[3]?.id.startsWith('link-feedback:')) {
+        if (loseReceipt) { loseReceipt = false; throw Error('lost reverse receipt after writing') }
+        if (args[0] === 'p2') {
+          a.c.links.localChanged()
+          await until(() => listener.version(id) !== previousVersion)
+        }
+      }
+      return saved
+    }
     const inviterStarted = performance.now()
     const discarded = items.map(({ answer, ...item }) => ({ ...item, result: 'discarded', note: '旧版' }))
-    assert.equal((await a.worker.request('workspace.linkFeedback', { id, ...request, requestId: 'reverse', items: discarded })).state, 'submitted')
-    console.log('T48 loopback feedback receipt ms', JSON.stringify({ joiner: +joinerMs.toFixed(1), inviter: +(performance.now() - inviterStarted).toFixed(1) }))
+    const reverse = { ...request, requestId: 'reverse', items: discarded }
+    const submit = (input: typeof reverse) => Promise.race([
+      send(a, input), delay(3000, undefined, { ref: false }).then(() => assert.fail('feedback waited for an ordinary report'))
+    ])
+    assert.equal((await submit(reverse)).state, 'uncertain')
+    assert.deepEqual(await submit(reverse), { state: 'submitted', requestId: reverse.requestId, fingerprint: fingerprint(reverse) })
+    assert.equal((await submit({ ...reverse, projectId: 'p2', requestId: 'reverse-second' })).state, 'submitted')
+    console.log('T48 loopback feedback receipt ms', JSON.stringify({ joiner: +joinerMs.toFixed(1), inviterBatch: +(performance.now() - inviterStarted).toFixed(1) }))
     const received = await b.c.store.get('p1')
     assert.equal(received.tasks[1].blockedStatus, 'discarded')
     assert.equal(received.tasks[0].acceptance[0].status, 'discarded')
     assert.equal(received.tasks[1].decisions[0].answer, null)
     assert.equal(received.tasks[1].decisions[0].history[0].source, '主人在工作间 甲工作间 提交')
+    assert.equal(received.tasks[0].acceptance[0].history.length, 1)
+    assert.equal((await b.c.store.get('p2')).tasks[0].acceptance[0].history.length, 1)
+    await until(() => watcherRequestedReport)
+    resumeReports()
+    await refresh
+    await until(async () => (await b.c.links.snapshot()).peers[0].report?.projects[0].tasks?.[0].title === '新的普通项目报告')
     assert.equal((await send(a, { ...request, revision: received.revision, requestId: 'older-client' })).state, 'rejected')
     await share(a, false, 'summary')
     assert.match((await send(b)).reason!, /未允许/)
@@ -137,7 +190,7 @@ test('delegated feedback applies once in both directions and rechecks sharing on
     await a.c.links.revoke(id)
     await b.c.links.refresh()
     await assert.rejects(() => send(b), /断开/)
-  } finally { a.c.stop(); b.c.stop(); await a.worker.deactivate(); await b.worker.deactivate() }
+  } finally { resumeReports(); a.c.stop(); b.c.stop(); await a.worker.deactivate(); await b.worker.deactivate() }
 })
 
 test('peer artifacts use authenticated loopback in both directions, cache complete versions and recheck access', async () => {

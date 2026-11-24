@@ -304,7 +304,10 @@ async function setup(options = {}, hub) {
       }
       if (name === 'workspace.linkFeedback') {
         const project = links.peers.find(p => p.id === input.id).report.projects.find(p => p.id === input.projectId);
-        if (options.delayLinkReply) await new Promise(resolve => { fixture.finishLinkReply = resolve; });
+        if (options.delayLinkReply) {
+          if (fixture.finishLinkReply) throw Error('正在确认上次提交，请稍候');
+          await new Promise(resolve => { fixture.finishLinkReply = () => { delete fixture.finishLinkReply; resolve(); }; });
+        }
         if (window.fixture.linkTimeout) return { state: 'uncertain', requestId: input.requestId, reason: '连接超时' };
         if (options.rejectLinkFeedback) return { state: 'rejected', requestId: input.requestId, reason: '项目已更新' };
         if (window.fixture.lostLinkFeedback === input.requestId) { const {id,...wire}=input; return { state: 'submitted', requestId: input.requestId, fingerprint:await digest(wire) }; }
@@ -1619,6 +1622,36 @@ try {
     assert.deepEqual(remote[0].input.items.find(i => i.kind === 'blocked'), {taskId:'b', kind:'blocked', itemId:'b', itemRevision:3, note:'已补建'});
     assert.deepEqual(remote[0], remote[1]);
     assert.deepEqual(await page.evaluate(() => fixture.calls.find(c => c.name === 'shell.openExternal').input), 'https://example.com/preview');
+  });
+  await setup({ width: 1040, delegatedFeedback: true, peerProjectPage: true, delayLinkReply: true });
+  await test('batch claims and submits two projects on one peer in order', async () => {
+    await page.evaluate(() => {
+      const projects = fixture.links.peers[0].report.projects;
+      const project = structuredClone(projects[0]);
+      const title = '对方移动端交付';
+      Object.assign(project, { id: 'p2', name: '对方移动项目', pending: 1, tasks: [{ ...project.tasks[0], title }] });
+      project.feedback.tasks = [{ ...project.feedback.tasks[0], title }];
+      projects.push(project);
+      fixture.emit();
+    });
+    await review('对方页面交付').check();
+    await review('对方移动端交付').check();
+    await dock().getByRole('button', { name: '提交 2 条' }).click();
+    const finish = async count => {
+      await page.waitForFunction(() => !!fixture.finishLinkReply);
+      const state = await page.evaluate(() => {
+        const calls = fixture.calls.filter(c => c.name === 'workspace.linkFeedback').map(c => [c.input.id, c.input.projectId]);
+        const claims = Object.entries(fixture.stored['panel.feedbackState']).filter(([, sheet]) => sheet.attempt?.checkingUntil).map(([id]) => id);
+        fixture.finishLinkReply();
+        return { calls, claims };
+      });
+      assert.deepEqual(state.calls, [['up', 'p1'], ['up', 'p2']].slice(0, count));
+      assert.deepEqual(state.claims, [JSON.stringify(['up', 'p' + count])]);
+    };
+    await finish(1);
+    await finish(2);
+    await page.getByRole('status').filter({ hasText: '已提交 2 条' }).waitFor();
+    assert.equal(await page.getByText('正在确认上次提交，请稍候').count(), 0);
   });
   let uncertainStorage;
   await setup({ width: 1040, delegatedFeedback: true });
