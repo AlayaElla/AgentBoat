@@ -364,6 +364,43 @@ test('preview restores an interrupted hook commit before preparing another confi
   assert.ok(!fs.existsSync(stage));
 });
 
+test('missing live hooks with two valid recovery records require manual selection and preserve both versions', t => {
+  const { home, codex, repository } = refreshFixture(t);
+  const hooks = path.join(codex, 'hooks.json'), config = options(home, codex);
+  const owner = JSON.stringify([repository, path.join(realpathSync(codex), 'hooks.json')]);
+  const original = readFileSync(hooks, 'utf8');
+  const updated = JSON.stringify({ ...JSON.parse(original), note: 'editor saved newer content' });
+  const records = [original, updated].map((bytes, i) => {
+    const stage = path.join(codex, '.hooks.json-agentboat-' + (i === 0 ? 'A' : 'B'));
+    mkdirSync(stage);
+    if (i !== 0) writeFileSync(hooks, bytes);
+    const saved = path.join(stage, 'old');
+    fs.renameSync(hooks, saved);
+    writeFileSync(path.join(stage, 'next'), bytes);
+    writeFileSync(path.join(stage, 'owner'), owner);
+    return { stage, saved, bytes };
+  });
+  const check = message => {
+    assert.match(message, /多份.*人工核对/);
+    assert.ok(message.includes(hooks));
+    for (const { saved } of records) assert.ok(message.includes(saved));
+    return true;
+  };
+  const plan = previewSetup(config);
+  check(plan.error);
+  assert.equal(plan.confirmation, undefined);
+  const unowned = path.join(codex, '.hooks.json-agentboat-0-unknown');
+  cpSync(records[0].stage, unowned, { recursive: true });
+  writeFileSync(path.join(unowned, 'owner'), 'foreign');
+  assert.throws(() => applySetup(undefined, config), error => check(error.message));
+  assert.ok(!fs.existsSync(hooks));
+  for (const { stage, saved, bytes } of records) {
+    assert.equal(readFileSync(saved, 'utf8'), bytes);
+    assert.equal(readFileSync(path.join(stage, 'next'), 'utf8'), bytes);
+    assert.equal(readFileSync(path.join(stage, 'owner'), 'utf8'), owner);
+  }
+});
+
 test('hooks preflight rejects ENOTSUP before moving the original and keeps a failed rollback recoverable', t => {
   const { home, codex } = refreshFixture(t);
   const hooks = path.join(codex, 'hooks.json'), config = options(home, codex);

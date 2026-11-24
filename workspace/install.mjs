@@ -207,29 +207,38 @@ const sameInode = (a, b) => a?.isFile() && b?.isFile() && a.dev === b.dev && a.i
 function hookRecovery(file, repository) {
   const info = stat(file);
   if (info && (!info.isFile() || info.nlink === 1)) return;
+  const candidates = [];
+  let unknownStage;
   for (const stage of stages(file, 'agentboat')) {
     const old = path.join(stage, 'old'), next = path.join(stage, 'next'), owner = path.join(stage, 'owner');
     const current = path.join(stage, 'current');
     const linked = info && [old, next, current].find(candidate => sameInode(info, stat(candidate)));
     if (info ? !linked : !stat(next)?.isFile() || !stat(old)) continue;
     const location = path.join(resolvedParent(path.dirname(file)), path.basename(file));
-    if (!stat(owner)?.isFile() || readFileSync(owner, 'utf8') !== JSON.stringify([repository, location]))
-      throw Error('hooks 有其他 Orca 配置或归属未知的中断记录：' + stage);
-    if (stat(current) && linked !== current) throw Error('上次 hooks 回滚中断，请核对保留的文件：' + current + ' → ' + file);
-    return () => {
-      if (!info) {
-        restoreFile(old, location);
-        rmSync(next, { force: true });
-      } else {
-        const live = stat(location);
-        if (!sameInode(info, live) || !sameInode(live, stat(linked))) throw Error('hooks 在恢复期间已更改：' + file);
-        if (linked !== next) rmSync(next, { force: true });
-        unlinkSync(linked);
-      }
-      unlinkSync(owner);
-      if (!stat(old)) rmdirSync(stage);
-    };
+    if (!stat(owner)?.isFile() || readFileSync(owner, 'utf8') !== JSON.stringify([repository, location])) unknownStage ??= stage;
+    else candidates.push({ stage, old, next, owner, current, linked, location });
+    if (info) break;
   }
+  if (candidates.length > 1)
+    throw Error('hooks 存在多份恢复候选，请人工核对：' + file + '\n' + candidates.map(candidate => candidate.old).join('\n'));
+  if (unknownStage) throw Error('hooks 有其他 Orca 配置或归属未知的中断记录：' + unknownStage);
+  const [candidate] = candidates;
+  if (!candidate) return;
+  const { stage, old, next, owner, current, linked, location } = candidate;
+  if (stat(current) && linked !== current) throw Error('上次 hooks 回滚中断，请核对保留的文件：' + current + ' → ' + file);
+  return () => {
+    if (!info) {
+      restoreFile(old, location);
+      rmSync(next, { force: true });
+    } else {
+      const live = stat(location);
+      if (!sameInode(info, live) || !sameInode(live, stat(linked))) throw Error('hooks 在恢复期间已更改：' + file);
+      if (linked !== next) rmSync(next, { force: true });
+      unlinkSync(linked);
+    }
+    unlinkSync(owner);
+    if (!stat(old)) rmdirSync(stage);
+  };
 }
 
 function setupRecovery(home, codexHome, repository) {
