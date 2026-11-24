@@ -856,10 +856,10 @@ function dock() {
   const label = incomplete ? `有 ${incomplete} 条还没写内容` : `已选 ${count} 条 · ${groups.length} 个项目`
   const failures = Object.entries(feedbackRequests).filter(([id, record]) => record.reason && feedbackFailure(record) !== sheets[id].dismissed && Object.keys(choices(id)).length)
   const savedError = failures.map(([id, record]) => '「' + inboxProjectName(id) + '」未确认提交：' + record.reason).join('。')
-  const message = error || (!busy && [savedError, notice].filter(Boolean).join('。')) || notice
+  const message = [error, !busy && savedError, !error && notice].filter(Boolean).join('。')
   async function closeToast() {
     try {
-      if (!error && !busy) for (const [id, record] of failures) await saveSubmission({ projectId: id, items: [], dismiss: feedbackFailure(record) })
+      if (!busy) for (const [id, record] of failures) await saveSubmission({ projectId: id, items: [], dismiss: feedbackFailure(record) })
       dismiss()
     } catch (e) { error = (e as Error).message; render() }
   }
@@ -996,7 +996,7 @@ async function submitFeedback() {
     await edits
     if (draftFailure) throw Error(draftFailure)
     const before = inboxRows()
-    const results = await Promise.all(groups.map(async ([projectId, group]) => {
+    const submit = async ([projectId, group]: typeof groups[number]) => {
       const entries = Object.values(group)
       try {
         const rows = before.filter(r => r.projectId === projectId && entries.some(d => matchesRow(d, r)))
@@ -1004,6 +1004,15 @@ async function submitFeedback() {
         for (const r of rows) finishing.set(r.id, r)
         return { sent: entries.length }
       } catch (e) { return { sent: 0, rejected: { projectId, reason: (e as Error).message } } }
+    }
+    const byPeer = new Map<string, Promise<unknown>>()
+    const results = await Promise.all(groups.map(group => {
+      const [projectId] = group
+      if (!isRemote(projectId)) return submit(group)
+      const [peerId] = JSON.parse(projectId)
+      const result = (byPeer.get(peerId) ?? Promise.resolve()).then(() => submit(group))
+      byPeer.set(peerId, result)
+      return result
     }))
     const sent = results.reduce((count, result) => count + result.sent, 0), rejected = results.flatMap(r => r.rejected ? [r.rejected] : [])
     trayOpen = false
