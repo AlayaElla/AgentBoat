@@ -1,5 +1,5 @@
 import { assert, mockHost, mountWorker, test } from 'orca/testing'
-import { LocalBots, localEndpoint, quotaReceipt } from './bot-runtime'
+import { BotStartRejected, LocalBots, localEndpoint, quotaReceipt } from './bot-runtime'
 import { workspaceSoul } from './bot-soul'
 import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import path from 'node:path'
@@ -173,7 +173,7 @@ function botRuntime() {
       },
       startChat: async (bot: BotTarget, agent: string) => {
         env.soulActions.push(`start ${bot.id} ${agent}`); env.starts.push(agent)
-        if (env.reject) throw Error('refused')
+        if (env.reject) throw new BotStartRejected('refused')
         const handle = env.startTo ?? env.next
         env.sideChats.add(handle)
         return handle
@@ -217,7 +217,7 @@ async function setup() {
     env.startTo = undefined
     env.starts.length = 0
   }
-  return { env, worker, store, backups, main, poll, bind }
+  return { env, worker, store, backups, main, poll, bind, runtime }
 }
 
 test('bot ignores delivered Feishu mail, uncertain notifications and read questions, then stops on overdue queued mail', async () => {
@@ -343,6 +343,62 @@ test('手动新开 bot 对话被拒绝时，保留仍持有原 Run 的旧代理'
     await main.deliver(after.runId, { id: 'after-refusal', subject: '留言', body: '继续处理', state: 'pending' })
     assert.equal(env.sends.at(-1)?.target, 'run:' + after.runId)
     assert.equal(env.sends.at(-1)?.body, '继续处理')
+  } finally { await worker.deactivate() }
+})
+
+test('手动换 bot 启动回执未知时保留切换记录并暂停，主人仍可重选', async () => {
+  const { env, worker, store, main, bind, runtime } = await setup()
+  try {
+    await bind()
+    env.owner = first
+    const startChat = runtime.bots!.startChat
+    runtime.bots!.startChat = async () => { throw Error('bots.session.start 本机调用未确认') }
+    const choose = async () => worker.request('workspace.agent.switch', { mode: 'bot', revision: (await store.workspace()).revision, botId: initial.id, agent: 'codex' })
+    const paused = await choose()
+    assert.equal(paused.botStopped, true)
+    assert.match(paused.bot!.result!, /核对 bot 对话的启动回执/)
+    assert.equal((await store.workspace()).botSwitch?.agent, 'codex')
+    const sent = env.sends.length
+    await main.deliver('run_bot', { id: 'after-unknown', subject: '留言', body: '暂缓', state: 'pending' })
+    assert.equal(env.sends.length, sent)
+    runtime.bots!.startChat = startChat
+    assert.equal((await choose()).switchingBotAgent, 'codex')
+  } finally { await worker.deactivate() }
+})
+
+test('手动换 bot 期间收到了旧地址额度回执，拒绝启动后仍保留回执并暂停', async () => {
+  const { env, worker, store, main, bind, runtime } = await setup()
+  try {
+    await bind()
+    env.owner = first
+    const quota = { home: first, recoveryAt: Date.now() + 60_000 }
+    let returnQuota!: () => void, refuseStart!: () => void
+    const mailSent = new Promise<void>(sent => {
+      runtime.botMail = async () => {
+        sent()
+        await new Promise<void>(resolve => { returnQuota = resolve })
+        return { recipient: first, quota }
+      }
+    })
+    const opening = new Promise<void>(started => {
+      runtime.bots!.startChat = async () => {
+        started()
+        await new Promise<void>(resolve => { refuseStart = resolve })
+        throw new BotStartRejected('refused')
+      }
+    })
+    const delivery = main.deliver('run_bot', { id: 'old-in-flight', subject: '留言', body: '正在投递', state: 'pending' })
+    await mailSent
+    const switching = worker.request('workspace.agent.switch', { mode: 'bot', revision: (await store.workspace()).revision, botId: initial.id, agent: 'codex' })
+    await opening
+    returnQuota(); await delivery
+    refuseStart()
+    const paused = await switching
+    assert.equal(paused.botStopped, true)
+    assert.match(paused.bot!.result!, /当前 bot 对话已用完额度/)
+    const saved = await store.workspace()
+    assert.equal(saved.session?.handle, first)
+    assert.deepEqual(saved.botQuota, quota)
   } finally { await worker.deactivate() }
 })
 

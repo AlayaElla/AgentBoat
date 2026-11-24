@@ -169,6 +169,22 @@ test('交回时原主消失，可将仍持有同一代 Run 的在线备用转正
   } finally { await close() }
 })
 
+test('交回时备用已泊车，同代空 owner 不能解除代管', async () => {
+  const p = activeProject()
+  p.backup!.phase = 'returning'
+  p.backup!.standbyRunId = 'run_park'
+  const { env, c, worker, close } = await fixture(p, undefined, undefined, codexLead)
+  env.sessions = [actingBackup]
+  env.owner = null
+  env.generation = p.backup!.generation!
+  try {
+    const request = { projectId: p.ref.id, revision: p.revision }
+    await assert.rejects(() => worker.request('project.lead', { ...request, mode: 'promote' }), /Run 归属/)
+    await assert.rejects(() => worker.request('project.settings', { ...request, leadAgents: { backup: null } }), /Run 归属/)
+    assert.deepEqual(await c.store.get(p.ref.id), p)
+  } finally { await close() }
+})
+
 test('代管恢复要求可靠离线证据和匹配的 Run 归属', async () => {
   const p = activeProject(), { env, c, poll, worker, close } = await fixture(p, undefined, undefined, codexLead)
   const read = () => worker.request('project.lead', { projectId: p.ref.id })

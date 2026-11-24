@@ -10,6 +10,7 @@ type Call = (args: string[]) => Promise<any>
 type Rpc = (method: 'bots.list' | 'bots.agentChoices' | 'agentSession.createSupport' | 'bots.session.start', params?: object) => Promise<any>
 export const botHomeHandle = (value: unknown): value is string =>
   typeof value === 'string' && /^orca_session_id:[\da-f]{8}(?:-[\da-f]{4}){3}-[\da-f]{12}$/i.test(value)
+export class BotStartRejected extends Error {}
 
 export function localEndpoint(transports: unknown, platform = process.platform): string {
   const windows = platform === 'win32'
@@ -45,7 +46,13 @@ async function localRpc(method: Parameters<Rpc>[0], params?: object) {
         try {
           const frame = JSON.parse(line)
           if (frame.id !== id) continue
-          if (!frame.ok) return abort()
+          if (frame.ok !== true) {
+            const message = frame.error?.message
+            if (frame.ok === false && method === 'bots.session.start' && typeof message === 'string' && message.startsWith('bot_session_refused: ')) {
+              reject(new BotStartRejected(message)); socket.destroy(); return
+            }
+            return abort()
+          }
           resolve(frame.result); socket.destroy(); return
         } catch { return abort() }
       }
@@ -123,7 +130,7 @@ export class LocalBots {
     return botHomeHandle(handle) && (await this.chats(bot)).some(c => c.home === false && 'orca_session_id:' + c.id === handle)
   }
   async startChat(bot: BotTarget, agent: string) {
-    if (!(await this.choices(bot)).includes(agent)) throw Error('该代理在所选 bot 中不可用')
+    if (!(await this.choices(bot)).includes(agent)) throw new BotStartRejected('该代理在所选 bot 中不可用')
     // The Home Chat reset retires its previous session and drops unread bot requests.
     const result = await this.rpc('bots.session.start', { botId: bot.id, agent })
     const handle = 'orca_session_id:' + result.sessionId
