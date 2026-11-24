@@ -94,25 +94,43 @@ test('host failures produce one bounded unreadable result and never leak host er
   assert.equal((await snapshot([workspace], { agents: [agent('unexpected')] })).result.ok, false)
 })
 
-test('status shares an inspection list but the next inspection checks liveness again', async () => {
+test('status reuses its inspection sample while direct checks reread Orca', async () => {
   const runtime = new OrcaRuntime(async () => 'unused'), calls: string[] = []
   let incomplete = false
+  let terminals: { handle: string; connected: boolean }[] = []
+  const main = { handle: 'orca_session_id:test', workspace: 'id:test', agent: 'claude', path: '/test', title: '', workspaceName: '', online: 'unknown' as const }
+  const stateStartedAt = Date.now()
   ;(runtime as any).call = async (args: string[]) => {
+    assert.ok(!args.includes('--agent-wait'))
     calls.push(args[1])
-    return args[1] === 'ps' ? { worktrees: [], truncated: incomplete } : { terminals: [] }
+    return args[1] === 'ps' ? { truncated: incomplete, worktrees: [{ address: { environment: 'local', worktree: main.workspace }, path: main.path,
+      agents: [{ paneKey: 'structured-agent-session-test:pane', subagentObservation: 'live', state: 'working', stateStartedAt }] }] } : { terminals }
   }
   const host = mockHost({ results: { 'workspace.list': { workspaces: [], truncated: false } } })
   let api!: OrcaWorkerApi
   const worker = await mountWorker({ default: value => { api = value } }, { host })
   try {
-    await runtime.targets('sample')
-    await runtime.agents([], api.host, { handle: 'orca_session_id:test', workspace: 'id:test', agent: 'claude', path: '', title: '', workspaceName: '', online: 'unknown' })
+    const sample = runtime.targets('sample')
+    const initial = await runtime.agents([], api.host, main, sample)
+    assert.deepEqual(initial.main?.status, { state: 'work', since: stateStartedAt })
     assert.deepEqual(calls, ['ps', 'list'])
     incomplete = true
     await runtime.targets('display')
     assert.deepEqual(calls, ['ps', 'list'])
     await assert.rejects(() => runtime.targets(), /会话列表不完整/)
     await assert.rejects(() => runtime.targets('sample'), /会话列表不完整/)
+    assert.deepEqual((await runtime.agents([], api.host, main, sample)).main, initial.main)
+    assert.deepEqual(calls, ['ps', 'list', 'ps', 'list', 'ps', 'list'])
+    incomplete = false
+    const terminal = { ...main, handle: 'disconnected-terminal' }
+    terminals = [{ handle: terminal.handle, connected: false }]
+    const direct = await runtime.agents([], api.host, terminal)
+    assert.equal(direct.main?.status.state, 'offline')
+    assert.deepEqual((await runtime.agents([], api.host, terminal, runtime.targets('sample'))).main, direct.main)
+    terminals.push({ handle: terminal.handle, connected: true })
+    const ambiguous = await runtime.agents([], api.host, terminal)
+    assert.equal(ambiguous.main?.status.state, 'unknown')
+    assert.deepEqual((await runtime.agents([], api.host, terminal, runtime.targets('sample'))).main, ambiguous.main)
   } finally { await worker.deactivate() }
 })
 
@@ -241,23 +259,35 @@ test('host catalog matches exact local IDs even without workspaces, refusing a t
   } finally { await worker.deactivate() }
 })
 
-test('status events refresh panel and status bar without any panel request, recover errors and dispose', async () => {
-  const host = mockHost(); let c!: ReturnType<typeof testCoordinator>, state = 'waiting', reads = 0, unavailable = false
+test('status bursts sample once, publish visible changes only, and recover errors', async () => {
+  const host = mockHost(); let c!: ReturnType<typeof testCoordinator>, state = 'waiting', taskId = 'first', reads = 0, unavailable = false
+  const since = Date.now()
   const worker = await mountWorker({ default: api => { c = testCoordinator(api, { projects: async () => refs, agents: async () => {
     reads++
     if (unavailable) throw Error('host unavailable')
-    return { ok: true, at: Date.now(), agents: [{ id: 'one', projectId: 'p1', agent: 'codex', role: 'session', state: agentState(state as any), rawState: state, title: '测试', since: Date.now() }] }
+    return { ok: true, at: Date.now(), agents: [{ id: 'one', projectId: 'p1', agent: 'codex', role: 'worker', state: agentState(state as any), rawState: state, title: '测试', taskTitle: '测试', taskId, since }] }
   } }) } }, { host })
   const emit = () => worker.emit('agent.status.changed', { workspaceId: 'ws', paneKey: 'pane', state: state as any, receivedAt: Date.now() })
   try {
-    await emit(); assert.equal((host.callsOf('statusBar.update').at(-1) as any).text, '工作间 · 待处理 1')
-    assert.ok(worker.posts.some(p => p.event === 'project.changed'))
+    const first = emit()
+    await new Promise<void>(resolve => setImmediate(resolve))
+    assert.equal(reads, 0)
+    await Promise.all([first, emit(), emit()])
+    assert.equal(reads, 1)
+    const posts = () => worker.posts.filter(p => p.event === 'project.changed').length
+    assert.equal(posts(), 1)
+    assert.equal((host.callsOf('statusBar.update').at(-1) as any).text, '工作间 · 待处理 1')
     const before = reads; await worker.request('workspace.agents'); assert.equal(reads, before)
+    state = 'blocked'; await Promise.all([emit(), emit()])
+    assert.equal(reads, 2); assert.equal(posts(), 1); assert.equal(host.callsOf('statusBar.update').length, 1)
+    taskId = 'second'; await emit()
+    assert.equal(posts(), 2)
+    assert.equal((await worker.request('workspace.agents')).agents[0].taskId, 'second')
     state = 'working'; await emit(); assert.equal((host.callsOf('statusBar.update').at(-1) as any).text, '工作间 · 待处理 0')
     unavailable = true; await emit(); assert.ok((host.callsOf('statusBar.update').at(-1) as any).tooltip.includes('agent 状态读不到'))
     assert.equal((await worker.request('workspace.agents')).ok, false)
     unavailable = false; state = 'blocked'; await emit(); assert.equal((host.callsOf('statusBar.update').at(-1) as any).text, '工作间 · 待处理 1')
-    c.stop(); const stopped = reads; await emit(); assert.equal(reads, stopped)
+    const stopped = reads, pending = emit(); c.stop(); await pending; await emit(); assert.equal(reads, stopped)
     assert.deepEqual(worker.refusals, [])
   } finally { c.stop(); await worker.deactivate() }
 })
@@ -272,4 +302,35 @@ test('an event arriving during a host read requests a fresh read before publishi
     const second = worker.emit('agent.status.changed', event); release(); await Promise.all([first, second])
     assert.equal(reads, 2)
   } finally { c.stop(); await worker.deactivate() }
+})
+
+test('a status event after the shared inventory starts supersedes that inventory', async () => {
+  let release!: () => void, entered!: () => void, c!: ReturnType<typeof testCoordinator>
+  const gate = new Promise<void>(resolve => { release = resolve }), started = new Promise<void>(resolve => { entered = resolve })
+  const main = { handle: 'orca_session_id:main', workspace: 'id:' + workspace.id, path: workspace.path, workspaceName: workspace.name,
+    title: '主会话', agent: 'codex', online: 'online' as const }
+  const host = mockHost({ storage: { workspace: { version: 1, revision: 0, runId: 'run_main', requests: [], session: main } } })
+  const since = Date.now(), samples: string[] = []
+  let state: 'working' | 'waiting' = 'working'
+  const worker = await mountWorker({ default: api => { c = testCoordinator(api, {
+    targets: async () => {
+      const session = { ...main, state }
+      entered(); await gate
+      return { sessions: [session], workspaces: [] }
+    },
+    agents: async (_projects, _host, _main, inventory) => {
+      const observed = inventory ? (await inventory)?.sessions[0]?.state : state
+      samples.push(observed ?? '')
+      return { ok: true, at: Date.now(), agents: [], main: { handle: main.handle, status: { state: observed === 'waiting' ? 'need' : 'work', since } } }
+    }
+  }) } }, { host })
+  try {
+    await c.start(); await started
+    state = 'waiting'
+    const delivered = worker.emit('agent.status.changed', { workspaceId: workspace.id, paneKey: 'pane', state, receivedAt: Date.now() })
+    release()
+    await delivered
+    assert.deepEqual(samples, ['working', 'waiting'])
+    assert.equal((await worker.request('workspace.agents')).main?.status.state, 'need')
+  } finally { release(); c.stop(); await worker.deactivate() }
 })

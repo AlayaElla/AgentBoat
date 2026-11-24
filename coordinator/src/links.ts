@@ -16,6 +16,7 @@ import { setTimeout as delay } from 'node:timers/promises'
 import { validAgentId } from '../../workspace/agent-launch.mjs'
 
 type Scope = 'none' | 'summary' | 'details'
+const catalogPollMin = 2_000, catalogPollMax = 8_000
 export interface Sharing { scope: Scope; allProjects: boolean; projectIds: string[]; delegateFeedback?: boolean }
 export type FeedbackTask = Pick<Task, 'id' | 'title' | 'phase' | 'blockedRevision' | 'blockedStatus'> & {
   decisions: Pick<Task['decisions'][number], 'id' | 'question' | 'options' | 'answer'>[]
@@ -319,7 +320,9 @@ export class WorkspaceLinks {
   private initial: LinkData = { version: 1, revision: 0, workspaceId: randomUUID(), name: '我的工作间', enabled: false, host: '127.0.0.1', port: 0, publicUrl: '', tls: false, peers: [] }
   private server?: http.Server | https.Server
   private timer?: ReturnType<typeof setInterval>
-  private catalogTimer?: ReturnType<typeof setInterval>
+  private catalogTimer?: ReturnType<typeof setTimeout>
+  private catalogDelay = catalogPollMin
+  private pollingCatalog = false
   private invitation?: { token: string; expires: number }
   private incoming = new Map<string, { report: SharedReport; receivedAt: string; offline?: boolean }>()
   private feedbackPending = new Map<string, { request: DelegatedFeedback; sent: boolean; finish: (result: FeedbackReply) => void }>()
@@ -409,16 +412,32 @@ export class WorkspaceLinks {
     for (const p of d.peers) this.watch(p)
     clearInterval(this.timer)
     this.timer = setInterval(() => { void this.refresh().catch(() => {}) }, 10_000); this.timer.unref()
-    clearInterval(this.catalogTimer)
-    if (this.checkCatalog) {
-      // shortcut: Orca has no project catalog event; read the local catalog while sharing.
-      this.catalogTimer = setInterval(() => {
-        void this.data().then(d => {
-          if (d.peers.some(p => p.state === 'active' && p.scope !== 'none')) return this.checkCatalog!()
-        }).catch(() => {})
-      }, 1000)
-      this.catalogTimer.unref()
-    }
+    this.catalogDelay = catalogPollMin
+    this.scheduleCatalog()
+  }
+  private scheduleCatalog() {
+    clearTimeout(this.catalogTimer)
+    if (!this.running || !this.checkCatalog || this.pollingCatalog) return
+    // shortcut: Orca has no project catalog event; poll while sharing until one is available.
+    this.catalogTimer = setTimeout(async () => {
+      this.pollingCatalog = true
+      this.catalogDelay = Math.min(this.catalogDelay * 2, catalogPollMax)
+      try {
+        const d = await this.data()
+        if (!this.running) return
+        if (d.peers.some(p => p.state === 'active' && p.scope !== 'none')) await this.checkCatalog!()
+      } catch { /* Check the catalog again on the next poll. */ }
+      finally {
+        this.pollingCatalog = false
+        this.scheduleCatalog()
+      }
+    }, this.catalogDelay)
+    this.catalogTimer.unref()
+  }
+  private activeCatalog() {
+    if (this.catalogDelay === catalogPollMin) return
+    this.catalogDelay = catalogPollMin
+    this.scheduleCatalog()
   }
   private async listen(d: LinkData) {
     this.closeListener()
@@ -446,7 +465,7 @@ export class WorkspaceLinks {
     this.stream.stop()
     this.artifacts.stop()
     clearInterval(this.timer)
-    clearInterval(this.catalogTimer)
+    clearTimeout(this.catalogTimer)
     for (const watcher of this.watchers.values()) watcher.abort()
     this.watchers.clear()
     for (const { request, finish } of this.feedbackPending.values()) finish({ requestId: request.requestId, state: 'uncertain', reason: '连接已停止，请重试核对' })
@@ -665,6 +684,7 @@ export class WorkspaceLinks {
   }
   private version(peerId: string) { return this.versions.get(peerId) ?? this.originVersion }
   private wake(peerId: string) {
+    this.activeCatalog()
     this.versions.set(peerId, randomUUID())
     this.waiters.get(peerId)?.()
   }
@@ -787,6 +807,7 @@ export class WorkspaceLinks {
         if (reply) this.feedbackReplies.set(p.id, reply)
         const nextReceipt = hasReceipts(acknowledgements) && JSON.stringify(acknowledgements) !== JSON.stringify(this.exchangeReceipts(packet.exchange))
         const nextArtifact = await this.artifacts.receive(p.id, p.workspaceId, result.artifact)
+        if (result.exchange.messages.length || result.feedback || result.artifact) this.activeCatalog()
         return nextArtifact || !!reply || more || nextReceipt && (this.running || !!acknowledgements.progress?.length)
       })
       if (this.running && panelChanged(result)) this.changed()
@@ -863,6 +884,7 @@ export class WorkspaceLinks {
         await this.artifacts.receive(p.id, p.workspaceId, body.artifact)
         const feedback = await this.receiveFeedback(p, body.feedback)
         if (incoming) await this.recordIncoming(d, p, incoming)
+        if (body.exchange.messages.length || body.feedback || body.artifact) this.activeCatalog()
         return { p, d, acknowledgements, feedback }
       })
       if (!sync) return

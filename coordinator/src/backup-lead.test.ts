@@ -3,9 +3,9 @@ import os from 'node:os'
 import path from 'node:path'
 import { assert, mockHost, mountWorker, test } from 'orca/testing'
 import { testCoordinator } from './test-runtime'
-import { fingerprint, fresh, submitTask } from './store'
+import { fingerprint, fresh, receiveEvent, submitTask } from './store'
 import { refs } from './fixtures'
-import type { AgentSession, ContactRoutes, LeadAction, Project, Workspace } from './model'
+import type { AgentSession, ContactRoutes, Delivery, LeadAction, Project, Workspace } from './model'
 import { stopped } from './backup-lead'
 import { mainTargets, type TargetInventory } from './runtime'
 
@@ -13,7 +13,6 @@ const now = Date.now(), minute = 60_000
 const primary: AgentSession = { handle: 'orca_session_id:claude_lead', workspace: refs[0].workspace, workspaceName: '项目', path: refs[0].path, title: '主用', online: 'online', agent: 'claude', state: 'done' }
 
 test('在线主用存在超过十五分钟的待办且已知不在工作时才需要探测', () => {
-  assert.ok(stopped(undefined, undefined, now))
   assert.ok(stopped({ ...primary, online: 'offline' }, undefined, now))
   assert.equal(stopped(primary, undefined, now), undefined)
   assert.equal(stopped(primary, now - 15 * minute, now), undefined)
@@ -29,7 +28,8 @@ async function fixture(project: Project, workspace?: Workspace, exports?: string
   const env = { sessions: [main], inventoryFailed: false, available: true, failLaunch: false, owner: main.handle as string | null, generation: 1, installed: ['claude', 'codex'], spaces: [{ workspace: main.workspace, name: '项目', path: main.path }], launches: [] as { workspace: string; agent: string; options: unknown; prompt: string }[],
     inventory: undefined as (() => TargetInventory) | undefined,
     contactRoute: { dispatch: 'ctx_contact' } as ContactRoutes[string], launchHandle: 'orca_session_id:backup',
-    catalogReads: 0, contacts: [] as string[], mailRuns: [] as string[], controls: [] as { handle: string; prompt: string }[], deliveries: [] as string[], reports: [] as any[] }
+    catalogReads: 0, contacts: [] as string[], mailRuns: [] as string[], mailFailed: false, failedDelivery: '', attemptedDelivery: undefined as Delivery | undefined,
+    controls: [] as { handle: string; prompt: string }[], deliveries: [] as string[], reports: [] as any[] }
   let c!: ReturnType<typeof testCoordinator>
   const worker = await mountWorker({ default: api => {
     c = testCoordinator(api, {
@@ -42,7 +42,11 @@ async function fixture(project: Project, workspace?: Workspace, exports?: string
       syncContacts: async jobs => { env.contacts = jobs.map(j => j.id); return Object.fromEntries(jobs.map(j => [j.id, env.contactRoute])) },
       installedAgents: async () => env.installed.map(id => ({ id, name: id, default: id === 'codex' })),
       identify: async (handle, run, own) => { assert.equal(run, own); return (env.inventory?.() ?? env).sessions.find(s => s.handle === handle)! },
-      mail: async runId => { env.mailRuns.push(runId); return { reports: [], questions: [], waiting: env.reports } },
+      mail: async runId => {
+        env.mailRuns.push(runId)
+        if (env.mailFailed) throw Error('inbox timed out')
+        return { reports: [], questions: [], waiting: env.reports }
+      },
       launchMain: async (workspace, agent, prompt, options) => {
         env.launches.push({ workspace, agent, prompt, options })
         if (env.failLaunch) throw Error('模拟启动回执丢失')
@@ -50,7 +54,14 @@ async function fixture(project: Project, workspace?: Workspace, exports?: string
         return env.launchHandle
       },
       requestTakeover: async (handle, prompt) => { env.controls.push({ handle, prompt }) },
-      send: async (run, d) => { env.deliveries.push([run, env.owner, d.subject].join('|')); return {} }
+      send: async (run, d) => {
+        env.deliveries.push([run, env.owner, d.subject].join('|'))
+        if (d.id === env.failedDelivery) {
+          env.attemptedDelivery = (await c.store.get(project.ref.id)).deliveries.find(row => row.id === d.id)
+          throw Error('send timed out')
+        }
+        return {}
+      }
     }, undefined, exports)
   } }, { host })
   const poll = async () => { await c.checkBackups(); await c.flush(project.ref.id) }
@@ -411,18 +422,22 @@ for (const agent of ['codex', 'antigravity']) test('项目主用探测超时后�
   } finally { Date.now = realNow; await close() }
 })
 
-test('未关联任务的旧消息只探测一次，主用确认后只对新积压再探测', async () => {
+test('无任务的历史来源不算积压，主用只对当前 Run 的未处理消息探测', async () => {
   const p = bound()
   const event = { id: 'old', source: 'owner', sourceId: 'old', threadId: '', chatId: '', senderId: 'owner', text: '项目状态如何？', receivedAt: new Date(now - 24 * 60 * minute).toISOString() }
-  p.events.push(event)
-  // An old notification with unknown delivery can remain in the queue indefinitely.
-  p.deliveries.push({ id: 'old-notice', subject: '进展', body: '', state: 'uncertain', createdAt: now - 60 * minute })
+  p.events.push(event, { ...event, id: 'sent', sourceId: 'sent', receivedAt: new Date(now - 16 * minute).toISOString() })
+  p.deliveries.push({ id: 'sent', subject: '进展', body: '', state: 'sent' })
   const { c, env, poll, command, close } = await fixture(p)
   const realNow = Date.now
   let clock = now
   Date.now = () => clock
   try {
-    await poll(); await poll(); await poll()
+    await poll(); await poll()
+    assert.equal((await c.store.get(p.ref.id)).backup?.phase, 'standby')
+    assert.equal(env.controls.length, 0)
+    env.reports.push({ at: clock - 16 * minute, title: 'Run 尚未读取的新消息' })
+    await c.refreshQuestions()
+    await poll()
     assert.deepEqual(env.controls.map(m => m.handle), [primary.handle])
     clock += 9 * minute
     await command('ready'); await command('ready')
@@ -436,13 +451,84 @@ test('未关联任务的旧消息只探测一次，主用确认后只对新积�
       reboot.env.sessions = env.sessions
       await reboot.poll(); await reboot.poll()
       assert.equal(reboot.env.controls.length, 0)
-      await reboot.c.store.mutate(p.ref.id, undefined, r => { r.events.push({ ...event, id: 'new', sourceId: 'new', receivedAt: new Date(clock).toISOString() }) })
+      reboot.env.reports.push({ at: clock, title: 'Run 新一轮待办' })
+      await reboot.c.refreshQuestions()
       clock += 16 * minute
       await reboot.poll()
       assert.deepEqual(reboot.env.controls.map(m => m.handle), [primary.handle])
       assert.equal((await reboot.c.store.get(p.ref.id)).backup?.phase, 'probing')
     } finally { await reboot.close() }
   } finally { Date.now = realNow; await close() }
+})
+
+test('收件箱失败时保留积压探测，确认主用离线后仍接管', async () => {
+  const p = bound()
+  p.deliveries.push({ id: 'unconfirmed', targetRunId: p.runId, subject: '待核对投递', body: '', state: 'uncertain', createdAt: now - 16 * minute })
+  const { c, env, poll, close } = await fixture(p)
+  const realNow = Date.now
+  let clock = now
+  Date.now = () => clock
+  try {
+    await poll()
+    env.mailFailed = true
+    await c.refreshQuestions(); await poll()
+    assert.equal(env.controls.length, 0)
+    env.mailFailed = false
+    await c.refreshQuestions(); await poll()
+    assert.match(env.controls[0].prompt, /lead-ready/)
+
+    clock += 11 * minute
+    env.mailFailed = true
+    await c.refreshQuestions(); await poll()
+    assert.equal((await c.store.get(p.ref.id)).backup?.phase, 'probing')
+    assert.equal(env.controls.length, 1)
+
+    env.sessions[0] = { ...primary, online: 'offline' }
+    let reads = 0
+    env.inventory = () => { reads++; return { sessions: env.sessions, workspaces: env.spaces } }
+    await poll()
+    assert.equal(reads, 2)
+    assert.equal((await c.store.get(p.ref.id)).backup?.phase, 'taking')
+    assert.match(env.controls[1].prompt, /lead-take/)
+    assert.match(env.controls[1].prompt, /收件箱待核对/)
+    assert.equal(env.controls[1].handle, env.launchHandle)
+  } finally { Date.now = realNow; await close() }
+})
+
+test('无任务的超时投递保留旧 Run 回执，换 Run 后不触发探活', async () => {
+  const p = bound()
+  const at = now - 60 * minute
+  receiveEvent(p, { id: 'forwarded', source: 'workspace-agent', sourceId: 'forwarded', threadId: 'forwarded', chatId: '',
+    senderId: 'run_owner', text: '转交消息', receivedAt: new Date(at).toISOString() })
+  p.deliveries.push({ id: 'legacy', subject: '历史待核对', body: '', state: 'uncertain', createdAt: at })
+  const { c, worker, env, poll, close } = await fixture(p)
+  try {
+    env.failedDelivery = 'forwarded'
+    await poll()
+    const old = await c.store.get(p.ref.id)
+    const receipt = old.deliveries.find(d => d.id === 'forwarded')!
+    assert.equal(env.attemptedDelivery?.state, 'sending')
+    assert.equal(env.attemptedDelivery?.targetRunId, p.runId)
+    assert.equal(receipt.state, 'uncertain')
+    assert.equal(receipt.targetRunId, p.runId)
+    assert.ok(old.events.every(e => !e.taskId))
+
+    const next = { ...primary, handle: 'orca_session_id:next' }
+    env.sessions.push(next)
+    const switched = await worker.request('project.lead', { projectId: p.ref.id, mode: 'existing', revision: old.revision, handle: next.handle })
+    const token = /一次性接管凭据：([^\n]+)/.exec(env.controls[0].prompt)![1]
+    env.owner = next.handle; env.launchHandle = 'orca_session_id:next_backup'
+    await worker.request('project.agent', { projectId: p.ref.id, operation: 'bind', revision: switched.binding.revision,
+      requestId: 'switch-run', runId: 'run_next', currentRunId: 'run_next', caller: next.handle, token })
+    await c.refreshQuestions()
+    await poll(); await poll()
+    const saved = await c.store.get(p.ref.id)
+    assert.equal(saved.runId, 'run_next')
+    assert.equal(saved.backup?.phase, 'standby')
+    assert.equal(env.controls.length, 1)
+    assert.deepEqual(saved.deliveries.find(d => d.id === 'forwarded'), receipt)
+    assert.deepEqual(saved.deliveries.find(d => d.id === 'legacy'), p.deliveries[1])
+  } finally { await close() }
 })
 
 test('聊天 Run 的空 handle 使用已有绑定，接管和交回都核对本会话回执与最新代次', async () => {
@@ -605,9 +691,79 @@ test('清单超时保持待命，完整清单确认主用消失后才接管', as
     assert.equal(env.controls.length, 0)
     assert.equal((await c.store.get(p.ref.id)).backup?.phase, 'standby')
     env.inventoryFailed = false
+    let reads = 0
+    env.inventory = () => ({ sessions: ++reads < 3 ? env.sessions : [primary, ...env.sessions], workspaces: env.spaces })
+    await poll()
+    assert.equal(reads, 3)
+    assert.equal(env.controls.length, 0)
+    assert.equal((await c.store.get(p.ref.id)).backup?.phase, 'standby')
+    env.inventory = undefined
     await poll()
     assert.deepEqual(env.controls.map(m => m.handle), ['orca_session_id:backup'])
     assert.ok(env.controls[0].prompt.includes('lead-take'))
+  } finally { await close() }
+})
+
+test('备用漏报和不可核实不会重复记录或发送同一次主备告警', async () => {
+  const p = bound()
+  const { c, env, poll, close } = await fixture(p, { version: 1, revision: 0, runId: 'run_owner', requests: [] })
+  try {
+    await poll()
+    const standby = { ...env.sessions[1], online: 'unknown' as const }
+    const missing = [{ ...primary, online: 'offline' as const }]
+    const initial = (await c.store.get(p.ref.id)).revision
+    let reads = 0
+    env.inventory = () => ({ sessions: reads++ ? [...missing, standby] : missing, workspaces: env.spaces })
+    await poll()
+    assert.equal(reads, 2)
+    assert.equal((await c.store.get(p.ref.id)).revision, initial)
+
+    env.inventory = undefined
+    env.sessions = missing
+    await poll()
+    const alerted = await c.store.get(p.ref.id)
+    assert.match(alerted.backup!.problem!, /均停住/)
+    assert.equal(alerted.backup!.history.length, 1)
+    assert.equal(env.deliveries.length, 1)
+    for (const sessions of [[...missing, standby], missing]) {
+      env.sessions = sessions
+      await poll()
+      assert.deepEqual(await c.store.get(p.ref.id), alerted)
+      assert.equal(env.deliveries.length, 1)
+    }
+    env.sessions = [{ ...primary, state: 'working' }]
+    await poll()
+    assert.equal((await c.store.get(p.ref.id)).backup?.problem, undefined)
+    env.sessions = missing
+    await poll()
+    assert.equal((await c.store.get(p.ref.id)).backup!.history.length, 2)
+    assert.equal(env.deliveries.length, 2)
+  } finally { await close() }
+})
+
+test('收件箱单次超时不会清除仍有积压的主备告警', async () => {
+  const p = bound()
+  const { c, env, poll, close } = await fixture(p, { version: 1, revision: 0, runId: 'run_owner', requests: [] })
+  try {
+    await poll()
+    env.sessions[1] = { ...env.sessions[1], online: 'offline' }
+    env.reports.push({ at: now - 16 * minute, title: '同一条未读消息' })
+    await c.refreshQuestions(); await poll()
+    const alerted = await c.store.get(p.ref.id)
+    assert.match(alerted.backup!.problem!, /均停住/)
+    assert.equal(alerted.backup!.history.length, 1)
+    assert.equal(env.deliveries.length, 1)
+
+    for (const mailFailed of [true, false]) {
+      env.mailFailed = mailFailed
+      await c.refreshQuestions(); await poll()
+      assert.deepEqual(await c.store.get(p.ref.id), alerted)
+      assert.equal(env.deliveries.length, 1)
+    }
+
+    env.reports.length = 0
+    await c.refreshQuestions(); await poll()
+    assert.equal((await c.store.get(p.ref.id)).backup?.problem, undefined)
   } finally { await close() }
 })
 
@@ -629,7 +785,7 @@ test('无绑定、隐藏和移除的项目跳过；启动失败记录一次；�
     assert.equal(b.phase, 'standby')
     assert.ok(b.problem?.includes('均停住'))
     assert.equal(env.controls.length, 0)
-    env.sessions = [primary]; await poll()
+    env.sessions = [primary]; await c.refreshQuestions(); await poll()
     assert.ok(!Object.hasOwn((await c.store.get(p.ref.id)).backup!, 'problem'))
   } finally { await close() }
 })

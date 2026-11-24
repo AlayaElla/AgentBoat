@@ -20,11 +20,20 @@ const label = (r: Binding) => 'ref' in r ? r.ref.name : '工作间'
 const available = (r: Binding) => !('ref' in r && r.hidden) && !takeoverActive(r.takeover)
 const chat = (handle?: string) => !!handle?.startsWith('orca_session_id:')
 const unopened = (b?: BackupLead) => !b || b.phase === 'unavailable' || b.phase === 'single'
-const offline = (s?: AgentSession) => !s || s.online === 'offline'
+type LeadState = Pick<AgentSession, 'online' | 'state'>
+const bothStopped = '主用和备用均停住，请主人核对会话'
 
-export function stopped(session: AgentSession | undefined, pendingSince: number | undefined, now: number) {
-  if (offline(session)) return 'Orca 中找不到在线会话'
-  if (session?.online === 'online' && ['done', 'blocked', 'waiting'].includes(session.state ?? '') &&
+function leadState(inventory: TargetInventory | undefined, workspace: string, handle?: string, previous?: TargetInventory): LeadState {
+  const session = inventory?.sessions.find(s => s.handle === handle && s.workspace === workspace)
+  if (session) return session
+  // Absence is evidence only when two complete reads agree.
+  return { online: handle && targetOnline(previous, handle, workspace) === 'offline' &&
+    targetOnline(inventory, handle, workspace) === 'offline' ? 'offline' : 'unknown' }
+}
+
+export function stopped(session: LeadState, pendingSince: number | undefined, now: number) {
+  if (session.online === 'offline') return 'Orca 中找不到在线会话'
+  if (session.online === 'online' && ['done', 'blocked', 'waiting'].includes(session.state ?? '') &&
     pendingSince !== undefined && now - pendingSince > 15 * 60_000) return '待处理事项已超过 15 分钟'
 }
 
@@ -139,15 +148,17 @@ export class BackupLeads {
   }
 
   async inspect(r: Binding, session: AgentSession, inventory: Awaited<ReturnType<CoordinatorRuntime['targets']>>,
-    pending: { at: number; title: string }[], context: string, ownerRun: string, now = Date.now()) {
+    pending: { at: number; title: string }[] | undefined, context: string, ownerRun: string, now = Date.now(),
+    recheck = () => this.runtime.targets().catch(() => undefined)) {
     if (!available(r) || !r.runId) return
     const id = key(r), b = r.backup
     const w = 'ref' in r ? undefined : r, bot = w?.bot
-    const live = inventory.sessions.find(s => s.handle === session.handle && s.workspace === session.workspace) ??
-      { ...session, online: targetOnline(inventory, session.handle, session.workspace) }
+    const { workspace, handle } = session
+    let live = leadState(inventory, workspace, handle)
     if (w && bot) {
+      if (live.online === 'unknown') live = leadState(await recheck(), workspace, handle, inventory)
       if (w.botSwitch && await this.inventoryStatus(w, true, now)) return
-      const oldest = pending.length ? Math.min(...pending.map(p => p.at)) : undefined
+      const oldest = pending?.length ? Math.min(...pending.map(p => p.at)) : undefined
       const reason = stopped(live, oldest === undefined ? undefined : Math.max(oldest, w.botReceipt?.confirmedAt ?? 0), now)
       const api = this.runtime.bots
       let current: BotTarget | undefined, home: string | undefined
@@ -265,36 +276,59 @@ export class BackupLeads {
       await this.updateBinding(r, row => this.launchFailure(row, ownerRun))
     }
     else {
-      const standby = inventory.sessions.find(s => s.handle === b.handle && s.workspace === session.workspace)
+      let standby = leadState(inventory, workspace, b.handle)
+      let observed = inventory
+      if (live.online === 'unknown' || b.handle && standby.online === 'unknown') {
+        const fresh = await recheck()
+        if (fresh) {
+          observed = fresh
+          live = leadState(fresh, workspace, handle, inventory)
+          standby = leadState(fresh, workspace, b.handle, inventory)
+        }
+      }
       const confirmedAt = b.confirmedAt
-      if (confirmedAt !== undefined) pending = pending.filter(p => p.at > confirmedAt)
-      const oldest = pending.length ? Math.min(...pending.map(p => p.at)) : undefined
-      const reason = stopped(live, oldest === undefined || !b.consumed ? oldest : Math.max(oldest, b.since), now)
+      if (confirmedAt !== undefined) pending = pending?.filter(p => p.at > confirmedAt)
+      const oldest = pending?.length ? Math.min(...pending.map(p => p.at)) : undefined
+      const since = oldest === undefined || !b.consumed ? oldest : Math.max(oldest, b.since)
       const waitingForStandby = b.phase === 'taking' || b.phase === 'handoff' ? b.since : oldest && Math.max(oldest, b.since)
       const primaryInCharge = b.phase === 'standby' || b.phase === 'probing'
+      const expired = b.phase === 'probing' && b.lastProbe !== undefined && now - b.lastProbe >= probeWait
+      const stillWaiting = oldest !== undefined && b.lastProbe !== undefined && oldest <= b.lastProbe
+      let reason = stopped(live, since, now)
+      if (primaryInCharge && reason && standby.online === 'online' &&
+        (b.phase === 'standby' || live.online === 'offline' || expired && stillWaiting)) {
+        const fresh = await this.runtime.targets().catch(() => undefined)
+        live = leadState(fresh, workspace, handle, observed)
+        standby = leadState(fresh, workspace, b.handle, observed)
+        reason = stopped(live, since, now)
+      }
       const backupReason = stopped(standby, primaryInCharge ? undefined : waitingForStandby, now)
       const uncertain = queue(r).some(d => d.control && awaitingLeadControl(b, d.control) && d.state === 'uncertain')
       const route = b.contact && this.routes[b.contact.id]
-      const problem = route?.error ? '主用联络未就绪：' + route.error : reason && backupReason ? '主用和备用均停住，请主人核对会话' : uncertain ? '接管通知送达待核对，请查看目标会话' : undefined
-      const missing = offline(live)
-      const expired = b.phase === 'probing' && b.lastProbe !== undefined && now - b.lastProbe >= probeWait
-      const stillWaiting = oldest !== undefined && b.lastProbe !== undefined && oldest <= b.lastProbe
-      if (b.phase === 'standby' && !missing && reason && standby?.online === 'online') {
+      // An unreadable inbox cannot confirm that a nonworking session cleared its backlog.
+      const pendingUnknown = pending === undefined
+      const holdingAlert = b.problem === bothStopped &&
+        (reason || live.online === 'unknown' || pendingUnknown && live.state !== 'working') &&
+        (backupReason || standby.online === 'unknown' || pendingUnknown && !primaryInCharge && waitingForStandby === undefined && standby.state !== 'working')
+      const problem = holdingAlert ? bothStopped : route?.error ? '主用联络未就绪：' + route.error
+        : reason && backupReason ? bothStopped : uncertain ? '接管通知送达待核对，请查看目标会话' : undefined
+      const missing = live.online === 'offline'
+      if (b.phase === 'standby' && !missing && reason && standby.online === 'online') {
         await this.updateBinding(r, row => {
           const b = row.backup!
           b.phase = 'probing'; b.cycle = randomUUID(); delete b.lastProbe; delete b.problem
           control(row, 'ready', '如能继续处理，请在 10 分钟内确认。')
         })
-      } else if (primaryInCharge && reason && standby?.online === 'online' &&
+      } else if (primaryInCharge && reason && standby.online === 'online' &&
         (missing || expired && stillWaiting)) {
         const cause = missing ? reason : reason + '，主用探测已超过 10 分钟未确认'
         await this.updateBinding(r, row => {
           const b = row.backup!
           b.phase = 'taking'; b.since = now; b.cycle = randomUUID(); delete b.problem
-          control(row, 'take', `${cause}。先用 ${id ? 'read ' + id : 'overview --brief'} 读插件记录，接管后核对原 Run 收件箱。待处理：${pending.slice(0, 12).map(p => p.title.slice(0, 120)).join('、') || '暂无'}。进行中的任务和执行者：${context || '暂无已登记任务'}。`)
+          control(row, 'take', `${cause}。先用 ${id ? 'read ' + id : 'overview --brief'} 读插件记录，接管后核对原 Run 收件箱。待处理：${pending ? pending.slice(0, 12).map(p => p.title.slice(0, 120)).join('、') || '暂无' : '收件箱待核对'}。进行中的任务和执行者：${context || '暂无已登记任务'}。`)
           b.history.push({ at: now, text: `请求 ${b.handle} 接管：${cause}` })
         })
-      } else if (expired && !missing && !stillWaiting) {
+      } else if (expired && live.online === 'online' && pending && !stillWaiting) {
         await this.updateBinding(r, row => { row.backup!.phase = 'standby'; delete row.backup!.credential })
       } else if (b.phase === 'active' && (!b.contact || route?.dispatch) && now - (b.lastProbe ?? b.since) >= hour && live?.online === 'online' &&
         !queue(r).some(d => d.control?.cycle === b.cycle && d.control.action === 'ready' && (d.state === 'pending' || d.state === 'sending'))) {

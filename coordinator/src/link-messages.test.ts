@@ -173,8 +173,10 @@ test('a waiting peer receives Orca project catalog and agent activity changes be
     live = 'need'
     await a.worker.emit('agent.status.changed', { workspaceId: 'fake', paneKey: 'fake', state: 'waiting', receivedAt: Date.now() })
     await until(async () => (await status()) === 'need')
+    await a.send(id, 'reverse-link', '共享目录退避期间的消息')
+    await until(() => b.sends.some(({ delivery }) => delivery.body.includes('共享目录退避期间的消息')))
     catalog = []
-    await until(async () => (await report())?.projects.length === 0)
+    await until(async () => (await report())?.projects.length === 0, 5000)
   } finally { await b.close(); await a.close() }
 })
 

@@ -4,6 +4,7 @@ import { assert, test, mockHost, mountWorker } from 'orca/testing'
 import path from 'node:path'
 import os from 'node:os'
 import { setTimeout as delay } from 'node:timers/promises'
+import { test as timedTest } from 'node:test'
 import { mkdtemp, mkdir, rm, writeFile, truncate, symlink } from 'node:fs/promises'
 import { artifactChunkBytes, fileChunkBytes, maxLinkFileBytes } from './link-files'
 import type { OrcaWorkerApi } from 'orca/worker'
@@ -783,4 +784,27 @@ test('refresh does not broadcast changes when there is no outbound peer to sync'
   const api = { storage: { get: async (key: string) => key !== 'workspace.links' ? null : ({ version: 1, revision: 0, workspaceId: 'own', name: 'own', enabled: false, host: '127.0.0.1', port: 0, publicUrl: '', tls: false, peers: [] }) } }
   const links = new WorkspaceLinks(api as unknown as OrcaWorkerApi, async () => [], () => { changed++ }, undefined, undefined, undefined, testFiles())
   await links.refresh(); assert.equal(changed, 0); links.stop()
+})
+
+timedTest('catalog polling backs off on an idle reverse link and resumes faster after activity', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const peer = { id: 'peer', workspaceId: 'remote', name: 'remote', endpoint: '', state: 'active', scope: 'details', allProjects: true, projectIds: [] }
+  const api = { storage: { get: async (key: string) => key !== 'workspace.links' ? null : ({
+    version: 1, revision: 0, workspaceId: 'own', name: 'own', enabled: false, host: '127.0.0.1', port: 0, publicUrl: '', tls: false, peers: [peer]
+  }) } }
+  let reads = 0
+  const links = new WorkspaceLinks(api as unknown as OrcaWorkerApi, async () => [], () => {}, undefined, undefined, undefined, testFiles(), async () => { reads++ })
+  const tick = async (ms: number) => { t.mock.timers.tick(ms); await new Promise<void>(resolve => setImmediate(resolve)) }
+  try {
+    await links.start()
+    await tick(1000); assert.equal(reads, 0)
+    await tick(1000); assert.equal(reads, 1)
+    await tick(3999); assert.equal(reads, 1)
+    await tick(1); assert.equal(reads, 2)
+    await tick(7999); assert.equal(reads, 2)
+    await tick(1); assert.equal(reads, 3)
+    links.localChanged(); await tick(0)
+    await tick(2000); assert.equal(reads, 4)
+    links.stop(); await tick(8000); assert.equal(reads, 4)
+  } finally { links.stop() }
 })
