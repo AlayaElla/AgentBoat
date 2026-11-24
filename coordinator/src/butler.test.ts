@@ -73,6 +73,35 @@ test('Hermes → main → reply → Hermes: v1 async, blocking, deduplication, a
   } finally { b.stop() }
 })
 
+test('A2A accepts text parts with optional text/plain mediaType and rejects other fields or media types', async () => {
+  const { b } = await instance()
+  try {
+    const submit = (id: string, part: Record<string, unknown>) => {
+      const p = params(id)
+      return rpc(b, 'SendMessage', { ...p, message: { ...p.message, parts: [part] } })
+    }
+    const text = '模拟 Hermes 消息'
+    for (const [id, part] of Object.entries({ plain: { text }, typed: { text, mediaType: 'text/plain' } })) {
+      const { code, body } = await submit(id, part)
+      assert.equal(code, 200)
+      assert.equal(body.jsonrpc, '2.0')
+      assert.equal(body.id, 'rpc-test')
+      assert.equal(body.result.task.status.state, 'TASK_STATE_SUBMITTED')
+      assert.deepEqual(body.result.task.history[0].parts, [{ text }])
+    }
+    for (const part of [
+      {}, { text, ['__proto__']: {} },
+      { text, mediaType: 'text/html' }, { text, mediaType: 'application/json' }, { text, mediaType: '' },
+      { text, mediaType: null }, { text, mediaType: 42 }, { text, raw: 'YQ==' },
+      { text, url: 'https://example.com' }, { text, data: {} }, { text, unknown: true },
+    ]) {
+      const { body } = await submit('invalid', part)
+      assert.equal(body.error?.code, -32602, JSON.stringify(part))
+    }
+    assert.deepEqual((await b.snapshot()).entries.map(entry => entry.id), ['plain', 'typed'])
+  } finally { b.stop() }
+})
+
 test('blocking Hermes outbound does not prevent an inbound clarification from reaching main', async () => {
   let release!: () => void
   const ready = new Promise<void>(r => { release = r })
