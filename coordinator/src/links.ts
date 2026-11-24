@@ -314,6 +314,7 @@ export class WorkspaceLinks {
   private waiters = new Map<string, (status?: number) => void>()
   private watchers = new Map<string, AbortController>()
   private running = false
+  private stopGeneration = 0
   private signaling = false
   private lastReport = new Map<string, number>()
   private recentActivity?: { at: number; result: Promise<LocalActivity> }
@@ -462,6 +463,7 @@ export class WorkspaceLinks {
   private closeListener() { this.server?.closeAllConnections(); this.server?.close(); this.server = undefined; this.listening = ''; this.invitation = undefined }
   stop() {
     this.running = false
+    this.stopGeneration++
     this.stream.stop()
     this.artifacts.stop()
     clearInterval(this.timer)
@@ -713,16 +715,43 @@ export class WorkspaceLinks {
     this.watchers.set(p.id, state)
     void (async () => {
       let backoff = 250, pushCount = 0
-      let version: string | undefined
+      let version: string | undefined = this.originVersion, refresh = false
+      const wait = async (since: string) => {
+        try {
+          const token = await this.orca.secrets.get(secretKey(p.id))
+          return { token, update: token ? await call(p.endpoint, '/wait', { id: p.id, since }, token, signal) : undefined }
+        } catch (error) { return { error } }
+      }
+      let waiting: ReturnType<typeof wait> | undefined
+      let reporting: Promise<{ synced: string | undefined }> | undefined
+      const retry = async () => {
+        await delay(backoff, undefined, { signal, ref: false })
+        backoff = Math.min(backoff * 2, 10_000)
+      }
       let pushing = Promise.resolve()
       while (!signal.aborted) {
         try {
-          version ??= await this.sync(p.id, signal)
+          if (refresh && !reporting) {
+            refresh = false
+            reporting = this.sync(p.id, signal).then(synced => ({ synced }), () => ({ synced: undefined }))
+          }
+          if (version && !waiting) waiting = wait(version)
+          const next = await Promise.race([waiting, reporting].filter(p => p !== undefined))
           if (signal.aborted) return
-          const token = await this.orca.secrets.get(secretKey(p.id))
+          if ('synced' in next) {
+            reporting = undefined
+            if (!next.synced) throw Error()
+            version ??= next.synced
+            continue
+          }
+          waiting = undefined
+          if ('error' in next) throw next.error
+          const { token, update: waited } = next
           if (!token) return
-          if (!version) throw Error()
-          const waited = await call(p.endpoint, '/wait', { id: p.id, since: version }, token, signal)
+          const announced = waited.version === undefined ? undefined : id(waited.version)
+          // Advancing the long poll only queues a report. It never completes one in flight.
+          if (announced !== version || waited.feedback !== true) refresh = true
+          version = announced
           if (waited.offer && pushCount < 2) {
             // The next open can arrive before the previous push's HTTP acknowledgement.
             pushCount++
@@ -732,28 +761,24 @@ export class WorkspaceLinks {
               if (peer) await this.stream.push(peer, token, waited.offer)
             }).catch(() => {}).finally(() => { pushCount-- })
           }
-          // Keep the last ordinary version so a concurrent report update still wakes this watcher.
-          if (waited.feedback === true) {
-            if (!await this.sync(p.id, signal, true)) throw Error()
-          } else version = undefined
-          backoff = 250
+          if (waited.feedback === true && !await this.sync(p.id, signal, true)) await retry()
+          else backoff = 250
         } catch (e) {
           if (signal.aborted) return
-          version = undefined
+          refresh = true
           await this.syncFailed(p.id, e)
           this.changed()
-          await delay(backoff, undefined, { signal, ref: false })
-          backoff = Math.min(backoff * 2, 10_000)
+          await retry()
         }
       }
     })().catch(() => {}).finally(() => { if (this.watchers.get(p.id) === state) this.watchers.delete(p.id) })
   }
   async refresh() { const d = await this.serial(() => this.data()); const peers = d.peers.filter(p => p.endpoint); await Promise.all(peers.map(p => this.sync(p.id))); if (peers.length) this.changed(); return this.snapshot() }
-  private async packet(p: Peer, outgoing: SharedReport | undefined, receipts: Receipts, request = false, reply?: FeedbackReply, feedbackOnly = false) {
+  private async packet(p: Peer, outgoing: SharedReport | undefined, receipts: Receipts, version?: string, reply?: FeedbackReply, feedbackOnly = false) {
     const sending = this.unsentFeedback(p.id)
     const artifact = feedbackOnly ? undefined : await this.artifacts.packet(p.id, ref => this.artifactSource(p, ref))
     const packet = { ...syncPacket(outgoing, feedbackOnly ? [] : await this.messages.pending(p.id), receipts,
-      { request: sending?.request, reply }, request ? p.id : undefined, request ? undefined : this.version(p.id)), ...(feedbackOnly && { feedbackOnly: true }) }
+      { request: sending?.request, reply }, version === undefined ? p.id : undefined, version), ...(feedbackOnly && { feedbackOnly: true }) }
     const m = packet.exchange.messages.find(m => m.files)
     if (m) {
       const chunk = await this.messages.chunk(p.id, m)
@@ -782,18 +807,23 @@ export class WorkspaceLinks {
     if (signal?.aborted) return
     const key = feedbackOnly ? `${connectionId}:feedback` : connectionId
     const running = this.syncing.get(key)
-    if (running) { await running; return this.sync(connectionId, signal, feedbackOnly) }
+    if (running) {
+      if (feedbackOnly) return running
+      await running
+      return this.sync(connectionId, signal)
+    }
     const work = (async () => {
       while (!signal?.aborted) {
-        if (!feedbackOnly && this.feedbackReplies.has(connectionId) && !await this.sync(connectionId, signal, true)) return
+        if (!feedbackOnly && this.feedbackReplies.has(connectionId)) void this.sync(connectionId, signal, true).catch(() => {})
         const result = await this.syncOne(connectionId, signal, feedbackOnly)
-        if (!result?.more) return result?.version
+        if (!result || !result.more && !(feedbackOnly && this.feedbackReplies.has(connectionId))) return result?.version
       }
     })()
     this.syncing.set(key, work)
     try { return await work } finally { if (this.syncing.get(key) === work) this.syncing.delete(key) }
   }
   private async syncOne(connectionId: string, signal: AbortSignal | undefined, feedbackOnly: boolean) {
+    const generation = this.stopGeneration
     try {
       const d = await this.serial(() => this.data()), p = d.peers.find(p => p.id === connectionId)
       if (!p?.endpoint) return
@@ -801,15 +831,15 @@ export class WorkspaceLinks {
       if (!token) throw Error()
       const outgoing = feedbackOnly ? undefined : await this.localReport(p, d)
       const packet = await this.serial(async () => {
-        if ((await this.data()).revision !== d.revision) return
-        return feedbackOnly ? this.packet(p, undefined, noReceipts, true, this.feedbackReplies.get(p.id), true)
-          : this.packet(p, outgoing, this.receipts.get(p.id) ?? noReceipts, true)
+        if ((await this.data()).revision !== d.revision || signal?.aborted || generation !== this.stopGeneration) return
+        return feedbackOnly ? this.packet(p, undefined, noReceipts, undefined, this.feedbackReplies.get(p.id), true)
+          : this.packet(p, outgoing, this.receipts.get(p.id) ?? noReceipts)
       })
       if (!packet) return
       const result = await call(p.endpoint, '/sync', packet, token, signal)
       const version = id(result.version)
       const incoming = result.report === undefined ? undefined : received(result.report, p)
-      const more = await this.serial(async () => { const now = await this.data(), current = now.peers.find(x => x.id === p.id); if (!current) return false
+      const more = await this.serial(async () => { const now = await this.data(), current = now.peers.find(x => x.id === p.id); if (!current || signal?.aborted || generation !== this.stopGeneration) return false
         const lightweight = result.feedbackOnly === true
         const { more, ...acknowledgements } = lightweight ? { ...noReceipts, more: false }
           : await this.receiveMessages(incoming ? { ...current, name: incoming.name } : current, result.exchange)
@@ -820,6 +850,7 @@ export class WorkspaceLinks {
         if (this.feedbackReplies.get(p.id) === packet.feedback?.reply) this.feedbackReplies.delete(p.id)
         this.artifacts.sent(p.id, packet.artifact)
         const reply = await this.receiveFeedback(current, result.feedback)
+        if (signal?.aborted || generation !== this.stopGeneration) return false
         if (reply) this.feedbackReplies.set(p.id, reply)
         const nextReceipt = hasReceipts(acknowledgements) && JSON.stringify(acknowledgements) !== JSON.stringify(this.exchangeReceipts(packet.exchange))
         const nextArtifact = await this.artifacts.receive(p.id, p.workspaceId, result.artifact)
@@ -829,7 +860,7 @@ export class WorkspaceLinks {
       if (this.running && (result.feedbackOnly === true ? result.feedback : panelChanged(result))) this.changed()
       return { version, more }
     } catch (e) {
-      if (!signal?.aborted) await this.syncFailed(connectionId, e)
+      if (!signal?.aborted && (!feedbackOnly || (e as { status?: number }).status === 401)) await this.syncFailed(connectionId, e)
     }
   }
   private exchangeReceipts({ messages, ...receipts }: MessageExchange): Receipts { return receipts }
@@ -881,7 +912,7 @@ export class WorkspaceLinks {
         if (req.url === '/wait') {
           const since = id(body.since)
           this.waiters.get(p.id)?.()
-          const update = () => ({ offer: this.artifacts.takeOffer(p.id), feedback: this.unsentFeedback(p.id) ? true : undefined })
+          const update = () => ({ version: this.version(p.id), offer: this.artifacts.takeOffer(p.id), feedback: this.unsentFeedback(p.id) ? true : undefined })
           if (since !== this.version(p.id) || this.artifacts.offer(p.id) || this.unsentFeedback(p.id)) { reply(200, update()); return }
           const cleanup = () => {
             clearTimeout(timer)
@@ -904,19 +935,20 @@ export class WorkspaceLinks {
         const feedback = await this.receiveFeedback(p, body.feedback)
         if (incoming) await this.recordIncoming(d, p, incoming)
         if (body.exchange?.messages?.length || body.feedback || body.artifact) this.activeCatalog()
+        const version = this.version(p.id)
         if (lightweight || this.unsentFeedback(p.id)) {
-          const response = await this.packet(p, undefined, noReceipts, false, feedback, true)
+          const response = await this.packet(p, undefined, noReceipts, version, feedback, true)
           reply(200, response)
           if (lightweight ? body.feedback : panelChanged(body)) this.changed()
           return
         }
-        return { p, d, acknowledgements, feedback }
+        return { p, d, acknowledgements, feedback, version }
       })
       if (!sync) return
       const outgoing = await this.localReport(sync.p, sync.d)
       await this.serial(async () => {
         if ((await this.data()).revision !== sync.d.revision) fail('工作间连接已更新')
-        const response = await this.packet(sync.p, outgoing, sync.acknowledgements, false, sync.feedback)
+        const response = await this.packet(sync.p, outgoing, sync.acknowledgements, sync.version, sync.feedback)
         if (Buffer.byteLength(JSON.stringify(response)) > LIMIT) fail('工作间上报过大')
         reply(200, response)
         this.artifacts.sent(sync.p.id, response.artifact)

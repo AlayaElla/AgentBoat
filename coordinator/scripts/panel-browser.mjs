@@ -1623,8 +1623,8 @@ try {
     assert.deepEqual(remote[0], remote[1]);
     assert.deepEqual(await page.evaluate(() => fixture.calls.find(c => c.name === 'shell.openExternal').input), 'https://example.com/preview');
   });
-  await setup({ width: 1040, delegatedFeedback: true, peerProjectPage: true, delayLinkReply: true });
-  await test('batch claims and submits two projects on one peer in order', async () => {
+  const selectTwoPeerProjects = async () => {
+    await setup({ width: 1040, delegatedFeedback: true, peerProjectPage: true, delayLinkReply: true });
     await page.evaluate(() => {
       const projects = fixture.links.peers[0].report.projects;
       const project = structuredClone(projects[0]);
@@ -1637,6 +1637,9 @@ try {
     await review('对方页面交付').check();
     await review('对方移动端交付').check();
     await dock().getByRole('button', { name: '提交 2 条' }).click();
+  };
+  await test('batch claims and submits two projects on one peer in order', async () => {
+    await selectTwoPeerProjects();
     const finish = async count => {
       await page.waitForFunction(() => !!fixture.finishLinkReply);
       const state = await page.evaluate(() => {
@@ -1652,6 +1655,21 @@ try {
     await finish(2);
     await page.getByRole('status').filter({ hasText: '已提交 2 条' }).waitFor();
     assert.equal(await page.getByText('正在确认上次提交，请稍候').count(), 0);
+  });
+  await test('a timed-out project and a failed preflight share the batch alert', async () => {
+    await selectTwoPeerProjects();
+    await page.waitForFunction(() => !!fixture.finishLinkReply);
+    await page.evaluate(() => {
+      fixture.linkTimeout = true;
+      fixture.overviewFailures = 10;
+      delete fixture.links.peers[0].report.projects[1].feedback;
+      fixture.finishLinkReply();
+    });
+    const alert = page.getByRole('alert');
+    await alert.filter({ hasText: '「对方移动项目 · 工作间 up」未确认提交：项目已隐藏或读不到' })
+      .filter({ hasText: '「对方示例项目 · 工作间 up」未确认提交：连接超时' }).waitFor();
+    await alert.getByRole('button', { name: '关闭提示' }).click();
+    await alert.waitFor({ state: 'hidden' });
   });
   let uncertainStorage;
   await setup({ width: 1040, delegatedFeedback: true });

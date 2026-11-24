@@ -128,10 +128,10 @@ test('delegated feedback applies once in both directions and rechecks sharing on
       while (!await condition()) { assert.ok(Date.now() < deadline, 'timed out waiting for link update'); await delay(10) }
     }
     await until(() => listener.waiters.has(id))
-    let watcherRequestedReport = false
+    let watcherReports = 0
     const dialerSync = dialer.sync.bind(dialer)
     dialer.sync = (peerId: string, signal?: AbortSignal, feedbackOnly?: boolean) => {
-      if (signal && !feedbackOnly) watcherRequestedReport = true
+      if (signal && !feedbackOnly) watcherReports++
       return dialerSync(peerId, signal, feedbackOnly)
     }
     const held = new Promise<void>(resolve => { resumeReports = resolve })
@@ -144,8 +144,8 @@ test('delegated feedback applies once in both directions and rechecks sharing on
         return localReport(...args)
       }
     }
-    const refresh = b.c.links.refresh()
-    await until(() => dialerReporting)
+    a.c.links.localChanged()
+    await until(() => dialerReporting && watcherReports === 1)
     await a.c.store.mutate('p1', undefined, p => { p.tasks[0].title = '新的普通项目报告' })
     const mutateReverse = b.c.store.mutate.bind(b.c.store)
     let loseReceipt = true
@@ -178,9 +178,8 @@ test('delegated feedback applies once in both directions and rechecks sharing on
     assert.equal(received.tasks[1].decisions[0].history[0].source, '主人在工作间 甲工作间 提交')
     assert.equal(received.tasks[0].acceptance[0].history.length, 1)
     assert.equal((await b.c.store.get('p2')).tasks[0].acceptance[0].history.length, 1)
-    await until(() => watcherRequestedReport)
     resumeReports()
-    await refresh
+    await until(() => watcherReports >= 2)
     await until(async () => (await b.c.links.snapshot()).peers[0].report?.projects[0].tasks?.[0].title === '新的普通项目报告')
     assert.equal((await send(a, { ...request, revision: received.revision, requestId: 'older-client' })).state, 'rejected')
     await share(a, false, 'summary')
@@ -191,6 +190,40 @@ test('delegated feedback applies once in both directions and rechecks sharing on
     await b.c.links.refresh()
     await assert.rejects(() => send(b), /断开/)
   } finally { resumeReports(); a.c.stop(); b.c.stop(); await a.worker.deactivate(); await b.worker.deactivate() }
+})
+
+test('a failed lightweight receipt leaves ordinary reports and messages available', async () => {
+  const a = await instance('listener'), b = await instance('dialer', false)
+  let failReceipt = true, writes = 0, receiptFailures = 0
+  const listener = a.links as any, dialer = b.links as any
+  const receive = listener.receiveFeedback.bind(listener)
+  listener.receiveFeedback = (peer: unknown, exchange: any) => {
+    if (failReceipt && exchange?.reply) { receiptFailures++; throw Error('temporary receipt RPC failure') }
+    return receive(peer, exchange)
+  }
+  dialer.applyFeedback = async (_peer: unknown, request: unknown) => { writes++; return fingerprint(request) }
+  try {
+    await a.links.start(); await b.links.start()
+    const { id } = (await b.links.join((await a.links.invite()).invitation!.code)).peers[0]
+    await b.links.share({ id, revision: (await b.links.snapshot()).revision, scope: 'details', projectIds: ['p1'], delegateFeedback: true })
+    const request = { projectId: 'p1', revision: b.projects[0].revision, requestId: 'receipt-retry', items: [] }
+    const result = a.links.submitFeedback(id, request)
+    const deadline = Date.now() + 3000
+    while (!receiptFailures) { assert.ok(Date.now() < deadline, 'receipt was not attempted'); await delay(10) }
+    const proof = { requestId: request.requestId, state: 'submitted', fingerprint: fingerprint(request) }
+    assert.deepEqual(dialer.feedbackReplies.get(id), proof)
+    b.projects[0].ref.name = 'updated while receipt retries'
+    await b.links.send({ id, requestId: 'ordinary-message', text: 'queued while receipt retries' })
+    await b.links.refresh()
+    const peer = (await a.links.snapshot(true)).peers[0]
+    assert.equal(peer.report?.projects[0].name, 'updated while receipt retries')
+    assert.equal(peer.recentMessages?.find(message => message.requestId === 'ordinary-message')?.state, 'received')
+    assert.deepEqual(dialer.feedbackReplies.get(id), proof)
+    failReceipt = false
+    await b.links.refresh()
+    assert.deepEqual(await Promise.race([result, delay(3000, undefined, { ref: false }).then(() => assert.fail('original receipt was not retried'))]), proof)
+    assert.equal(writes, 1)
+  } finally { a.links.stop(); b.links.stop() }
 })
 
 test('peer artifacts use authenticated loopback in both directions, cache complete versions and recheck access', async () => {

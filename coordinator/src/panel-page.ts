@@ -856,10 +856,10 @@ function dock() {
   const label = incomplete ? `有 ${incomplete} 条还没写内容` : `已选 ${count} 条 · ${groups.length} 个项目`
   const failures = Object.entries(feedbackRequests).filter(([id, record]) => record.reason && feedbackFailure(record) !== sheets[id].dismissed && Object.keys(choices(id)).length)
   const savedError = failures.map(([id, record]) => '「' + inboxProjectName(id) + '」未确认提交：' + record.reason).join('。')
-  const message = error || (!busy && [savedError, notice].filter(Boolean).join('。')) || notice
+  const message = [error, !busy && savedError, !error && notice].filter(Boolean).join('。')
   async function closeToast() {
     try {
-      if (!error && !busy) for (const [id, record] of failures) await saveSubmission({ projectId: id, items: [], dismiss: feedbackFailure(record) })
+      if (!busy) for (const [id, record] of failures) await saveSubmission({ projectId: id, items: [], dismiss: feedbackFailure(record) })
       dismiss()
     } catch (e) { error = (e as Error).message; render() }
   }
