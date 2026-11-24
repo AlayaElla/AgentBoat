@@ -44,7 +44,7 @@ export function resetBackup(p: Project | Workspace, primary: string) {
   else delete p.backup
 }
 export function fresh(ref: ProjectRef): Project {
-  return { version: 1, ref, revision: 0, runId: '', roles: { design: 'antigravity', code: 'codex', review: 'codex' },
+  return { version: 1, ref, revision: 0, runId: '', roles: { design: 'codex', code: 'codex', review: 'codex' },
     tasks: [], events: [], deliveries: [], requests: [] }
 }
 export function artifactUrl(value: unknown, root: string): string {

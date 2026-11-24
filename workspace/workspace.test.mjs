@@ -38,7 +38,7 @@ test('code 模板提供默认主备和分工，旧原版读取时升级，定制
   assert.deepEqual(JSON.parse(readFileSync(local, 'utf8')), code);
   assert.deepEqual(projectLeadAgents(), expectedLeads);
   assert.deepEqual(api.template('code').roles, {
-    design: { agent: 'antigravity' }, code: { agent: 'codex' }, review: { agent: 'codex' },
+    design: { agent: 'codex' }, code: { agent: 'codex' }, review: { agent: 'codex' },
   });
 
   const v036 = {
@@ -56,7 +56,12 @@ test('code 模板提供默认主备和分工，旧原版读取时升级，定制
   };
   const { id, name, roles, source, firstMessage, backupAgents } = v036;
   const v010 = { id, name, roles, source, firstMessage, mainAgent: { agent: 'claude', surface: 'chat' } };
-  for (const old of [v036, { ...v010, backupAgents }, v010, { ...v010, mainAgent: backupAgents.claude }, { ...code, backupAgents }]) {
+  const v038 = {
+    id, name: '代码项目：Antigravity 设计，Codex 编码和审查', source, firstMessage,
+    mainAgent: { agent: 'antigravity' }, backupAgent: { agent: 'codex' },
+    roles: { ...roles, design: { agent: 'antigravity' } },
+  };
+  for (const old of [v036, { ...v010, backupAgents }, v010, { ...v010, mainAgent: backupAgents.claude }, { ...v038, backupAgents }, v038]) {
     const contents = '\uFEFF' + JSON.stringify(old);
     writeFileSync(local, contents);
     assert.deepEqual(api.template('code'), code);
@@ -65,13 +70,13 @@ test('code 模板提供默认主备和分工，旧原版读取时升级，定制
     assert.equal(readFileSync(local, 'utf8'), contents);
   }
 
-  const customized = { ...v036, backupAgent: null };
+  const customized = { ...v038, backupAgent: null };
   const contents = JSON.stringify(customized);
   writeFileSync(local, contents);
   api.init();
   assert.deepEqual(api.template('code'), customized);
-  assert.deepEqual(projectLeadAgents(), { primary: v036.mainAgent, backup: null });
-  assert.deepEqual(templateLeadPreferences(api.template('code')), { primary: v036.mainAgent, backup: null });
+  assert.deepEqual(projectLeadAgents(), { primary: v038.mainAgent, backup: null });
+  assert.deepEqual(templateLeadPreferences(api.template('code')), { primary: v038.mainAgent, backup: null });
   assert.equal(readFileSync(local, 'utf8'), contents);
   assert.throws(() => api.template('../escape'));
 });
@@ -293,7 +298,7 @@ test('manual create shares launch defaults and the same pending-project guard', 
   assert.equal(lead.agent, 'antigravity'); assert.equal(lead.model, undefined); assert.equal(lead.effort, undefined);
   assert.equal(lead.handle, 'orca_session_id:fake-project-lead');
   const { roles, leadAgents } = f.read().project;
-  assert.deepEqual(roles, { design: 'antigravity', code: 'codex', review: 'codex' });
+  assert.deepEqual(roles, { design: 'codex', code: 'codex', review: 'codex' });
   assert.equal(leadAgents, undefined);
   assert.equal((await f.message('after-manual')).autoLaunch.reused, true);
   assert.equal(f.calls().filter(args => args[0] === 'agent').length, 1);
@@ -377,7 +382,8 @@ test('legacy create journal closes against a manually bound folder project', asy
   const result = await f.workspace('create', input);
   assert.equal(result.stage, 'already-bound');
   assert.equal(result.runId, f.state.project.runId);
-  assert.equal(result.rolesMatchTemplate, true);
+  assert.equal(result.rolesMatchTemplate, false);
+  assert.deepEqual(f.read().project.roles, f.state.project.roles);
   assert.deepEqual(JSON.parse(readFileSync(file)), result);
   assert.deepEqual(await f.workspace('create', input), result);
   assert.deepEqual(f.calls().map(args => args[0] === 'installed' ? args[1] : args.slice(0, 2).join(' ')),
