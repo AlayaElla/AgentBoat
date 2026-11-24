@@ -1335,11 +1335,13 @@ function pendingLead(t: MainTakeover | undefined, cancel?: () => unknown, worksp
     minutes && t.backupAgent ? small(`接管后会自动配一个 ${agentName(t.backupAgent)} 备用`) : null,
     cancel ? button('取消', cancel, '', workspace && t.state === 'sending' && t.target.workspace === '') : null)
 }
-function leadChoices(w: WorkspaceBinding, sessions: AgentSession[] | undefined, choose: (input: SwitchChoice & { mode: 'cancel' | 'existing' }) => unknown, project = false) {
+function leadChoices(w: WorkspaceBinding, sessions: AgentSession[] | undefined, choose: (input: SwitchChoice & { mode: 'cancel' | 'existing' }) => unknown,
+  project = false, firstSetup?: { confirmation?: string; blocked: boolean }) {
   const label = project ? '主会话' : '主 agent'
   return [pendingLead(w.takeover, () => choose({ mode: 'cancel' }), !project),
     section('在线会话', sessions?.map(s => card(row(el('span', { class: 'grow any' }, s.title || agentName(s.agent)),
-      w.session?.handle === s.handle ? tag(`当前${label}`) : button(project || w.runId ? '换成它' : '设为主 agent', () => choose({ mode: 'existing', handle: s.handle }), 'primary')),
+      w.session?.handle === s.handle ? tag(`当前${label}`) : button(project || w.runId ? '换成它' : firstSetup?.confirmation ? '完成首次设置并绑定' : '设为主 agent',
+        () => choose({ mode: 'existing', handle: s.handle }), 'primary', firstSetup?.blocked)),
     small(project ? agentName(s.agent) : `${agentName(s.agent)} · ${s.workspaceName} · ${s.path}`))),
     !sessions ? detailReadState('在线会话') : !sessions.length ? small('没有可接管的在线会话') : null)]
 }
@@ -1401,6 +1403,11 @@ function detailReadState(label: string) {
 }
 function mainPage() {
   const w = all.workspace, workspaces = targets?.workspaces ?? []
+  const setup: SetupPreview | undefined = targets?.setup
+  const confirmation = setup?.confirmation
+  const firstConfirmation = w.runId ? undefined : confirmation
+  const codexHomeChanged = setup?.codexHome !== undefined && 'CODEX_HOME' in form && form.CODEX_HOME !== setup.codexHome
+  const firstBlocked = !w.runId && (!!setup?.error || codexHomeChanged)
   const frame = active
   const mainAction = (action: () => Promise<unknown>) => act(async () => {
     delete frame.form.mainError
@@ -1409,8 +1416,9 @@ function mainPage() {
     await refresh()
   }, false)
   const switchMain = async (input: SwitchChoice) => {
-    const send = () => req('workspace.agent.switch', { revision: all.workspace.revision, ...input }, 60_000)
-    if (input.setupConfirmation) return mainAction(send)
+    const setupConfirmation = input.mode === 'cancel' ? undefined : firstConfirmation
+    const send = () => req('workspace.agent.switch', { revision: all.workspace.revision, ...input, setupConfirmation }, 60_000)
+    if (setupConfirmation) return mainAction(send)
     delete frame.form.mainError
     try { await send(); frame.dirty = false }
     catch (e) { frame.form.mainError = (e as Error).message }
@@ -1427,16 +1435,13 @@ function mainPage() {
   const mode = bots.length ? form.mainMode ?? (w.bot || !w.runId && bots.some(b => b.agents?.length) ? 'bot' : 'new') : 'new'
   const loadingAgents = targets?.agentWorkspace !== form['工作区']
   const availableAgents = loadingAgents ? null : targets?.availableAgents
-  const setup: SetupPreview | undefined = targets?.setup
-  const confirmation = setup?.confirmation
-  const confirmWithBot = !!confirmation && !w.runId && mode === 'bot' && !!selected
   const usesCodex = targets?.projectUsesCodex || w.session?.agent === 'codex' || w.takeover?.target.agent === 'codex'
     || (mode === 'bot' ? selected : form.Agent ?? defaultAgent(availableAgents ?? [])) === 'codex'
   return [el('p', { class: 'any' }, leadDescription(w, '主 agent')), w.bot ? el('p', {}, botStatus(w.bot)) : null,
     w.switchingBotAgent && !w.botStopped ? callout(`等待 ${agentName(w.switchingBotAgent)} 接管`) : null,
     w.backup ? callout('原接管正在处理，完成后可更换主 agent') : null,
     w.bot?.soul ? el('p', { class: 'any' }, '已写入职责说明', el('br'), w.bot.soul.backup ? '备份位置：' + w.bot.soul.backup : '原文件不存在，无需备份') : null,
-    backupHistory(w), switching ? pendingLead(w.takeover, () => switchMain({ mode: 'cancel' }), true) : leadChoices(w, targets?.sessions, switchMain),
+    backupHistory(w),
     active.error && targets ? detailReadState('在线会话') : null,
     bots.length ? tabButtons('切换方式', [{ id: 'bot', name: 'bot' }, { id: 'new', name: '新会话' }], mode, id => { form.mainMode = id; render() }) : null,
     targets?.bots?.length === 0 ? callout('在 Orca 左侧 Bots 点 ＋ → New bot → Start from scratch，确认运行在本机并选好代理。') : null,
@@ -1445,19 +1450,28 @@ function mainPage() {
     confirmation && setup ? section(w.runId ? '修复本机设置' : '首次设置',
       el('ul', { class: 'setup-paths' }, setup.paths.map(file => el('li', {}, file))),
       small('备份与执行记录：' + setup.backupRoot),
-      confirmWithBot ? null : button(w.runId ? '确认修复' : '完成首次设置', () => mainAction(() => req('workspace.setup', { confirmation }, 60_000)), 'primary')) : null,
+      w.runId ? button('确认修复', () => mainAction(() => req('workspace.setup', { confirmation }, 60_000)), 'primary', codexHomeChanged) : null) : null,
+    setup?.codexHome !== undefined ? fold(frame.key + '-setup-options', '高级选项', () => card(
+      input('CODEX_HOME', setup.codexHome, 'text', () => render(), '留空使用默认目录'),
+      button('保存 Codex 目录', () => mainAction(async () => {
+        const result = await req('workspace.setup.codexHome', { path: frame.form.CODEX_HOME })
+        frame.form.CODEX_HOME = result.path
+      }), 'sm', !codexHomeChanged))) : null,
     targets ? el('div', { class: 'sec', role: bots.length ? 'tabpanel' : undefined, id: active.key + '-tab' }, mode === 'bot'
       ? [select('Bot', Object.fromEntries(bots.map(b => [b.id, b.name])), bot!.id, () => { delete form['Bot 代理']; render() }),
         botAgents.length ? select('Bot 代理', Object.fromEntries(botAgents.map(id => [id, agentName(id)])), selected ?? '', () => render()) : callout('该 bot 暂无可启动的代理'),
-        button(confirmWithBot ? '完成首次设置并设为主 bot' : currentBot ? '切换代理' : '设为主 bot',
-          () => switchMain({ mode: 'bot', botId: bot!.id, agent: selected, ...(confirmWithBot ? { setupConfirmation: confirmation } : {}) }), 'primary',
-          switching || !selected || !w.runId && !!setup?.error || currentBot && selected === w.session?.agent && !w.botStopped)]
+        button(firstConfirmation ? '完成首次设置并设为主 bot' : currentBot ? '切换代理' : '设为主 bot',
+          () => switchMain({ mode: 'bot', botId: bot!.id, agent: selected }), 'primary',
+          switching || !selected || firstBlocked || currentBot && selected === w.session?.agent && !w.botStopped)]
       : [bots.length ? null : el('h2', { class: 'h2' }, '新会话'),
         select('工作区', Object.fromEntries(workspaces.map((s: any) => [s.workspace, s.name + ' · ' + s.path])), targets.agentWorkspace, () => { delete form.Agent; render(); void loadPage().then(render) }),
         availableAgents?.length ? agentSelect(availableAgents) : small(loadingAgents ? '正在读取可用代理…' : catalogIssue(availableAgents)),
-        button('新开一个主 agent', () => switchMain({ mode: 'new', workspace: form['工作区'], agent: form.Agent }), 'primary', switching || !availableAgents?.length),
+        button(firstConfirmation ? '完成首次设置并新开主 agent' : '新开一个主 agent',
+          () => switchMain({ mode: 'new', workspace: form['工作区'], agent: form.Agent }), 'primary', switching || !availableAgents?.length || firstBlocked),
         targets.bots === undefined ? small('无法读取 Orca bot 的可用代理') : null]) : null,
-    usesCodex && setup?.codexHooks ? callout(`${setup.error || setup.paths.includes(setup.codexHooks) ? '写入定义后，' : 'Codex hook 定义已写入。'}在 Codex CLI 输入 /hooks，信任 SessionStart、PreToolUse 和 Stop 后生效。 ${setup.codexHooks}`) : null,
+    switching ? pendingLead(w.takeover, () => switchMain({ mode: 'cancel' }), true)
+      : leadChoices(w, targets?.sessions, switchMain, false, { confirmation: firstConfirmation, blocked: firstBlocked }),
+    usesCodex && setup?.codexHooks ? callout(`${setup.error || setup.paths.includes(setup.codexHooks) ? '写入定义后，' : 'Codex hook 定义已写入。'}在 Codex CLI 输入 /hooks，信任 SessionStart、PreToolUse 和 Stop 后生效。请确认 Codex 会话所在 PATH 可运行 Node ≥22。 ${setup.codexHooks}`) : null,
     fold(active.key + '-binding-' + (w.session?.handle ?? ''), '绑定详情', () => el('dl', { class: 'kv' }, Object.entries({ Run: w.runId || '未绑定', 会话: w.session?.handle || '未知', 目录: w.session?.path || '未知', 绑定时间: w.boundAt || '未知', 授权边界: w.securityBoundary || '未知' }).map(([k, v]) => [el('dt', {}, k), el('dd', {}, v)])), undefined,
       !!(w.bot && w.runId && w.session?.handle && !w.takeover))]
 }

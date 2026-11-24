@@ -2,7 +2,7 @@ import type { Snapshot, Project, ProjectRef, Overview, WorkspaceBinding, Messagi
 import type { DelegatedFeedback, FeedbackReply, LinksSnapshot, Sharing } from './links'
 export type ProjectLeadSwitch = Omit<LeadSwitch, 'mode'> & { mode: Exclude<LeadSwitch['mode'], 'bot'> | 'promote' }
 export type ProjectLeadRequest = ProjectLeadSwitch & { startOnly?: boolean; template?: string; goal?: string; introduction?: string }
-export type SetupPreview = { paths: string[]; backupRoot: string; codexHooks: string; confirmation?: string; error?: string }
+export type SetupPreview = { paths: string[]; backupRoot: string; codexHooks: string; codexHome?: string; confirmation?: string; error?: string }
 export type WorkspaceSwitchChoice = Omit<LeadSwitch, 'revision'> & { setupConfirmation?: string }
 export interface ArchivePage {
   end: number; previousEnd?: number; tasks: Project['tasks']
@@ -31,6 +31,7 @@ declare module 'orca' {
     'workspace.agent.targets': { input: { workspace?: string } | undefined; output: { agentWorkspace: string; availableAgents: import('./model').InstalledAgent[] | null; bots?: import('./model').BotTarget[]; sessions: import('./model').AgentSession[]; workspaces: { workspace: string; name: string; path: string }[]; setup?: SetupPreview; projectUsesCodex?: boolean } }
     'workspace.agent.switch': { input: WorkspaceSwitchChoice & { revision: number }; output: WorkspaceBinding }
     'workspace.setup': { input: { confirmation: string }; output: { completed: string[]; backup?: string } }
+    'workspace.setup.codexHome': { input: { path: string }; output: { path: string } }
     'workspace.projectLead': { input: ProjectLeadSwitch & { projectId: string; runId: string }; output: ProjectLead }
     'workspace.entry': { output: { opened: boolean } }
     'workspace.message': { input: { projectId: string; revision?: number; requestId: string; runId: string; text: string }; output: Snapshot & { queued?: string } }

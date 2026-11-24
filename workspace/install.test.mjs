@@ -1,12 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { mkdtempSync, mkdirSync, cpSync, readFileSync, readdirSync, realpathSync, symlinkSync, writeFileSync, rmSync } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { pathToFileURL } from 'node:url';
 import fs from 'node:fs';
 import { syncBuiltinESMExports } from 'node:module';
-import { applySetup, previewSetup, refreshInstalledSkills, skillTargets } from './install.mjs';
+import { applySetup, previewSetup, refreshInstalledSkills, skillTargets, validateCodexHome } from './install.mjs';
 import { installationRoot } from '../coordinator/scripts/orca-cli.mjs';
 
 const options = (home, codexHome = path.join(home, '.codex')) => ({ home, env: { ...process.env, CODEX_HOME: codexHome } });
@@ -102,8 +103,8 @@ test('refresh respects a missing setup, removed skills, occupied directories and
   assert.ok(!fs.existsSync(backups));
 });
 
-test('a failed swap rolls back and an interrupted swap recovers on the next startup', t => {
-  const { refresh, skills } = refreshFixture(t);
+test('a failed swap rolls back and startup reclaims an exited process lock to restore the interrupted skill', t => {
+  const { home, refresh, skills } = refreshFixture(t);
   const target = skills[0].installed, file = path.join(target, 'SKILL.md'), current = readFileSync(file, 'utf8');
   writeFileSync(file, current + '\nold');
   const rename = fs.renameSync, log = t.mock.method(console, 'error', () => {});
@@ -118,9 +119,15 @@ test('a failed swap rolls back and an interrupted swap recovers on the next star
   const stage = mkdtempSync(path.join(path.dirname(target), '.agentboat-workspace-refresh-'));
   cpSync(target, path.join(stage, 'next'), { recursive: true });
   rename(target, path.join(stage, 'old'));
+  const child = spawnSync(process.execPath, ['-e', ''], { windowsHide: true });
+  assert.equal(child.status, 0);
+  const lock = path.join(home, '.agentboat-setup.lock');
+  mkdirSync(lock);
+  writeFileSync(path.join(lock, 'pid-' + child.pid + '-11111111-1111-1111-1111-111111111111'), '');
   refresh();
   assert.equal(readFileSync(file, 'utf8'), current);
   assert.ok(!fs.existsSync(stage));
+  assert.ok(!fs.existsSync(lock));
 });
 
 test('hook drift compares owned events, matchers and commands without writing either config', t => {
@@ -194,10 +201,64 @@ test('Node diagnosis and a fresh preview stay read-only', t => {
   const preview = previewSetup(config);
   assert.equal(preview.paths.length, 8);
   assert.ok(preview.paths.includes(path.join(config.env.CODEX_HOME, 'hooks.json')));
-  const withoutPath = Object.fromEntries(Object.entries(config.env).filter(([key]) => key.toUpperCase() !== 'PATH'));
+  const withoutPath = Object.fromEntries(Object.entries(config.env).filter(([key]) => !['PATH', 'PROGRAMFILES', 'LOCALAPPDATA'].includes(key.toUpperCase())));
+  withoutPath.ProgramFiles = path.join(home, 'program-files');
+  withoutPath.LOCALAPPDATA = path.join(home, 'local-app-data');
   const blocked = previewSetup({ home, env: withoutPath });
   assert.match(blocked.error, /独立 Node\.js ≥22.*PATH.*重启 Orca/);
   assert.deepEqual(readdirSync(home), []);
+  if (process.platform === 'win32') {
+    const nodeDir = path.join(withoutPath.LOCALAPPDATA, 'Programs', 'nodejs');
+    mkdirSync(nodeDir, { recursive: true });
+    const node = path.join(nodeDir, 'node.exe');
+    cpSync(process.execPath, node);
+    const pathKey = Object.keys(config.env).find(key => key.toUpperCase() === 'PATH');
+    const nodeBin = path.dirname(realpathSync(process.execPath));
+    withoutPath.PATH = config.env[pathKey].split(path.delimiter).filter(dir =>
+      !fs.existsSync(path.join(dir.replace(/^"(.*)"$/, '$1'), 'node.exe')) && path.relative(nodeBin, dir)).join(path.delimiter);
+    const fixture = { home, env: withoutPath };
+    const ready = previewSetup(fixture);
+    assert.ok(ready.confirmation, ready.error);
+    applySetup(ready.confirmation, fixture);
+    const definition = JSON.parse(readFileSync(path.join(home, '.claude/settings.json'), 'utf8'));
+    assert.equal(definition.hooks.Stop[0].hooks[0].command, node);
+  }
+});
+
+test('custom CODEX_HOME accepts only complete Windows or POSIX paths before preview', t => {
+  for (const valid of ['C:\\Codex data', '\\\\host\\share\\codex']) assert.equal(validateCodexHome(valid, 'win32'), valid);
+  for (const bad of ['C:codex', '\\codex', '/codex', '\\\\host', 'C:\\one\\..\\two', 'C:/one/./two', 'C:\\control\n']) {
+    assert.throws(() => validateCodexHome(bad, 'win32'), /完整绝对路径/);
+  }
+  for (const bad of ['codex', '~/codex', '/one/../two', '/codex\u0000']) assert.throws(() => validateCodexHome(bad, 'darwin'), /完整绝对路径/);
+  assert.equal(validateCodexHome('/Users/test/Codex data', 'darwin'), '/Users/test/Codex data');
+  const home = mkdtempSync(path.join(os.tmpdir(), 'agentboat-invalid-codex-'));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  assert.match(previewSetup({ ...options(home), codexHome: path.join(home, 'codex') + '\u0001' }).error, /控制字符/);
+  assert.deepEqual(readdirSync(home), []);
+});
+
+test('Claude links are checked against the physical parent and cannot use the nominal home path', t => {
+  const { home, skills, codex } = refreshFixture(t);
+  const [skill] = skills, physical = path.join(home, 'redirected/.claude/skills');
+  const other = path.join(home, 'redirected/.agents/skills', skill.name);
+  const parent = path.dirname(skill.claudeLink);
+  for (const { claudeLink } of skills) fs.unlinkSync(claudeLink);
+  fs.rmdirSync(parent);
+  mkdirSync(physical, { recursive: true });
+  mkdirSync(other, { recursive: true });
+  const kind = process.platform === 'win32' ? 'junction' : 'dir';
+  symlinkSync(physical, parent, kind);
+  const relative = path.relative(parent, skill.installed);
+  symlinkSync(process.platform === 'win32' ? other : relative, skill.claudeLink, kind);
+  // A junction gives the same physical target on Windows without creating a privileged relative symlink.
+  const read = fs.readlinkSync;
+  const relativeRead = t.mock.method(fs, 'readlinkSync', (file, ...args) => file === skill.claudeLink ? relative : read(file, ...args));
+  syncBuiltinESMExports();
+  try {
+    assert.notEqual(realpathSync(skill.claudeLink), realpathSync(skill.installed));
+    assert.ok(previewSetup(options(home, codex)).error.includes(skill.claudeLink));
+  } finally { relativeRead.mock.restore(); syncBuiltinESMExports(); }
 });
 
 test('setup serializes callers, preserves a last-minute hook edit and retries from its partial receipt', t => {
@@ -213,15 +274,15 @@ test('setup serializes callers, preserves a last-minute hook edit and retries fr
   assert.throws(() => applySetup(stale.confirmation, config), /已更改/);
   assert.ok(!fs.existsSync(path.join(home, '.agents')));
   writeFileSync(hooks, initial);
-  const preview = previewSetup(config), write = fs.writeFileSync;
-  let raced = false;
-  const inject = t.mock.method(fs, 'writeFileSync', (file, ...args) => {
-    write(file, ...args);
-    if (!raced && typeof file === 'string' && file.startsWith(hooks + '.') && file.endsWith('.tmp')) {
-      raced = true;
+  const preview = previewSetup(config), rename = fs.renameSync;
+  const inject = t.mock.method(fs, 'renameSync', (file, to) => {
+    if (file === hooks && path.basename(to) === 'old') {
       assert.throws(() => applySetup(preview.confirmation, config), /另一次 AgentBoat 设置/);
-      write(hooks, personal);
+      const update = hooks + '.editor';
+      writeFileSync(update, personal);
+      rename(update, hooks);
     }
+    return rename(file, to);
   });
   syncBuiltinESMExports();
   let backup;
@@ -240,9 +301,40 @@ test('setup serializes callers, preserves a last-minute hook edit and retries fr
   assert.ok(completed.includes(settings));
   const retry = previewSetup(config);
   assert.deepEqual(retry.paths, [hooks]);
-  assert.deepEqual(applySetup(retry.confirmation, config).completed, [hooks]);
+  const publish = fs.linkSync;
+  const late = t.mock.method(fs, 'linkSync', (file, to) => {
+    if (to === hooks && path.basename(file) === 'next') writeFileSync(path.join(path.dirname(file), 'old'), personal + '\n');
+    return publish(file, to);
+  });
+  syncBuiltinESMExports();
+  try { assert.throws(() => applySetup(retry.confirmation, config), /写入期间已更改/); }
+  finally { late.mock.restore(); syncBuiltinESMExports(); }
+  assert.equal(readFileSync(hooks, 'utf8'), personal + '\n');
+  const after = applySetup(previewSetup(config).confirmation, config);
+  assert.deepEqual(after.completed, [hooks]);
+  const receipt = JSON.parse(readFileSync(path.join(after.backup, 'replaced-hooks.jsonl'), 'utf8').trim());
+  assert.equal(readFileSync(receipt.replaced, 'utf8'), personal + '\n');
   assert.deepEqual(JSON.parse(readFileSync(hooks, 'utf8')).hooks.Stop[0], JSON.parse(personal).hooks.Stop[0]);
   assert.equal(readFileSync(path.join(backup, '.codex/hooks.json'), 'utf8'), initial);
+});
+
+test('preview restores an interrupted hook commit before preparing another confirmation', t => {
+  const { home, codex, repository } = refreshFixture(t);
+  const hooks = path.join(codex, 'hooks.json'), config = options(home, codex);
+  const original = readFileSync(hooks);
+  const stage = mkdtempSync(path.join(codex, '.hooks.json-agentboat-'));
+  writeFileSync(path.join(stage, 'owner'), JSON.stringify([repository, path.join(realpathSync(codex), 'hooks.json')]));
+  writeFileSync(path.join(stage, 'next'), original);
+  fs.renameSync(hooks, path.join(stage, 'old'));
+  const captured = path.join(stage, 'current');
+  writeFileSync(captured, 'editor bytes');
+  assert.ok(previewSetup(config).error.includes(captured));
+  assert.equal(readFileSync(captured, 'utf8'), 'editor bytes');
+  assert.ok(!fs.existsSync(hooks));
+  rmSync(captured);
+  assert.equal(previewSetup(config).confirmation, undefined);
+  assert.deepEqual(readFileSync(hooks), original);
+  assert.ok(!fs.existsSync(stage));
 });
 
 test('installer renders both skills in a moved repository, links Claude and copies to Antigravity', async () => {

@@ -20,7 +20,7 @@ orca plugin install AlayaElla/AgentBoat
 
 打开 **工作间 → 设置 → 主 agent → bot**，选 Bot 和代理。首次设置有缺项时，核对页面列出的路径，点 **完成首次设置并设为主 bot**。设置已就绪时，点 **设为主 bot**。刚创建的 Bot 可以点「刷新」加载。
 
-设置会备份将修改的配置，安装两份角色 skill，并合并 Claude Code 与 Codex 的 hooks。用 Codex 时，按页面提示在同一 Codex 用户环境的 CLI 输入 `/hooks`，信任 `SessionStart`、`PreToolUse` 和 `Stop`。回到工作间，等接管完成后在「绑定详情」核对新会话和 **Run**。
+设置会备份将修改的配置，安装两份角色 skill，并合并 Claude Code 与 Codex 的 hooks。用 Codex 时，确认 Codex 会话所在的 PATH 可运行 Node.js 22 或更新版本，再在 Codex CLI 输入 `/hooks`，信任 `SessionStart`、`PreToolUse` 和 `Stop`。回到工作间，等接管完成后在「绑定详情」核对新会话和 **Run**。
 
 ## 3. 开始协作
 
@@ -48,7 +48,7 @@ entry="${ORCA_USER_DATA_PATH:-$orca_data}/agentboat-current"
 node "$entry/setup.mjs"
 ```
 
-Codex 用户目录缺省为 `~/.codex`。使用自定义 `CODEX_HOME` 时，在 Orca 的 AgentBoat 插件设置填入该绝对路径，回到「主 agent」页刷新预览。命令行入口读取终端的 `CODEX_HOME`。备份和写入记录位于 `~/.agentboat/backups/setup-*`。如果提示同名内容归属未知或属于另一 Orca 配置，先核对报出的路径，再重新预览。
+Codex 用户目录缺省为 `~/.codex`。使用自定义 `CODEX_HOME` 时，在「工作间 → 设置 → 主 agent → 高级选项」填入完整绝对路径，保存后核对预览。命令行入口读取终端的 `CODEX_HOME`。备份和写入记录位于 `~/.agentboat/backups/setup-*`。如果提示同名内容归属未知或属于另一 Orca 配置，先核对报出的路径，再重新预览。
 
 ## 升级
 

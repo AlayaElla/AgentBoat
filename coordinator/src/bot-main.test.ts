@@ -276,6 +276,36 @@ test('面板确认首次设置后才启动 bot，失败保留路径，绑定后�
   }
 })
 
+test('在线会话和新会话的首次绑定都要通过同一设置门槛', async () => {
+  const confirmation = 'a'.repeat(64), file = '/fixture/codex/hooks.json'
+  for (const choice of [{ mode: 'existing' as const, handle: first }, { mode: 'new' as const, workspace: standby.workspace, agent: 'codex' }]) {
+    let conflict = true, installed = 0
+    const { env, worker } = await setup({
+      preview: () => ({ paths: [file], backupRoot: '/fixture/backups', codexHooks: file,
+        ...(conflict ? { error: '异主配置：' + file } : { confirmation }) }),
+      apply: value => {
+        assert.equal(value, confirmation)
+        assert.deepEqual(env.sends, [])
+        assert.deepEqual(env.launches, [])
+        installed++
+        return { completed: [file] }
+      }
+    })
+    const panel = { panel: 'project-coordinator' }
+    const choose = (token?: string) => worker.request('workspace.agent.switch',
+      { ...choice, revision: 0, ...(token ? { setupConfirmation: token } : {}) }, panel)
+    try {
+      await assert.rejects(() => choose(), /异主配置/)
+      conflict = false
+      await assert.rejects(() => choose(), /确认首次设置路径/)
+      const waiting = await choose(confirmation)
+      assert.equal(waiting.takeover?.state, 'waiting')
+      assert.equal(installed, 1)
+      assert.equal(choice.mode === 'existing' ? env.sends[0]?.target : env.launches[0], choice.mode === 'existing' ? first : standby.workspace)
+    } finally { await worker.deactivate() }
+  }
+})
+
 test('bot ignores delivered Feishu mail, uncertain notifications and read questions, then stops on overdue queued mail', async () => {
   const { runtime } = botRuntime()
   const host = mockHost()

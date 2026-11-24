@@ -148,9 +148,12 @@ export async function switchLead(runtime: CoordinatorRuntime, input: LeadSwitch,
 }
 
 export type WorkspaceSetup = { preview: () => SetupPreview | Promise<SetupPreview>; apply: (confirmation: string) =>
-  { completed: string[]; backup?: string } | Promise<{ completed: string[]; backup?: string }> }
-function confirmSetup(panel: PanelRequestContext['panel'], confirmation: unknown): string {
+  { completed: string[]; backup?: string } | Promise<{ completed: string[]; backup?: string }>; saveCodexHome?: (value: unknown) => Promise<string> }
+function requireSetupPanel(panel: PanelRequestContext['panel']) {
   if (panel.id === 'orca-cli' || panel.surface !== 'panel' || panel.contributionId !== 'project-coordinator') fail('请在工作间主 agent 页面确认首次设置')
+}
+function confirmSetup(panel: PanelRequestContext['panel'], confirmation: unknown): string {
+  requireSetupPanel(panel)
   if (typeof confirmation !== 'string' || !/^[a-f0-9]{64}$/.test(confirmation)) fail('请刷新并确认首次设置路径')
   return confirmation
 }
@@ -261,18 +264,25 @@ export function mainAgent(orca: OrcaWorkerApi, store: ProjectStore, runtime: Coo
     changed()
     return result
   })
+  orca.panels.handle('workspace.setup.codexHome', async (input, { panel }) => {
+    requireSetupPanel(panel)
+    if (!setup?.saveCodexHome) fail('无法保存 CODEX_HOME，请检查 AgentBoat 安装')
+    const path = await setup.saveCodexHome(input?.path)
+    changed()
+    return { path }
+  })
   orca.panels.handle('workspace.agent.switch', async (input, { panel }) => {
     const w = await store.workspace()
     const expected = revision(input.revision)
     if (w.revision !== expected) fail('工作间已更新，请刷新后再提交')
-    if (input.mode === 'bot' && w.bot && w.bot.id === input.botId) {
+    if (input.mode === 'bot' && w.runId && w.bot && w.bot.id === input.botId) {
       try { await backups.chooseBotAgent(w, w.bot.id, text(input.agent, '代理', 100)) }
       finally { await flushRetired() }
       return read()
     }
     await switchLead(runtime, input, {
       role: 'workspace',
-      prepare: setup && input.mode === 'bot' && (!w.runId || input.setupConfirmation !== undefined) ? async () => {
+      prepare: setup && input.mode !== 'cancel' && (!w.runId || input.setupConfirmation !== undefined) ? async () => {
         if (input.setupConfirmation !== undefined) {
           await setup.apply(confirmSetup(panel, input.setupConfirmation))
           return

@@ -1,4 +1,4 @@
-import { appendFileSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { appendFileSync, cpSync, existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmdirSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
@@ -17,32 +17,36 @@ function within(parent, child) {
 const marker = '--agentboat-role-harness';
 const hookScript = 'workspace/harness/hook.mjs';
 
-function pathExecutable(name, args, env, verify) {
-  const pathKey = Object.keys(env).find(key => process.platform === 'win32' ? key.toUpperCase() === 'PATH' : key === 'PATH');
+function envValue(env, name) {
+  if (process.platform !== 'win32') return env[name];
+  return env[Object.keys(env).find(key => key.toUpperCase() === name.toUpperCase())];
+}
+
+function pathExecutable(name, args, env, verify, extra = []) {
   const extension = process.platform === 'win32' ? '.exe' : '';
   // A child probe must run standalone, including when the worker inherits Electron's Node mode.
   const cleanEnv = Object.fromEntries(Object.entries(env).filter(([key]) => !['NODE_OPTIONS', 'ELECTRON_RUN_AS_NODE'].includes(key.toUpperCase())));
-  for (const entry of (env[pathKey] || '').split(path.delimiter)) {
+  for (const entry of [...(envValue(env, 'PATH') || '').split(path.delimiter), ...extra]) {
     const dir = entry.replace(/^"(.*)"$/, '$1');
     if (!path.isAbsolute(dir)) continue;
     const file = path.join(dir, name + extension);
     if (!existsSync(file)) continue;
     try {
       const output = execFileSync(file, args, { encoding: 'utf8', env: cleanEnv, cwd: dir, timeout: 3000, windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] });
-      return verify(output) ? file : undefined;
-    } catch (error) {
-      if (['ENOENT', 'EACCES'].includes(error.code)) continue;
-      return;
-    }
+      if (verify(output)) return file;
+    } catch {}
   }
 }
 function standaloneNode(env) {
+  const windows = process.platform === 'win32';
+  const programFiles = windows && (envValue(env, 'ProgramFiles') || path.join((envValue(env, 'SystemDrive') || 'C:') + '\\', 'Program Files'));
+  const local = windows && (envValue(env, 'LOCALAPPDATA') || path.join(envValue(env, 'USERPROFILE') || os.homedir(), 'AppData', 'Local'));
   return pathExecutable('node', ['-p', "process.release.name === 'node' && !process.versions.electron ? process.versions.node : ''"], env,
-    output => Number(/^(\d+)\./.exec(output)?.[1]) >= 22);
+    output => Number(/^(\d+)\./.exec(output)?.[1]) >= 22, windows ? [path.join(programFiles, 'nodejs'), path.join(local, 'Programs', 'nodejs')] : []);
 }
 function setupEnvironment(env) {
   const node = standaloneNode(env);
-  if (!node) throw Error('在 PATH 中找不到可运行的独立 Node.js ≥22。请安装 Node.js 22 或更新版本并加入 PATH，再重启 Orca 或重新打开终端。');
+  if (!node) throw Error('找不到可运行的独立 Node.js ≥22。请安装 Node.js 22 或更新版本并加入 PATH，再重启 Orca 或重新打开终端。');
   if (!pathExecutable('git', ['--version'], env, output => output.startsWith('git version ')))
     throw Error('在 PATH 中找不到可运行的 Git。请安装 Git 并加入 PATH，再重启 Orca 或重新打开终端。');
   return node;
@@ -166,11 +170,66 @@ function snapshot(file, kind) {
   throw Error('安装目标已有其他内容，未覆盖：' + file);
 }
 
-function interruptedSkill(file) {
-  const parent = path.dirname(file), prefix = '.' + path.basename(file) + '-refresh-';
-  if (!existsSync(parent)) return;
+function stages(file, tag) {
+  const parent = path.dirname(file), prefix = '.' + path.basename(file) + '-' + tag + '-';
+  if (!existsSync(parent)) return [];
   return readdirSync(parent, { withFileTypes: true }).filter(dir => dir.isDirectory() && dir.name.startsWith(prefix))
-    .map(dir => path.join(parent, dir.name, 'old')).find(old => stat(old));
+    .map(dir => path.join(parent, dir.name));
+}
+
+function interruptedSkill(file) {
+  return stages(file, 'refresh').map(dir => path.join(dir, 'old')).find(old => stat(old));
+}
+
+function skillRecovery(file, name, repository) {
+  if (stat(file)) return;
+  const old = interruptedSkill(file);
+  if (!old) return;
+  const stage = path.dirname(old), next = path.join(stage, 'next');
+  if (!ownedSkill(snapshot(old, 'skill').value, name, repository) ||
+      !ownedSkill(snapshot(next, 'skill').value, name, repository)) return;
+  return () => {
+    if (stat(file)) throw Error('skill 在恢复期间已更改：' + file);
+    renameSync(old, file);
+    rmSync(next, { recursive: true });
+    rmdirSync(stage);
+  };
+}
+
+function restoreFile(old, file) {
+  if (!stat(old)?.isFile()) throw Error('请核对保留的原文件：' + old);
+  linkSync(old, file);
+  unlinkSync(old);
+}
+
+function hookRecovery(file, repository) {
+  const info = stat(file);
+  if (info && (!info.isFile() || info.nlink === 1)) return;
+  for (const stage of stages(file, 'agentboat')) {
+    const old = path.join(stage, 'old'), next = path.join(stage, 'next'), owner = path.join(stage, 'owner');
+    const staged = stat(next);
+    if (!staged?.isFile() || (info ? !isDeepStrictEqual(identity(info), identity(staged)) : !stat(old))) continue;
+    const location = path.join(resolvedParent(path.dirname(file)), path.basename(file));
+    if (!stat(owner)?.isFile() || readFileSync(owner, 'utf8') !== JSON.stringify([repository, location]))
+      throw Error('hooks 有其他 Orca 配置或归属未知的中断记录：' + stage);
+    const current = path.join(stage, 'current');
+    if (stat(current)) throw Error('上次 hooks 回滚中断，请核对保留的文件：' + current + ' → ' + file);
+    return () => {
+      if (!info) restoreFile(old, location);
+      else if (!isDeepStrictEqual(identity(lstatSync(location)), identity(lstatSync(next))))
+        throw Error('hooks 在恢复期间已更改：' + file);
+      unlinkSync(next);
+      unlinkSync(owner);
+      if (!stat(old)) rmdirSync(stage);
+    };
+  }
+}
+
+function setupRecovery(home, codexHome, repository) {
+  const skills = skillTargets(home).flatMap(({ name, installed, antigravity }) =>
+    [installed, antigravity].map(file => skillRecovery(file, name, repository)));
+  const hooks = hookTargets(home, codexHome, repository).map(({ file }) => hookRecovery(file, repository));
+  return [...skills, ...hooks].filter(Boolean);
 }
 
 function setupPlan(home, codexHome, repository, node) {
@@ -195,9 +254,8 @@ function setupPlan(home, codexHome, repository, node) {
       if (!ownedSkill(plan.desired, name, repository)) throw Error('AgentBoat 的 SKILL.md 归属不匹配：' + src);
     }
     const linkPlan = add(claudeLink, 'link', path.relative(home, claudeLink));
-    if (linkPlan.before.value &&
-        !samePath(path.resolve(path.dirname(linkPlan.before.location), linkPlan.before.value), shared.before.location) &&
-        !samePath(path.resolve(path.dirname(claudeLink), linkPlan.before.value), installed))
+    if (linkPlan.before.value && (!shared.before.entries || !existsSync(claudeLink) ||
+        !samePath(realpathSync(claudeLink), realpathSync(installed))))
       throw Error('Claude 位置已有其他内容，未覆盖：' + claudeLink);
     linkPlan.desired = linkPlan.before.value ?? shared.before.location;
   }
@@ -216,14 +274,22 @@ function setupPlan(home, codexHome, repository, node) {
   return { plans, changes, confirmation, entry };
 }
 
-function planSetup(home, env, codexHome) {
-  const repository = installationRoot({ repair: false }).replaceAll('\\', '/');
-  return setupPlan(home, codexHome, repository, setupEnvironment(env));
+const setupRepository = () => installationRoot({ repair: false }).replaceAll('\\', '/');
+
+export function validateCodexHome(value, platform = process.platform) {
+  if (value === '') return value;
+  const windows = platform === 'win32';
+  const full = typeof value === 'string' && (windows
+    ? /^(?:[a-z]:[\\/]|[\\/]{2}[^\\/]+[\\/][^\\/]+(?:[\\/]|$))/i.test(value) &&
+      !/[<>:"|?*]/.test(value.replace(/^[a-z]:/i, ''))
+    : value.startsWith('/'));
+  if (!full || /[\x00-\x1f\x7f-\x9f]/.test(value) || value.split(windows ? /[\\/]/ : '/').some(part => part === '.' || part === '..'))
+    throw Error('CODEX_HOME 必须是完整绝对路径，且不能含控制字符、. 或 .. 路径段。');
+  return value;
 }
 
 function codexDirectory(home, env, override) {
-  if (override && !path.isAbsolute(override)) throw Error('AgentBoat 插件设置中的 CODEX_HOME 必须是绝对路径：' + override);
-  return path.resolve(override || env.CODEX_HOME || path.join(home, '.codex'));
+  return path.resolve(validateCodexHome(override || envValue(env, 'CODEX_HOME') || path.join(home, '.codex')));
 }
 
 export function previewSetup({ home = os.homedir(), env = process.env, codexHome } = {}) {
@@ -232,7 +298,11 @@ export function previewSetup({ home = os.homedir(), env = process.env, codexHome
   try {
     const directory = codexDirectory(home, env, codexHome);
     codexHooks = path.join(directory, 'hooks.json');
-    const plan = planSetup(home, env, directory);
+    const repository = setupRepository();
+    // A preview can finish restoring files moved by an earlier, authorized setup.
+    if (setupRecovery(home, directory, repository).length)
+      withSetupLock(home, () => setupRecovery(home, directory, repository).forEach(recover => recover()));
+    const plan = setupPlan(home, directory, repository, setupEnvironment(env));
     return { backupRoot: backups, codexHooks, paths: plan.changes.map(p => p.file), ...(plan.changes.length ? { confirmation: plan.confirmation } : {}) };
   } catch (error) {
     return { paths: [], backupRoot: backups, codexHooks, error: error.message };
@@ -242,13 +312,45 @@ export function previewSetup({ home = os.homedir(), env = process.env, codexHome
 function withSetupLock(home, operation) {
   // Shared by all profiles and CODEX_HOME choices under this system account.
   const lock = path.join(realpathSync(home), '.agentboat-setup.lock');
-  try { mkdirSync(lock, { mode: 0o700 }); }
-  catch (error) {
-    if (error.code === 'EEXIST') throw Error('有另一次 AgentBoat 设置正在进行。若已确认安装进程退出，可移除空锁目录：' + lock);
-    throw error;
+  const busy = () => Error('有另一次 AgentBoat 设置正在进行，或锁的归属无法确认：' + lock);
+  const stage = mkdtempSync(lock + '-');
+  const owner = 'pid-' + process.pid + '-' + randomUUID();
+  const removeEmpty = () => {
+    try { rmdirSync(lock); }
+    catch (error) { if (!['ENOENT', 'ENOTEMPTY', 'EEXIST'].includes(error.code)) throw error; }
+  };
+  try {
+    writeFileSync(path.join(stage, owner), '', { flag: 'wx', mode: 0o600, flush: true });
+    // Publish the owner and directory together. An empty directory can only be between removals.
+    for (let attempt = 0; attempt < 5; attempt++) {
+      const entry = stat(lock);
+      if (!entry) {
+        try { renameSync(stage, lock); }
+        catch (error) {
+          if (stat(lock)) continue;
+          throw error;
+        }
+        try { return operation(); }
+        finally { unlinkSync(path.join(lock, owner)); removeEmpty(); }
+      }
+      if (!entry.isDirectory()) throw busy();
+      let owners;
+      try { owners = readdirSync(lock); }
+      catch (error) { if (error.code === 'ENOENT') continue; throw error; }
+      if (owners.length) {
+        const pid = Number(/^pid-([1-9]\d*)-[a-f0-9-]{36}$/.exec(owners[0])?.[1]);
+        if (owners.length !== 1 || !Number.isInteger(pid) || pid > 0x7fffffff) throw busy();
+        try { process.kill(pid, 0); throw busy(); }
+        catch (error) { if (error.code !== 'ESRCH') throw busy(); }
+        try { unlinkSync(path.join(lock, owners[0])); }
+        catch (error) { if (error.code === 'ENOENT') continue; throw error; }
+      }
+      removeEmpty();
+    }
+    throw busy();
+  } finally {
+    rmSync(stage, { recursive: true, force: true });
   }
-  try { return operation(); }
-  finally { rmdirSync(lock); }
 }
 
 function assertUnchanged(plan) {
@@ -284,7 +386,56 @@ function swapSkill(plan, prepare) {
   }
 }
 
-function saveTarget(plan) {
+function saveHook(plan, repository) {
+  const { before, desired, file } = plan, { location, entries, value } = before;
+  const stage = mkdtempSync(path.join(path.dirname(location), '.' + path.basename(location) + '-agentboat-'));
+  const old = path.join(stage, 'old'), next = path.join(stage, 'next'), owner = path.join(stage, 'owner');
+  const edited = () => Error('hooks 在写入期间已更改，请重新核对：' + file);
+  const verifyOld = () => {
+    if (!entries) return;
+    const actual = snapshot(old, 'hook');
+    if (!isDeepStrictEqual(actual.entries, entries) || !isDeepStrictEqual(actual.value, value)) throw edited();
+  };
+  let published = false;
+  try {
+    writeFileSync(owner, JSON.stringify([repository, location]), { flag: 'wx', mode: 0o600, flush: true });
+    writeFileSync(next, desired, { flag: 'wx', mode: entries ? entries[0][2] & 0o777 : 0o600, flush: true });
+    assertUnchanged(plan);
+    if (entries) renameSync(location, old);
+    verifyOld();
+    // Publish only into a vacant filename. Keep the actual displaced inode for recovery.
+    linkSync(next, location);
+    published = true;
+    try { verifyOld(); }
+    catch (error) {
+      const current = path.join(stage, 'current');
+      renameSync(location, current);
+      if (isDeepStrictEqual(identity(lstatSync(current)), identity(lstatSync(next))) && readFileSync(current).equals(desired)) {
+        unlinkSync(current);
+        published = false;
+      } else {
+        try { restoreFile(current, location); }
+        catch { throw Error(error.message + '\n并发内容保存在：' + current); }
+      }
+      throw error;
+    }
+    if (entries) return old;
+  } catch (error) {
+    if (!stat(old)) throw error;
+    if (!published && !stat(location)) {
+      try { restoreFile(old, location); }
+      catch { throw Error(error.message + '\n被移走的原内容保存在：' + old); }
+    }
+    if (stat(old)) throw Error(error.message + '\n被移走的原内容保存在：' + old);
+    throw error;
+  } finally {
+    rmSync(next, { force: true });
+    rmSync(owner, { force: true });
+    if (!stat(old) && !stat(path.join(stage, 'current'))) rmdirSync(stage);
+  }
+}
+
+function saveTarget(plan, repository) {
   const { kind, before, desired } = plan, { location, entries } = before;
   assertUnchanged(plan);
   mkdirSync(path.dirname(location), { recursive: true });
@@ -298,18 +449,15 @@ function saveTarget(plan) {
       writeTree(next, desired);
     });
   } else {
-    const temp = location + '.' + randomUUID() + '.tmp';
-    try {
-      writeFileSync(temp, desired, { flag: 'wx', mode: entries ? entries[0][2] & 0o777 : 0o600, flush: true });
-      assertUnchanged(plan);
-      renameSync(temp, location);
-    } finally { rmSync(temp, { force: true }); }
+    return saveHook(plan, repository);
   }
 }
 
 export function applySetup(confirmation, { home = os.homedir(), env = process.env, codexHome } = {}) {
   return withSetupLock(home, () => {
-    const plan = planSetup(home, env, codexDirectory(home, env, codexHome));
+    const repository = setupRepository(), directory = codexDirectory(home, env, codexHome);
+    setupRecovery(home, directory, repository).forEach(recover => recover());
+    const plan = setupPlan(home, directory, repository, setupEnvironment(env));
     if (!plan.changes.length) return { completed: [] };
     if (plan.confirmation !== confirmation) throw Error('首次设置的路径或文件已更改，请刷新并重新核对。');
     const assertEntry = () => {
@@ -337,8 +485,9 @@ export function applySetup(confirmation, { home = os.homedir(), env = process.en
       for (const item of plan.plans) assertUnchanged(item);
       for (const item of plan.changes) {
         assertEntry();
-        saveTarget(item);
+        const replaced = saveTarget(item, repository);
         completed.push(item.file);
+        if (replaced) appendFileSync(path.join(backup, 'replaced-hooks.jsonl'), JSON.stringify({ file: item.file, replaced }) + '\n', { mode: 0o600, flush: true });
         appendFileSync(path.join(backup, 'completed.jsonl'), JSON.stringify(item.file) + '\n', { mode: 0o600, flush: true });
       }
       return { backup, completed };
@@ -355,23 +504,8 @@ export function refreshInstalledSkills(entry, home = os.homedir(), codexHome = p
   const refresh = () => {
     for (const { name, source, file, antigravity } of targets) {
       try {
-        const parent = path.dirname(file), prefix = '.' + name + '-refresh-';
-        if (!stat(parent)?.isDirectory()) continue;
-        // Only the interval between the two renames leaves both halves and no live directory.
-        if (!stat(file)) {
-          for (const dir of readdirSync(parent, { withFileTypes: true })) {
-            if (!dir.isDirectory() || !dir.name.startsWith(prefix)) continue;
-            const stage = path.join(parent, dir.name), old = path.join(stage, 'old'), next = path.join(stage, 'next');
-            if (ownedSkill(snapshot(old, 'skill').value, name, repository) &&
-                ownedSkill(snapshot(next, 'skill').value, name, repository)) {
-              if (stat(file)) throw Error('skill 在恢复期间已更改：' + file);
-              renameSync(old, file);
-              rmSync(next, { recursive: true });
-              rmdirSync(stage);
-              break;
-            }
-          }
-        }
+        if (!stat(path.dirname(file))?.isDirectory()) continue;
+        skillRecovery(file, name, repository)?.();
         const before = snapshot(file, 'skill');
         if (!ownedSkill(before.value, name, repository)) continue;
         configured = true;

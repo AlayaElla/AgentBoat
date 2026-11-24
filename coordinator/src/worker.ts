@@ -18,7 +18,7 @@ import { fileErrorText, incomingHash, linkMessageHistory } from './link-messages
 import { LinkFiles } from './link-files'
 import { groupedAttention, isProjectShared, type OwnerQuestion } from './model'
 import { mainAgent, roleReminder, switchLead, takeoverView, recoverTakeover, type WorkspaceSetup } from './main-agent'
-import { applySetup, previewSetup } from '../../workspace/install.mjs'
+import { applySetup, previewSetup, validateCodexHome } from '../../workspace/install.mjs'
 import { projectAgentLaunch, projectLeadAgents, projectTemplate, templateLeadPreferences, type ProjectLeadAgents } from '../../workspace/agent-launch.mjs'
 import { promptClientPath, refreshReleaseSetup, pluginVersionLabel, release, roleRegistryPath } from '../scripts/orca-cli.mjs'
 import { cliBridge } from '../scripts/cli-bridge.mjs'
@@ -1174,15 +1174,16 @@ let cli: ReturnType<typeof cliBridge> | undefined
 export default async function activate(orca: OrcaWorkerApi): Promise<void> {
   if (!release) throw new Error('请在 Orca 中安装 AgentBoat 正式版')
   // Orca can omit CODEX_HOME from the trusted worker environment.
+  const codexHomeKey = 'workspace.setup.codexHome'
   const codexHome = async () => {
-    const configured = await orca.settings.get('codexHome')
-    return typeof configured === 'string' ? configured.trim() : ''
+    const configured = await orca.storage.get(codexHomeKey)
+    return typeof configured === 'string' ? configured : ''
   }
   // A broken stable link must not stop the plugin; the versioned paths keep working.
   let hooksChangedVersion: string | undefined
   try {
     const configured = await codexHome()
-    hooksChangedVersion = await refreshReleaseSetup(path.isAbsolute(configured) ? configured : undefined)
+    hooksChangedVersion = await refreshReleaseSetup(validateCodexHome(configured) || undefined)
   }
   catch (error) { console.error('AgentBoat 启动时检查固定入口和 skill 失败', error) }
   const runtime = new OrcaRuntime(async () => {
@@ -1191,8 +1192,16 @@ export default async function activate(orca: OrcaWorkerApi): Promise<void> {
   })
   cli = cliBridge(orca)
   coordinator = createCoordinator(cli.api, runtime, undefined, undefined, undefined, roleRegistryPath(), {
-    preview: async () => previewSetup({ codexHome: await codexHome() }),
-    apply: async confirmation => applySetup(confirmation, { codexHome: await codexHome() })
+    preview: async () => {
+      const saved = await codexHome()
+      return { ...previewSetup({ codexHome: saved }), codexHome: saved }
+    },
+    apply: async confirmation => applySetup(confirmation, { codexHome: await codexHome() }),
+    saveCodexHome: async value => {
+      const validated = validateCodexHome(value)
+      await orca.storage.set(codexHomeKey, validated)
+      return validated
+    }
   })
   await coordinator.start(hooksChangedVersion)
   await cli.start()

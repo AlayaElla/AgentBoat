@@ -1,4 +1,5 @@
 type SetupOptions = { home?: string; env?: NodeJS.ProcessEnv; codexHome?: string };
+export function validateCodexHome(value: unknown, platform?: NodeJS.Platform): string;
 export function previewSetup(options?: SetupOptions): {
   paths: string[]; backupRoot: string; codexHooks: string; confirmation?: string; error?: string;
 };
