@@ -1,6 +1,6 @@
 import { randomBytes, randomUUID } from 'node:crypto'
 import { botHomeHandle } from './bot-runtime'
-import { backupDefaults, projectLeadAgents } from '../../workspace/agent-launch.mjs'
+import { projectLeadAgents } from '../../workspace/agent-launch.mjs'
 import { promptClientPath } from '../scripts/orca-cli.mjs'
 import { awaitingLeadControl, expectedPhases, backupInCharge, workspaceBackupInFlight, type AgentSession, type BackupLead, type BotTarget, type ContactRoutes, type Delivery, type LeadAction, type Project, type Workspace } from './model'
 import { targetOnline, type CoordinatorRuntime, type TargetInventory } from './runtime'
@@ -29,6 +29,7 @@ export function stopped(session: AgentSession | undefined, pendingSince: number 
 }
 
 export const projectBackupBusy = (b?: BackupLead) => !!b && ['opening', 'taking', 'active', 'handoff', 'returning'].includes(b.phase)
+export const projectBackupCanRecover = (b?: BackupLead): b is BackupLead => b?.phase === 'active' || b?.phase === 'returning'
 
 function record(r: Binding, message: string, ownerRun: string) {
   const b = r.backup!
@@ -66,7 +67,7 @@ export class BackupLeads {
 
   projectPrimaryUnavailable(project: Project, inventory: TargetInventory) {
     const b = project.backup
-    if (b?.phase !== 'active' || !b.primary) return false
+    if (!projectBackupCanRecover(b) || !b.primary) return false
     // A contact's `closed` flag acknowledges our own cleanup. Only Orca's session error proves closure.
     const error = b.contact?.primary === b.primary ? this.routes[b.contact.id]?.error : undefined
     const sessionId = b.primary.slice('orca_session_id:'.length)
@@ -77,8 +78,8 @@ export class BackupLeads {
 
   async verifyProjectPromotion(runId: string, backup: BackupLead, session: AgentSession) {
     const { owner, generation } = await this.runtime.runBinding(runId)
-    if (!Number.isSafeInteger(generation) || (owner !== session.handle &&
-      !(owner === null && chat(session.handle) && generation === backup.generation))) fail('Run 归属与当前代管备用不符，请核对后再转正')
+    if (!Number.isSafeInteger(generation) || generation !== backup.generation ||
+      (owner !== session.handle && !(owner === null && chat(session.handle)))) fail('Run 归属或代次与当前代管备用不符，请核对后再操作')
   }
 
   private mutate(id: string, update: (r: Binding) => void, revision?: number) {
@@ -345,22 +346,20 @@ export class BackupLeads {
     let claimed: Workspace | undefined
     try {
       const choices = await api.choices(bot)
-      const primary = w.session!.agent, preferred = backupDefaults(primary).agent
+      const primary = w.session!.agent, preferred = primary === 'codex' ? 'claude' : 'codex'
       const agent = selected ?? (choices.includes(preferred) ? preferred : choices.find(a => a !== primary))
       if (!agent || !choices.includes(agent)) fail('该 bot 没有可切换的代理')
       const run = await this.runtime.runBinding(w.runId)
       if (!Number.isSafeInteger(run.generation) || run.owner !== null && run.owner !== oldHome) fail('Run 归属已变化，请先核对协调者')
       claimed = await this.store.mutateWorkspace(row => {
-        if (manual) {
-          delete row.originalBot; delete row.bot!.reason; delete row.bot!.recoveryAt
-        } else if (!returning) {
+        if (!manual && !returning) {
           row.originalBot ??= { agent: primary }
           row.bot!.reason = primary + ' 额度已用完'
           if (row.botQuota?.recoveryAt) row.bot!.recoveryAt = row.botQuota.recoveryAt
           else delete row.bot!.recoveryAt
         }
         row.botSwitch = { cycle, until: now + probeWait, oldHome, agent, returning, side: true, ...(manual ? { manual: true } : {}), credential: fingerprint(token), generation: run.generation }
-        delete row.bot!.result
+        if (!manual) delete row.bot!.result
         delete row.botQuota; delete row.botStopped
       }, w.revision)
       const next = await api.startChat(bot, agent)
@@ -374,10 +373,32 @@ export class BackupLeads {
       if (recipient !== next) fail('未确认 bot 对话的收件地址')
       this.changed('')
     } catch (error) {
+      if (manual && claimed && !w.botStopped && !w.botQuota && await this.keepBotAfterFailedSwitch(claimed, bot)) throw error
       if (claimed) await this.stopBot(claimed, 'bot 切换失败或回执无法核对', bot.name)
       else if (manual) throw error
       else if ((await this.store.workspace()).revision === w.revision) await this.stopBot(w, '切换失败：' + (error as Error).message, bot.name)
     }
+  }
+
+  private async keepBotAfterFailedSwitch(claimed: Workspace, bot: BotTarget) {
+    const session = claimed.session!, api = this.runtime.bots!
+    let kept = false
+    await this.store.mutateWorkspace(async row => {
+      const swap = row.botSwitch
+      if (!swap || swap.cycle !== claimed.botSwitch?.cycle || swap.recipient || row.botStopped || row.botQuota || !available(row) ||
+        row.runId !== claimed.runId || row.session?.handle !== session.handle || row.bot?.id !== bot.id) return
+      try {
+        const current = await api.find(bot.id)
+        if (!current || current.paused || !(row.bot.side ? await api.hasSideChat(current, session.handle) : await api.home(current) === session.handle)) return
+        const { sessions } = await this.runtime.targets()
+        if (!sessions.some(s => s.handle === session.handle && s.workspace === session.workspace && s.agent === session.agent && s.online === 'online')) return
+        const run = await this.runtime.runBinding(row.runId)
+        if (run.owner !== session.handle || run.generation !== swap.generation) return
+        delete row.botSwitch; kept = true
+      } catch { /* Unverified state follows the normal pause path. */ }
+    })
+    if (kept) this.changed('')
+    return kept
   }
 
   private finishTransfer(row: Binding, ownerRun: string, generation: number) {
@@ -496,7 +517,7 @@ export class BackupLeads {
         const result = (swap.returning ? '已切回 ' : '已切换至 ') + swap.agent + '，bot 对话已接管 Run。'
         const recovery = row.bot!.recoveryAt
         ownerAlert(row, result + (swap.manual || swap.returning ? '' : recovery ? `预计 ${new Date(recovery).toLocaleString()} 恢复，空闲时自动切回。` : '恢复时间未知，可在额度恢复后从面板切回。'))
-        if (swap.returning) { delete row.originalBot; delete row.bot!.reason; delete row.bot!.recoveryAt }
+        if (swap.manual || swap.returning) { delete row.originalBot; delete row.bot!.reason; delete row.bot!.recoveryAt }
         return
       }
       if (transferGeneration !== undefined) return this.finishTransfer(row, workspace.runId, transferGeneration)

@@ -73,16 +73,14 @@ const activeProject = (): Project => ({ ...bound(), mainAgentHandle: codexLead.h
     history: [{ at: now, text: '备用已接管原 Run' }], contact: { id: 'contact', workspace: primary.workspace, primary: codexLead.handle, projectId: refs[0].id }
   } })
 
-for (const mode of ['promote', 'existing'] as const) test(`代管备用转正沿用原 Run：${mode}`, async () => {
+test('转正代管备用沿用原 Run，将同代理的备用偏好改为继承', async () => {
   const p = activeProject()
   submitTask(p, { id: 'task', title: '正在执行', goal: '保留工作', phase: 'working', executions: [{ runId: p.runId, taskId: 'task_worker', dispatchId: 'ctx_worker', agent: 'codex' }] })
   p.takeover = { id: 'pending', state: 'waiting', target: primary, tokenHash: fingerprint('unused'), expiresAt: new Date(now + minute).toISOString() }
-  const { env, poll, c, worker, close } = await fixture(p, { version: 1, revision: 0, runId: 'run_owner', requests: [] }, undefined, codexLead)
+  const { env, poll, c, worker, close } = await fixture(p, undefined, undefined, codexLead)
   const read = () => worker.request('project.lead', { projectId: p.ref.id })
-  const preferences = { primary: { agent: 'antigravity' }, backup: { agent: 'codex' } }
-  env.sessions = mode === 'promote' ? [actingBackup] : [codexLead, actingBackup]
-  if (mode === 'existing') env.contactRoute = { error: closedChat }
-  env.owner = mode === 'promote' ? null : actingBackup.handle
+  env.sessions = [actingBackup]
+  env.owner = null
   env.generation = 2
   env.launchHandle = 'orca_session_id:codex_new_backup'
   env.installed.push('antigravity')
@@ -91,18 +89,11 @@ for (const mode of ['promote', 'existing'] as const) test(`代管备用转正沿
     const before = await read()
     assert.equal(before.backupPrimaryUnavailable, true)
     assert.equal(before.binding.backup?.phase, 'active')
-    const saved = await worker.request('project.settings', { projectId: p.ref.id, revision: before.binding.revision, leadAgents: preferences })
-    assert.deepEqual(saved.project?.leadAgents, preferences)
-    assert.deepEqual((await c.store.get(p.ref.id)).backup, p.backup)
-    assert.equal(env.launches.length, 0)
-    const request = { projectId: p.ref.id, revision: saved.project!.revision, mode }
-    await assert.rejects(() => worker.request('workspace.projectLead', { ...request, mode: 'promote', runId: 'run_other' }), /已绑定的工作间主 agent Run/)
-    const switched = mode === 'promote'
-      ? await worker.request('project.lead', request)
-      : await worker.request('workspace.projectLead', { ...request, handle: actingBackup.handle, runId: 'run_owner' })
+    const switched = await worker.request('project.lead', { projectId: p.ref.id, revision: before.binding.revision, mode: 'promote' })
     assert.equal(switched.binding.runId, p.runId)
     assert.deepEqual(switched.binding.session, actingBackup)
     assert.equal(switched.binding.takeover, undefined)
+    assert.deepEqual(switched.leadAgents.backup, { agent: 'codex' })
     assert.deepEqual(switched.binding.backup?.history.slice(0, 1), p.backup?.history)
     assert.match(switched.binding.backup!.history.at(-1)!.text, /原主会话已不可用.*代管会话.*转正为主会话/)
     await poll()
@@ -112,6 +103,7 @@ for (const mode of ['promote', 'existing'] as const) test(`代管备用转正沿
     assert.equal(after.mainAgentHandle, actingBackup.handle)
     assert.deepEqual(after.mainSession, actingBackup)
     assert.deepEqual(after.tasks, p.tasks)
+    assert.deepEqual(after.leadAgents, { primary: p.leadAgents!.primary })
     assert.equal(after.backup?.primary, actingBackup.handle)
     assert.equal(after.backup?.phase, 'standby')
     assert.equal(after.backup?.handle, env.launchHandle)
@@ -125,6 +117,58 @@ for (const mode of ['promote', 'existing'] as const) test(`代管备用转正沿
   } finally { await close() }
 })
 
+test('工作间选择代管备用也可转正，须使用已绑定的工作间 Run', async () => {
+  const p = activeProject()
+  const preferences = { primary: { agent: 'antigravity' }, backup: { agent: 'codex' } }
+  p.leadAgents = preferences
+  const { env, poll, worker, close } = await fixture(p, { version: 1, revision: 0, runId: 'run_owner', requests: [] }, undefined, codexLead)
+  env.sessions = [codexLead, actingBackup]
+  env.contactRoute = { error: closedChat }
+  env.owner = actingBackup.handle
+  env.generation = 2
+  env.installed.push('antigravity')
+  try {
+    await poll()
+    const before = await worker.request('project.lead', { projectId: p.ref.id })
+    const request = { projectId: p.ref.id, revision: before.binding.revision, mode: 'existing' as const, handle: actingBackup.handle }
+    await assert.rejects(() => worker.request('workspace.projectLead', { ...request, runId: 'run_other' }), /已绑定的工作间主 agent Run/)
+    const switched = await worker.request('workspace.projectLead', { ...request, runId: 'run_owner' })
+    assert.equal(switched.binding.session?.handle, actingBackup.handle)
+    assert.deepEqual(switched.leadAgents, preferences)
+  } finally { await close() }
+})
+
+test('交回时原主消失，可将仍持有同一代 Run 的在线备用转正', async () => {
+  const p = activeProject()
+  p.backup!.phase = 'returning'
+  p.backup!.credential = fingerprint('resume')
+  const { env, poll, worker, close } = await fixture(p, undefined, undefined, codexLead)
+  env.sessions = [codexLead, actingBackup]
+  env.owner = actingBackup.handle
+  env.generation = 2
+  try {
+    const read = () => worker.request('project.lead', { projectId: p.ref.id })
+    assert.equal((await read()).backupPrimaryUnavailable, undefined)
+    env.sessions = [actingBackup]
+    await poll()
+    const before = await read()
+    assert.equal(before.binding.backup?.phase, 'returning')
+    assert.equal(before.backupPrimaryUnavailable, true)
+    const promote = (revision: number) => worker.request('project.lead', { projectId: p.ref.id, revision, mode: 'promote' })
+    env.generation++
+    await assert.rejects(() => promote(before.binding.revision), /代次/)
+    env.generation--
+    const saved = await worker.request('project.settings', { projectId: p.ref.id, revision: before.binding.revision, leadAgents: { backup: null } })
+    assert.equal(saved.project?.leadAgents?.backup, null)
+    assert.equal(saved.lead?.backup?.phase, 'returning')
+    const switched = await promote(saved.project!.revision)
+    assert.equal(switched.binding.runId, p.runId)
+    assert.equal(switched.binding.session?.handle, actingBackup.handle)
+    assert.equal(switched.leadAgents.backup, null)
+    assert.notEqual(switched.binding.backup?.phase, 'returning')
+  } finally { await close() }
+})
+
 test('代管恢复要求可靠离线证据和匹配的 Run 归属', async () => {
   const p = activeProject(), { env, c, poll, worker, close } = await fixture(p, undefined, undefined, codexLead)
   const read = () => worker.request('project.lead', { projectId: p.ref.id })
@@ -135,7 +179,7 @@ test('代管恢复要求可靠离线证据和匹配的 Run 归属', async () => 
   env.sessions = [actingBackup]
   env.installed.push('antigravity')
   try {
-    for (const phase of ['opening', 'taking', 'handoff', 'returning'] as const) {
+    for (const phase of ['opening', 'taking', 'handoff'] as const) {
       await c.store.mutate(p.ref.id, undefined, row => { row.backup!.phase = phase })
       await assert.rejects(() => change('promote'), /正在代管项目 Run/)
       await assert.rejects(() => change('new'), /备用正在启动或处理/)

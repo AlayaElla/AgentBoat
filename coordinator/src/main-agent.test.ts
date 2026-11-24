@@ -219,8 +219,9 @@ test('project roles and new leads use the current workspace catalog and Orca lau
   try {
     assert.equal(defaultAgent((await read()).availableAgents!), 'qoder')
     const roles = { design: 'antigravity', code: 'codex', review: 'qoder' }
-    const settings = await worker.request('project.settings', { projectId: ref.id, revision: (await read()).binding.revision, roles })
+    const settings = await worker.request('project.settings', { projectId: ref.id, revision: (await read()).binding.revision, roles, template: 'code' })
     assert.deepEqual(settings.project!.roles, roles)
+    assert.equal(settings.project!.leadAgents, undefined)
     assert.deepEqual((await read()).leadAgents, { primary: { agent: 'antigravity' }, backup: { agent: 'codex' } })
     for (const choice of [undefined, 'codex']) {
       const result = await launch(choice)
@@ -242,7 +243,7 @@ test('project roles and new leads use the current workspace catalog and Orca lau
     await assert.rejects(() => saveLead({ backup: { agent: 'antigravity' } }), /需要选择不同/)
     await saveLead({ primary: { agent: 'codex' }, backup: { agent: 'antigravity' } })
     const fresh = await read()
-    const auto = { projectId: ref.id, revision: fresh.binding.revision, workspace: projectWorkspaceId, mode: 'new' as const, startOnly: true }
+    const auto = { projectId: ref.id, revision: fresh.binding.revision, workspace: projectWorkspaceId, mode: 'new' as const, startOnly: true, template: 'code' }
     const manual = { projectId: auto.projectId, revision: auto.revision, mode: auto.mode }
     const double = await Promise.allSettled([worker.request('project.lead', auto), worker.request('project.lead', manual)])
     assert.equal(double.filter(r => r.status === 'fulfilled').length, 1)

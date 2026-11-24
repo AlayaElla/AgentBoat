@@ -245,8 +245,8 @@ export function mainAgent(orca: OrcaWorkerApi, store: ProjectStore, runtime: Coo
     const expected = revision(input.revision)
     if (w.revision !== expected) fail('工作间已更新，请刷新后再提交')
     if (input.mode === 'bot' && w.bot && w.bot.id === input.botId) {
-      await backups.chooseBotAgent(w, w.bot.id, text(input.agent, '代理', 100))
-      await flushRetired()
+      try { await backups.chooseBotAgent(w, w.bot.id, text(input.agent, '代理', 100)) }
+      finally { await flushRetired() }
       return read()
     }
     await switchLead(runtime, input, {

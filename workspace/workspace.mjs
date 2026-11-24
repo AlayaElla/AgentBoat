@@ -121,11 +121,12 @@ function journal(dir, requestId, input, reuse = false) {
 function initIfNeeded() {
   if (!existsSync(path.join(home, 'requests')) || !existsSync(path.join(home, 'templates/code.json')) || !existsSync(path.join(home, 'memory/.git/index'))) init();
 }
-function launchProjectLead(j, t, project, goal) {
+function launchProjectLead(j, templateId, project, goal) {
+  const t = template(templateId);
   const { ref, revision } = project;
-  const context = { projectId: ref.id, repoId: ref.repoId, hostId: ref.hostId, path: ref.path, name: ref.name, roles: project.roles, template: t.id };
+  const context = { projectId: ref.id, repoId: ref.repoId, hostId: ref.hostId, path: ref.path, name: ref.name, roles: project.roles, template: templateId };
   j.update('launching', { context });
-  const { binding, leadAgents } = plugin('project.lead', { projectId: ref.id, revision, workspace: ref.workspace, mode: 'new', startOnly: true,
+  const { binding, leadAgents } = plugin('project.lead', { projectId: ref.id, revision, workspace: ref.workspace, mode: 'new', startOnly: true, template: templateId,
     introduction: `${t.firstMessage}\n项目身份与分工：${JSON.stringify(context)}\n完成绑定后简短回复项目编号与 Run。`,
     goal: goal || '先开启项目协作，等待具体任务。' });
   const takeover = binding.takeover;
@@ -177,7 +178,7 @@ function startProjectLead(p, templateId, goal, createJournal) {
     const pending = pendingSwitch(latest);
     if (pending) { j.update('delegated-to-takeover', { handle: pending.handle }); return pending; }
     if (latest.ref.repoId !== p.ref.repoId || latest.ref.workspace !== p.ref.workspace || canonical(latest.ref.path) !== workspaceDirectory) throw new Error('项目身份或工作区已变化，请核对后再操作');
-    const result = launchProjectLead(j, template(templateId), latest, goal);
+    const result = launchProjectLead(j, templateId, latest, goal);
     createJournal?.update(j.record.stage, { context: j.record.context, handle: j.record.handle });
     return result;
   } catch (error) {

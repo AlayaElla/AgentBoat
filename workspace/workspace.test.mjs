@@ -8,7 +8,7 @@ import { createHash } from 'node:crypto';
 import { promisify } from 'node:util';
 import { pathToFileURL } from 'node:url';
 import code from './templates/code.json' with { type: 'json' };
-import { projectLeadAgents, templateLeadAgents } from './agent-launch.mjs';
+import { projectLeadAgents, templateLeadAgents, templateLeadPreferences } from './agent-launch.mjs';
 
 const sandboxPath = path.resolve(process.env.AGENTBOAT_SANDBOX || path.join(os.tmpdir(), 'agentboat-sandbox'));
 mkdirSync(sandboxPath, { recursive: true });
@@ -56,10 +56,11 @@ test('code 模板提供默认主备和分工，旧原版读取时升级，定制
   };
   const { id, name, roles, source, firstMessage, backupAgents } = v036;
   const v010 = { id, name, roles, source, firstMessage, mainAgent: { agent: 'claude', surface: 'chat' } };
-  for (const old of [v036, { ...v010, backupAgents }, v010, { ...v010, mainAgent: backupAgents.claude }]) {
+  for (const old of [v036, { ...v010, backupAgents }, v010, { ...v010, mainAgent: backupAgents.claude }, { ...code, backupAgents }]) {
     const contents = '\uFEFF' + JSON.stringify(old);
     writeFileSync(local, contents);
     assert.deepEqual(api.template('code'), code);
+    assert.equal(templateLeadPreferences(api.template('code')), undefined);
     assert.deepEqual(projectLeadAgents(), expectedLeads);
     assert.equal(readFileSync(local, 'utf8'), contents);
   }
@@ -70,6 +71,7 @@ test('code 模板提供默认主备和分工，旧原版读取时升级，定制
   api.init();
   assert.deepEqual(api.template('code'), customized);
   assert.deepEqual(projectLeadAgents(), { primary: v036.mainAgent, backup: null });
+  assert.deepEqual(templateLeadPreferences(api.template('code')), { primary: v036.mainAgent, backup: null });
   assert.equal(readFileSync(local, 'utf8'), contents);
   assert.throws(() => api.template('../escape'));
 });
@@ -109,14 +111,14 @@ test('记忆按来源隔离、带日期、重复记录拒绝追加', () => {
   assert.throws(() => api.launchReceipt({ outcome: { handle: 'agent-1' }, prompt: { outcome: 'unknown' } }));
 });
 
-function handlePlugin(name, input, s, save) {
+function handlePlugin(name, input, s, save, leadPreferences) {
   switch (name) {
     case 'projects.list': return { projects: [s.ref] };
     case 'workspace.agent': return s.main;
     case 'project.settings':
       if (s.failSettings) throw Error('settings unavailable');
       s.project.roles = input.roles;
-      if (input.template && !s.project.leadAgents) s.project.leadAgents = defaultLeadAgents;
+      if (input.template && !s.project.leadAgents) s.project.leadAgents = leadPreferences(input.template);
       s.project.revision++; save(); return { project: s.project };
     case 'project.agent':
       if (input.operation === 'submit') {
@@ -178,7 +180,6 @@ cp.execFileSync = (executable, args, options) => {
       save(); return done({});
     case 'orchestration run-current': return done({ run: { id: s.main.runId } });
     case 'agent installed': return done({ agents: ['antigravity', 'claude', 'codex'].map(id => ({ id })) });
-    case 'agent launch': return done({ outcome: { kind: 'structured', sessionId: 'fake-project-lead' }, prompt: { outcome: s.failLaunch ? 'unknown' : 'journaled' } });
     case 'worktree create': return done({ launch: { outcome: { kind: 'terminal', handle: 'fake-worker' }, prompt: { outcome: 'handed-to-terminal' } } });
   }
   throw Error('Unexpected Orca command: ' + args.slice(0,2));
@@ -195,6 +196,7 @@ syncBuiltinESMExports();`);
   writeFileSync(path.join(release, '../current'), path.basename(release));
   const { cliBridge } = await import(pathToFileURL(path.join(release, 'coordinator/scripts/cli-bridge.mjs')));
   const host = cliBridge({ panels: { handle() {} } });
+  const leadPreferences = id => templateLeadPreferences(JSON.parse(readFileSync(path.join(home, 'templates', id + '.json'))));
   for (const name of ['workspace.agent', 'projects.list', 'project.agent', 'project.settings', 'project.lead', 'workspace.message']) {
     host.api.panels.handle(name, input => {
       appendFileSync(log, JSON.stringify(['installed', name]) + '\n');
@@ -203,6 +205,7 @@ syncBuiltinESMExports();`);
         assert.equal(input.startOnly, true);
         assert.equal(input.workspace, s.ref.workspace);
         assert.equal(s.project.runId, '');
+        s.project.leadAgents ??= leadPreferences(input.template);
         const leadAgents = s.project.leadAgents ?? defaultLeadAgents;
         appendFileSync(log, JSON.stringify(['agent', 'launch', '--agent', leadAgents.primary.agent, '--prompt', path.join(profile, 'agentboat-current', input.introduction)]) + '\n');
         const takeover = s.failLaunch ? { state: 'uncertain', target: { handle: '' }, error: '未确认 agent 收到提示词' }
@@ -210,7 +213,7 @@ syncBuiltinESMExports();`);
         s.lead = { takeover }; s.project.revision++; set(s);
         return { binding: s.lead, leadAgents };
       }
-      return handlePlugin(name, input, s, () => set(s));
+      return handlePlugin(name, input, s, () => set(s), leadPreferences);
     });
   }
   await host.start();
@@ -291,7 +294,7 @@ test('manual create shares launch defaults and the same pending-project guard', 
   assert.equal(lead.handle, 'orca_session_id:fake-project-lead');
   const { roles, leadAgents } = f.read().project;
   assert.deepEqual(roles, { design: 'antigravity', code: 'codex', review: 'codex' });
-  assert.deepEqual(leadAgents, { primary: { agent: 'antigravity' }, backup: { agent: 'codex' } });
+  assert.equal(leadAgents, undefined);
   assert.equal((await f.message('after-manual')).autoLaunch.reused, true);
   assert.equal(f.calls().filter(args => args[0] === 'agent').length, 1);
 });
@@ -313,6 +316,19 @@ for (const bindOnReceipt of [false, true]) test(`dispatch records its notice whe
   assert.match(launch[launch.indexOf('--prompt') + 1], /绑定后送达/);
   assert.deepEqual(f.read().project.tasks.map(task => task.id), ['direct-dispatch-1', 'direct-dispatch-1']);
   assert.deepEqual(f.read().project.messages.map(m => [m.runId, m.requestId]), [['run_main', 'dispatch-1-notice']]);
+});
+
+test('dispatch starts the project lead with the selected non-default template', async t => {
+  const f = await fakeWorkspace(t);
+  execFileSync('git', ['init', '--quiet'], { cwd: f.projectDir });
+  execFileSync('git', ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '--allow-empty', '-m', 'fixture'], { cwd: f.projectDir });
+  const mainAgent = { agent: 'codex', model: 'gpt-6.2-sol' };
+  mkdirSync(path.join(f.home, 'templates'), { recursive: true });
+  writeFileSync(path.join(f.home, 'templates/codex-sol.json'), JSON.stringify({ ...code, id: 'codex-sol', mainAgent, backupAgent: null }));
+  const result = await f.workspace('dispatch', { projectId: 'p1', requestId: 'dispatch-custom', template: 'codex-sol', name: 'agentboat-demo-worker', text: '模拟派活', source: 'fake source' });
+  assert.equal(result.autoLaunch.agent, mainAgent.agent);
+  assert.equal(result.autoLaunch.model, mainAgent.model);
+  assert.deepEqual(f.read().project.leadAgents, { primary: mainAgent, backup: null });
 });
 
 test('installed create resumes settings and dispatch records its notice through the local bridge', async t => {

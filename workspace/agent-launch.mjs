@@ -4,6 +4,7 @@ import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { isDeepStrictEqual } from 'node:util';
 
 const sorted = value => value && typeof value === 'object' && !Array.isArray(value)
   ? Object.fromEntries(Object.keys(value).sort().map(key => [key, sorted(value[key])]))
@@ -14,6 +15,7 @@ const legacyCode = new Set([
   '56f70a0f23bdf928129bc1595e7774ac26c70245beca3218f24b52a0f6bc7d83',
   'eec41a8178853129932232b33af900a66dace7e22c9c1f04d42a61f433ea5408',
   'cccc5131c10a09c55a1f0d581504402b32f2bc636c9e7f5d4eb8c6b657abc20d', // v0.1.36
+  'c0d7285a2f691d1ba8cd44af2d78f0bf36c544bb51306fce8337398e393db555', // v0.1.37
 ]);
 
 export function projectTemplate(id) {
@@ -26,8 +28,10 @@ export function projectTemplate(id) {
   return value;
 }
 
+export const validAgentId = value => typeof value === 'string' && /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,99}$/.test(value);
+
 export function projectAgentLaunch(value) {
-  if (typeof value?.agent !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,99}$/.test(value.agent)) throw new Error('需要有效的 Orca 代理编号');
+  if (!validAgentId(value?.agent)) throw new Error('需要有效的 Orca 代理编号');
   const { agent, model, effort, surface } = value;
   if (model !== undefined && (typeof model !== 'string' || !model.trim())) throw new Error('model 应为非空文本');
   if (effort !== undefined && (typeof effort !== 'string' || !effort.trim() || !model)) throw new Error('effort 需要 model');
@@ -46,6 +50,10 @@ export function templateLeadAgents(value) {
   };
 }
 
+export function templateLeadPreferences(value) {
+  return isDeepStrictEqual(value, code) ? undefined : templateLeadAgents(value);
+}
+
 export function projectLeadAgents(settings, activeAgent) {
   if (settings?.primary && settings.backup !== undefined) return settings;
   const defaults = templateLeadAgents(projectTemplate('code'));
@@ -57,8 +65,6 @@ export function projectLeadAgents(settings, activeAgent) {
   }
   return { primary, backup };
 }
-
-export const backupDefaults = primary => code.backupAgents[primary === 'codex' ? 'claude' : 'codex'];
 
 export function agentFlags(role) {
   return ['--agent', role.agent, ...(role.model ? ['--model', role.model] : []), ...(role.effort ? ['--effort', role.effort] : []), ...(role.surface ? ['--surface', role.surface] : [])];

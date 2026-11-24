@@ -326,6 +326,26 @@ test('Antigravity 可绑定为工作间 bot，同一 bot 可用其他宿主代�
   } finally { await worker.deactivate() }
 })
 
+test('手动新开 bot 对话被拒绝时，保留仍持有原 Run 的旧代理', async () => {
+  const { env, worker, store, main, bind } = await setup()
+  try {
+    await bind()
+    env.owner = first
+    env.reject = true
+    const prior = await store.workspace()
+    await assert.rejects(() => worker.request('workspace.agent.switch', { mode: 'bot', revision: prior.revision, botId: initial.id, agent: 'codex' }), /refused/)
+    const after = await store.workspace()
+    assert.equal(after.botSwitch, undefined)
+    assert.equal(after.botStopped, undefined)
+    assert.equal(after.runId, prior.runId)
+    assert.deepEqual(after.session, prior.session)
+    assert.ok(!env.sends.some(s => s.target === second))
+    await main.deliver(after.runId, { id: 'after-refusal', subject: '留言', body: '继续处理', state: 'pending' })
+    assert.equal(env.sends.at(-1)?.target, 'run:' + after.runId)
+    assert.equal(env.sends.at(-1)?.body, '继续处理')
+  } finally { await worker.deactivate() }
+})
+
 test('旧版已经投递的 bot Home 接管请求可在升级后接回原 Run', async () => {
   const { env, worker, store, backups, bind } = await setup()
   try {
