@@ -325,7 +325,8 @@ export class WorkspaceLinks {
   private catalogDelay = catalogPollMin
   private pollingCatalog = false
   private invitation?: { token: string; expires: number }
-  private incoming = new Map<string, { report: SharedReport; receivedAt: string; offline?: boolean }>()
+  private reportOrder = 0
+  private incoming = new Map<string, { report: SharedReport; receivedAt: string; order: number; offline?: boolean }>()
   private feedbackPending = new Map<string, { request: DelegatedFeedback; sent: boolean; finish: (result: FeedbackReply) => void }>()
   private feedbackReplies = new Map<string, FeedbackReply>()
   private chain: Promise<unknown> = Promise.resolve()
@@ -350,12 +351,12 @@ export class WorkspaceLinks {
     return d
   }
   private async save(d: LinkData) { if (Buffer.byteLength(JSON.stringify(d)) > 100_000) fail('连接记录已达上限'); await this.orca.storage.set('workspace.links', d as any) }
-  private async recordIncoming(d: LinkData, peer: Peer, report: SharedReport) {
+  private async recordIncoming(d: LinkData, peer: Peer, report: SharedReport, order = ++this.reportOrder) {
     const receivedAt = new Date().toISOString()
     if (!peer.lastSyncAt || peer.name !== report.name) {
       peer.name = report.name; peer.lastSyncAt = receivedAt; await this.save(d)
     }
-    this.incoming.set(peer.id, { report, receivedAt })
+    this.incoming.set(peer.id, { report, receivedAt, order })
   }
   async snapshot(includeMessages = false): Promise<LinksSnapshot> {
     const { d, summaries } = await this.serial(async () => {
@@ -722,8 +723,13 @@ export class WorkspaceLinks {
           return { token, update: token ? await call(p.endpoint, '/wait', { id: p.id, since }, token, signal) : undefined }
         } catch (error) { return { error } }
       }
-      let waiting: ReturnType<typeof wait> | undefined
-      let reporting: Promise<{ synced: string | undefined }> | undefined
+      type Update = Awaited<ReturnType<typeof wait>> | { synced: string | undefined }
+      const updates: Update[] = []
+      let waiting = false, reporting = false
+      let notify: (() => void) | undefined
+      const wake = () => { notify?.(); notify = undefined }
+      const post = (update: Update) => { updates.push(update); wake() }
+      signal.addEventListener('abort', wake, { once: true })
       const retry = async () => {
         await delay(backoff, undefined, { signal, ref: false })
         backoff = Math.min(backoff * 2, 10_000)
@@ -733,18 +739,23 @@ export class WorkspaceLinks {
         try {
           if (refresh && !reporting) {
             refresh = false
-            reporting = this.sync(p.id, signal).then(synced => ({ synced }), () => ({ synced: undefined }))
+            reporting = true
+            void this.sync(p.id, signal).then(synced => post({ synced }), () => post({ synced: undefined }))
           }
-          if (version && !waiting) waiting = wait(version)
-          const next = await Promise.race([waiting, reporting].filter(p => p !== undefined))
+          if (version && !waiting) {
+            waiting = true
+            void wait(version).then(post)
+          }
+          if (!updates.length) await new Promise<void>(resolve => { notify = resolve })
           if (signal.aborted) return
+          const next = updates.shift()!
           if ('synced' in next) {
-            reporting = undefined
+            reporting = false
             if (!next.synced) throw Error()
             version ??= next.synced
             continue
           }
-          waiting = undefined
+          waiting = false
           if ('error' in next) throw next.error
           const { token, update: waited } = next
           if (!token) return
@@ -836,17 +847,20 @@ export class WorkspaceLinks {
           : this.packet(p, outgoing, this.receipts.get(p.id) ?? noReceipts)
       })
       if (!packet) return
+      const order = ++this.reportOrder
       const result = await call(p.endpoint, '/sync', packet, token, signal)
       const version = id(result.version)
-      const incoming = result.report === undefined ? undefined : received(result.report, p)
-      const more = await this.serial(async () => { const now = await this.data(), current = now.peers.find(x => x.id === p.id); if (!current || signal?.aborted || generation !== this.stopGeneration) return false
+      const more = await this.serial(async () => {
+        const now = await this.data(), current = now.peers.find(x => x.id === p.id)
+        if (!current || signal?.aborted || generation !== this.stopGeneration) return false
+        const incoming = result.report !== undefined && order > (this.incoming.get(p.id)?.order ?? 0) ? received(result.report, current) : undefined
         const lightweight = result.feedbackOnly === true
         const { more, ...acknowledgements } = lightweight ? { ...noReceipts, more: false }
           : await this.receiveMessages(incoming ? { ...current, name: incoming.name } : current, result.exchange)
         if (hasReceipts(acknowledgements)) this.receipts.set(p.id, acknowledgements)
         else if (!feedbackOnly && !lightweight) this.receipts.delete(p.id)
         if (current.state === 'pending') { current.state = 'active'; now.revision++; await this.save(now) }
-        if (incoming) await this.recordIncoming(now, current, incoming)
+        if (incoming) await this.recordIncoming(now, current, incoming, order)
         if (this.feedbackReplies.get(p.id) === packet.feedback?.reply) this.feedbackReplies.delete(p.id)
         this.artifacts.sent(p.id, packet.artifact)
         const reply = await this.receiveFeedback(current, result.feedback)

@@ -226,6 +226,46 @@ test('a failed lightweight receipt leaves ordinary reports and messages availabl
   } finally { a.links.stop(); b.links.stop() }
 })
 
+test('a late ordinary response cannot overwrite a newer report returned with a lightweight receipt', async () => {
+  const a = await instance('listener'), b = await instance('dialer', false)
+  const listener = a.links as any, dialer = b.links as any
+  let resume = () => {}, captured = () => {}
+  const held = new Promise<void>(resolve => { resume = resolve })
+  const oldReportReady = new Promise<void>(resolve => { captured = resolve })
+  try {
+    await a.links.start()
+    const { id, workspaceId } = (await b.links.join((await a.links.invite()).invitation!.code)).peers[0]
+    await a.links.share({ id, revision: (await a.links.snapshot()).revision, scope: 'details', projectIds: ['p1'], delegateFeedback: true })
+    const readReport = async () => (await b.links.snapshot()).peers[0].report?.projects[0]
+    const localReport = listener.localReport.bind(listener), packet = listener.packet.bind(listener)
+    listener.localReport = async (...args: unknown[]) => {
+      const oldReport = await localReport(...args)
+      captured()
+      await held
+      return oldReport
+    }
+    listener.packet = async (...args: any[]) => {
+      const response = await packet(...args)
+      if (response.feedbackOnly) {
+        delete response.feedbackOnly
+        response.report = report(a.projects, args[0], workspaceId, 'listener')
+      }
+      return response
+    }
+    const ordinary = b.links.refresh()
+    await Promise.race([oldReportReady, delay(3000, undefined, { ref: false }).then(() => assert.fail('ordinary report was not captured'))])
+    a.projects[0].ref.name = 'new peer report'; a.projects[0].revision++
+    dialer.feedbackReplies.set(id, { requestId: 'legacy-receipt', state: 'submitted', fingerprint: 'proof' })
+    assert.ok(await dialer.sync(id, undefined, true))
+    assert.equal(dialer.feedbackReplies.has(id), false)
+    assert.equal((await readReport())?.name, 'new peer report')
+    resume()
+    await ordinary
+    assert.equal((await readReport())?.name, 'new peer report')
+    assert.equal((await readReport())?.feedback?.revision, a.projects[0].revision)
+  } finally { resume(); a.links.stop(); b.links.stop() }
+})
+
 test('peer artifacts use authenticated loopback in both directions, cache complete versions and recheck access', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'peer-artifact-'))
   const received = testFiles(), receive = received.receive.bind(received)
