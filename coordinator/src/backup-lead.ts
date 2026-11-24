@@ -305,7 +305,11 @@ export class BackupLeads {
       const backupReason = stopped(standby, primaryInCharge ? undefined : waitingForStandby, now)
       const uncertain = queue(r).some(d => d.control && awaitingLeadControl(b, d.control) && d.state === 'uncertain')
       const route = b.contact && this.routes[b.contact.id]
-      const holdingAlert = b.problem === bothStopped && (reason || live.online === 'unknown') && (backupReason || standby.online === 'unknown')
+      // An unreadable inbox cannot confirm that a nonworking session cleared its backlog.
+      const pendingUnknown = pending === undefined
+      const holdingAlert = b.problem === bothStopped &&
+        (reason || live.online === 'unknown' || pendingUnknown && live.state !== 'working') &&
+        (backupReason || standby.online === 'unknown' || pendingUnknown && !primaryInCharge && waitingForStandby === undefined && standby.state !== 'working')
       const problem = holdingAlert ? bothStopped : route?.error ? '主用联络未就绪：' + route.error
         : reason && backupReason ? bothStopped : uncertain ? '接管通知送达待核对，请查看目标会话' : undefined
       const missing = live.online === 'offline'

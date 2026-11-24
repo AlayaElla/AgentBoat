@@ -731,13 +731,39 @@ test('备用漏报和不可核实不会重复记录或发送同一次主备告�
       assert.deepEqual(await c.store.get(p.ref.id), alerted)
       assert.equal(env.deliveries.length, 1)
     }
-    env.sessions = [primary]
+    env.sessions = [{ ...primary, state: 'working' }]
     await poll()
     assert.equal((await c.store.get(p.ref.id)).backup?.problem, undefined)
     env.sessions = missing
     await poll()
     assert.equal((await c.store.get(p.ref.id)).backup!.history.length, 2)
     assert.equal(env.deliveries.length, 2)
+  } finally { await close() }
+})
+
+test('收件箱单次超时不会清除仍有积压的主备告警', async () => {
+  const p = bound()
+  const { c, env, poll, close } = await fixture(p, { version: 1, revision: 0, runId: 'run_owner', requests: [] })
+  try {
+    await poll()
+    env.sessions[1] = { ...env.sessions[1], online: 'offline' }
+    env.reports.push({ at: now - 16 * minute, title: '同一条未读消息' })
+    await c.refreshQuestions(); await poll()
+    const alerted = await c.store.get(p.ref.id)
+    assert.match(alerted.backup!.problem!, /均停住/)
+    assert.equal(alerted.backup!.history.length, 1)
+    assert.equal(env.deliveries.length, 1)
+
+    for (const mailFailed of [true, false]) {
+      env.mailFailed = mailFailed
+      await c.refreshQuestions(); await poll()
+      assert.deepEqual(await c.store.get(p.ref.id), alerted)
+      assert.equal(env.deliveries.length, 1)
+    }
+
+    env.reports.length = 0
+    await c.refreshQuestions(); await poll()
+    assert.equal((await c.store.get(p.ref.id)).backup?.problem, undefined)
   } finally { await close() }
 })
 
@@ -759,7 +785,7 @@ test('无绑定、隐藏和移除的项目跳过；启动失败记录一次；�
     assert.equal(b.phase, 'standby')
     assert.ok(b.problem?.includes('均停住'))
     assert.equal(env.controls.length, 0)
-    env.sessions = [primary]; await poll()
+    env.sessions = [primary]; await c.refreshQuestions(); await poll()
     assert.ok(!Object.hasOwn((await c.store.get(p.ref.id)).backup!, 'problem'))
   } finally { await close() }
 })
