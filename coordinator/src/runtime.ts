@@ -56,7 +56,7 @@ export interface CoordinatorRuntime {
   openOverview(): Promise<void>
   revealArtifact(file: string, directory: boolean): Promise<void>
   removeProject(ref: ProjectRef, host: HostApi<'worker'>): Promise<void>
-  agents(projects: Project[], host: HostApi<'worker'>, main?: AgentSession): Promise<AgentsSnapshot>
+  agents(projects: Project[], host: HostApi<'worker'>, main?: AgentSession, targets?: Promise<TargetInventory | undefined>): Promise<AgentsSnapshot>
   mail(runId: string, submitted?: (reports: WorkerReport[]) => Promise<Set<string>>): Promise<{ questions: OrcaQuestion[]; reports: WorkerReport[]; waiting?: { at: number; title: string; read?: boolean; report?: WorkerReport }[] }>
   hermesApprovalMode(): Promise<string>
   send(runId: string, delivery: Delivery): Promise<{ requestId?: string }>
@@ -147,7 +147,7 @@ export class OrcaRuntime implements CoordinatorRuntime {
   async targets(mode?: 'sample' | 'display') {
     const read = (args: string[]) => mode ? this.list(args, readTimeout, mode === 'sample') : this.call(args, readTimeout)
     // agents.list has no liveness/parent evidence; takeover still requires these exact CLI identities.
-    const [ps, list] = await Promise.all([read(['worktree', 'ps', '--limit', '10000', '--agent-wait']), read(['terminal', 'list', '--limit', '10000'])])
+    const [ps, list] = await Promise.all([read(['worktree', 'ps', '--limit', '10000']), read(['terminal', 'list', '--limit', '10000'])])
     if (!Array.isArray(ps.worktrees) || !Array.isArray(list.terminals) || list.hostScope?.omittedHostIds?.includes('local') || ps.truncated || list.truncated || ps.hostScope?.omittedHostIds?.includes('local')) fail('会话列表不完整，请恢复 Orca 后重试')
     if (ps.worktrees.some((w: any) => w.address?.environment === 'local' && !w.isArchived && !Array.isArray(w.agents))) fail('会话列表缺少 agent 状态')
     return mainTargets(ps.worktrees, list.terminals)
@@ -167,7 +167,9 @@ export class OrcaRuntime implements CoordinatorRuntime {
     return launchReceipt(launch)
   }
   async openOverview() { await this.call(['plugin', 'open', pluginKey, '--panel', 'project-coordinator']) }
-  async agents(projects: Project[], host: HostApi<'worker'>, main?: AgentSession) { return readAgents(host, args => this.list(args), projects, main) }
+  async agents(projects: Project[], host: HostApi<'worker'>, main?: AgentSession, targets?: Promise<TargetInventory | undefined>) {
+    return readAgents(host, args => this.list(args, readTimeout, args[0] !== 'orchestration'), projects, main, targets)
+  }
   async mail(runId: string, submitted?: (reports: WorkerReport[]) => Promise<Set<string>>) {
     // shortcut: Orca inbox has no pagination; scan the newest bounded window.
     const result = await this.call(['orchestration', 'inbox', '--run', runId, '--limit', String(inboxLimit)], readTimeout)
@@ -232,7 +234,7 @@ export class OrcaRuntime implements CoordinatorRuntime {
       return
     }
     // --force also bypasses open-session guards; inspect every worktree and terminal immediately before removal.
-    const [ps, terminals] = await Promise.all([this.call(['worktree', 'ps', '--limit', '10000', '--agent-wait']), this.call(['terminal', 'list', '--limit', '10000'])])
+    const [ps, terminals] = await Promise.all([this.call(['worktree', 'ps', '--limit', '10000']), this.call(['terminal', 'list', '--limit', '10000'])])
     assertProjectIdle(ref, ps, terminals)
     await this.call(['project', 'setup-delete', '--setup', found[0].id, '--force'])
     if ((await this.projects(host)).some(p => p.id === ref.id)) fail('Orca 尚未确认移除，工作间记录保留')

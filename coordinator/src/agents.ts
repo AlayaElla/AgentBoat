@@ -1,5 +1,6 @@
 import { isRecentAgent, type Project, type LiveAgent, type AgentsSnapshot, type AgentSession, type MainStatus } from './model'
 import type { HostApi, HostResult } from 'orca/host'
+import type { TargetInventory } from './runtime'
 import { projectKey } from './store'
 
 export type { LiveAgent, AgentsSnapshot } from './model'
@@ -7,7 +8,8 @@ type Read = (args: string[]) => Promise<any>
 export const maxAgentWorkspaces = 256, maxAgents = 2000
 
 // Host status is authoritative; worker history only identifies a saved execution.
-export async function readAgents(host: HostApi<'worker'>, read: Read, projects: Project[], main?: AgentSession): Promise<AgentsSnapshot> {
+export async function readAgents(host: HostApi<'worker'>, read: Read, projects: Project[], main?: AgentSession,
+  targets?: Promise<TargetInventory | undefined>): Promise<AgentsSnapshot> {
   const at = Date.now()
   try {
     const signal = AbortSignal.timeout(12_000)
@@ -23,12 +25,17 @@ export async function readAgents(host: HostApi<'worker'>, read: Read, projects: 
     }
     if (main && main.handle.startsWith('orca_session_id:')) {
       try {
-        const inventory = await read(['worktree', 'ps', '--limit', '10000', '--agent-wait'])
-        const matches = inventory.worktrees.filter((w: any) => w.address?.environment === 'local' && (w.hostId ?? 'local') === 'local' && w.address.worktree === main.workspace)
-          .flatMap((w: any) => w.agents ?? []).filter((a: any) => !a.parentPaneKey && main.handle === 'orca_session_id:' + /^structured-agent-session-(.+):[^:]+$/.exec(a.paneKey ?? '')?.[1])
-        if (!inventory.truncated && !inventory.hostScope?.omittedHostIds?.includes('local')) {
-          if (!matches.length || matches.length === 1 && matches[0].subagentObservation === 'exited') status = { state: 'offline' }
-          else if (matches.length === 1) status = sample(matches[0].state, matches[0].stateStartedAt)
+        const matches = targets ? (await targets)?.sessions.filter(s => s.handle === main.handle && s.workspace === main.workspace)
+          : await read(['worktree', 'ps', '--limit', '10000']).then(inventory => {
+            if (inventory.truncated || inventory.hostScope?.omittedHostIds?.includes('local')) return
+            return inventory.worktrees.filter((w: any) => w.address?.environment === 'local' && (w.hostId ?? 'local') === 'local' && !w.isArchived && w.address.worktree === main.workspace)
+              .flatMap((w: any) => w.agents ?? []).filter((a: any) => !a.parentPaneKey && main.handle === 'orca_session_id:' + /^structured-agent-session-(.+):[^:]+$/.exec(a.paneKey ?? '')?.[1])
+              .map((a: any) => ({ state: a.state, stateStartedAt: a.stateStartedAt, online: a.subagentObservation === 'live' ? 'online' : a.subagentObservation === 'exited' ? 'offline' : 'unknown' }))
+          })
+        if (matches?.length === 1) {
+          const [match] = matches
+          if (match.online === 'offline') status = { state: 'offline' }
+          else if (match.online === 'online') status = sample(match.state, match.stateStartedAt)
         }
       } catch { status = { state: 'unknown' } }
     }
@@ -80,9 +87,14 @@ export async function readAgents(host: HostApi<'worker'>, read: Read, projects: 
     }
     if (main && !main.handle.startsWith('orca_session_id:') && status.state === 'unknown') {
       try {
-        const inventory = await read(['terminal', 'list', '--limit', '10000'])
-        const matches = inventory.terminals.filter((terminal: any) => terminal.handle === main.handle)
-        if (!inventory.truncated && !inventory.hostScope?.omittedHostIds?.includes('local') && (!matches.length || matches.length === 1 && matches[0].connected === false)) status = { state: 'offline' }
+        if (targets) {
+          const matches = (await targets)?.sessions.filter(s => s.handle === main.handle && s.workspace === main.workspace)
+          if (matches?.length === 1 && matches[0].online === 'offline') status = { state: 'offline' }
+        } else {
+          const inventory = await read(['terminal', 'list', '--limit', '10000'])
+          const matches = inventory.terminals.filter((terminal: any) => terminal.handle === main.handle)
+          if (!inventory.truncated && !inventory.hostScope?.omittedHostIds?.includes('local') && matches.length === 1 && matches[0].connected === false) status = { state: 'offline' }
+        }
       } catch { status = { state: 'unknown' } }
     }
     return { ok: true, at, agents, ...(main ? { main: { handle: main.handle, status } } : {}), ...(truncated ? { truncated: true } : {}) }

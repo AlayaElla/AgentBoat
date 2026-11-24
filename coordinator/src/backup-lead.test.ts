@@ -13,7 +13,6 @@ const now = Date.now(), minute = 60_000
 const primary: AgentSession = { handle: 'orca_session_id:claude_lead', workspace: refs[0].workspace, workspaceName: '项目', path: refs[0].path, title: '主用', online: 'online', agent: 'claude', state: 'done' }
 
 test('在线主用存在超过十五分钟的待办且已知不在工作时才需要探测', () => {
-  assert.ok(stopped(undefined, undefined, now))
   assert.ok(stopped({ ...primary, online: 'offline' }, undefined, now))
   assert.equal(stopped(primary, undefined, now), undefined)
   assert.equal(stopped(primary, now - 15 * minute, now), undefined)
@@ -411,18 +410,22 @@ for (const agent of ['codex', 'antigravity']) test('项目主用探测超时后�
   } finally { Date.now = realNow; await close() }
 })
 
-test('未关联任务的旧消息只探测一次，主用确认后只对新积压再探测', async () => {
+test('无任务的历史来源不算积压，主用只对当前 Run 的未处理消息探测', async () => {
   const p = bound()
   const event = { id: 'old', source: 'owner', sourceId: 'old', threadId: '', chatId: '', senderId: 'owner', text: '项目状态如何？', receivedAt: new Date(now - 24 * 60 * minute).toISOString() }
-  p.events.push(event)
-  // An old notification with unknown delivery can remain in the queue indefinitely.
-  p.deliveries.push({ id: 'old-notice', subject: '进展', body: '', state: 'uncertain', createdAt: now - 60 * minute })
+  p.events.push(event, { ...event, id: 'sent', sourceId: 'sent', receivedAt: new Date(now - 16 * minute).toISOString() })
+  p.deliveries.push({ id: 'sent', subject: '进展', body: '', state: 'sent' })
   const { c, env, poll, command, close } = await fixture(p)
   const realNow = Date.now
   let clock = now
   Date.now = () => clock
   try {
-    await poll(); await poll(); await poll()
+    await poll(); await poll()
+    assert.equal((await c.store.get(p.ref.id)).backup?.phase, 'standby')
+    assert.equal(env.controls.length, 0)
+    env.reports.push({ at: clock - 16 * minute, title: 'Run 尚未读取的新消息' })
+    await c.refreshQuestions()
+    await poll()
     assert.deepEqual(env.controls.map(m => m.handle), [primary.handle])
     clock += 9 * minute
     await command('ready'); await command('ready')
@@ -436,7 +439,8 @@ test('未关联任务的旧消息只探测一次，主用确认后只对新积�
       reboot.env.sessions = env.sessions
       await reboot.poll(); await reboot.poll()
       assert.equal(reboot.env.controls.length, 0)
-      await reboot.c.store.mutate(p.ref.id, undefined, r => { r.events.push({ ...event, id: 'new', sourceId: 'new', receivedAt: new Date(clock).toISOString() }) })
+      reboot.env.reports.push({ at: clock, title: 'Run 新一轮待办' })
+      await reboot.c.refreshQuestions()
       clock += 16 * minute
       await reboot.poll()
       assert.deepEqual(reboot.env.controls.map(m => m.handle), [primary.handle])
@@ -605,9 +609,53 @@ test('清单超时保持待命，完整清单确认主用消失后才接管', as
     assert.equal(env.controls.length, 0)
     assert.equal((await c.store.get(p.ref.id)).backup?.phase, 'standby')
     env.inventoryFailed = false
+    let reads = 0
+    env.inventory = () => ({ sessions: ++reads < 3 ? env.sessions : [primary, ...env.sessions], workspaces: env.spaces })
+    await poll()
+    assert.equal(reads, 3)
+    assert.equal(env.controls.length, 0)
+    assert.equal((await c.store.get(p.ref.id)).backup?.phase, 'standby')
+    env.inventory = undefined
     await poll()
     assert.deepEqual(env.controls.map(m => m.handle), ['orca_session_id:backup'])
     assert.ok(env.controls[0].prompt.includes('lead-take'))
+  } finally { await close() }
+})
+
+test('备用漏报和不可核实不会重复记录或发送同一次主备告警', async () => {
+  const p = bound()
+  const { c, env, poll, close } = await fixture(p, { version: 1, revision: 0, runId: 'run_owner', requests: [] })
+  try {
+    await poll()
+    const standby = { ...env.sessions[1], online: 'unknown' as const }
+    const missing = [{ ...primary, online: 'offline' as const }]
+    const initial = (await c.store.get(p.ref.id)).revision
+    let reads = 0
+    env.inventory = () => ({ sessions: reads++ ? [...missing, standby] : missing, workspaces: env.spaces })
+    await poll()
+    assert.equal(reads, 2)
+    assert.equal((await c.store.get(p.ref.id)).revision, initial)
+
+    env.inventory = undefined
+    env.sessions = missing
+    await poll()
+    const alerted = await c.store.get(p.ref.id)
+    assert.match(alerted.backup!.problem!, /均停住/)
+    assert.equal(alerted.backup!.history.length, 1)
+    assert.equal(env.deliveries.length, 1)
+    for (const sessions of [[...missing, standby], missing]) {
+      env.sessions = sessions
+      await poll()
+      assert.deepEqual(await c.store.get(p.ref.id), alerted)
+      assert.equal(env.deliveries.length, 1)
+    }
+    env.sessions = [primary]
+    await poll()
+    assert.equal((await c.store.get(p.ref.id)).backup?.problem, undefined)
+    env.sessions = missing
+    await poll()
+    assert.equal((await c.store.get(p.ref.id)).backup!.history.length, 2)
+    assert.equal(env.deliveries.length, 2)
   } finally { await close() }
 })
 
