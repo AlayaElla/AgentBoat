@@ -272,7 +272,10 @@ export class Butler {
       if (p.configuration?.returnImmediately !== undefined && typeof p.configuration.returnImmediately !== 'boolean') throw rpcError(-32602, 'Invalid returnImmediately')
       if (p.configuration?.historyLength !== undefined && (!Number.isSafeInteger(p.configuration.historyLength) || p.configuration.historyLength < 0)) throw rpcError(-32602, 'Invalid historyLength')
       const m = object(p.message), mid = text(m.messageId, 'messageId', 200), contextId = m.contextId ? text(m.contextId, 'contextId', 200) : randomUUID()
-      if (m.role !== 'ROLE_USER' || !Array.isArray(m.parts) || !m.parts.length || m.parts.some((v: any) => !v || typeof v.text !== 'string' || Object.keys(v).some(k => k !== 'text'))) throw rpcError(-32602, 'Text ROLE_USER message required')
+      if (m.role !== 'ROLE_USER' || !Array.isArray(m.parts) || !m.parts.length || m.parts.some((v: any) =>
+        !v || typeof v.text !== 'string' || Object.keys(v).some(k => k !== 'text' && k !== 'mediaType') ||
+        (Object.hasOwn(v, 'mediaType') && v.mediaType !== 'text/plain')
+      )) throw rpcError(-32602, 'Text ROLE_USER message required')
       if (m.taskId) throw rpcError(-32602, 'Start a new task with the same contextId')
       const value = text(m.parts.map((v: any) => v.text).join('\n'), '消息', 16000), hash = fingerprint([value, m.contextId || ''])
       const taskId = await this.mutate(d => {
