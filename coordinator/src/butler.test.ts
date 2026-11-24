@@ -89,12 +89,14 @@ test('A2A accepts text parts with optional text/plain mediaType and rejects othe
       assert.equal(body.result.task.status.state, 'TASK_STATE_SUBMITTED')
       assert.deepEqual(body.result.task.history[0].parts, [{ text }])
     }
-    for (const fields of [
-      { mediaType: 'text/html' }, { mediaType: 'application/json' }, { mediaType: '' }, { mediaType: null }, { mediaType: 42 },
-      { raw: 'YQ==' }, { url: 'https://example.com' }, { data: {} }, { unknown: true },
+    for (const part of [
+      {}, { text, ['__proto__']: {} },
+      { text, mediaType: 'text/html' }, { text, mediaType: 'application/json' }, { text, mediaType: '' },
+      { text, mediaType: null }, { text, mediaType: 42 }, { text, raw: 'YQ==' },
+      { text, url: 'https://example.com' }, { text, data: {} }, { text, unknown: true },
     ]) {
-      const { body } = await submit('invalid', { text, ...fields })
-      assert.equal(body.error?.code, -32602, JSON.stringify(fields))
+      const { body } = await submit('invalid', part)
+      assert.equal(body.error?.code, -32602, JSON.stringify(part))
     }
     assert.deepEqual((await b.snapshot()).entries.map(entry => entry.id), ['plain', 'typed'])
   } finally { b.stop() }
