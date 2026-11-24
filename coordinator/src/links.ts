@@ -13,6 +13,7 @@ import { LinkArtifacts, artifactRef, streamTimeout, type ArtifactExchange, type 
 import { ArtifactStream } from './artifact-stream'
 import { LinkFiles } from './link-files'
 import { setTimeout as delay } from 'node:timers/promises'
+import { validAgentId } from '../../workspace/agent-launch.mjs'
 
 type Scope = 'none' | 'summary' | 'details'
 export interface Sharing { scope: Scope; allProjects: boolean; projectIds: string[]; delegateFeedback?: boolean }
@@ -99,7 +100,7 @@ type Receipts = Omit<MessageExchange, 'messages'>
 const noReceipts: Receipts = { received: [] }
 const hasReceipts = (r: Receipts) => !!(r.received.length || r.progress?.length || r.rejected?.length)
 const maxPeers = 50, maxProjectAgents = 20, maxReportAgents = 100, maxActivityTitle = 200
-const knownAgent = (value: unknown): value is string => typeof value === 'string' && (value === '' || /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,99}$/.test(value))
+const knownAgent = (value: unknown): value is string => value === '' || validAgentId(value)
 const publicAgent = (value: string) => knownAgent(value) ? value : ''
 const canDelegate = (p: Sharing) => p.scope === 'details' && p.delegateFeedback === true
 

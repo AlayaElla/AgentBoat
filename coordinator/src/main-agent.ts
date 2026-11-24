@@ -1,6 +1,6 @@
 import { botHomeHandle } from './bot-runtime'
 import { needsLeadCompaction } from './project-archive'
-import { backupView, type BackupLeads } from './backup-lead'
+import { backupView, pendingBotSwitch, type BackupLeads } from './backup-lead'
 import { randomBytes, randomUUID } from 'node:crypto'
 import { existsSync } from 'node:fs'
 import { promptClientPath } from '../scripts/orca-cli.mjs'
@@ -148,15 +148,16 @@ export function mainAgent(orca: OrcaWorkerApi, store: ProjectStore, runtime: Coo
   async function read(sample?: import('./model').AgentsSnapshot, list?: Project[]): Promise<WorkspaceBinding> {
     const w = await store.workspace()
     const takeover = takeoverView(w.takeover)
+    const switching = pendingBotSwitch(w)
     const previous = w.retired?.filter(d => d.id.startsWith('retired:')).at(-1)
     const s = w.session
     const activity = sample?.ok && sample.main?.handle === s?.handle ? sample.main?.status : undefined
     const online = sample ? activity?.state === 'offline' ? 'offline' : activity && activity.state !== 'unknown' ? 'online' : 'unknown' : s ? await runtime.targets().then(t => t.sessions.find(x => x.handle === s.handle)?.online ?? 'offline' as const).catch(() => 'unknown' as const) : 'unknown'
     const current = w.bot && await runtime.bots?.find(w.bot.id).catch(() => undefined)
     return { revision: w.revision, runId: w.runId, ...(w.bot ? { bot: { ...w.bot, ...current, ...(w.bot.side && s ? { agent: s.agent } : {}) } } : {}),
-      ...(w.botSwitch ? { switchingBotAgent: w.botSwitch.agent } : {}), ...(w.botStopped ? { botStopped: true } : {}),
+      ...(switching ? { switchingBotAgent: switching.agent } : {}), ...(w.botStopped ? { botStopped: true } : {}),
       ...(workspaceBackupInFlight(w.backup) ? { backup: backupView(w.backup) } : {}), securityBoundary: mainSecurityBoundary,
-      ...(s ? { session: { ...s, online: w.botSwitch ? 'unknown' : online } } : {}), ...(w.boundAt ? { boundAt: w.boundAt } : {}),
+      ...(s ? { session: { ...s, online: switching ? 'unknown' : online } } : {}), ...(w.boundAt ? { boundAt: w.boundAt } : {}),
       ...(w.runId ? { projectNames: (list ?? await projects()).filter(p => !p.hidden && p.runId === w.runId).map(p => p.ref.name) } : {}),
       ...(previous ? { previousNotice: previous.state } : {}),
       ...(takeover ? { takeover } : {}) }
@@ -245,14 +246,14 @@ export function mainAgent(orca: OrcaWorkerApi, store: ProjectStore, runtime: Coo
     const expected = revision(input.revision)
     if (w.revision !== expected) fail('工作间已更新，请刷新后再提交')
     if (input.mode === 'bot' && w.bot && w.bot.id === input.botId) {
-      await backups.chooseBotAgent(w, w.bot.id, text(input.agent, '代理', 100))
-      await flushRetired()
+      try { await backups.chooseBotAgent(w, w.bot.id, text(input.agent, '代理', 100)) }
+      finally { await flushRetired() }
       return read()
     }
     await switchLead(runtime, input, {
       role: 'workspace',
       targets: () => runtime.targets(), mutate: (update, expected) => store.mutateWorkspace(row => {
-        if (input.mode !== 'cancel' && (row.botSwitch || workspaceBackupInFlight(row.backup))) fail('请等当前工作间接管结束')
+        if (input.mode !== 'cancel' && (pendingBotSwitch(row) || workspaceBackupInFlight(row.backup))) fail('请等当前工作间接管结束')
         return update(row)
       }, expected), changed,
       prompt: (token, expiresAt) => `开启工作间管理。主人已在项目协作面板发起切换，请由当前会话接管工作间主 agent。先读 $agentboat-workspace；自己创建新的协调 Run。接管脚本绝对路径：${JSON.stringify(promptClientPath())}\n用 node 调用此路径的 main-read，再以最新 revision 和唯一 requestId 调用 main-bind --check；检查通过后重读 main-read，以最新 revision 和新的 requestId 正式 main-bind。main-bind 从标准输入接收 JSON；caller 由脚本从当前 Orca 环境取得，不要填写别人的会话或 Run。一次性接管凭据：${token}\n有效至：${expiresAt}\n仅用于本次接管，不保存到文件或记忆，不转发。绑定成功后先读取 overview 补齐之前的待办；已经送达原主 agent 的通知不会补发。`

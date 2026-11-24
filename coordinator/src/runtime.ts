@@ -11,7 +11,7 @@ import { fail, projectKey } from './store'
 import { readAgents, type AgentsSnapshot } from './agents'
 import type { Project } from './model'
 import type { HostApi } from 'orca/host'
-import { agentFlags, launchReceipt, type AgentLaunch } from '../../workspace/agent-launch.mjs'
+import { agentFlags, launchReceipt, validAgentId, type AgentLaunch } from '../../workspace/agent-launch.mjs'
 import { inboxLimit, openRunMail, type OrcaQuestion, type OrcaWorkerRecord } from '../scripts/orca-questions.mjs'
 import { workerReport, type WorkerReport } from '../scripts/worker-reports.mjs'
 import { activeUserDataPath, pluginKey, release } from '../scripts/orca-cli.mjs'
@@ -137,7 +137,7 @@ export class OrcaRuntime implements CoordinatorRuntime {
   async installedAgents(workspace: string, fresh = false): Promise<InstalledAgent[]> {
     if (!workspace) fail('项目当前没有工作区')
     const { agents } = await this.list(['agent', 'installed', '--worktree', workspace], 60_000, fresh)
-    if (!Array.isArray(agents) || agents.some(a => typeof a?.id !== 'string' || !a.id || typeof a.name !== 'string' || !a.name || typeof a.default !== 'boolean')) fail('Orca 的可启动 agent 列表无效')
+    if (!Array.isArray(agents) || agents.some(a => !validAgentId(a?.id) || typeof a.name !== 'string' || !a.name || typeof a.default !== 'boolean')) fail('Orca 的可启动 agent 列表无效')
     return agents.map(({ id, name, default: preferred }) => ({ id, name, default: preferred }))
   }
   async verifyRun(id: string, caller?: string): Promise<void> {
