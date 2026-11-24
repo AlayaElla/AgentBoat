@@ -3,9 +3,9 @@ import os from 'node:os'
 import path from 'node:path'
 import { assert, mockHost, mountWorker, test } from 'orca/testing'
 import { testCoordinator } from './test-runtime'
-import { fingerprint, fresh, submitTask } from './store'
+import { fingerprint, fresh, receiveEvent, submitTask } from './store'
 import { refs } from './fixtures'
-import type { AgentSession, ContactRoutes, LeadAction, Project, Workspace } from './model'
+import type { AgentSession, ContactRoutes, Delivery, LeadAction, Project, Workspace } from './model'
 import { stopped } from './backup-lead'
 import { mainTargets, type TargetInventory } from './runtime'
 
@@ -28,7 +28,8 @@ async function fixture(project: Project, workspace?: Workspace, exports?: string
   const env = { sessions: [main], inventoryFailed: false, available: true, failLaunch: false, owner: main.handle as string | null, generation: 1, installed: ['claude', 'codex'], spaces: [{ workspace: main.workspace, name: '项目', path: main.path }], launches: [] as { workspace: string; agent: string; options: unknown; prompt: string }[],
     inventory: undefined as (() => TargetInventory) | undefined,
     contactRoute: { dispatch: 'ctx_contact' } as ContactRoutes[string], launchHandle: 'orca_session_id:backup',
-    catalogReads: 0, contacts: [] as string[], mailRuns: [] as string[], controls: [] as { handle: string; prompt: string }[], deliveries: [] as string[], reports: [] as any[] }
+    catalogReads: 0, contacts: [] as string[], mailRuns: [] as string[], mailFailed: false, failedDelivery: '', attemptedDelivery: undefined as Delivery | undefined,
+    controls: [] as { handle: string; prompt: string }[], deliveries: [] as string[], reports: [] as any[] }
   let c!: ReturnType<typeof testCoordinator>
   const worker = await mountWorker({ default: api => {
     c = testCoordinator(api, {
@@ -41,7 +42,11 @@ async function fixture(project: Project, workspace?: Workspace, exports?: string
       syncContacts: async jobs => { env.contacts = jobs.map(j => j.id); return Object.fromEntries(jobs.map(j => [j.id, env.contactRoute])) },
       installedAgents: async () => env.installed.map(id => ({ id, name: id, default: id === 'codex' })),
       identify: async (handle, run, own) => { assert.equal(run, own); return (env.inventory?.() ?? env).sessions.find(s => s.handle === handle)! },
-      mail: async runId => { env.mailRuns.push(runId); return { reports: [], questions: [], waiting: env.reports } },
+      mail: async runId => {
+        env.mailRuns.push(runId)
+        if (env.mailFailed) throw Error('inbox timed out')
+        return { reports: [], questions: [], waiting: env.reports }
+      },
       launchMain: async (workspace, agent, prompt, options) => {
         env.launches.push({ workspace, agent, prompt, options })
         if (env.failLaunch) throw Error('模拟启动回执丢失')
@@ -49,7 +54,14 @@ async function fixture(project: Project, workspace?: Workspace, exports?: string
         return env.launchHandle
       },
       requestTakeover: async (handle, prompt) => { env.controls.push({ handle, prompt }) },
-      send: async (run, d) => { env.deliveries.push([run, env.owner, d.subject].join('|')); return {} }
+      send: async (run, d) => {
+        env.deliveries.push([run, env.owner, d.subject].join('|'))
+        if (d.id === env.failedDelivery) {
+          env.attemptedDelivery = (await c.store.get(project.ref.id)).deliveries.find(row => row.id === d.id)
+          throw Error('send timed out')
+        }
+        return {}
+      }
     }, undefined, exports)
   } }, { host })
   const poll = async () => { await c.checkBackups(); await c.flush(project.ref.id) }
@@ -447,6 +459,76 @@ test('无任务的历史来源不算积压，主用只对当前 Run 的未处理
       assert.equal((await reboot.c.store.get(p.ref.id)).backup?.phase, 'probing')
     } finally { await reboot.close() }
   } finally { Date.now = realNow; await close() }
+})
+
+test('收件箱失败时保留积压探测，确认主用离线后仍接管', async () => {
+  const p = bound()
+  p.deliveries.push({ id: 'unconfirmed', targetRunId: p.runId, subject: '待核对投递', body: '', state: 'uncertain', createdAt: now - 16 * minute })
+  const { c, env, poll, close } = await fixture(p)
+  const realNow = Date.now
+  let clock = now
+  Date.now = () => clock
+  try {
+    await poll()
+    env.mailFailed = true
+    await c.refreshQuestions(); await poll()
+    assert.equal(env.controls.length, 0)
+    env.mailFailed = false
+    await c.refreshQuestions(); await poll()
+    assert.match(env.controls[0].prompt, /lead-ready/)
+
+    clock += 11 * minute
+    env.mailFailed = true
+    await c.refreshQuestions(); await poll()
+    assert.equal((await c.store.get(p.ref.id)).backup?.phase, 'probing')
+    assert.equal(env.controls.length, 1)
+
+    env.sessions[0] = { ...primary, online: 'offline' }
+    let reads = 0
+    env.inventory = () => { reads++; return { sessions: env.sessions, workspaces: env.spaces } }
+    await poll()
+    assert.equal(reads, 2)
+    assert.equal((await c.store.get(p.ref.id)).backup?.phase, 'taking')
+    assert.match(env.controls[1].prompt, /lead-take/)
+    assert.match(env.controls[1].prompt, /收件箱待核对/)
+    assert.equal(env.controls[1].handle, env.launchHandle)
+  } finally { Date.now = realNow; await close() }
+})
+
+test('无任务的超时投递保留旧 Run 回执，换 Run 后不触发探活', async () => {
+  const p = bound()
+  const at = now - 60 * minute
+  receiveEvent(p, { id: 'forwarded', source: 'workspace-agent', sourceId: 'forwarded', threadId: 'forwarded', chatId: '',
+    senderId: 'run_owner', text: '转交消息', receivedAt: new Date(at).toISOString() })
+  p.deliveries.push({ id: 'legacy', subject: '历史待核对', body: '', state: 'uncertain', createdAt: at })
+  const { c, worker, env, poll, close } = await fixture(p)
+  try {
+    env.failedDelivery = 'forwarded'
+    await poll()
+    const old = await c.store.get(p.ref.id)
+    const receipt = old.deliveries.find(d => d.id === 'forwarded')!
+    assert.equal(env.attemptedDelivery?.state, 'sending')
+    assert.equal(env.attemptedDelivery?.targetRunId, p.runId)
+    assert.equal(receipt.state, 'uncertain')
+    assert.equal(receipt.targetRunId, p.runId)
+    assert.ok(old.events.every(e => !e.taskId))
+
+    const next = { ...primary, handle: 'orca_session_id:next' }
+    env.sessions.push(next)
+    const switched = await worker.request('project.lead', { projectId: p.ref.id, mode: 'existing', revision: old.revision, handle: next.handle })
+    const token = /一次性接管凭据：([^\n]+)/.exec(env.controls[0].prompt)![1]
+    env.owner = next.handle; env.launchHandle = 'orca_session_id:next_backup'
+    await worker.request('project.agent', { projectId: p.ref.id, operation: 'bind', revision: switched.binding.revision,
+      requestId: 'switch-run', runId: 'run_next', currentRunId: 'run_next', caller: next.handle, token })
+    await c.refreshQuestions()
+    await poll(); await poll()
+    const saved = await c.store.get(p.ref.id)
+    assert.equal(saved.runId, 'run_next')
+    assert.equal(saved.backup?.phase, 'standby')
+    assert.equal(env.controls.length, 1)
+    assert.deepEqual(saved.deliveries.find(d => d.id === 'forwarded'), receipt)
+    assert.deepEqual(saved.deliveries.find(d => d.id === 'legacy'), p.deliveries[1])
+  } finally { await close() }
 })
 
 test('聊天 Run 的空 handle 使用已有绑定，接管和交回都核对本会话回执与最新代次', async () => {

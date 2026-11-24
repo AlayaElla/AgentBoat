@@ -148,7 +148,7 @@ export class BackupLeads {
   }
 
   async inspect(r: Binding, session: AgentSession, inventory: Awaited<ReturnType<CoordinatorRuntime['targets']>>,
-    pending: { at: number; title: string }[], context: string, ownerRun: string, now = Date.now(),
+    pending: { at: number; title: string }[] | undefined, context: string, ownerRun: string, now = Date.now(),
     recheck = () => this.runtime.targets().catch(() => undefined)) {
     if (!available(r) || !r.runId) return
     const id = key(r), b = r.backup
@@ -158,7 +158,7 @@ export class BackupLeads {
     if (w && bot) {
       if (live.online === 'unknown') live = leadState(await recheck(), workspace, handle, inventory)
       if (w.botSwitch && await this.inventoryStatus(w, true, now)) return
-      const oldest = pending.length ? Math.min(...pending.map(p => p.at)) : undefined
+      const oldest = pending?.length ? Math.min(...pending.map(p => p.at)) : undefined
       const reason = stopped(live, oldest === undefined ? undefined : Math.max(oldest, w.botReceipt?.confirmedAt ?? 0), now)
       const api = this.runtime.bots
       let current: BotTarget | undefined, home: string | undefined
@@ -287,8 +287,8 @@ export class BackupLeads {
         }
       }
       const confirmedAt = b.confirmedAt
-      if (confirmedAt !== undefined) pending = pending.filter(p => p.at > confirmedAt)
-      const oldest = pending.length ? Math.min(...pending.map(p => p.at)) : undefined
+      if (confirmedAt !== undefined) pending = pending?.filter(p => p.at > confirmedAt)
+      const oldest = pending?.length ? Math.min(...pending.map(p => p.at)) : undefined
       const since = oldest === undefined || !b.consumed ? oldest : Math.max(oldest, b.since)
       const waitingForStandby = b.phase === 'taking' || b.phase === 'handoff' ? b.since : oldest && Math.max(oldest, b.since)
       const primaryInCharge = b.phase === 'standby' || b.phase === 'probing'
@@ -321,10 +321,10 @@ export class BackupLeads {
         await this.updateBinding(r, row => {
           const b = row.backup!
           b.phase = 'taking'; b.since = now; b.cycle = randomUUID(); delete b.problem
-          control(row, 'take', `${cause}。先用 ${id ? 'read ' + id : 'overview --brief'} 读插件记录，接管后核对原 Run 收件箱。待处理：${pending.slice(0, 12).map(p => p.title.slice(0, 120)).join('、') || '暂无'}。进行中的任务和执行者：${context || '暂无已登记任务'}。`)
+          control(row, 'take', `${cause}。先用 ${id ? 'read ' + id : 'overview --brief'} 读插件记录，接管后核对原 Run 收件箱。待处理：${pending ? pending.slice(0, 12).map(p => p.title.slice(0, 120)).join('、') || '暂无' : '收件箱待核对'}。进行中的任务和执行者：${context || '暂无已登记任务'}。`)
           b.history.push({ at: now, text: `请求 ${b.handle} 接管：${cause}` })
         })
-      } else if (expired && live.online === 'online' && !stillWaiting) {
+      } else if (expired && live.online === 'online' && pending && !stillWaiting) {
         await this.updateBinding(r, row => { row.backup!.phase = 'standby'; delete row.backup!.credential })
       } else if (b.phase === 'active' && (!b.contact || route?.dispatch) && now - (b.lastProbe ?? b.since) >= hour && live?.online === 'online' &&
         !queue(r).some(d => d.control?.cycle === b.cycle && d.control.action === 'ready' && (d.state === 'pending' || d.state === 'sending'))) {

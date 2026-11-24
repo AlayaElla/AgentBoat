@@ -40,6 +40,7 @@ export interface TargetInventory {
   workspaces: { workspace: string; name: string; path: string; botHomeKey?: string }[]
   unidentifiedTerminalWorkspaces?: string[]
   listedTerminalHandles?: string[]
+  disconnectedTerminalHandles?: string[]
 }
 export interface CoordinatorRuntime {
   bots?: Pick<LocalBots, 'list' | 'find' | 'home' | 'choices' | 'hasSideChat' | 'startChat' | 'writeSoul' | 'removeSoul'>
@@ -274,6 +275,7 @@ export function mainTargets(rows: any[], terminals: any[]): TargetInventory {
     }
   }
   return { sessions, workspaces, unidentifiedTerminalWorkspaces: [...unidentifiedTerminalWorkspaces],
-    listedTerminalHandles: terminals.filter(t => t.connected !== false && typeof t.handle === 'string').map(t => t.handle) }
+    listedTerminalHandles: terminals.filter(t => t.connected !== false && typeof t.handle === 'string').map(t => t.handle),
+    disconnectedTerminalHandles: terminals.filter(t => t.connected === false && typeof t.handle === 'string').map(t => t.handle) }
 }
 export { executable as defaultExecutable } from '../scripts/orca-cli.mjs'

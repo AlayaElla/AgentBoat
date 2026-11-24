@@ -88,8 +88,9 @@ export async function readAgents(host: HostApi<'worker'>, read: Read, projects: 
     if (main && !main.handle.startsWith('orca_session_id:') && status.state === 'unknown') {
       try {
         if (targets) {
-          const matches = (await targets)?.sessions.filter(s => s.handle === main.handle && s.workspace === main.workspace)
-          if (matches?.length === 1 && matches[0].online === 'offline') status = { state: 'offline' }
+          const inventory = await targets
+          if (inventory?.disconnectedTerminalHandles?.filter(handle => handle === main.handle).length === 1 &&
+            !inventory.listedTerminalHandles?.includes(main.handle)) status = { state: 'offline' }
         } else {
           const inventory = await read(['terminal', 'list', '--limit', '10000'])
           const matches = inventory.terminals.filter((terminal: any) => terminal.handle === main.handle)

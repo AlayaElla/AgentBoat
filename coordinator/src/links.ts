@@ -424,6 +424,7 @@ export class WorkspaceLinks {
       this.catalogDelay = Math.min(this.catalogDelay * 2, catalogPollMax)
       try {
         const d = await this.data()
+        if (!this.running) return
         if (d.peers.some(p => p.state === 'active' && p.scope !== 'none')) await this.checkCatalog!()
       } catch { /* Check the catalog again on the next poll. */ }
       finally {

@@ -75,22 +75,25 @@ export function createCoordinator(api: OrcaWorkerApi, runtime: CoordinatorRuntim
   let statusUpdates: Promise<void> | undefined, statusDirty = false
   let live: import('./agents').AgentsSnapshot = { ok: false, at: 0, agents: [] }
   let agentsDirty = true, refreshingAgents: Promise<typeof live> | undefined
+  let activitySequence = 0, sampledSequence = 0
   let nextActivityAt = 0
   function refreshAgents(force = false, bindings?: ReturnType<typeof sampleBindings>): Promise<typeof live> {
     if (force) agentsDirty = true
     if (refreshingAgents) return refreshingAgents
-    if (!force && (Date.now() < nextActivityAt || !agentsDirty && Date.now() - live.at < activityInterval)) return Promise.resolve(live)
+    if (!force && (Date.now() < nextActivityAt || !agentsDirty && sampledSequence === activitySequence && Date.now() - live.at < activityInterval)) return Promise.resolve(live)
     refreshingAgents = (async () => {
       for (let sample = 0; sample < 2; sample++) {
         const started = Date.now()
         const observed = sample === 0 && bindings ? await bindings : undefined
         const { list } = observed?.records ?? await availableProjectRecords()
+        const sequence = observed?.inventory ? observed.sequence : activitySequence
         agentsDirty = false
         try { live = await runtime.agents(list, orca.host, actingMain(observed?.workspace ?? await store.workspace()), observed?.inventory) }
         catch { live = { ok: false, at: Date.now(), agents: [], error: 'agent 状态读不到' } }
+        sampledSequence = sequence
         const elapsed = Date.now() - started
         nextActivityAt = elapsed >= readTimeout ? Date.now() + activityInterval : 0
-        if (!agentsDirty || nextActivityAt) break
+        if (sampledSequence === activitySequence && (!agentsDirty || nextActivityAt)) break
       }
       return live
     })().finally(() => { refreshingAgents = undefined })
@@ -121,8 +124,8 @@ export function createCoordinator(api: OrcaWorkerApi, runtime: CoordinatorRuntim
   async function publishActivity(panelChanged = false) {
     if (stoppedChecks) return
     const { at, agents, ...status } = live
-    const visible = agents.map(({ id, projectId, agent, role, state, title, taskTitle, since }) =>
-      ({ id, projectId, agent, role, state, title, taskTitle, since })).sort((a, b) => a.id.localeCompare(b.id))
+    const visible = agents.map(({ id, projectId, agent, role, state, title, taskId, taskTitle, since }) =>
+      ({ id, projectId, agent, role, state, title, taskId, taskTitle, since })).sort((a, b) => a.id.localeCompare(b.id))
     const next = { ...status, agents: visible }
     if (!isDeepStrictEqual(next, publishedActivity)) {
       publishedActivity = next
@@ -135,22 +138,22 @@ export function createCoordinator(api: OrcaWorkerApi, runtime: CoordinatorRuntim
     }
   }
   const activityEvents = new AbortController()
-  let publishingActivity: Promise<void> | undefined, activityPending = false
+  let publishingActivity: Promise<void> | undefined
   function scheduleActivity() {
-    if (stoppedChecks || Date.now() < nextActivityAt) return
-    return publishingActivity ??= delay(activityDebounce, undefined, { signal: activityEvents.signal }).then(async () => {
-      activityPending = false
+    if (stoppedChecks) return
+    return publishingActivity ??= delay(Math.max(activityDebounce, nextActivityAt - Date.now()), undefined, { signal: activityEvents.signal }).then(async () => {
       if (Date.now() >= nextActivityAt) {
         await refreshAgents()
-        await publishActivity()
+        await publishActivity().catch(() => {})
       }
-    }).catch(() => {}).finally(() => {
+    }).finally(() => {
       publishingActivity = undefined
-      if (activityPending && agentsDirty) void scheduleActivity()
-    })
+    }).then(() => {
+      if (sampledSequence !== activitySequence) void scheduleActivity()
+    }).catch(() => {})
   }
   const activityEvent = orca.events.on('agent.status.changed', () => {
-    activityPending = agentsDirty = true
+    activitySequence++
     return scheduleActivity()
   })
   let questions: OwnerQuestion[] = [], pollingQuestions: Promise<Awaited<ReturnType<typeof availableProjectRecords>> | undefined> | undefined
@@ -618,17 +621,19 @@ export function createCoordinator(api: OrcaWorkerApi, runtime: CoordinatorRuntim
             (x.targetRunId || !needsWorkspaceRun(x) || runId) &&
             (!x.external || m.feishu.enabled && x.external.appId === m.feishu.appId && m.feishu.chatIds.includes(x.external.chatId)))
           if (!d) break
+          const fallbackRun = needsWorkspaceRun(d) ? runId : undefined
           let claimed = false
           await store.mutateMessaging(m => {
             const saved = m.deliveries.find(x => x.id === d.id)
             if (!saved || saved.state !== 'pending') return
             saved.state = 'sending'
+            if (!saved.external && fallbackRun) saved.targetRunId ??= fallbackRun
             if (saved.runNotice) saved.runNotice.attemptedAt = Date.now()
             claimed = true
           })
           if (!claimed) continue
           try {
-            const receipt = await sendDelivery(d, d.runNotice?.stage === 'project' ? 'project' : 'workspace', needsWorkspaceRun(d) ? runId : undefined)
+            const receipt = await sendDelivery(d, d.runNotice?.stage === 'project' ? 'project' : 'workspace', fallbackRun)
             await store.mutateMessaging(m => {
               const saved = m.deliveries.find(x => x.id === d.id)!
               saved.state = 'sent'
@@ -660,16 +665,18 @@ export function createCoordinator(api: OrcaWorkerApi, runtime: CoordinatorRuntim
           if (!delivery) break
           const { refs, error } = await availableProjects()
           if (error || !refs.some(ref => ref.id === id)) break
-          let claimed = false, runId = ''
+          let claimed: Delivery | undefined, role: 'workspace' | 'project' = 'project'
           await store.mutate(id, undefined, p => {
-            if (!allowed(delivery, p)) return
-            runId = p.runId
-            p.deliveries.find(x => x.id === delivery.id)!.state = 'sending'; claimed = true
+            const saved = p.deliveries.find(d => d.id === delivery.id)
+            if (!saved || saved.state !== 'pending' || !allowed(saved, p)) return
+            if (saved.targetRunId) role = 'workspace'
+            if (!saved.external) saved.targetRunId ??= p.runId
+            saved.state = 'sending'; claimed = saved
           })
           if (!claimed) continue
           attempted = true
           try {
-            const receipt = delivery.control ? await backups.send(id, delivery) : await sendDelivery(delivery, delivery.targetRunId ? 'workspace' : 'project', runId)
+            const receipt = claimed.control ? await backups.send(id, claimed) : await sendDelivery(claimed, role)
             await store.mutate(id, undefined, p => {
               const d = p.deliveries.find(x => x.id === delivery.id)!
               d.state = 'sent'; if ('requestId' in receipt && receipt.requestId) d.requestId = receipt.requestId
@@ -1028,8 +1035,9 @@ export function createCoordinator(api: OrcaWorkerApi, runtime: CoordinatorRuntim
     records ??= await availableProjectRecords()
     const workspace = await store.workspace()
     const projects = records.list.filter(p => !p.hidden && p.runId && p.ref.hostId === 'local')
+    const sequence = activitySequence
     const inventory = !stoppedChecks && (workspace.runId || projects.length) && !records.error ? runtime.targets('sample').catch(() => undefined) : undefined
-    return { records, workspace, projects, inventory }
+    return { records, workspace, projects, inventory, sequence }
   }
   function checkBackups(records?: ProjectRecords) {
     if (!checking) {
@@ -1069,13 +1077,14 @@ export function createCoordinator(api: OrcaWorkerApi, runtime: CoordinatorRuntim
         continue
       }
       const bot = !project && w.bot
-      const pending: { at: number; title: string }[] = []
-      if (r.backup?.handle || bot) {
-        const mail = project ? waitingByRun.get(r.runId) : await runtime.mail(r.runId).then(m => [...m.waiting ?? [], ...m.questions.filter(q => !bot || !q.read).map(q => ({ at: q.at, title: q.subject }))] as Waiting).catch(() => null)
-        if ((mail === null || !mail && r.backup?.phase === 'probing') && !bot) continue
-        const reports = (mail ?? []).flatMap(m => m.report ? [m.report] : [])
+      const monitorPending = r.backup?.handle || bot
+      const mail = !monitorPending ? [] : project ? waitingByRun.get(r.runId) : await runtime.mail(r.runId)
+        .then(m => [...m.waiting ?? [], ...m.questions.filter(q => !bot || !q.read).map(q => ({ at: q.at, title: q.subject }))] as Waiting).catch(() => null)
+      const pending: { at: number; title: string }[] | undefined = mail ? [] : undefined
+      if (monitorPending && mail && pending) {
+        const reports = mail.flatMap(m => m.report ? [m.report] : [])
         const submitted = project && await store.archive.submittedReports(project, reports)
-        pending.push(...(mail ?? []).filter(m => !m.report || (submitted ? !submitted.has(m.report.id) : !m.read)))
+        pending.push(...mail.filter(m => !m.report || (submitted ? !submitted.has(m.report.id) : !m.read)))
         const sourceTimes = new Map<string, number>()
         if (project) {
           pending.push(...questions.filter(q => q.runId === r.runId))
@@ -1095,7 +1104,7 @@ export function createCoordinator(api: OrcaWorkerApi, runtime: CoordinatorRuntim
         }
         const deliveries = project ? project.deliveries : [...mailbox.deliveries, ...projects.flatMap(p => p.deliveries.filter(d => d.targetRunId === w.runId))]
         for (const d of deliveries) if (!d.control && !d.external && !d.id.startsWith('retired:') && (!d.targetRunId || d.targetRunId === r.runId) &&
-          (d.state === 'pending' || !bot && d.state === 'uncertain')) pending.push({ at: d.createdAt ?? sourceTimes.get(d.id) ?? r.backup?.confirmedAt ?? r.backup?.since ?? Date.parse(w.boundAt ?? ''), title: d.subject })
+          (d.state === 'pending' || !bot && d.state === 'uncertain' && d.targetRunId === r.runId)) pending.push({ at: d.createdAt ?? sourceTimes.get(d.id) ?? r.backup?.confirmedAt ?? r.backup?.since ?? Date.parse(w.boundAt ?? ''), title: d.subject })
       }
       const context = (project ? [project] : projects).flatMap(p => p.tasks.filter(t => t.phase === 'working').map(t =>
         [t.title, ...t.executions.slice(-3).map(e => e.agent + ' ' + e.dispatchId)].join(' · ').slice(0, 300))).slice(0, 12).join('；')
@@ -1103,7 +1112,7 @@ export function createCoordinator(api: OrcaWorkerApi, runtime: CoordinatorRuntim
         if (project) defer(project.ref.id)
         else void main.flushRetired().catch(() => {})
       }
-      await backups.inspect(r, session, inventory, pending.filter(p => Number.isFinite(p.at)), context, w.runId, Date.now(), recheck).catch(() => {
+      await backups.inspect(r, session, inventory, pending?.filter(p => Number.isFinite(p.at)), context, w.runId, Date.now(), recheck).catch(() => {
         // Binding revisions can change during a sample. Re-read this role on the next tick.
       })
     }
