@@ -6,7 +6,7 @@ import path from 'node:path'
 import { tmpdir } from 'node:os'
 import { testCoordinator } from './test-runtime'
 import { BackupLeads } from './backup-lead'
-import { mainAgent } from './main-agent'
+import { mainAgent, type WorkspaceSetup } from './main-agent'
 import { fingerprint, ProjectStore } from './store'
 import { mainTargets, OrcaRuntime, type CoordinatorRuntime } from './runtime'
 import type { AgentSession, BotTarget } from './model'
@@ -193,13 +193,13 @@ function botRuntime() {
   return { env, inventory, runtime }
 }
 
-async function setup() {
+async function setup(firstSetup?: WorkspaceSetup) {
   const { env, inventory, runtime } = botRuntime()
   let store!: ProjectStore, backups!: BackupLeads, main!: ReturnType<typeof mainAgent>
   const worker = await mountWorker({ default: orca => {
     store = new ProjectStore(orca.storage)
     backups = new BackupLeads(store, runtime, async () => {}, () => {})
-    main = mainAgent(orca, store, runtime, () => {}, () => {}, async () => [], backups, () => ({ ok: false, at: 0, agents: [] }))
+    main = mainAgent(orca, store, runtime, () => {}, () => {}, async () => [], backups, () => ({ ok: false, at: 0, agents: [] }), firstSetup)
   } }, { host: mockHost() })
   const poll = async () => {
     const w = await store.workspace()
@@ -219,6 +219,92 @@ async function setup() {
   }
   return { env, worker, store, backups, main, poll, bind, runtime }
 }
+
+test('面板确认首次设置后才启动 bot，失败保留路径，绑定后可单独修复 hooks', async () => {
+  const home = await mkdtemp(path.join(tmpdir(), 'agentboat-bot-setup-'))
+  const code: typeof import('../../workspace/install.mjs') = await import(new URL('../../workspace/install.mjs', import.meta.url).href)
+  const config = { home, codexHome: path.join(home, 'custom-codex'), env: { ...process.env, CODEX_HOME: path.join(home, 'other-codex') } }
+  const hooks = path.join(config.codexHome, 'hooks.json'), backup = path.join(home, '.agentboat/backups/setup-fixture')
+  let failInstall = true
+  const { env, worker, store } = await setup({
+    preview: () => code.previewSetup(config),
+    apply: confirmation => {
+      if (failInstall) throw Error('写入失败：' + hooks + '\n备份位置：' + backup)
+      env.soulActions.push('setup')
+      return code.applySetup(confirmation, config)
+    }
+  })
+  const panel = { panel: 'project-coordinator' }
+  const targets = () => worker.request('workspace.agent.targets', {}, panel)
+  const choose = (setupConfirmation?: string, context = panel) => worker.request('workspace.agent.switch',
+    { mode: 'bot', revision: 0, botId: initial.id, ...(setupConfirmation ? { setupConfirmation } : {}) }, context)
+  try {
+    const plan = (await targets()).setup!
+    assert.ok(plan.paths.includes(hooks))
+    await assert.rejects(choose, /确认首次设置路径/)
+    await assert.rejects(() => choose(plan.confirmation, { panel: 'another-panel' }), /主 agent 页面/)
+    await assert.rejects(() => choose(plan.confirmation), error => {
+      assert.ok(error instanceof Error && error.message.includes(hooks) && error.message.includes(backup))
+      return true
+    })
+    assert.deepEqual(await readdir(home), [])
+    assert.deepEqual(env.soulActions, [])
+    assert.equal((await store.workspace()).takeover, undefined)
+    failInstall = false
+    env.next = first
+    const waiting = await choose(plan.confirmation)
+    assert.equal(waiting.takeover?.state, 'waiting')
+    assert.deepEqual(env.soulActions, ['setup', 'write bot-1', 'start bot-1 claude', 'mail ' + first])
+    assert.match(await readFile(hooks, 'utf8'), /--agentboat-role-harness/)
+    await assert.rejects(() => readFile(path.join(config.env.CODEX_HOME, 'hooks.json')), e => (e as NodeJS.ErrnoException).code === 'ENOENT')
+    const result = await worker.request('workspace.agent', { operation: 'bind', revision: waiting.revision, requestId: 'setup-bind',
+      runId: 'run_bot', currentRunId: 'run_bot', caller: first, token: /一次性接管凭据：([^\n]+)/.exec(env.sends[0].body)![1] })
+    assert.equal(result.runId, 'run_bot')
+    assert.equal(result.session?.handle, first)
+    const drift = JSON.parse(await readFile(hooks, 'utf8'))
+    drift.hooks.Stop[0].hooks[0].timeout = 45
+    await writeFile(hooks, JSON.stringify(drift))
+    const repair = (await targets()).setup!
+    assert.deepEqual(repair.paths, [hooks])
+    assert.deepEqual((await worker.request('workspace.setup', { confirmation: repair.confirmation! }, panel)).completed, [hooks])
+    assert.equal((await targets()).setup!.confirmation, undefined)
+    assert.equal((await store.workspace()).runId, 'run_bot')
+    assert.deepEqual(env.starts, ['claude'])
+  } finally {
+    await worker.deactivate()
+    await rm(home, { recursive: true, force: true })
+  }
+})
+
+test('在线会话和新会话的首次绑定都要通过同一设置门槛', async () => {
+  const confirmation = 'a'.repeat(64), file = '/fixture/codex/hooks.json'
+  for (const choice of [{ mode: 'existing' as const, handle: first }, { mode: 'new' as const, workspace: standby.workspace, agent: 'codex' }]) {
+    let conflict = true, installed = 0
+    const { env, worker } = await setup({
+      preview: () => ({ paths: [file], backupRoot: '/fixture/backups', codexHooks: file,
+        ...(conflict ? { error: '异主配置：' + file } : { confirmation }) }),
+      apply: value => {
+        assert.equal(value, confirmation)
+        assert.deepEqual(env.sends, [])
+        assert.deepEqual(env.launches, [])
+        installed++
+        return { completed: [file] }
+      }
+    })
+    const panel = { panel: 'project-coordinator' }
+    const choose = (token?: string) => worker.request('workspace.agent.switch',
+      { ...choice, revision: 0, ...(token ? { setupConfirmation: token } : {}) }, panel)
+    try {
+      await assert.rejects(() => choose(), /异主配置/)
+      conflict = false
+      await assert.rejects(() => choose(), /确认首次设置路径/)
+      const waiting = await choose(confirmation)
+      assert.equal(waiting.takeover?.state, 'waiting')
+      assert.equal(installed, 1)
+      assert.equal(choice.mode === 'existing' ? env.sends[0]?.target : env.launches[0], choice.mode === 'existing' ? first : standby.workspace)
+    } finally { await worker.deactivate() }
+  }
+})
 
 test('bot ignores delivered Feishu mail, uncertain notifications and read questions, then stops on overdue queued mail', async () => {
   const { runtime } = botRuntime()

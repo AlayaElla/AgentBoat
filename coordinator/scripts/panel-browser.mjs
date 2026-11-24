@@ -153,6 +153,22 @@ async function setup(options = {}, hub) {
     }
     const calls = [];
     window.fixture = { project, projects, links, live, workspace, calls, hostCalls: [], stored, workspaceTarget: { workspaceId: 'identity:project-workspace', multipleConversations: true }, emit: () => events['project.changed']?.({}), race: false, prune: () => { task.acceptance[0].revision++; task.acceptance[0].fingerprint = 'new-version'; project.revision++; } };
+    if (options.firstSetup) window.fixture.setup = {
+      paths: ['/fixture/.agents/skills/agentboat-workspace', '/fixture/custom-codex/hooks.json'],
+      backupRoot: '/fixture/.agentboat/backups', codexHooks: '/fixture/custom-codex/hooks.json', codexHome: '/fixture/custom-codex', confirmation: 'a'.repeat(64)
+    };
+    const applyFixtureSetup = confirmation => {
+      const setup = window.fixture.setup;
+      if (!setup?.confirmation || setup.confirmation !== confirmation) throw Error('请确认首次设置路径');
+      if (window.fixture.failSetup) {
+        window.fixture.failSetup = false;
+        throw Error('写入失败：' + setup.codexHooks + '\n备份位置：' + setup.backupRoot + '/setup-retry');
+      }
+      const completed = setup.paths;
+      delete setup.confirmation;
+      setup.paths = [];
+      return { completed };
+    };
     if (options.ownerQuestion) window.fixture.questions = [{ id: 'msg_owner', projectId: 'p1', runId: project.runId, from: 'dispatch:worker-example',
       title: '请登录测试面板', body: '请登录测试面板\n在测试浏览器打开示例页面', at: now - 11 * 60_000 }];
     if (options.ownerReport) window.fixture.reports = [{ id: 'msg_report', projectId: 'p1', runId: project.runId, from: 'dispatch:fixture',
@@ -343,13 +359,36 @@ async function setup(options = {}, hub) {
       if (name === 'workspace.connections' && options.hermes && input.operation === 'read') {
         return { connection: hermes, a2a: { url: 'http://127.0.0.1:1234', port: 5678, revision: 1, entries: [] } };
       }
-      if (name === 'workspace.agent.targets') return { agentWorkspace: 'identity:test', availableAgents, ...(options.bot || options.availableBot ? { bots: [{ id: 'new-bot', name: '工作管家', agent: 'antigravity', paused: false, agents: ['antigravity', 'grok'] }] } : options.emptyBots ? { bots: [] } : {}), sessions: clone(sessions), workspaces: [{ workspace: 'identity:test', name: '示例工作区', path: '/test/工作区 with spaces' }] };
+      if (name === 'workspace.agent.targets') return { agentWorkspace: 'identity:test', availableAgents,
+        ...(options.bot || options.availableBot ? { bots: [{ id: 'new-bot', name: '工作管家', agent: 'antigravity', paused: false,
+          agents: options.firstSetup ? ['antigravity', 'claude', 'codex'] : ['antigravity', 'grok'] }] } : options.emptyBots ? { bots: [] } : {}),
+        sessions: clone(sessions), workspaces: [{ workspace: 'identity:test', name: '示例工作区', path: '/test/工作区 with spaces' }],
+        ...(window.fixture.setup ? { setup: clone(window.fixture.setup), projectUsesCodex: !!window.fixture.projectUsesCodex } : {}) };
+      if (name === 'workspace.setup') return applyFixtureSetup(input.confirmation);
+      if (name === 'workspace.setup.codexHome') {
+        if (!input.path.startsWith('/')) throw Error('CODEX_HOME 必须是完整绝对路径');
+        stored['workspace.setup.codexHome'] = input.path;
+        const setup = window.fixture.setup;
+        const newHooks = input.path + '/hooks.json';
+        setup.paths = setup.paths.map(file => file === setup.codexHooks ? newHooks : file);
+        Object.assign(setup, { codexHooks: newHooks, codexHome: input.path, confirmation: 'c'.repeat(64) });
+        return { path: input.path };
+      }
       if (name === 'workspace.agent.switch') {
         if (input.revision !== workspace.revision) throw Error('工作间已更新');
+        if (input.mode !== 'cancel' && !workspace.runId && window.fixture.setup?.confirmation) applyFixtureSetup(input.setupConfirmation);
         workspace.revision++;
-        if (input.mode === 'bot') workspace.takeover = { id: 'selection', target: { title: '工作管家' }, state: 'waiting', expiresAt: new Date(Date.now() + 600000).toISOString() };
+        if (input.mode === 'bot') workspace.takeover = { id: 'selection', target: { title: '工作管家', workspace: '', agent: input.agent }, state: 'waiting', expiresAt: new Date(Date.now() + 600000).toISOString() };
         else if (input.mode === 'cancel') delete workspace.takeover;
         else workspace.takeover = { id: String(workspace.revision), target: input.mode === 'new' ? { title: '新的 ' + input.agent + ' 会话' } : sessions.find(s => s.handle === input.handle), state: 'waiting', expiresAt: new Date(Date.now() + 600000).toISOString() };
+        if (input.mode === 'bot' && window.fixture.delayBot) {
+          window.fixture.delayBot = false;
+          workspace.takeover.state = 'sending';
+          window.fixture.emit();
+          await new Promise(resolve => { window.fixture.finishBot = resolve; });
+          Object.assign(workspace.takeover, { state: 'waiting' });
+          workspace.takeover.target.handle = 'bot-side-chat';
+        }
         if (window.fixture.delaySwitch) { window.fixture.delaySwitch = false; window.fixture.emit(); await new Promise(r => { window.fixture.finishSwitch = r; }); }
         return clone(workspace);
       }
@@ -542,7 +581,7 @@ try {
     assert.equal(await layer.getByLabel('Bot 代理').inputValue(), 'antigravity');
     assert.deepEqual(await layer.getByLabel('Bot 代理').locator('option').evaluateAll(options => options.map(o => o.value)), ['antigravity', 'grok']);
     await layer.getByRole('button', { name: '设为主 bot' }).click();
-    await currentLayer().getByText(/正在等 工作管家 接管/).waitFor();
+    await currentLayer().getByText(/等待接管绑定 · 工作管家/).waitFor();
     const choice = await page.evaluate(() => fixture.calls.find(c => c.name === 'workspace.agent.switch').input);
     assert.deepEqual(choice, { revision: 1, mode: 'bot', botId: 'new-bot', agent: 'antigravity' });
   });
@@ -554,6 +593,82 @@ try {
     await tab.waitFor();
     assert.equal(await tab.getAttribute('aria-selected'), 'true');
     assert.equal(await currentLayer().getByRole('button', { name: '设为主 bot' }).count(), 0);
+  });
+  await test('首次 bot 设置预览、错误和一键绑定，Codex 提示按需显示，绑定后修复 hooks', async () => {
+    await setup({ unbound: true, availableBot: true, firstSetup: true });
+    await page.getByRole('button', { name: '设置', exact: true }).click();
+    await page.getByRole('button', { name: '管理主 agent' }).click();
+    const layer = currentLayer(), tab = layer.getByRole('tab', { name: 'bot', exact: true });
+    const confirm = layer.getByRole('button', { name: '完成首次设置并设为主 bot' });
+    const hookPath = '/fixture/custom-codex/hooks.json';
+    await confirm.waitFor();
+    assert.equal(await tab.getAttribute('aria-selected'), 'true');
+    await layer.getByText('/fixture/.agents/skills/agentboat-workspace', { exact: true }).waitFor();
+    await layer.getByText(hookPath, { exact: true }).waitFor();
+    assert.equal(await layer.getByText(/输入 \/hooks/).count(), 0);
+    await layer.getByLabel('Bot 代理').selectOption('claude');
+    assert.equal(await layer.getByText(/输入 \/hooks/).count(), 0);
+    await layer.getByLabel('Bot 代理').selectOption('codex');
+    await layer.getByText(/写入定义后.*SessionStart、PreToolUse 和 Stop.*Codex 会话所在 PATH 可运行 Node ≥22/).waitFor();
+    await layer.getByLabel('Bot 代理').selectOption('antigravity');
+    assert.equal(await page.evaluate(() => fixture.calls.filter(c => ['workspace.agent.switch', 'workspace.setup'].includes(c.name)).length), 0);
+    await page.evaluate(() => { fixture.failSetup = true; });
+    await confirm.click();
+    const failure = layer.getByRole('alert').filter({ hasText: '写入失败' });
+    assert.match(await failure.innerText(), /custom-codex\/hooks\.json[\s\S]*备份位置：\/fixture\/\.agentboat\/backups\/setup-retry/);
+    assert.equal(await page.evaluate(() => fixture.workspace.takeover), undefined);
+    await page.evaluate(() => { fixture.delayBot = true; });
+    await confirm.click();
+    await layer.getByText(/正在启动对话 · 工作管家/).waitFor();
+    await page.evaluate(() => fixture.finishBot());
+    await layer.getByText(/等待接管绑定 · 工作管家/).waitFor();
+    await page.evaluate(() => {
+      delete fixture.workspace.takeover;
+      Object.assign(fixture.workspace, { runId: 'run_new_bot', bot: { id: 'new-bot', name: '工作管家', agent: 'antigravity' },
+        session: { handle: 'bot-side-chat', title: '新接管对话', agent: 'antigravity', online: 'online' } });
+      fixture.emit();
+    });
+    await layer.getByText('run_new_bot', { exact: true }).waitFor();
+    await layer.getByText('bot-side-chat', { exact: true }).waitFor();
+    assert.equal(await layer.getByText(/输入 \/hooks/).count(), 0);
+    await page.evaluate(() => {
+      fixture.projectUsesCodex = true;
+      fixture.setup.paths = [fixture.setup.codexHooks];
+      fixture.setup.confirmation = 'b'.repeat(64);
+      fixture.emit();
+    });
+    await layer.getByText(hookPath, { exact: true }).waitFor();
+    await layer.getByRole('button', { name: '确认修复' }).click();
+    await layer.getByText(/Codex hook 定义已写入.*SessionStart、PreToolUse 和 Stop/).waitFor();
+    assert.equal(await layer.getByRole('button', { name: '确认修复' }).count(), 0);
+    const actions = await page.evaluate(() => fixture.calls.filter(c => ['workspace.agent.switch', 'workspace.setup'].includes(c.name)));
+    assert.deepEqual(actions.map(c => c.input.setupConfirmation ?? c.input.confirmation), ['a'.repeat(64), 'a'.repeat(64), 'b'.repeat(64)]);
+  });
+  await test('自定义 Codex 目录保存后更新预览，首次绑定在线或新会话都带确认凭据', async () => {
+    for (const mode of ['existing', 'new']) {
+      await setup({ unbound: true, emptyBots: true, firstSetup: true });
+      await page.getByRole('button', { name: '设置', exact: true }).click();
+      await page.getByRole('button', { name: '管理主 agent' }).click();
+      const layer = currentLayer();
+      const action = layer.getByRole('button', { name: mode === 'existing' ? '完成首次设置并绑定' : '完成首次设置并新开主 agent', exact: true }).first();
+      await action.waitFor();
+      await layer.getByRole('button', { name: '高级选项' }).click();
+      const field = layer.getByLabel('CODEX_HOME'), save = layer.getByRole('button', { name: '保存 Codex 目录' });
+      assert.equal(await field.inputValue(), '/fixture/custom-codex');
+      await field.fill('../relative');
+      assert.equal(await action.isDisabled(), true);
+      await save.click();
+      await layer.getByRole('alert').filter({ hasText: '完整绝对路径' }).waitFor();
+      assert.equal(await page.evaluate(() => fixture.stored['workspace.setup.codexHome']), undefined);
+      await field.fill('/fixture/chosen-codex');
+      await save.click();
+      await layer.getByText('/fixture/chosen-codex/hooks.json', { exact: true }).waitFor();
+      await action.click();
+      await layer.getByText(/等待接管绑定/).waitFor();
+      const request = await page.evaluate(() => fixture.calls.find(c => c.name === 'workspace.agent.switch').input);
+      assert.equal(request.mode, mode);
+      assert.equal(request.setupConfirmation, 'c'.repeat(64));
+    }
   });
   await test('settings details show available data while reads are pending and recover locally', async () => {
     await setup({ coldMain: true, holdAgents: true, hermes: true });
@@ -1307,20 +1422,24 @@ try {
       assert.equal(await currentLayer().getByLabel('Bot', { exact: true }).count(), 0);
       await page.evaluate(() => { fixture.delaySwitch = true; });
       await page.getByRole('button', { name: action, exact: true }).nth(0).click();
-      await page.getByText('正在等 甲会话 接管，还剩 10 分钟', { exact: true }).waitFor();
+      await page.getByText('等待接管绑定 · 甲会话，还剩 10 分钟', { exact: true }).waitFor();
+      if (unbound) {
+        await currentLayer().getByText(/在 Orca 左侧 Bots 点 ＋ → New bot → Start from scratch/).waitFor();
+        assert.equal(await page.getByRole('button', { name: '刷新', exact: true }).count(), 1);
+      }
       assert.equal(await page.getByRole('button', { name: action, exact: true }).nth(1).isEnabled(), true);
       assert.equal(await page.getByRole('button', { name: '取消', exact: true }).isEnabled(), true);
       await page.getByRole('button', { name: action, exact: true }).nth(1).click();
-      await page.getByText('正在等 乙会话 接管，还剩 10 分钟', { exact: true }).waitFor();
+      await page.getByText('等待接管绑定 · 乙会话，还剩 10 分钟', { exact: true }).waitFor();
       await page.evaluate(() => fixture.finishSwitch());
       await page.getByRole('button', { name: '取消', exact: true }).click();
       await page.getByRole('button', { name: '取消', exact: true }).waitFor({ state: 'detached' });
       await page.getByRole('button', { name: '新开一个主 agent', exact: true }).click();
-      await page.getByText('正在等 新的 claude 会话 接管，还剩 10 分钟', { exact: true }).waitFor();
+      await page.getByText('等待接管绑定 · 新的 claude 会话，还剩 10 分钟', { exact: true }).waitFor();
       assert.equal(await page.getByLabel('Agent', { exact: true }).inputValue(), 'claude');
       await page.getByLabel('Agent', { exact: true }).selectOption('codex');
       await page.getByRole('button', { name: '新开一个主 agent', exact: true }).click();
-      await page.getByText('正在等 新的 codex 会话 接管，还剩 10 分钟', { exact: true }).waitFor();
+      await page.getByText('等待接管绑定 · 新的 codex 会话，还剩 10 分钟', { exact: true }).waitFor();
       await page.evaluate(() => { fixture.workspace.takeover.error = '接管请求未能确认送达，请核对目标会话后重试'; fixture.workspace.takeover.state = 'uncertain'; fixture.emit(); });
       await page.getByRole('alert').filter({ hasText: '未能确认送达' }).waitFor();
       await page.evaluate(() => { fixture.workspace.takeover.expiresAt = new Date(Date.now() - 1).toISOString(); fixture.emit(); });

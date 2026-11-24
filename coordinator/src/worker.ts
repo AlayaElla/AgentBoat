@@ -17,7 +17,8 @@ import { WorkspaceLinks } from './links'
 import { fileErrorText, incomingHash, linkMessageHistory } from './link-messages'
 import { LinkFiles } from './link-files'
 import { groupedAttention, isProjectShared, type OwnerQuestion } from './model'
-import { mainAgent, roleReminder, switchLead, takeoverView, recoverTakeover } from './main-agent'
+import { mainAgent, roleReminder, switchLead, takeoverView, recoverTakeover, type WorkspaceSetup } from './main-agent'
+import { applySetup, previewSetup, validateCodexHome } from '../../workspace/install.mjs'
 import { projectAgentLaunch, projectLeadAgents, projectTemplate, templateLeadPreferences, type ProjectLeadAgents } from '../../workspace/agent-launch.mjs'
 import { promptClientPath, refreshReleaseSetup, pluginVersionLabel, release, roleRegistryPath } from '../scripts/orca-cli.mjs'
 import { cliBridge } from '../scripts/cli-bridge.mjs'
@@ -29,7 +30,7 @@ import type { ProjectArtifactRef } from './protocol'
 const activityInterval = 60_000
 const activityDebounce = 150
 
-export function createCoordinator(api: OrcaWorkerApi, runtime: CoordinatorRuntime, transport?: MessageTransport, exportDirectory?: string, linkFiles?: LinkFiles, roleFile?: string) {
+export function createCoordinator(api: OrcaWorkerApi, runtime: CoordinatorRuntime, transport?: MessageTransport, exportDirectory?: string, linkFiles?: LinkFiles, roleFile?: string, setup?: WorkspaceSetup) {
   const orca = { ...api, panels: checkedPanels(api) }
   const refreshRoles: (() => Promise<void>) | undefined = roleFile ? roleRegistry(roleFile, async () => {
     const [workspace, projects, mailbox] = await Promise.all([store.workspace(), store.all(), store.messaging().catch(() => undefined)])
@@ -71,7 +72,7 @@ export function createCoordinator(api: OrcaWorkerApi, runtime: CoordinatorRuntim
     if (result.done && (input.action === 'take' || input.action === 'resume')) deferBackupCheck()
     return result
   })
-  const main = mainAgent(orca, store, runtime, changed, () => { deferMailbox(); deferBackupCheck() }, async () => (await availableProjectRecords()).list, backups, () => live)
+  const main = mainAgent(orca, store, runtime, changed, () => { deferMailbox(); deferBackupCheck() }, async () => (await availableProjectRecords()).list, backups, () => live, setup)
   let statusUpdates: Promise<void> | undefined, statusDirty = false
   let live: import('./agents').AgentsSnapshot = { ok: false, at: 0, agents: [] }
   let agentsDirty = true, refreshingAgents: Promise<typeof live> | undefined
@@ -1143,7 +1144,7 @@ export function createCoordinator(api: OrcaWorkerApi, runtime: CoordinatorRuntim
       const id = 'setup-hooks:' + hooksChangedVersion
       if (!(await store.messaging()).deliveries.some(d => d.id === id)) await store.mutateMessaging(m => {
         if (!m.deliveries.some(d => d.id === id)) m.deliveries.push({ id, state: 'pending', subject: 'AgentBoat hooks 需要更新',
-          body: `AgentBoat ${hooksChangedVersion} 的 hooks 登记有变化，请主人或项目在当前 Orca 配置下重跑首次设置。` })
+          body: `AgentBoat ${hooksChangedVersion} 的 hooks 登记有变化，请主人打开「工作间 → 设置 → 主 agent」，核对路径后修复。` })
       })
     } catch (error) { console.error('AgentBoat 无法登记 hooks 提醒', error) }
     if (refreshRoles) { await readCatalog(); await refreshRoles() }
@@ -1172,16 +1173,36 @@ let coordinator: ReturnType<typeof createCoordinator> | undefined
 let cli: ReturnType<typeof cliBridge> | undefined
 export default async function activate(orca: OrcaWorkerApi): Promise<void> {
   if (!release) throw new Error('请在 Orca 中安装 AgentBoat 正式版')
+  // Orca can omit CODEX_HOME from the trusted worker environment.
+  const codexHomeKey = 'workspace.setup.codexHome'
+  const codexHome = async () => {
+    const configured = await orca.storage.get(codexHomeKey)
+    return typeof configured === 'string' ? configured : ''
+  }
   // A broken stable link must not stop the plugin; the versioned paths keep working.
   let hooksChangedVersion: string | undefined
-  try { hooksChangedVersion = await refreshReleaseSetup() }
+  try {
+    const configured = await codexHome()
+    hooksChangedVersion = await refreshReleaseSetup(validateCodexHome(configured) || undefined)
+  }
   catch (error) { console.error('AgentBoat 启动时检查固定入口和 skill 失败', error) }
   const runtime = new OrcaRuntime(async () => {
     const configured = await orca.settings.get('cliPath')
     return typeof configured === 'string' && configured.trim() ? configured.trim() : defaultExecutable
   })
   cli = cliBridge(orca)
-  coordinator = createCoordinator(cli.api, runtime, undefined, undefined, undefined, roleRegistryPath())
+  coordinator = createCoordinator(cli.api, runtime, undefined, undefined, undefined, roleRegistryPath(), {
+    preview: async () => {
+      const saved = await codexHome()
+      return { ...previewSetup({ codexHome: saved }), codexHome: saved }
+    },
+    apply: async confirmation => applySetup(confirmation, { codexHome: await codexHome() }),
+    saveCodexHome: async value => {
+      const validated = validateCodexHome(value)
+      await orca.storage.set(codexHomeKey, validated)
+      return validated
+    }
+  })
   await coordinator.start(hooksChangedVersion)
   await cli.start()
 }

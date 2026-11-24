@@ -1,19 +1,19 @@
 # 工作间主 agent
 
-Node.js + Git + 运行中的 Orca 桌面端，以及已加载的项目协作插件、已安装的 `orca-project-coordinator` skill。无需重建插件。脚本使用 `ORCA_CLI_COMMAND`（Windows 默认当前用户 Orca 安装路径），命令固定作用于本机 Orca；不接管工作间主 Run。
+需要独立 Node.js 22 或更新版本、Git，以及已安装 AgentBoat 插件的 Orca 桌面端。按主指南添加本机 Bot，在「工作间 → 设置 → 主 agent → bot」选 Bot 和代理，核对首次设置路径后点「完成首次设置并设为主 bot」。设置就绪后，打开接管对话开始协作。 [AgentBoat 接入指南](../README.md)
+
+下列管理命令从当前 Orca 配置的 `agentboat-current` 入口运行。脚本通过 `ORCA_CLI_COMMAND` 或 Orca 的默认 CLI 路径操作本机工作间。
 
 ```powershell
 node workspace/workspace.mjs init
 node workspace/workspace.mjs templates
 ```
 
-以上命令从 AgentBoat 入口目录运行。正式版入口是当前 Orca 用户数据目录下的 `agentboat-current`。首次设置通过此目录的 `setup.mjs` 安装两份 skill 和 hooks。升级会自动刷新已安装的 skill。已有安装首次启用 Antigravity，或收到 hooks 变化提醒时，重跑首次设置。
+首次设置将两份角色 skill 安装到 `~/.agents/skills/`，创建 `~/.claude/skills/` 下的目录链接（Windows 使用 junction），并写入 `~/.gemini/config/skills/` 下的 Antigravity 副本。升级会自动刷新归属当前 Orca 配置的 skill，开启新会话即可加载。首次启用 Antigravity 缺副本或收到 hooks 变化提醒时，到「主 agent」页核对路径并确认修复。入口下的 `setup.mjs` 也可用于命令行设置。 [工作间 skill 全文](skill/agentboat-workspace/SKILL.md)
 
-两份 skill 位于 `~/.agents/skills/`，Claude 通过 `~/.claude/skills/` 的目录链接读取，Windows 使用 junction。Antigravity 从 `~/.gemini/config/skills/` 读取完整副本。安装器发现 Claude 或 Antigravity 的同名位置被其他内容占用时会停止。安装后打开新的 Orca agent 会话，加载 skill 后说“开启工作间管理”。[工作间 skill 全文](skill/agentboat-workspace/SKILL.md)
+设置向 `~/.claude/settings.json` 和 `${CODEX_HOME}/hooks.json`（缺省 `~/.codex/hooks.json`）各合并三条 AgentBoat hook。用自定义 Codex 用户目录时，在「工作间 → 设置 → 主 agent → 高级选项」填入完整绝对路径，保存后核对预览。命令行入口读取终端的 `CODEX_HOME`。写入前核对同名 skill、链接和 AgentBoat hooks 的归属，保留其他设置及 hook。已有内容备份到 `~/.agentboat/backups/setup-*`，同目录记录已完成项和被替换的 hook 文件位置。
 
-安装器会向 `~/.claude/settings.json` 和 `~/.codex/hooks.json` 各合并三条 AgentBoat hook。Codex 使用自定义 `CODEX_HOME` 时写入该目录。修改前在原文件旁备份为 `*.agentboat-*.bak`，保留已有 hooks。它们只对插件已登记的 Orca 管理员会话生效。
-
-首次安装后，在 Codex CLI 输入 `/hooks`，检查源文件为用户级 `hooks.json`、命令指向本仓库 `workspace/harness/hook.mjs`，再信任 AgentBoat 的 SessionStart、PreToolUse 和 Stop 三条。安装器只写 hook 定义，信任由 Codex 在用户确认后记录。 [Codex hooks 文档](https://learn.chatgpt.com/docs/hooks)
+使用 Codex 时，确认 Codex 会话所在的 PATH 可运行 Node.js 22 或更新版本，再在该环境的 CLI 输入 `/hooks`，核对用户级 `hooks.json` 中指向 `agentboat-current/workspace/harness/hook.mjs` 的 `SessionStart`、`PreToolUse` 和 `Stop`，信任后生效。hooks 按工作间已登记的会话匹配角色。 [Codex hooks 文档](https://learn.chatgpt.com/docs/hooks)
 
 工作间管理员应逐条运行获准的管理和只读命令。需要 stdin 时可用 Bash 的输入重定向或 PowerShell 的 `Get-Content -Raw … | node …`。项目主会话用 `client.mjs submit` 登记成果，并在对应任务的 `executions` 里保留 Orca Run、任务和派工编号。
 

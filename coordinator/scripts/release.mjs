@@ -31,7 +31,7 @@ for (const [source, destination] of [
   ...['panel.html', 'panel.css', 'panel-page.ts', 'model.ts', 'task-state.mjs', 'artifact-versions.mjs', 'artifact-preview.ts', 'protocol.ts', 'feedback-drafts.ts', 'assets'].map(name => ['coordinator/plugin/src/' + name, 'src/' + name]),
   ...['client.mjs', 'lead-contact.mjs', 'orca-cli.mjs', 'cli-bridge.mjs', 'main-role-card.mjs', 'worker-reports.mjs'].map(name => ['coordinator/scripts/' + name, 'coordinator/scripts/' + name]),
   ['coordinator/scripts/setup.mjs', 'setup.mjs'],
-  ...['skill', 'LINKS.md', 'HERMES.md'].map(name => ['coordinator/' + name, 'coordinator/' + name]),
+  ...['skill', 'LINKS.md', 'FEISHU.md', 'HERMES.md'].map(name => ['coordinator/' + name, 'coordinator/' + name]),
   ...['install.mjs', 'workspace.mjs', 'agent-launch.mjs', 'project-skills.mjs', 'harness/hook.mjs', 'skill/agentboat-workspace', 'skill/agentboat-hermes', 'install-hermes.sh', 'install-hermes.ps1', 'configure-hermes.py', 'templates/code.json', 'README.md'].map(name => ['workspace/' + name, 'workspace/' + name]),
 ]) {
   cpSync(path.join(root, source), path.join(out, destination), { recursive: true });

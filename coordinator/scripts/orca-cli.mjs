@@ -45,7 +45,7 @@ export const pluginDataPath = (root = activeUserDataPath()) => path.join(root, '
 export const roleRegistryPath = (...profile) => path.join(pluginDataPath(profile.length ? userDataPath(...profile) : undefined), 'roles.json');
 
 // Orca owns current and prunes old releases. Keep our directory link outside its plugins tree.
-function linkCurrentRelease() {
+function linkCurrentRelease(repair) {
   const link = stableRoot(), current = path.join(keyDir, 'current');
   for (let attempt = 0; attempt < 3; attempt++) {
     let hash;
@@ -62,25 +62,27 @@ function linkCurrentRelease() {
       if (previous && !path.relative(previous, target)) return link;
       if (!previous || path.relative(path.dirname(previous), keyDir) || !versionHash.test(path.basename(previous)))
         throw Error(`固定入口已有其他内容，未覆盖：${link}`);
+      if (!repair) throw Error(`固定入口需要更新，请重启 AgentBoat：${link}`);
       try { unlinkSync(link); } catch (error) { if (error.code !== 'ENOENT') throw error; }
     }
+    if (!repair) throw Error(`找不到固定入口，请重新打开工作间：${link}`);
     try { symlinkSync(target, link, process.platform === 'win32' ? 'junction' : 'dir'); }
     catch (error) { if (error.code !== 'EEXIST') throw error; }
   }
   throw Error(`AgentBoat 固定入口正在更新，请稍后重试：${link}`);
 }
 
-export function installationRoot() {
+export function installationRoot({ repair = true } = {}) {
   if (!installed) return versionDir;
-  const entry = linkCurrentRelease();
+  const entry = linkCurrentRelease(repair);
   if (!entry) throw Error('找不到 AgentBoat 当前安装版本，请确认插件已启用');
   return entry;
 }
 
-export async function refreshReleaseSetup() {
+export async function refreshReleaseSetup(codexHome) {
   if (!installed) return;
   const entry = installationRoot();
   if (path.relative(versionDir, realpathSync(entry))) return;
   const { refreshInstalledSkills } = await import(pathToFileURL(path.join(entry, 'workspace/install.mjs')).href);
-  if (refreshInstalledSkills(entry)) return pluginVersionLabel();
+  if (refreshInstalledSkills(entry, undefined, codexHome)) return pluginVersionLabel();
 }

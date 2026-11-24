@@ -4,10 +4,11 @@ import { backupView, pendingBotSwitch, type BackupLeads } from './backup-lead'
 import { randomBytes, randomUUID } from 'node:crypto'
 import { existsSync } from 'node:fs'
 import { promptClientPath } from '../scripts/orca-cli.mjs'
-import type { OrcaWorkerApi } from 'orca/worker'
+import type { OrcaWorkerApi, PanelRequestContext } from 'orca/worker'
 import { defaultAgent, workspaceBackupInFlight, type AgentSession, type Delivery, type LeadSwitch, type MainTakeover, type Project, type StoredTakeover, type WorkspaceBinding } from './model'
 import type { CoordinatorRuntime } from './runtime'
 import type { AgentLaunch } from '../../workspace/agent-launch.mjs'
+import type { SetupPreview } from './protocol'
 import { ProjectStore, fail, fingerprint, takeoverActive, text, revision } from './store'
 
 const mainSecurityBoundary = 'Run 归属由会话自报；替换授权来自面板一次性凭据。同一系统用户的本机程序可读写插件数据。'
@@ -39,6 +40,7 @@ export async function switchLead(runtime: CoordinatorRuntime, input: LeadSwitch,
   subject?: string
   launch?: AgentLaunch
   startOnly?: boolean
+  prepare?: () => Promise<void>
 }) {
   const expected = revision(input.revision), { mutate, changed } = options
   async function clearPendingSoul(w: Binding, nextId?: string) {
@@ -82,6 +84,7 @@ export async function switchLead(runtime: CoordinatorRuntime, input: LeadSwitch,
   }
   if (!target) fail('目标会话或工作区已不可用，请刷新后选择')
   if (!existsSync(promptClientPath())) fail('找不到接管脚本，请检查 AgentBoat 安装')
+  if (options.prepare) await options.prepare()
   const token = randomBytes(32).toString('base64url'), id = randomUUID(), expiresAt = new Date(Date.now() + 10 * 60_000).toISOString()
   let preparationError: Error | undefined
   await mutate(async w => {
@@ -144,7 +147,18 @@ export async function switchLead(runtime: CoordinatorRuntime, input: LeadSwitch,
   changed()
 }
 
-export function mainAgent(orca: OrcaWorkerApi, store: ProjectStore, runtime: CoordinatorRuntime, changed: () => void, bound: () => void, projects: () => Promise<Project[]>, backups: BackupLeads, sample: () => import('./model').AgentsSnapshot) {
+export type WorkspaceSetup = { preview: () => SetupPreview | Promise<SetupPreview>; apply: (confirmation: string) =>
+  { completed: string[]; backup?: string } | Promise<{ completed: string[]; backup?: string }>; saveCodexHome?: (value: unknown) => Promise<string> }
+function requireSetupPanel(panel: PanelRequestContext['panel']) {
+  if (panel.id === 'orca-cli' || panel.surface !== 'panel' || panel.contributionId !== 'project-coordinator') fail('请在工作间主 agent 页面确认首次设置')
+}
+function confirmSetup(panel: PanelRequestContext['panel'], confirmation: unknown): string {
+  requireSetupPanel(panel)
+  if (typeof confirmation !== 'string' || !/^[a-f0-9]{64}$/.test(confirmation)) fail('请刷新并确认首次设置路径')
+  return confirmation
+}
+
+export function mainAgent(orca: OrcaWorkerApi, store: ProjectStore, runtime: CoordinatorRuntime, changed: () => void, bound: () => void, projects: () => Promise<Project[]>, backups: BackupLeads, sample: () => import('./model').AgentsSnapshot, setup?: WorkspaceSetup) {
   async function read(sample?: import('./model').AgentsSnapshot, list?: Project[]): Promise<WorkspaceBinding> {
     const w = await store.workspace()
     const takeover = takeoverView(w.takeover)
@@ -239,19 +253,44 @@ export function mainAgent(orca: OrcaWorkerApi, store: ProjectStore, runtime: Coo
     const agentWorkspace = (t.workspaces.find(w => w.workspace === input?.workspace) ?? t.workspaces[0])?.workspace ?? ''
     const [bots, availableAgents] = await Promise.all([runtime.bots?.list().catch(() => undefined),
       agentWorkspace ? runtime.installedAgents(agentWorkspace, true).catch(() => null) : []])
-    return { workspaces: t.workspaces, agentWorkspace, availableAgents, ...(bots ? { bots } : {}), sessions: t.sessions.filter(s => s.online === 'online') }
+    const projectUsesCodex = setup && (await store.all()).some(p => !p.hidden && p.ref.hostId === 'local' &&
+      [p.leadAgents?.primary?.agent, p.leadAgents?.backup?.agent, p.mainSession?.agent, p.backup?.agent].includes('codex'))
+    return { workspaces: t.workspaces, agentWorkspace, availableAgents, ...(bots ? { bots } : {}), sessions: t.sessions.filter(s => s.online === 'online'),
+      ...(setup ? { setup: await setup.preview(), projectUsesCodex: !!projectUsesCodex } : {}) }
   })
-  orca.panels.handle('workspace.agent.switch', async input => {
+  orca.panels.handle('workspace.setup', async (input, { panel }) => {
+    if (!setup) fail('首次设置不可用，请检查 AgentBoat 安装')
+    const result = await setup.apply(confirmSetup(panel, input?.confirmation))
+    changed()
+    return result
+  })
+  orca.panels.handle('workspace.setup.codexHome', async (input, { panel }) => {
+    requireSetupPanel(panel)
+    if (!setup?.saveCodexHome) fail('无法保存 CODEX_HOME，请检查 AgentBoat 安装')
+    const path = await setup.saveCodexHome(input?.path)
+    changed()
+    return { path }
+  })
+  orca.panels.handle('workspace.agent.switch', async (input, { panel }) => {
     const w = await store.workspace()
     const expected = revision(input.revision)
     if (w.revision !== expected) fail('工作间已更新，请刷新后再提交')
-    if (input.mode === 'bot' && w.bot && w.bot.id === input.botId) {
+    if (input.mode === 'bot' && w.runId && w.bot && w.bot.id === input.botId) {
       try { await backups.chooseBotAgent(w, w.bot.id, text(input.agent, '代理', 100)) }
       finally { await flushRetired() }
       return read()
     }
     await switchLead(runtime, input, {
       role: 'workspace',
+      prepare: setup && input.mode !== 'cancel' && (!w.runId || input.setupConfirmation !== undefined) ? async () => {
+        if (input.setupConfirmation !== undefined) {
+          await setup.apply(confirmSetup(panel, input.setupConfirmation))
+          return
+        }
+        const preview = await setup.preview()
+        if (preview.error) fail(preview.error)
+        if (preview.confirmation) fail('请刷新并确认首次设置路径')
+      } : undefined,
       targets: () => runtime.targets(), mutate: (update, expected) => store.mutateWorkspace(row => {
         if (input.mode !== 'cancel' && (pendingBotSwitch(row) || workspaceBackupInFlight(row.backup))) fail('请等当前工作间接管结束')
         return update(row)
