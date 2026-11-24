@@ -6,13 +6,24 @@ import os from 'node:os';
 import { pathToFileURL } from 'node:url';
 import fs from 'node:fs';
 import { syncBuiltinESMExports } from 'node:module';
-import { install, refreshInstalledSkills } from './install.mjs';
+import { applySetup, previewSetup, refreshInstalledSkills, skillTargets } from './install.mjs';
+import { installationRoot } from '../coordinator/scripts/orca-cli.mjs';
+
+const options = (home, codexHome = path.join(home, '.codex')) => ({ home, env: { ...process.env, CODEX_HOME: codexHome } });
+function install(home, codexHome, preview = previewSetup, apply = applySetup) {
+  const config = options(home, codexHome);
+  const plan = preview(config);
+  if (plan.error) throw Error(plan.error);
+  return apply(plan.confirmation, config);
+}
 
 function refreshFixture(t) {
   const home = mkdtempSync(path.join(os.tmpdir(), 'agentboat-refresh-'));
   t.after(() => rmSync(home, { recursive: true, force: true }));
   const codex = path.join(home, 'custom-codex');
-  const { repository, skills } = install(home, codex);
+  install(home, codex);
+  const repository = installationRoot().replaceAll('\\', '/'), skills = skillTargets(home);
+  rmSync(path.join(home, '.agentboat/backups'), { recursive: true });
   return { home, codex, repository, skills, refresh: () => refreshInstalledSkills(repository, home, codex),
     backups: path.join(home, '.agentboat/backups') };
 }
@@ -122,7 +133,7 @@ test('hook drift compares owned events, matchers and commands without writing ei
     assert.equal(refresh(), false);
     for (const mutate of [
       x => { x.hooks.SessionStart[0].matcher = 'wrong'; },
-      x => { x.hooks.Stop[0].hooks[0].command = 'wrong'; },
+      x => { x.hooks.Stop[0].hooks[0].timeout = 90; },
       x => { x.hooks.OtherEvent = x.hooks.SessionStart; },
       x => { delete x.hooks.PreToolUse; }
     ]) {
@@ -134,6 +145,104 @@ test('hook drift compares owned events, matchers and commands without writing ei
     }
     writeFileSync(file, original);
   }
+});
+
+test('setup refuses unknown skills and each foreign profile target before any write', t => {
+  const { home, codex, repository, skills, backups } = refreshFixture(t);
+  const config = options(home, codex), other = path.join(home, 'other-profile/agentboat-current');
+  const settings = path.join(home, '.claude/settings.json'), hooks = path.join(codex, 'hooks.json');
+  const shared = path.join(skills[1].installed, 'SKILL.md'), agy = path.join(skills[1].antigravity, 'SKILL.md');
+  const foreign = path.join(other, 'workspace/harness/hook.mjs');
+  const change = [
+    [shared, () => 'personal skill'],
+    [shared, original => original.replaceAll(repository, other.replaceAll('\\', '/'))],
+    [agy, original => original.replaceAll(repository, other.replaceAll('\\', '/'))],
+    [settings, original => {
+      const config = JSON.parse(original);
+      config.hooks.Stop[0].hooks[0].args[0] = foreign;
+      return JSON.stringify(config);
+    }],
+    [hooks, original => {
+      const config = JSON.parse(original);
+      config.hooks.Stop[0].hooks[0].command = `node "${foreign.replaceAll('\\', '/')}" --agentboat-role-harness --codex`;
+      return JSON.stringify(config);
+    }]
+  ];
+  const firstSkill = path.join(skills[0].installed, 'SKILL.md');
+  writeFileSync(firstSkill, readFileSync(firstSkill, 'utf8') + '\nold');
+  const preview = previewSetup(config);
+  assert.ok(preview.confirmation && preview.paths.includes(skills[0].installed));
+  for (const [file, replace] of change) {
+    const original = readFileSync(file, 'utf8'), foreignContent = replace(original);
+    assert.notEqual(foreignContent, original);
+    writeFileSync(file, foreignContent);
+    const conflict = previewSetup(config);
+    assert.ok(conflict.error.includes(file.endsWith('SKILL.md') ? path.dirname(file) : file), conflict.error);
+    assert.equal(conflict.confirmation, undefined);
+    assert.throws(() => applySetup(preview.confirmation, config), /归属未知|其他 Orca 配置/);
+    assert.equal(readFileSync(file, 'utf8'), foreignContent);
+    assert.match(readFileSync(firstSkill, 'utf8'), /old$/);
+    assert.ok(!fs.existsSync(backups));
+    writeFileSync(file, original);
+  }
+});
+
+test('Node diagnosis and a fresh preview stay read-only', t => {
+  const home = mkdtempSync(path.join(os.tmpdir(), 'agentboat-preview-'));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const config = options(home, path.join(home, 'custom-codex'));
+  const preview = previewSetup(config);
+  assert.equal(preview.paths.length, 8);
+  assert.ok(preview.paths.includes(path.join(config.env.CODEX_HOME, 'hooks.json')));
+  const withoutPath = Object.fromEntries(Object.entries(config.env).filter(([key]) => key.toUpperCase() !== 'PATH'));
+  const blocked = previewSetup({ home, env: withoutPath });
+  assert.match(blocked.error, /独立 Node\.js ≥22.*PATH.*重启 Orca/);
+  assert.deepEqual(readdirSync(home), []);
+});
+
+test('setup serializes callers, preserves a last-minute hook edit and retries from its partial receipt', t => {
+  const home = mkdtempSync(path.join(os.tmpdir(), 'agentboat-setup-race-'));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const config = options(home), settings = path.join(home, '.claude/settings.json'), hooks = path.join(home, '.codex/hooks.json');
+  const personal = '{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"keep this edit"}]}]}}';
+  const initial = '{"model":"fixture"}';
+  mkdirSync(path.dirname(hooks), { recursive: true });
+  writeFileSync(hooks, initial);
+  const stale = previewSetup(config);
+  writeFileSync(hooks, personal);
+  assert.throws(() => applySetup(stale.confirmation, config), /已更改/);
+  assert.ok(!fs.existsSync(path.join(home, '.agents')));
+  writeFileSync(hooks, initial);
+  const preview = previewSetup(config), write = fs.writeFileSync;
+  let raced = false;
+  const inject = t.mock.method(fs, 'writeFileSync', (file, ...args) => {
+    write(file, ...args);
+    if (!raced && typeof file === 'string' && file.startsWith(hooks + '.') && file.endsWith('.tmp')) {
+      raced = true;
+      assert.throws(() => applySetup(preview.confirmation, config), /另一次 AgentBoat 设置/);
+      write(hooks, personal);
+    }
+  });
+  syncBuiltinESMExports();
+  let backup;
+  try {
+    assert.throws(() => applySetup(preview.confirmation, config), error => {
+      assert.ok(error.message.includes(hooks));
+      assert.ok(error.message.includes(settings));
+      backup = /备份位置：(.+)$/.exec(error.message)?.[1];
+      return !!backup;
+    });
+  } finally { inject.mock.restore(); syncBuiltinESMExports(); }
+  assert.equal(readFileSync(hooks, 'utf8'), personal);
+  assert.equal(readFileSync(path.join(backup, '.codex/hooks.json'), 'utf8'), initial);
+  const completed = readFileSync(path.join(backup, 'completed.jsonl'), 'utf8').trim().split('\n').map(line => JSON.parse(line));
+  assert.equal(completed.length, 7);
+  assert.ok(completed.includes(settings));
+  const retry = previewSetup(config);
+  assert.deepEqual(retry.paths, [hooks]);
+  assert.deepEqual(applySetup(retry.confirmation, config).completed, [hooks]);
+  assert.deepEqual(JSON.parse(readFileSync(hooks, 'utf8')).hooks.Stop[0], JSON.parse(personal).hooks.Stop[0]);
+  assert.equal(readFileSync(path.join(backup, '.codex/hooks.json'), 'utf8'), initial);
 });
 
 test('installer renders both skills in a moved repository, links Claude and copies to Antigravity', async () => {
@@ -149,7 +258,7 @@ test('installer renders both skills in a moved repository, links Claude and copi
     cpSync(new URL('./harness', import.meta.url), path.join(repo, 'workspace/harness'), { recursive: true });
     cpSync(new URL('./skill', import.meta.url), path.join(repo, 'workspace/skill'), { recursive: true });
     cpSync(new URL('../coordinator/skill', import.meta.url), path.join(repo, 'coordinator/skill'), { recursive: true });
-    const { install } = await import(pathToFileURL(path.join(repo, 'workspace/install.mjs')));
+    const moved = await import(pathToFileURL(path.join(repo, 'workspace/install.mjs')));
     const settingsFile = path.join(home, '.claude/settings.json');
     mkdirSync(path.dirname(settingsFile), { recursive: true });
     const settings = { theme: 'dark', hooks: { SessionStart: [{ hooks: [{ type: 'command', command: 'ponytail' }] }],
@@ -166,8 +275,13 @@ test('installer renders both skills in a moved repository, links Claude and copi
     const originalCodex = JSON.stringify(existing, null, 3);
     writeFileSync(codexFile, originalCodex);
     writeFileSync(config, 'model = "fixture"\n[hooks.state]\n');
-    const result = install(home);
-    assert.equal(result.skills.length, 2);
+    const originalExec = process.execPath;
+    let result;
+    try {
+      process.execPath = path.join(temp, 'orca-electron.exe');
+      result = install(home, undefined, moved.previewSetup, moved.applySetup);
+    } finally { process.execPath = originalExec; }
+    assert.equal(result.completed.length, 8);
     function check(dir) {
       for (const e of readdirSync(dir, { withFileTypes: true })) {
         const file = path.join(dir, e.name);
@@ -175,7 +289,7 @@ test('installer renders both skills in a moved repository, links Claude and copi
         else if (file.endsWith('.md')) assert.doesNotMatch(readFileSync(file, 'utf8'), /\{\{AGENTBOAT_REPO\}\}|[DC]:[\\/]AIGroup[\\/]AgentBoat|%APPDATA%/);
       }
     }
-    for (const { installed, claudeLink, antigravity } of result.skills) {
+    for (const { installed, claudeLink, antigravity } of moved.skillTargets(home)) {
       assert.equal(realpathSync(claudeLink), realpathSync(installed));
       assert.equal(antigravity, path.join(home, '.gemini/config/skills', path.basename(installed)));
       assert.ok(fs.lstatSync(antigravity).isDirectory());
@@ -195,7 +309,7 @@ test('installer renders both skills in a moved repository, links Claude and copi
     for (const event of ['SessionStart', 'PreToolUse', 'Stop']) {
       assert.deepEqual(installed.hooks[event].slice(0, -1), settings.hooks[event] ?? []);
       const { command, args, onFailure } = installed.hooks[event].at(-1).hooks[0];
-      assert.equal(command, process.execPath);
+      assert.equal(realpathSync(command), realpathSync(originalExec));
       assert.equal(realpathSync(args[0]), realpathSync(path.join(repo, 'workspace/harness/hook.mjs')));
       assert.equal(onFailure, 'continue');
     }
@@ -206,16 +320,12 @@ test('installer renders both skills in a moved repository, links Claude and copi
       assert.deepEqual(codexHooks.hooks[event].slice(0, -1), existing.hooks[event]);
       assert.match(codexHooks.hooks[event].at(-1).hooks[0].command, /harness\/hook\.mjs['"] --agentboat-role-harness --codex$/);
     }
-    const codexBackups = () => readdirSync(path.dirname(codexFile)).filter(name => name.endsWith('.bak'));
-    assert.equal(codexBackups().length, 1);
-    assert.equal(readFileSync(path.join(path.dirname(codexFile), codexBackups()[0]), 'utf8'), originalCodex);
-    const backups = () => readdirSync(path.dirname(settingsFile)).filter(name => name.endsWith('.bak'));
-    assert.equal(backups().length, 1);
-    assert.equal(readFileSync(path.join(path.dirname(settingsFile), backups()[0]), 'utf8'), original);
-    assert.deepEqual(install(home), result);
+    const backups = () => readdirSync(path.dirname(result.backup));
+    assert.equal(readFileSync(path.join(result.backup, '.codex/hooks.json'), 'utf8'), originalCodex);
+    assert.equal(readFileSync(path.join(result.backup, '.claude/settings.json'), 'utf8'), original);
+    assert.deepEqual(install(home, undefined, moved.previewSetup, moved.applySetup), { completed: [] });
     assert.equal(readFileSync(settingsFile, 'utf8'), updated);
     assert.equal(readFileSync(codexFile, 'utf8'), codex);
-    assert.equal(codexBackups().length, 1);
     assert.equal(readFileSync(config, 'utf8'), 'model = "fixture"\n[hooks.state]\n');
     assert.equal(backups().length, 1);
     const foreignHome = path.join(temp, 'foreign-home');
@@ -228,7 +338,7 @@ test('installer renders both skills in a moved repository, links Claude and copi
     mkdirSync(foreign, { recursive: true });
     const personal = path.join(foreign, 'SKILL.md');
     writeFileSync(personal, '---\nname: orca-project-coordinator\n---\nPersonal skill');
-    assert.throws(() => install(agyHome), /Antigravity 位置已有其他内容/);
+    assert.throws(() => install(agyHome), /归属未知/);
     assert.equal(readFileSync(personal, 'utf8'), '---\nname: orca-project-coordinator\n---\nPersonal skill');
     assert.equal(fs.existsSync(path.join(agyHome, '.agents')), false);
   } finally {

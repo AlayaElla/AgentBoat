@@ -14,6 +14,7 @@ function fixture(t) {
   const temp = mkdtempSync(path.join(os.tmpdir(), 'agentboat-stable-'));
   t.after(() => rmSync(temp, { recursive: true, force: true }));
   const profile = path.join(temp, 'Orca profile'), home = path.join(temp, 'home');
+  mkdirSync(home);
   const key = path.join(profile, 'plugins', pluginKey), stable = path.join(profile, 'agentboat-current');
   const env = { ...process.env, HOME: home, USERPROFILE: home, CODEX_HOME: path.join(home, '.codex'),
     ORCA_USER_DATA_PATH: profile, AGENTBOAT_HOME: path.join(home, '.agentboat'), ORCA_AGENT_SESSION_ID: '' };
@@ -112,7 +113,7 @@ test('one setup survives two worker upgrades, old version pruning and separate O
 
 test('entry refuses occupied files, directories and foreign directory links', async t => {
   const { temp, stable, run, version } = fixture(t);
-  const install = path.join(version('a'), 'workspace/install.mjs');
+  const install = path.join(version('a'), 'setup.mjs');
   writeFileSync(stable, 'keep');
   await assert.rejects(run([install]), /固定入口已有其他内容/);
   assert.equal(readFileSync(stable, 'utf8'), 'keep');
@@ -124,9 +125,9 @@ test('entry refuses occupied files, directories and foreign directory links', as
   rmSync(stable, { recursive: true });
   symlinkSync(other, stable, process.platform === 'win32' ? 'junction' : 'dir');
   await assert.rejects(run([install]), /固定入口已有其他内容/);
-  const cli = path.join(path.dirname(install), '../coordinator/scripts/orca-cli.mjs');
+  const cli = path.join(path.dirname(install), 'coordinator/scripts/orca-cli.mjs');
   const { promptClientPath } = await import(pathToFileURL(cli));
-  assert.equal(promptClientPath(), path.resolve(path.dirname(install), '..', client));
+  assert.equal(promptClientPath(), path.resolve(path.dirname(install), client));
   assert.equal(realpathSync(stable), other);
 });
 

@@ -37,6 +37,7 @@ body{margin:0}
 .h1{margin:0;font-size:16px;line-height:24px;font-weight:600}
 .h2{margin:0;font-size:14px;line-height:20px;font-weight:600}
 .sec{display:flex;flex-direction:column;gap:8px;min-width:0}
+.setup-paths{margin:0;padding-inline-start:20px;overflow-wrap:anywhere}
 .sec-h{display:flex;align-items:center;gap:8px;min-height:24px}
 
 /* 按钮：照 Orca 的 Button。主按钮是 default 变体（主色实底）；文字按钮是 ghost；危险操作是 destructive。
