@@ -10,6 +10,7 @@ import { artifactChunkBytes, fileChunkBytes, maxLinkFileBytes } from './link-fil
 import type { OrcaWorkerApi } from 'orca/worker'
 import type { ArtifactProgress } from './link-artifacts'
 import { WorkspaceLinks, endpoint, invitationHost, report } from './links'
+import { roleReminder } from './main-agent'
 import { refs, sample } from './fixtures'
 import { fingerprint, fresh, type FeedbackItem } from './store'
 import type { LiveAgent } from './model'
@@ -115,7 +116,7 @@ test('delegated feedback applies once in both directions and rechecks sharing on
     assert.deepEqual(replies.map(e => [e.text, e.taskId, e.senderId]), [['已经做好了', decision.id, '主人在工作间 乙工作间 提交']])
     assert.deepEqual(a.notices.map(([run]) => run).sort(), ['run_example', 'workspace-甲工作间'])
     assert.ok(a.notices.every(([, body]) => body.includes('主人在工作间 乙工作间 提交')))
-    assert.ok(a.notices.find(([run]) => run === 'run_example')![1].endsWith('提醒：实现交给执行者，成果用 submit 登记待验收。'))
+    assert.ok(a.notices.find(([run]) => run === 'run_example')![1].endsWith(roleReminder.project))
     assert.ok(!a.notices.find(([run]) => run === 'workspace-甲工作间')![1].includes('提醒：'))
     assert.ok((await a.c.store.get('p1')).deliveries.every(d => !d.body.includes('你是工作间管理员') && !d.body.includes('你是项目管理员')))
 
