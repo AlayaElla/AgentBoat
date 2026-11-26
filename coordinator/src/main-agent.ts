@@ -13,8 +13,8 @@ import { ProjectStore, fail, fingerprint, takeoverActive, text, revision } from 
 
 const mainSecurityBoundary = 'Run 归属由会话自报；替换授权来自面板一次性凭据。同一系统用户的本机程序可读写插件数据。'
 export const roleReminder = {
-  workspace: '提醒：你是工作间管理员，项目里的活交给项目主会话。',
-  project: '提醒：实现交给执行者，成果用 submit 登记待验收。'
+  workspace: '提醒：你是工作间管理员，项目里的活交给项目主会话。已有同一待验收或待决定时，沿用原项。',
+  project: '提醒：实现交给执行者，成果用 submit 登记待验收。等待已有验收或决定的后续任务，在进度里注明原事项。'
 }
 
 export function takeoverView(t?: StoredTakeover): MainTakeover | undefined {

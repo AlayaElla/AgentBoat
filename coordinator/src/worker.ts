@@ -210,8 +210,8 @@ export function createCoordinator(api: OrcaWorkerApi, runtime: CoordinatorRuntim
           ['sent', 'uncertain'].includes(first.state) && now - first.runNotice.attemptedAt >= escalationWait && !records.has(escalatedId)
         if (first && !escalate) return []
         const project = currentRuns.get(mail.projectId)!, label = mail.report ? '执行者回报待提交' : '执行者问题待回复'
-        const action = escalate ? '请联系项目主会话核对，由你判断是否需要告诉主人。'
-          : mail.report ? '请核对成果并用 submit 登记。' : '请核对原问题并回复，确需主人处理时请登记为受阻或待决定。'
+        const action = escalate ? '请联系项目主会话核对。已有同一验收或决定时沿用原项，请项目主会话回复执行者。由你判断是否需要告诉主人。'
+          : mail.report ? '请核对成果并用 submit 登记。' : '请核对待处理事项并回复原问题。已有同一验收或决定时，回复原任务和事项编号。确需主人另做操作时，再登记对应事项。'
         return [{ id: escalate ? escalatedId : firstId, noticeKeys: [key], state: 'pending', ...(!escalate ? { targetRunId: mail.runId } : {}),
           runNotice: { stage: escalate ? 'workspace' : 'project', projectId: mail.projectId, runId: mail.runId },
           subject: `${project.ref.name} · ${label}`.slice(0, 200),

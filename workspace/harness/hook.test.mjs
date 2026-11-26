@@ -54,8 +54,8 @@ test('Claude role hooks scope actions by Orca identity and fail open', () => {
     }
     for (const source of ['startup', 'resume', 'compact', 'clear']) {
       const session = id => run(id, { hook_event_name: 'SessionStart', source }).decision?.hookSpecificOutput?.additionalContext;
-      assert.match(session('claude_workspace'), /工作间管理员.*[\s\S]+工作间待处理 1 组/);
-      assert.match(session('claude_project'), /项目管理员.*[\s\S]+待验收 1 项/);
+      assert.match(session('claude_workspace'), /工作间管理员.*同一待验收或待决定沿用原事项[\s\S]+工作间待处理 1 组/);
+      assert.match(session('claude_project'), /项目管理员.*等待已有验收或决定的后续任务沿用原事项[\s\S]+待验收 1 项/);
       assert.equal(session('claude_worker'), undefined);
     }
     assert.equal(run('claude_workspace', 'bad input').decision, null);
@@ -194,7 +194,8 @@ test('Claude role hooks scope actions by Orca identity and fail open', () => {
     setTranscript(question('msg_code', '测试文件放在哪？'));
     assert.equal(stop(), undefined);
     setTranscript(question());
-    assert.match(run('claude_project', { hook_event_name: 'Stop', transcript_path: transcript }).decision.reason, /主人.*submit/);
+    assert.match(run('claude_project', { hook_event_name: 'Stop', transcript_path: transcript }).decision.reason,
+      /先用 read.*orca orchestration reply.*沿用原项.*另做操作时，用 submit/);
     assert.equal(stop(true), undefined);
     for (const [reply, blocked] of [[receipt('working'), true], [receipt('blocked', 'p2'), true],
       [receipt('blocked'), false], [receipt('working', 'p1', false, true), false]]) {
@@ -203,6 +204,14 @@ test('Claude role hooks scope actions by Orca identity and fail open', () => {
     }
     const reply = (id = 'msg_owner', body = '--body "处理好了 | > ;"') => assistant('reply', `orca orchestration reply --id ${id} ${body} --json`);
     const accepted = '{"ok":true,"result":{"messageId":"msg_reply_receipt"}}';
+    for (const [kind, reference] of [['验收', 'car-render / check-render（第 1 版）'], ['决定', 'choose-style / style']]) {
+      const awaiting = question('msg_owner', `请主人处理${kind}后继续。`);
+      setTranscript(awaiting, submit, result('call', receipt('paused')));
+      assert.equal(stop(), 'block');
+      setTranscript(awaiting, submit, result('call', receipt('paused')),
+        reply('msg_owner', `--body "等待原${kind} ${reference} 处理后继续。"`), result('reply', accepted));
+      assert.equal(stop(), undefined);
+    }
     for (const [id, output, failed, blocked] of [['msg_wrong', accepted, false, true], ['msg_owner', '{"ok":false}', false, true],
       ['msg_owner', accepted, true, true], ['msg_owner', accepted, false, false], ['msg_owner', 'Replied msg_reply_receipt', false, false]]) {
       setTranscript(question(), reply(id), result('reply', output, failed));

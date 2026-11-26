@@ -26,7 +26,7 @@ const rules = {
 };
 const redirect = '你是工作间管理员：这类操作交给项目主会话（client.mjs message）或用 workspace.mjs dispatch 派 agent。';
 const stopReason = '执行者已回报：先核对成果，用 submit 交成待验收（或写明不需要验收的原因、标 completed），再结束。';
-const questionReason = '有执行者的问题需要主人处理：请先用 submit 登记受阻或待决定，写清主人要做什么，或回复原问题。';
+const questionReason = '有执行者的问题可能需要主人处理。先用 read 核对待处理事项，用 orca orchestration reply 回复原问题。已有同一验收或决定时沿用原项，在回复里注明原任务和事项编号。确需主人另做操作时，用 submit 登记对应事项。';
 const diagnostic = error => console.error('AgentBoat hook：' + (error.code || error.name || '读取失败'));
 const same = (a, b) => path.relative(a, b) === '';
 const inside = (root, file) => {
