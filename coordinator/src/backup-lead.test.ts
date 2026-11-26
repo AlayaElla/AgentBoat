@@ -30,7 +30,7 @@ async function fixture(project: Project, workspace?: Workspace, exports?: string
     quotaHistory: undefined as Parameters<typeof projectLeadQuotaReceipt>[0],
     contactRoute: { dispatch: 'ctx_contact' } as ContactRoutes[string], launchHandle: 'orca_session_id:backup',
     catalogReads: 0, contacts: [] as string[], mailRuns: [] as string[], mailFailed: false, failedDelivery: '', attemptedDelivery: undefined as Delivery | undefined,
-    controls: [] as { handle: string; prompt: string }[], deliveries: [] as string[], reports: [] as any[] }
+    controls: [] as { handle: string; prompt: string }[], deliveries: [] as string[], sentDeliveries: [] as Delivery[], reports: [] as any[] }
   let c!: ReturnType<typeof testCoordinator>
   const worker = await mountWorker({ default: api => {
     c = testCoordinator(api, {
@@ -57,6 +57,7 @@ async function fixture(project: Project, workspace?: Workspace, exports?: string
       },
       requestTakeover: async (handle, prompt) => { env.controls.push({ handle, prompt }) },
       send: async (run, d) => {
+        env.sentDeliveries.push(d)
         env.deliveries.push([run, env.owner, d.subject].join('|'))
         if (d.id === env.failedDelivery) {
           env.attemptedDelivery = (await c.store.get(project.ref.id)).deliveries.find(row => row.id === d.id)
@@ -473,22 +474,25 @@ test('在线 Antigravity 额度失败从原 Run 一次接管，保留已读但�
   const sourceId = 'workspace-agent:' + fingerprint('first-request')
   receiveEvent(p, { id: sourceId, source: 'workspace-agent', sourceId: 'first-request', threadId: sourceId,
     chatId: '', senderId: 'run_workspace', text: '第一条请求', receivedAt: new Date(now - 500).toISOString() })
-  const delivery = p.deliveries[0]
-  Object.assign(delivery, { state: 'sent', targetRunId: p.runId })
   submitTask(p, { id: 'old', title: '现有任务', goal: '沿用原任务', phase: 'working',
     executions: [{ runId: p.runId, taskId: 'task_existing', dispatchId: 'ctx_existing', agent: 'claude' }] })
   const { env, poll, command, c, close } = await fixture(p, undefined, undefined, main)
   env.sessions.push(standby)
-  const sessionId = 'antigravity_lead'
-  const mail = { kind: 'message', role: 'user', blocks: [{ type: 'text', text: `Orca mail\n${delivery.body}` }],
-    from: { kind: 'agent', orchestration: { message: 'mail-notice', mailbox: `run:${p.runId}`, messages: [{ messageId: 'msg_first', runId: p.runId,
-      from: 'plugin:alayaella.agentboat', content: { body: [10, 10 + delivery.body.length] } }] } } }
-  const scope = { kind: 'turn', turnItemId: 'latest-turn' }
-  const failure = { kind: 'status', tone: 'error', text: 'Individual quota reached' }
-  const turn = { state: 'completed', outcome: 'failure', completedAt: now, userItemId: 'orca:prompt' }
-  const reply = { ok: true, page: { sessionId, working: false, actionablePromptIds: [],
-    latestTurn: { itemId: scope.turnItemId, turn }, items: [{ itemId: turn.userItemId, body: mail }, { turnScope: scope, body: failure }] } }
   try {
+    await c.flush(p.ref.id)
+    const delivery = (await c.store.get(p.ref.id)).deliveries.find(d => d.id === sourceId)!
+    assert.equal(delivery.state, 'sent')
+    const sent = env.sentDeliveries.find(d => d.id === sourceId)!
+    assert.ok(sent.body.startsWith(delivery.body + '\n\n') && sent.body.length > delivery.body.length + 2)
+    const sessionId = 'antigravity_lead'
+    const mail = { kind: 'message', role: 'user', blocks: [{ type: 'text', text: `Orca mail\n${sent.body}` }],
+      from: { kind: 'agent', orchestration: { message: 'mail-notice', mailbox: `run:${p.runId}`, messages: [{ messageId: 'msg_first', runId: p.runId,
+        from: 'plugin:alayaella.agentboat', content: { body: [10, 10 + sent.body.length] } }] } } }
+    const scope = { kind: 'turn', turnItemId: 'latest-turn' }
+    const failure = { kind: 'status', tone: 'error', text: 'Individual quota reached' }
+    const turn = { state: 'completed', outcome: 'failure', completedAt: now, userItemId: 'orca:prompt' }
+    const reply = { ok: true, page: { sessionId, working: false, actionablePromptIds: [],
+      latestTurn: { itemId: scope.turnItemId, turn }, items: [{ itemId: turn.userItemId, body: mail }, { turnScope: scope, body: failure }] } }
     for (const page of [
       { ...reply.page, latestTurn: { ...reply.page.latestTurn, turn: { ...turn, outcome: 'success' } } },
       { ...reply.page, items: [reply.page.items[0], { turnScope: scope, body: { ...failure, text: 'Connection lost' } }] },
@@ -502,7 +506,7 @@ test('在线 Antigravity 额度失败从原 Run 一次接管，保留已读但�
     assert.equal(projectLeadQuotaReceipt(reply, sessionId, 'run_other'), undefined)
     assert.deepEqual(projectLeadQuotaReceipt({ ...reply, page: { ...reply.page,
       items: [reply.page.items[0], { turnScope: scope, body: { kind: 'status', failure: { kind: 'usageLimitReached' } } }] } }, sessionId, p.runId),
-    { completedAt: now, sourceBodyHashes: [fingerprint(delivery.body)] })
+    { completedAt: now, sourceBodyHashes: [fingerprint(sent.body)] })
     env.quotaHistory = reply
     env.generation = 2
     await poll()
@@ -512,7 +516,8 @@ test('在线 Antigravity 额度失败从原 Run 一次接管，保留已读但�
     await poll(); await poll()
     assert.deepEqual(env.controls.map(c => c.handle), [standby.handle])
     const prompt = env.controls[0].prompt
-    assert.ok(prompt.includes(`lead-take ${p.runId} `) && prompt.includes(sourceId) && prompt.includes(' --full') && prompt.includes('ctx_existing'))
+    assert.ok(prompt.includes(`lead-take ${p.runId} `) && prompt.includes(' --full') && prompt.includes('ctx_existing'))
+    assert.ok(prompt.includes(`本轮未登记来源：${sourceId}。`))
     assert.deepEqual(await command('take'), { useRun: p.runId })
     env.generation++
     const receipt = { confirm: true, currentRunId: p.runId, generation: env.generation }
@@ -525,6 +530,7 @@ test('在线 Antigravity 额度失败从原 Run 一次接管，保留已读但�
     assert.deepEqual(after.tasks, p.tasks)
     assert.deepEqual(after.events, p.events)
     assert.deepEqual(after.deliveries.find(d => d.id === sourceId), delivery)
+    assert.equal(env.sentDeliveries.filter(d => d.id === sourceId).length, 1)
     assert.equal(env.launches.length, 0)
   } finally { await close() }
 })

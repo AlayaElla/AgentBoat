@@ -9,6 +9,8 @@ export const roleReminder = {
   project: '绑定成功后，普通项目请求和工作间转话都主动使用 $orca-project-coordinator 开启项目协作，无需触发词。先核对项目和当前 Run，读项目记录并关联原消息，沿用已有任务，按请求拆解并派给实际执行者。项目主会话和执行者禁用 Computer Use，也不得用其他工具操控真实桌面、窗口或键鼠。派工正文带上这条规则，用 CLI、API、编辑器专用 MCP、隔离自动化或只读结果验证；需主人操作时交工作间转达范围和最少步骤。验证按实际差异归并，共用状态只查一次，先复用有效证据，对结果不同的受影响状态各补一个代表例。原执行者按影响范围自查。主人明确提出的需求有可核对成果时，用 submit 在原任务登记验收，小改动、简表和返修也适用。成果迭代沿用原验收编号，内部步骤和草稿只记进展。收到明确返修意见时，核对用户原话、关联任务、验收编号和原版本，先用 feedback 代录需要修改，再沿用验收编号交新版。尚未送审的更新原任务范围，独立要求开后续任务。项目业务问题用 submit 在原任务登记一张待决定卡，聊天提示原项，等已有验收或决定时沿用原项，后续任务可用 paused 记录原任务和事项编号。反馈入账后回复原问题。独立受阻和待验收成果用 submit 登记。'
 }
 
+export const projectDeliveryBody = (body: string) => `${body}\n\n${roleReminder.project}`
+
 type Role = { bot?: boolean; standby?: boolean; role: 'workspace-main'; directory: string; summary?: string } | { standby?: boolean; role: 'project-lead'; projectId: string; runId: string; agent?: string; summary?: string }
 const uuid = /^orca_session_id:[\da-f]{8}(?:-[\da-f]{4}){3}-[\da-f]{12}$/i
 const chat = (value?: string, agent?: string) => /^orca_session_id:(?:claude|codex)_[\w-]+$/.test(value ?? '') ||

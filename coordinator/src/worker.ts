@@ -23,7 +23,7 @@ import { projectAgentLaunch, projectLeadAgents, projectTemplate, templateLeadPre
 import { promptClientPath, refreshReleaseSetup, pluginVersionLabel, release, roleRegistryPath } from '../scripts/orca-cli.mjs'
 import { cliBridge } from '../scripts/cli-bridge.mjs'
 import { applyDelta, type Sheets } from './feedback-drafts'
-import { roleRegistry } from './role-registry'
+import { projectDeliveryBody, roleRegistry } from './role-registry'
 import { escalationWait } from '../scripts/worker-reports.mjs'
 import { businessQuestion, questionSourceId } from '../scripts/orca-questions.mjs'
 import type { ProjectArtifactRef } from './protocol'
@@ -612,7 +612,7 @@ export function createCoordinator(api: OrcaWorkerApi, runtime: CoordinatorRuntim
   }
   async function sendDelivery(d: Delivery, role: keyof typeof roleReminder, fallbackRunId = '') {
     if (d.external) return { messageId: await sources.send(d) }
-    const body = role === 'project' && !d.id.startsWith('retired:') ? `${d.body}\n\n${roleReminder.project}` : d.body
+    const body = role === 'project' && !d.id.startsWith('retired:') ? projectDeliveryBody(d.body) : d.body
     const run = d.targetRunId || fallbackRunId
     return role === 'workspace' ? main.deliver(run, { ...d, body }) : runtime.send(run, { ...d, body })
   }

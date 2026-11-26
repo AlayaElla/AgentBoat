@@ -5,7 +5,7 @@ import { promptClientPath } from '../scripts/orca-cli.mjs'
 import { awaitingLeadControl, expectedPhases, backupInCharge, workspaceBackupInFlight, type AgentSession, type BackupLead, type BotTarget, type ContactRoutes, type Delivery, type LeadAction, type Project, type Workspace } from './model'
 import { targetOnline, type CoordinatorRuntime, type TargetInventory } from './runtime'
 import { fail, fingerprint, ProjectStore, resetBackup, takeoverActive, text } from './store'
-import { roleReminder } from './role-registry'
+import { projectDeliveryBody, roleReminder } from './role-registry'
 
 function ownerAlert(w: Workspace, message: string) {
   w.bot!.result = message
@@ -337,7 +337,8 @@ export class BackupLeads {
         const cause = quota || missing ? reason : reason + '，主用探测已超过 10 分钟未确认'
         const sourceBodyHashes = quota?.sourceBodyHashes
         const sources = sourceBodyHashes?.length && 'ref' in r ? r.events.filter(e => e.source === 'workspace-agent' && !e.taskId &&
-          r.deliveries.some(d => d.id === e.id && d.targetRunId === r.runId && sourceBodyHashes.includes(fingerprint(d.body))))
+          r.deliveries.some(d => d.id === e.id && d.targetRunId === r.runId &&
+            (sourceBodyHashes.includes(fingerprint(d.body)) || sourceBodyHashes.includes(fingerprint(projectDeliveryBody(d.body))))))
           .slice(0, 12).map(e => e.id) : []
         const recovery = sources.length ? `本轮未登记来源：${sources.join('、')}。在完整项目记录中核对原文和已有任务，登记时沿用来源编号。` : ''
         await this.updateBinding(r, row => {
