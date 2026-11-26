@@ -1887,8 +1887,12 @@ try {
     assert.equal(await page.evaluate(() => fixture.calls.find(c => c.name === 'project.openArtifact')?.input.connectionId), 'up');
     const preview = async () => {
       await page.locator('#panel[aria-busy="false"]').waitFor();
-      await remoteFile.dispatchEvent('contextmenu', { clientX: 32, clientY: 32 });
-      await page.getByRole('menuitem', { name: '预览或保存共享文件' }).click();
+      await remoteFile.evaluate(button => {
+        button.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, clientX: 32, clientY: 32 }));
+        const item = Array.from(document.querySelectorAll('[role="menuitem"]')).find(el => el.textContent === '预览或保存共享文件');
+        if (!item) throw Error('共享成果缺少预览入口');
+        item.click();
+      });
     };
     const openFile = async (name, type, data) => {
       await page.evaluate(f => { fixture.peerFile = f; }, { name, type, data });
