@@ -15,6 +15,8 @@ node workspace/workspace.mjs templates
 
 确认代理所在环境的 PATH 可运行 Node.js 22 或更新版本。使用 Codex 时，在 CLI 输入 `/hooks`，信任 AgentBoat 的 `SessionStart`、`UserPromptSubmit`、`PreToolUse` 和 `Stop`。Antigravity 使用 `agentboat-project-lead` 的 `PreInvocation`。升级后在设置页确认补装，重新打开或恢复已有会话。 [Codex hooks 文档](https://learn.chatgpt.com/docs/hooks) [Antigravity hooks 文档](https://antigravity.google/docs/hooks)
 
+从 v0.1.45 升到 v0.1.46 后，在 Windows 打开「工作间 → 设置 → 主 agent」，核对 Codex 用户目录，在「修复本机设置」点「确认修复」。Codex 的 AgentBoat `PreToolUse` 超时改为 10 秒。在 Codex 的 `/hooks` 中确认该条变更，再重新打开或恢复会话。 [Codex hook 信任说明](https://learn.chatgpt.com/docs/hooks)
+
 新建主会话和面板接管由插件发开场提示和一次性凭据。绑定后，工作间转话自带项目协作提示。直接发给项目主会话的普通请求由 Codex 和 Antigravity 的 hooks 按已绑定的会话补充角色说明，Codex 在恢复时也通过 `SessionStart` 读取项目摘要。两种路径都用原项目编号和已有 Run 继续。
 
 工作间管理员应逐条运行获准的管理和只读命令。需要 stdin 时可用 Bash 的输入重定向或 PowerShell 的 `Get-Content -Raw … | node …`。项目主会话用 `client.mjs submit` 登记成果，并在对应任务的 `executions` 里保留 Orca Run、任务和派工编号。

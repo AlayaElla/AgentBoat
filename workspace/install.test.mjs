@@ -181,6 +181,34 @@ test('hook drift compares owned events, matchers and commands without writing ei
   }
 });
 
+test('Windows Codex refresh repairs only the existing PreToolUse timeout in place', { skip: process.platform !== 'win32' }, t => {
+  const { home, codex, refresh } = refreshFixture(t);
+  const hooks = path.join(codex, 'hooks.json'), config = path.join(codex, 'config.toml');
+  const settings = JSON.parse(readFileSync(hooks, 'utf8'));
+  const before = { type: 'command', command: 'echo before' };
+  const after = { type: 'command', command: 'echo after' };
+  const group = settings.hooks.PreToolUse[0];
+  assert.equal(group.hooks[0].timeout, 10);
+  group.hooks.unshift(before);
+  group.hooks.push(after);
+  settings.hooks.PreToolUse.push({ matcher: 'Bash', hooks: [after] });
+  group.hooks[1].timeout = 5;
+  const oldHooks = JSON.stringify(settings);
+  const oldTrust = '[hooks.state."fixture:pre_tool_use:0:1"]\ntrusted_hash = "sha256:old"\n';
+  writeFileSync(hooks, oldHooks);
+  writeFileSync(config, oldTrust);
+
+  assert.equal(refresh(), true);
+  assert.equal(readFileSync(hooks, 'utf8'), oldHooks);
+  const result = install(home, codex);
+  assert.deepEqual(result.completed, [hooks]);
+  group.hooks[1].timeout = 10;
+  assert.deepEqual(JSON.parse(readFileSync(hooks, 'utf8')), settings);
+  assert.equal(readFileSync(config, 'utf8'), oldTrust);
+  assert.equal(readFileSync(path.join(result.backup, '.codex/hooks.json'), 'utf8'), oldHooks);
+  assert.equal(refresh(), false);
+});
+
 test('setup refuses unknown skills and each foreign profile target before any write', t => {
   const { home, codex, repository, skills, backups } = refreshFixture(t);
   const config = options(home, codex), other = path.join(home, 'other-profile/agentboat-current');
@@ -536,7 +564,9 @@ test('installer renders both skills in a moved repository, links Claude and copi
     assert.deepEqual(codexHooks.hooks.Interrupt, []);
     for (const event of ['SessionStart', 'PreToolUse', 'UserPromptSubmit', 'Stop']) {
       assert.deepEqual(codexHooks.hooks[event].slice(0, -1), existing.hooks[event] ?? []);
-      assert.match(codexHooks.hooks[event].at(-1).hooks[0].command, /harness\/hook\.mjs['"] --agentboat-role-harness --codex$/);
+      const { command, timeout } = codexHooks.hooks[event].at(-1).hooks[0];
+      assert.match(command, /harness\/hook\.mjs['"] --agentboat-role-harness --codex$/);
+      assert.equal(timeout, process.platform === 'win32' && event === 'PreToolUse' ? 10 : 5);
     }
     const agy = JSON.parse(readFileSync(agyFile, 'utf8'));
     assert.deepEqual(agy['orca-status'], orcaStatus);
