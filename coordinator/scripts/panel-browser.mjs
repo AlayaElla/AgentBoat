@@ -1887,9 +1887,8 @@ try {
     assert.equal(await page.evaluate(() => fixture.calls.find(c => c.name === 'project.openArtifact')?.input.connectionId), 'up');
     const preview = async () => {
       await page.locator('#panel[aria-busy="false"]').waitFor();
-      await remoteFile.press('Shift+F10');
-      await page.getByRole('menuitem', { name: '预览或保存共享文件' }).waitFor();
-      await page.keyboard.press('Enter');
+      await remoteFile.click({ button: 'right' });
+      await page.getByRole('menuitem', { name: '预览或保存共享文件' }).click();
     };
     const openFile = async (name, type, data) => {
       await page.evaluate(f => { fixture.peerFile = f; }, { name, type, data });
