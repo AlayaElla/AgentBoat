@@ -7,9 +7,11 @@ import { notifyFeishu } from './feishu'
 import { mkdir, mkdtemp, readFile, readdir, realpath, rm, symlink, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
+import { pathToFileURL } from 'node:url'
 import type { OrcaWorkerApi } from 'orca/worker'
 import type { CoordinatorRuntime } from './runtime'
 import { assertProjectIdle, OrcaRuntime, revealArtifact } from './runtime'
+import { artifactKind } from './artifact-kind'
 import { attention, groupedAttention, taskState } from './model'
 import { inboxLimit, openRunMail, questionWait, questionMaxAge } from '../scripts/orca-questions.mjs'
 import { escalationWait, projectSubmissions, reportSubmitted, reportWait, workerReport } from '../scripts/worker-reports.mjs'
@@ -350,20 +352,23 @@ test('local artifact actions validate registered paths and archived tasks before
   const outside = dir + '\u00a0'
   const ref = { ...refs[1], path: dir }, p = fresh(ref)
   const remote = { ...ref, id: 'remote', hostId: 'remote-host' }
-  const files = ['设计稿.md', '样稿 v9.html', 'missing.md']
-  const docs = path.join(dir, 'design files')
-  const link = path.join(dir, 'outside-link'), revealed: [string, boolean][] = []
+  const files = ['设计稿.md', '样稿 v9.HTML', 'missing.md', '图片.png', '评审.pdf', '包.zip', '网页.htm']
+  const docs = path.join(dir, '设计 design files')
+  const link = path.join(dir, 'outside-link'), revealed: [string, boolean][] = [], browsed: [string, string][] = []
   let c!: ReturnType<typeof createCoordinator>, workspace = ref.workspace
   try {
     await mkdir(docs, { recursive: true })
     await mkdir(outside)
     await symlink(outside, link, process.platform === 'win32' ? 'junction' : 'dir')
     assert.ok((await realpath(link)).endsWith('\u00a0'))
-    for (const name of files.slice(0, 2)) await writeFile(path.join(docs, name), 'fixture')
+    for (const name of files.filter((_, i) => i !== 2)) await writeFile(path.join(docs, name), 'fixture')
+    await writeFile(path.join(outside, 'outside.html'), 'fixture')
+    await mkdir(path.join(docs, 'directory.htm'))
     const artifact = (id: string, url: string) => ({ id, label: id, version: 'v1', url })
     submitTask(p, { ...deliverable, artifacts: [
       ...files.map((name, i) => artifact(`a${i}`, path.join(docs, name))), artifact('directory', docs), artifact('root', dir),
-      artifact('web', 'https://example.com/preview'), artifact('link', link)
+      artifact('web', 'https://example.com/preview'), artifact('link', link), artifact('web-link', path.join(link, 'outside.html')),
+      artifact('web-directory', path.join(docs, 'directory.htm'))
     ], acceptance: [] })
     p.tasks[0].artifacts.push(artifact('outside', `${dir}${path.sep}..${path.sep}outside`))
     const host = mockHost({ storage: { 'project:p2': p as any }, results: {
@@ -374,6 +379,7 @@ test('local artifact actions validate registered paths and archived tasks before
     } })
     const worker = await mountWorker({ default: api => { c = createCoordinator(api, {
       projects: async () => [refs[0], { ...ref, workspace }, remote],
+      openArtifactPage: async (workspaceId, file) => { browsed.push([workspaceId, file]) },
       revealArtifact: async (file, directory) => { revealed.push([file, directory]) }
     }, undefined, path.join(dir, 'exports')) } }, { host })
     try {
@@ -381,21 +387,26 @@ test('local artifact actions validate registered paths and archived tasks before
       const reveal = (artifactId: string, projectId = ref.id) => worker.request('project.openArtifactFolder', { projectId, taskId: deliverable.id, artifactId })
       assert.deepEqual(await open('a0'), { opened: true })
       assert.deepEqual(await open('a1'), { opened: true })
+      for (const id of ['a3', 'a4', 'a5', 'a6']) assert.deepEqual(await open(id), { opened: true })
       await assert.rejects(() => open('a2'), /成果文件不存在或无法访问/)
       await assert.rejects(() => open('a0', refs[0].id), /请选择本项目的本机成果/)
       assert.deepEqual(await reveal('a1'), { opened: true })
       await assert.rejects(() => reveal('a2'), /成果文件不存在或无法访问/)
       for (const id of ['outside', 'link', 'root']) await assert.rejects(() => reveal(id), /成果路径不属于当前项目/)
       await assert.rejects(() => open('link'), /成果路径不属于当前项目/)
+      await assert.rejects(() => open('web-link'), /成果路径不属于当前项目/)
+      await assert.rejects(() => open('web-directory'), /成果文件不存在或无法访问/)
+      await assert.rejects(() => open('a1', remote.id), /请选择本项目的本机成果/)
       await assert.rejects(() => reveal('web'), /请选择本项目的本机成果/)
       await assert.rejects(() => reveal('a0', remote.id), /请选择本项目的本机成果/)
       workspace = ''
       await assert.rejects(() => open('a0'), /这个项目当前没有工作区/)
+      await assert.rejects(() => open('a1'), /这个项目当前没有工作区/)
       assert.deepEqual(await reveal('directory'), { opened: true })
       const workspaceId = ref.workspace.slice(3)
-      assert.deepEqual(host.calls.filter(c => c.method === 'editor.open' || c.method === 'workspace.open'), files.slice(0, 2).flatMap(name => [
-        { method: 'editor.open', params: { workspaceId, path: `design files/${name}` } }, { method: 'workspace.open', params: { workspaceId } }
-      ]))
+      assert.deepEqual(host.calls.filter(c => c.method === 'editor.open'), [0, 3, 4, 5].map(i =>
+        ({ method: 'editor.open', params: { workspaceId, path: `设计 design files/${files[i]}` } })))
+      assert.deepEqual(host.calls.filter(c => c.method === 'workspace.open').map(c => c.params), Array.from({ length: 6 }, () => ({ workspaceId })))
       workspace = ref.workspace
       const saved = await c.store.mutate(ref.id, 0, project => {
         project.tasks[0].updatedAt = '2020-01-01'
@@ -407,9 +418,31 @@ test('local artifact actions validate registered paths and archived tasks before
       await assert.rejects(() => open('a1'), /请选择本项目的本机成果/)
       await assert.rejects(() => worker.request('project.openArtifact', { ...archived, archiveEnd: 1 }), /归档批次不存在/)
       const file = await realpath(path.join(docs, files[1]))
+      assert.deepEqual(browsed, [[workspace, file], [workspace, await realpath(path.join(docs, files[6]))], [workspace, file]])
       assert.deepEqual(revealed, [[file, false], [await realpath(docs), true], [file, false]])
     } finally { c.stop(); await worker.deactivate() }
   } finally { await rm(temp, { recursive: true, force: true }) }
+})
+
+test('artifact categories prefer trusted metadata, then recognized filenames', () => {
+  assert.equal(artifactKind({ kind: 'image', url: '', label: '原稿.pdf' }), 'image')
+  assert.equal(artifactKind({ url: 'https://example.com/素材%2EPDF?save=.png#view', label: '审阅' }), 'pdf')
+  assert.equal(artifactKind({ url: 'https://example.com/preview', label: '审阅' }), 'web')
+  assert.equal(artifactKind({ url: 'https://example.com/archive.zip', label: '下载' }), 'file')
+  assert.equal(artifactKind({ url: '', label: '录屏.MOV' }), 'video')
+  assert.equal(artifactKind({ url: '', label: '旧登记' }), 'file')
+})
+
+test('artifact page asks Orca to display an encoded local file URL in the target worktree', async () => {
+  const file = path.resolve('设计资料 space', '页面 #1.htm'), runtime = new OrcaRuntime(async () => 'unused')
+  ;(runtime as any).call = async (args: string[]) => {
+    assert.ok(pathToFileURL(file).href.endsWith('/%E8%AE%BE%E8%AE%A1%E8%B5%84%E6%96%99%20space/%E9%A1%B5%E9%9D%A2%20%231.htm'))
+    assert.deepEqual(args, ['tab', 'create', '--worktree', 'id:target', '--url', pathToFileURL(file).href, '--focus'])
+    return { browserPageId: 'browser-tab' }
+  }
+  await runtime.openArtifactPage('id:target', file)
+  ;(runtime as any).call = async () => ({})
+  await assert.rejects(() => runtime.openArtifactPage('id:target', file), /Orca 未打开网页标签/)
 })
 
 test('artifact reveal passes native paths as arguments and accepts Explorer exit code 1', async () => {

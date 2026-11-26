@@ -6,6 +6,7 @@ import { promisify } from 'node:util'
 import { existsSync } from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
+import { pathToFileURL } from 'node:url'
 import type { AgentSession, Delivery, InstalledAgent, ProjectRef } from './model'
 import { fail, projectKey } from './store'
 import { readAgents, type AgentsSnapshot } from './agents'
@@ -55,6 +56,7 @@ export interface CoordinatorRuntime {
   requestTakeover(handle: string, prompt: string, subject?: string): Promise<void>
   launchMain(workspace: string, agent: string, prompt: string, options?: Omit<AgentLaunch, 'agent'>): Promise<string>
   openOverview(): Promise<void>
+  openArtifactPage(workspace: string, file: string): Promise<void>
   revealArtifact(file: string, directory: boolean): Promise<void>
   removeProject(ref: ProjectRef, host: HostApi<'worker'>): Promise<void>
   agents(projects: Project[], host: HostApi<'worker'>, main?: AgentSession, targets?: Promise<TargetInventory | undefined>): Promise<AgentsSnapshot>
@@ -73,6 +75,12 @@ export function targetOnline(inventory: TargetInventory | undefined, handle: str
 }
 export class OrcaRuntime implements CoordinatorRuntime {
   constructor(private executable: () => Promise<string>) {}
+  async openArtifactPage(workspace: string, file: string) {
+    const url = pathToFileURL(file)
+    if (url.hostname) fail('仅可预览本机磁盘上的网页文件')
+    const { browserPageId } = await this.call(['tab', 'create', '--worktree', workspace, '--url', url.href, '--focus'], readTimeout)
+    if (!browserPageId) fail('Orca 未打开网页标签')
+  }
   revealArtifact(file: string, directory: boolean) { return revealArtifact(file, directory) }
   bots = new LocalBots(args => this.call(args, readTimeout))
   async botMail(target: string, subject: string, body: string, type: 'handoff' | 'status', home?: string) {

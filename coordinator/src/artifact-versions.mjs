@@ -1,5 +1,5 @@
 export function artifactTitle({ label, version }) {
-  return label === version ? label : label + ' · ' + version;
+  return label === version || label.endsWith(' ' + version) ? label : label + ' · ' + version;
 }
 
 export function latestArtifacts(tasks, includeExpired = false) {

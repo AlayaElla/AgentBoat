@@ -1096,6 +1096,7 @@ try {
       assert.deepEqual(await titles(), ['原稿']);
       assert.match(await panel.innerText(), /页面交付、插画 · 登记/);
       const entry = panel.getByRole('button', { name: '原稿', exact: true });
+      assert.equal(await entry.locator('.artifact-kind').textContent(), '文件');
       assert.equal(await entry.evaluate(el => el.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: innerWidth - 1, clientY: innerHeight - 1 }))), false);
       const menu = page.getByRole('menu', { name: '成果操作' }), viewport = page.viewportSize();
       const bounds = await menu.boundingBox();
@@ -1138,7 +1139,10 @@ try {
       const body = await openReview('移动端交付');
       const calls = () => page.evaluate(() => fixture.calls.filter(c => c.name === 'project.openArtifact').map(c => c.input));
       const expected = artifactId => ({ projectId: 'p2', taskId: 't2', artifactId });
-      const entry = body.getByRole('button', { name: '打开成果 · 设计文档', exact: true });
+      const entry = body.getByRole('button', { name: '打开成果 · 设计文档 · v1', exact: true });
+      const htmlEntry = body.getByRole('button', { name: '打开成果 · 样稿 v9', exact: true });
+      const webEntry = body.getByRole('button', { name: '打开成果 · 网页预览 · v1', exact: true });
+      assert.deepEqual(await body.locator('.artifact-kind').allTextContents(), ['文档', '网页', '网页']);
       const menu = page.getByRole('menu', { name: '成果操作' });
       assert.match(await entry.getAttribute('title'), /右键打开所在文件夹/);
       await rightClickArtifact(entry);
@@ -1149,11 +1153,13 @@ try {
       await page.keyboard.press('Shift+F10');
       await page.keyboard.press('Enter');
       assert.deepEqual(await page.evaluate(() => fixture.calls.filter(c => c.name === 'project.openArtifactFolder').map(c => c.input)), [expected('md')]);
-      await body.getByRole('button', { name: '打开成果 · 网页预览', exact: true }).click({ button: 'right' });
+      await webEntry.click({ button: 'right' });
       assert.equal(await menu.count(), 0);
+      await webEntry.click();
+      assert.deepEqual(await page.evaluate(() => fixture.calls.filter(c => c.name === 'shell.openExternal').map(c => c.input)), ['https://example.com/preview']);
       await entry.click();
       await page.evaluate(() => { fixture.artifactError = '成果文件不存在或无法访问'; });
-      await body.getByRole('button', { name: '打开成果 · 样稿 v9', exact: true }).click();
+      await htmlEntry.click();
       const error = page.getByRole('alert').filter({ hasText: '打不开「样稿 v9」：成果文件不存在或无法访问' });
       await error.waitFor();
       assert.deepEqual(await calls(), ['md', 'html'].map(expected));
@@ -1165,6 +1171,7 @@ try {
       await detail.getByRole('button', { name: '打开成果 · 样稿 v9', exact: true }).click();
       await detail.getByRole('button', { name: /^成果 / }).click();
       const taskEntry = detail.getByRole('button', { name: '设计文档 · v1', exact: true });
+      assert.equal(await taskEntry.locator('.artifact-kind').textContent(), '文档');
       await rightClickArtifact(taskEntry);
       await activeHeader().getByRole('heading', { name: '移动端交付', exact: true }).click();
       await menu.waitFor({ state: 'detached' });
@@ -1770,6 +1777,7 @@ try {
     await doc.getByRole('button', { name: '关闭' }).click();
     const html = '<h1>文档</h1>', source = Buffer.from(html).toString('base64');
     const download = await openFile('design.html', 'application/octet-stream', source);
+    await download.getByRole('status').filter({ hasText: '当前无法直接打开' }).waitFor();
     await download.getByRole('button', { name: '保存到本机' }).click();
     assert.deepEqual(await page.evaluate(() => fixture.calls.filter(c => c.name === 'files.saveAs').at(-1).input), { suggestedName: 'design.html', data: html });
     assert.equal(await download.locator('iframe, object, embed, pre, img, canvas, h1').count(), 0);
@@ -1880,8 +1888,8 @@ try {
     await row('对方等待补建').click();
     await currentLayer().getByRole('textbox', { name:'受阻备注' }).fill('已补建');
     await row('对方页面交付').click();
-    await currentLayer().getByRole('button', { name: '打开成果 · 设计原稿', exact: true }).waitFor();
-    await currentLayer().getByRole('button', { name: '打开成果 · 网页预览', exact: true }).click();
+    await currentLayer().getByRole('button', { name: '打开成果 · 设计原稿 · v1', exact: true }).getByText('文件', { exact: true }).waitFor();
+    await currentLayer().getByRole('button', { name: '打开成果 · 网页预览 · v1', exact: true }).click();
     const remoteRow = row('对方页面交付').locator('..');
     await remoteRow.getByText(/对方示例项目/).waitFor();
     await review('对方页面交付').check();
