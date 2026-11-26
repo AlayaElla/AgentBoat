@@ -272,6 +272,10 @@ button.item:active,.pcard-h:active,.wsr-h:active,.note:active,.fold-h:active{bac
 
 /* 等你处理的行。窄排版：点一行，要处理的内容在这一行下面展开。宽排版：点一行，内容在右边的详情栏里打开，这一行变深 */
 .irows{display:flex;flex-direction:column;gap:2px;min-width:0}
+.inbox-groups{display:flex;flex-direction:column;gap:6px;min-width:0}
+.inbox-group>.fold-h{min-width:0;min-height:32px;padding:0 8px;background:var(--fill)}
+.inbox-group>.fold-h:hover{background:var(--hover)}
+.inbox-group .irows{padding-top:2px}
 .irow{display:flex;flex-direction:column;min-width:0;border-radius:var(--r-md);transition:background-color var(--ab-t-fast) var(--ab-ease)}
 .irow.open,.irow.picked{background:color-mix(in oklab,var(--ab-need) 10%,transparent)}
 .irow-h{display:flex;align-items:flex-start;min-width:0}
