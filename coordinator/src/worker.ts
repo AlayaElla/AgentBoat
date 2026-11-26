@@ -17,13 +17,13 @@ import { WorkspaceLinks } from './links'
 import { fileErrorText, incomingHash, linkMessageHistory } from './link-messages'
 import { LinkFiles } from './link-files'
 import { groupedAttention, isProjectShared, type OwnerQuestion } from './model'
-import { mainAgent, roleReminder, switchLead, takeoverView, recoverTakeover, type WorkspaceSetup } from './main-agent'
+import { mainAgent, switchLead, takeoverView, recoverTakeover, type WorkspaceSetup } from './main-agent'
 import { applySetup, previewSetup, validateCodexHome } from '../../workspace/install.mjs'
 import { projectAgentLaunch, projectLeadAgents, projectTemplate, templateLeadPreferences, type ProjectLeadAgents } from '../../workspace/agent-launch.mjs'
 import { promptClientPath, refreshReleaseSetup, pluginVersionLabel, release, roleRegistryPath } from '../scripts/orca-cli.mjs'
 import { cliBridge } from '../scripts/cli-bridge.mjs'
 import { applyDelta, type Sheets } from './feedback-drafts'
-import { projectDeliveryBody, roleRegistry } from './role-registry'
+import { projectDeliveryBody, roleRegistry, type roleReminder } from './role-registry'
 import { escalationWait } from '../scripts/worker-reports.mjs'
 import { businessQuestion, questionSourceId } from '../scripts/orca-questions.mjs'
 import type { ProjectArtifactRef } from './protocol'
@@ -552,13 +552,10 @@ export function createCoordinator(api: OrcaWorkerApi, runtime: CoordinatorRuntim
   }
   async function ingestOne(appId: string, event: SourceEvent): Promise<void> {
     const m = await store.messaging(), f = m.feishu
-    if (f.enabled && f.appId === appId && f.chatIds.includes(event.chatId)) {
-      if (!f.senderIds.includes(event.senderId)) return
-      if (!m.inbox.some(x => x.event.id === event.id)) await store.mutateMessaging(m => { m.inbox.push({ appId, event, state: 'pending' }) })
-      await processMessage(event.id)
-      changed(); setImmediate(() => { void flushMailbox().catch(() => {}) })
-      return
-    }
+    if (!f.enabled || f.appId !== appId || !f.chatIds.includes(event.chatId) || !f.senderIds.includes(event.senderId)) return
+    if (!m.inbox.some(x => x.event.id === event.id)) await store.mutateMessaging(m => { m.inbox.push({ appId, event, state: 'pending' }) })
+    await processMessage(event.id)
+    changed(); deferMailbox()
   }
 
   const response = (appId: string, event: SourceEvent, body: string): Delivery => ({ id: `response:${event.id}`, subject: '工作间', body, state: 'pending',

@@ -27,7 +27,11 @@ export class Connections {
   private save() { return this.api.storage.set('workspace.connections', { version: 1, entries: this.entries } as any) }
   private instance(e: Entry) {
     let b = this.instances.get(e.id)
-    if (!b) { b = new Butler(this.api, this.main, (run, id, body) => this.notify(run, id, body, this.entries.find(x => x.id === e.id)?.name || e.name), this.changed, e.id, () => this.entries.find(x => x.id === e.id)?.name || e.name); this.instances.set(e.id, b) }
+    if (!b) {
+      const name = () => this.entries.find(x => x.id === e.id)?.name || e.name
+      b = new Butler(this.api, this.main, (run, id, body) => this.notify(run, id, body, name()), this.changed, e.id, name)
+      this.instances.set(e.id, b)
+    }
     return b
   }
   async list(): Promise<Connection[]> {

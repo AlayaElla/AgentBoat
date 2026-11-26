@@ -10,7 +10,7 @@ import { artifactChunkBytes, fileChunkBytes, maxLinkFileBytes } from './link-fil
 import type { OrcaWorkerApi } from 'orca/worker'
 import type { ArtifactProgress } from './link-artifacts'
 import { WorkspaceLinks, endpoint, invitationHost, report } from './links'
-import { roleReminder } from './main-agent'
+import { roleReminder } from './role-registry'
 import { refs, sample } from './fixtures'
 import { fingerprint, fresh, submitTask, type FeedbackItem } from './store'
 import type { LiveAgent } from './model'
