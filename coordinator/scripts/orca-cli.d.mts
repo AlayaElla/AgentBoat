@@ -8,5 +8,6 @@ export function refreshReleaseSetup(codexHome?: string): Promise<string | undefi
 export function pluginVersionLabel(): string;
 export const pluginKey: string;
 export function activeUserDataPath(): string;
+export function ownerMessages(caller: string, cli: string, messageId?: string): Promise<{ messageId: string; text: string; receivedAt: string }[]>;
 export function pluginDataPath(root?: string): string;
 export function roleRegistryPath(platform?: NodeJS.Platform, env?: NodeJS.ProcessEnv, home?: string): string;

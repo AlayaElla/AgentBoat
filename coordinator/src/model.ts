@@ -19,6 +19,7 @@ export interface Acceptance {
 interface Decision {
   // An omitted answer is pending. Null records a discard without inventing an answer.
   id: string; question: string; options: string[]; artifactIds?: string[]; answer?: string | null; history: UserFeedback[]; archivedHistory?: number
+  orcaQuestions?: { id: string; runId: string; from: string }[]; presentedAt?: string
 }
 export interface Task {
   id: string; title: string; goal: string; progress: string
@@ -34,6 +35,7 @@ export interface SourceEvent {
   id: string; source: string; sourceId: string; threadId: string; chatId: string
   senderId: string; text: string; receivedAt: string; taskId?: string
   replyToIds?: string[]
+  ownerDecision?: { messageId: string; taskId: string; itemId: string }
   worker?: { runId: string; taskId: string; dispatchId: string; projectTaskId: string }
 }
 interface FeedbackTarget {

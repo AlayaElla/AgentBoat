@@ -2,6 +2,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { existsSync, lstatSync, readFileSync, readlinkSync, realpathSync, symlinkSync, unlinkSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { createRequire } from 'node:module';
 
 const appCli = path.resolve(path.dirname(process.execPath), process.platform === 'win32' ? 'resources/bin/orca.exe' : '../Resources/bin/orca');
 export const executable = process.env.ORCA_CLI_COMMAND || (existsSync(appCli) ? appCli : process.platform === 'win32'
@@ -33,6 +34,28 @@ const pluginsDir = path.dirname(keyDir);
 const versionHash = /^(?:[0-9a-f]{32}|[0-9a-f]{64})$/;
 const installed = release && versionHash.test(path.basename(versionDir)) && path.basename(keyDir) === pluginKey && path.basename(pluginsDir) === 'plugins';
 export const activeUserDataPath = () => installed ? path.dirname(pluginsDir) : userDataPath();
+export async function ownerMessages(caller, cli, messageId) {
+  if (!caller?.startsWith('orca_session_id:') || messageId !== undefined && !messageId.startsWith('orca:'))
+    throw Error('请从 Orca 聊天查询用户原消息');
+  // Public agent read omits journal IDs and the recorded input author.
+  cli = realpathSync(cli);
+  const { RuntimeClient } = createRequire(import.meta.url)(path.resolve(path.dirname(cli), '../app.asar.unpacked/out/cli/runtime/client.js'));
+  const client = new RuntimeClient(activeUserDataPath(), 5000, null, null, cli);
+  const sessionId = caller.slice('orca_session_id:'.length);
+  const result = messageId === undefined
+    ? await client.call('agentSession.history', { sessionId, direction: 'tail', limit: 60 })
+    : await client.call('agentSession.item', { sessionId, itemId: messageId });
+  const items = messageId === undefined ? result.result?.page?.items : [result.result?.item];
+  if (!result.ok || !Array.isArray(items)) throw Error('Orca 未返回聊天记录');
+  return items.flatMap(message => {
+    const body = message?.body, block = body?.blocks?.length === 1 && body.blocks[0], typist = body?.typedBy;
+    if (typeof message?.itemId !== 'string' || !message.itemId.startsWith('orca:') || messageId !== undefined && message.itemId !== messageId ||
+        !Number.isFinite(message.observedAt) || body?.kind !== 'message' || body.role !== 'user' || body.from !== undefined ||
+        (typist?.by !== 'host' && !(typist?.by === 'device' && typist.own === true)) || block?.type !== 'text' ||
+        typeof block.text !== 'string' || !block.text.trim() || block.text.length > 8000) return [];
+    return [{ messageId: message.itemId, text: block.text, receivedAt: new Date(message.observedAt).toISOString() }];
+  });
+}
 export const stableRoot = () => path.resolve(activeUserDataPath(), 'agentboat-current');
 const clientScript = 'coordinator/scripts/client.mjs';
 export const stableClientPath = () => path.join(stableRoot(), clientScript);

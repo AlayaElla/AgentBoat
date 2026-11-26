@@ -34,7 +34,7 @@ declare module 'orca' {
     'workspace.setup.codexHome': { input: { path: string }; output: { path: string } }
     'workspace.projectLead': { input: ProjectLeadSwitch & { projectId: string; runId: string }; output: ProjectLead }
     'workspace.entry': { output: { opened: boolean } }
-    'workspace.message': { input: { projectId: string; revision?: number; requestId: string; runId: string; text: string }; output: Snapshot & { queued?: string } }
+    'workspace.message': { input: { projectId: string; revision?: number; requestId: string; runId: string; text: string; caller?: string; ownerDecision?: NonNullable<import('./model').SourceEvent['ownerDecision']> }; output: Snapshot & { queued?: string } }
     'projects.list': { output: { projects: ProjectRef[]; error?: string } }
     'project.read': { input: { projectId: string }; output: Snapshot }
     'project.task': { input: { projectId: string; taskId: string }; output: Project['tasks'][number] | null }
@@ -48,7 +48,7 @@ declare module 'orca' {
     'project.expireArtifact': { input: { projectId: string; revision: number; taskId: string; artifactId: string }; output: Snapshot }
     'project.openArtifact': { input: ProjectArtifactRef & { connectionId?: string }; output: { opened: boolean } }
     'project.openArtifactFolder': { input: ProjectArtifactRef; output: { opened: boolean } }
-    'project.agent': { input: { operation: 'read' | 'bind' | 'submit'; projectId: string; revision?: number; requestId?: string; runId?: string; caller?: string; currentRunId?: string; token?: string; task?: unknown; taskId?: string }; output: Snapshot & { task?: import('./model').Task; submitted?: Pick<import('./model').Task, 'id' | 'phase' | 'submittedAt'> & { pendingAcceptance: boolean; pendingDecision: boolean }; archiveStatus?: '已归档' } }
+    'project.agent': { input: { operation: 'read' | 'bind' | 'submit'; projectId: string; revision?: number; requestId?: string; runId?: string; caller?: string; currentRunId?: string; token?: string; task?: unknown; taskId?: string }; output: Snapshot & { task?: import('./model').Task; submitted?: Pick<import('./model').Task, 'id' | 'phase' | 'submittedAt'> & { pendingAcceptance: boolean; pendingDecision: boolean; decisionQuestionIds?: string[] }; archiveStatus?: '已归档' } }
   }
   interface PluginPanelEvents { 'workspace.artifactProgress': import('./link-artifacts').ArtifactProgress; 'project.changed': { projectId: string }; 'panel.draftsChanged': {}; 'workspace.open': { switching: boolean } }
 }

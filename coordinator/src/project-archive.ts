@@ -37,7 +37,7 @@ function oldProbes(p: Owner) {
 export const needsLeadCompaction = (p: Owner) => (p.backup?.history.length ?? 0) > recentLeadHistory || oldProbes(p).length > 0
 
 export class ProjectArchive {
-  private indexes = new Map<string, { end: number; proofs: Map<string, string>; taskIds: Set<string>; sourceOwners: Set<string> }>()
+  private indexes = new Map<string, { end: number; proofs: Map<string, string>; taskIds: Set<string>; sourceOwners: Set<string>; questionSources: Set<string> }>()
   private submissions = new Map<string, { end: number; read: Promise<Submissions> }>()
   constructor(private directory: string) {}
 
@@ -78,22 +78,31 @@ export class ProjectArchive {
     throw Error('归档批次不存在，请重新打开归档')
   }
 
-  async receipt(p: Project, id: string) {
+  private async index(p: Project) {
     if (!p.archive) return
     const head = p.archive
-    const index = this.indexes.get(head.id) ?? { end: 0, proofs: new Map<string, string>(), taskIds: new Set<string>(), sourceOwners: new Set<string>() }
+    const index = this.indexes.get(head.id) ?? { end: 0, proofs: new Map<string, string>(), taskIds: new Set<string>(), sourceOwners: new Set<string>(), questionSources: new Set<string>() }
     if (index.end !== head.end) {
       for await (const { batch } of this.batches(p, index.end)) {
         for (const r of batch.requests) index.proofs.set(r.id, r.fingerprint)
         for (const t of batch.tasks ?? []) index.taskIds.add(t.id)
-        for (const e of batch.events ?? []) if (e.taskId) index.sourceOwners.add(e.taskId)
+        for (const e of batch.events ?? []) {
+          if (e.taskId) index.sourceOwners.add(e.taskId)
+          if (e.source === 'orca-question') index.questionSources.add(e.id)
+        }
       }
       index.end = head.end
       this.indexes.set(head.id, index)
     }
-    const fingerprint = index.proofs.get(id)
+    return index
+  }
+
+  async receipt(p: Project, id: string) {
+    const fingerprint = (await this.index(p))?.proofs.get(id)
     return fingerprint && { id, fingerprint }
   }
+
+  async archivedQuestions(p: Project) { return (await this.index(p))?.questionSources }
 
   private archiveSubmissions(p: Project) {
     const head = p.archive!, cached = this.submissions.get(head.id)

@@ -51,6 +51,13 @@
 - sourceIds 用本项目 events 的 id，一个来源只关联一个任务。
 - 一次 submit 带出多条新事项时，插件只给工作间主 agent 发一条汇总通知。未绑定时不发，之后绑定也不补发。
 
+### 执行者的业务决定
+
+- 执行者确需主人做业务取舍时，用 `orca orchestration ask --question "[业务决定] 问题和必要背景" --options "选项一,选项二"` 寄给项目 Run。保留回执中的 `msg_…` 后结束本轮，等原问题答复。权限、登录及连接授权继续在对应的宿主或连接入口处理。
+- 项目主会话用 `orca orchestration inbox --run <Run> --json --full` 核对原问题、派工和原文，再读项目任务。沿用已有的同一决定编号。新事项用原 `msg_…` 作为稳定决定编号。用 `submit` 在对应 `decisions` 条目加 `"orcaQuestionId":"msg_…"`，保留问题、选项、补充背景和关联成果。首次登记时，问题原来的 Run、Orca task 和 dispatch 要与任务的 `executions` 对应。任务处于 `working` 或 `ready`，持有这张决定卡即可等待答复。
+- 成功的 `submission.decisionQuestionIds` 列出已关联的原问题。登记后可结束本轮，同一原问题重复登记沿用原卡。待决定期间固定展示的成果版本。已经有明确结论的同一决定可直接用已存答案回复新来的原问题。
+- 收到反馈通知后，用 `read <projectId> --task <taskId>` 核对决定编号、已存结论和备注，再在原 Run 的当前项目主会话运行 `reply-decision <projectId> <taskId> <decisionId>`。它用原生 `orca orchestration reply` 回送答案和备注，并逐条返回 `questionId`、`replyId` 和 `duplicate`。同一 Run 接管后由新协调者继续。若问题属于旧 Run，由该 Run 当前协调者处理。出现不同的已有答复或回执不明时，读原 Run 邮件核对，更改答案会被 Orca 拒绝。
+
 ## 代录用户结论
 
 先用 `read <projectId> --task <taskId>` 确认任务和验收的当前版本，再用 `feedback` 代录。
@@ -67,6 +74,11 @@
 - requestId 可省略。带上时，原样重放不会重复写入。
 - 代处理已开放的对方项目，在顶层加连接编号 `id`，并提供对方的 projectId、revision 和唯一 requestId。成功回执含逐项状态，对方的最新 revision 从同步后的项目报告读取。离线或回执未确认时保留原请求编号核对。
 - 只给项目主 agent 发一条消息，后续由它跟进。
+
+### 聊天里的明确决定
+
+- 本机 Orca 结构化聊天用 `owner-messages` 读取本会话最近的用户原话和 `messageId`。核对原话明确指向当前项目、任务、决定与成果版本，再用 `feedback`，顶层填 `"ownerSource":{"messageId":"orca:…"}`。条目填 `kind: "decision"`、`taskId`、`itemId`、`itemRevision: 1`、`read --task` 给出的 `fingerprint` 和明确的 `answer`。请求带当前项目 `revision` 和稳定 `requestId`。插件重新核查 Orca 保存的输入者、时间和原话，原话写入反馈备注。
+- 工作间主会话收到用户明确答复时，从自己的聊天用 `owner-messages` 核对原话，在 `message` 请求附 `"ownerDecision":{"messageId":"orca:…","taskId":"…","itemId":"…"}`。项目主会话查收 `sourceId`，在 `feedback` 顶层填 `"ownerSource":{"eventId":"workspace-agent:…"}`，核对同一事项和版本后代录。执行者直接收到的用户原话也可沿用 `worker-feedback` 的 `eventId`。来源不明时，保留原卡等待明确答复。
 
 ### 会话里的返修意见
 

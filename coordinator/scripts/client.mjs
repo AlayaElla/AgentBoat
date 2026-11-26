@@ -1,4 +1,4 @@
-import { activeUserDataPath, executable, release } from './orca-cli.mjs';
+import { activeUserDataPath, executable, ownerMessages, release } from './orca-cli.mjs';
 import { installedRequest } from './cli-bridge.mjs';
 import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
@@ -7,6 +7,10 @@ import { createHash } from 'node:crypto';
 import { writeMainRoleCards } from './main-role-card.mjs';
 
 const [operation, argument, flag, taskId, extra] = process.argv.slice(2);
+const sourceList = operation === 'owner-messages';
+if (sourceList && argument) throw new Error('用法：owner-messages');
+const replyDecision = operation === 'reply-decision';
+if (replyDecision && (!argument || !flag || !taskId || extra)) throw new Error('用法：reply-decision <项目编号> <任务编号> <决定编号>');
 // Internal callers pass handler data on stdin. The workspace hook excludes option-prefixed commands.
 const internal = operation === '--workspace-request' && ['project.settings', 'project.lead', 'workspace.message', 'workspace.connections'].includes(argument) && !flag;
 const brief = operation === 'overview' && argument === '--brief';
@@ -21,7 +25,7 @@ if (historyArgs.length && (historyArgs.length !== 2 || historyArgs[0] !== '--end
 const leadBind = operation === 'project-lead-bind', leadSwitch = operation === 'project-lead-switch';
 const leadActions = ['lead-take', 'lead-ready', 'lead-handoff', 'lead-resume'];
 const leadAction = leadActions.includes(operation);
-const allowed = [...leadActions, 'lead-history', 'projects', 'overview', 'main-read', 'main-bind', 'project-lead', 'project-lead-switch', 'project-lead-bind', 'message', 'read', 'bind', 'submit', 'feedback', 'worker-feedback', 'feishu-reply', 'links-read', 'links-refresh', 'links-invite', 'links-cancel-invite', 'links-join', 'links-configure', 'links-rename', 'links-share', 'links-relate', 'links-revoke', 'links-send', 'hide', 'restore', 'delete', 'main-targets', 'connections', 'connection-read', 'connection-check', 'connection-send', 'connection-reply'];
+const allowed = [...leadActions, 'lead-history', 'projects', 'overview', 'main-read', 'main-bind', 'project-lead', 'project-lead-switch', 'project-lead-bind', 'message', 'read', 'bind', 'submit', 'feedback', 'reply-decision', 'owner-messages', 'worker-feedback', 'feishu-reply', 'links-read', 'links-refresh', 'links-invite', 'links-cancel-invite', 'links-join', 'links-configure', 'links-rename', 'links-share', 'links-relate', 'links-revoke', 'links-send', 'hide', 'restore', 'delete', 'main-targets', 'connections', 'connection-read', 'connection-check', 'connection-send', 'connection-reply'];
 if (!internal && !allowed.includes(operation)) throw new Error('用法：node client.mjs projects|overview|main-read|main-targets|connections | connection-read|connection-check <名字> | main-bind|project-lead-switch|project-lead-bind|connection-send|connection-reply|links-send < stdin | read|project-lead <projectId> | bind|submit|message|feedback|feishu-reply|hide|restore|delete <input.json>');
 const caller = process.env.ORCA_AGENT_SESSION_ID ? `orca_session_id:${process.env.ORCA_AGENT_SESSION_ID}` : process.env.ORCA_TERMINAL_HANDLE;
 const profileEnv = release ? { ...process.env, ORCA_USER_DATA_PATH: activeUserDataPath() } : process.env;
@@ -33,8 +37,9 @@ function readInput(file) {
 }
 const input = internal ? readInput(0) : history ? { projectId: historyProject, end: historyArgs.length ? Number(historyArgs[1]) : undefined } : leadAction ? { runId: argument, action: operation.slice(5), caller, token: flag, ...(taskId ? { note: taskId } : {}) } : operation === 'connections' ? { operation: 'read' } : operation.startsWith('connection-') ? { ...(['connection-read','connection-check'].includes(operation) ? { name: argument } : readInput(0)), operation: operation.slice(11) } : operation.startsWith('links-') ? { ...(['links-join', 'links-configure', 'links-rename', 'links-share', 'links-relate', 'links-revoke', 'links-send'].includes(operation) ? readInput(0) : {}), operation: operation.slice(6) } : ['projects', 'overview'].includes(operation) ? null : operation === 'main-read' ? { operation: 'read' } : operation === 'read'
   ? { operation, projectId: argument, taskId: readOptions.task }
+  : replyDecision ? { operation: 'read', projectId: argument, taskId: flag }
   : operation === 'project-lead' ? { projectId: argument }
-  : operation === 'main-targets' ? null
+  : operation === 'main-targets' || sourceList ? null
   : { ...readInput(operation === 'main-bind' || leadBind || leadSwitch ? 0 : argument), ...(['message', 'feedback', 'worker-feedback', 'feishu-reply', 'project-lead-switch'].includes(operation) ? {} : { operation: operation === 'main-bind' || leadBind ? 'bind' : operation }) };
 if (internal && argument === 'project.lead' && (input.mode !== 'new' || input.startOnly !== true)) throw new Error('此入口仅用于自动启动未绑定的项目主会话');
 if (leadSwitch && !['existing', 'new', 'promote', 'cancel'].includes(input.mode)) throw new Error('请选择 existing、new、promote 或 cancel');
@@ -54,12 +59,14 @@ if (operation === 'main-bind' || leadBind || leadSwitch) {
 }
 const delegatedFeedback = operation === 'feedback' && Object.hasOwn(input, 'id');
 const ownerFeedback = !delegatedFeedback && operation === 'feedback' && Object.hasOwn(input, 'ownerSource');
-if (ownerFeedback || operation === 'worker-feedback') {
+const ownerRelay = operation === 'message' && Object.hasOwn(input, 'ownerDecision');
+const workerQuestion = operation === 'submit' && Array.isArray(input.task?.decisions) && input.task.decisions.some(d => d?.orcaQuestionId !== undefined);
+if (ownerFeedback || ownerRelay || workerQuestion || operation === 'worker-feedback') {
   if (!caller) throw new Error('请在收到反馈的 Orca 会话中执行此命令');
   input.caller = caller;
-  if (ownerFeedback) {
+  if (ownerFeedback || ownerRelay || workerQuestion) {
     const current = currentRun();
-    if (!current.ok || !current.result?.run?.id) throw new Error('未确认当前项目主会话的 Run');
+    if (!current.ok || !current.result?.run?.id) throw new Error('未确认当前主会话的 Run');
     input.runId = current.result.run.id;
   }
 } else if (!delegatedFeedback && ['bind', 'submit', 'feedback', 'hide', 'restore', 'delete'].includes(operation)) {
@@ -77,7 +84,7 @@ const handler = operation === 'main-targets' ? 'workspace.agent.targets' : maint
 if (maintenance) { delete input.operation; if (operation !== 'delete') input.hidden = operation === 'hide'; }
 try {
   const request = () => installedRequest(handler, input);
-  let reply = await request();
+  let reply = sourceList ? { ok: true, result: { messages: (await ownerMessages(caller, executable)).slice(-10) } } : await request();
   if (leadAction) {
     const first = reply;
     const next = first.result?.result;
@@ -115,6 +122,34 @@ try {
   }
   if (!reply.ok) throw Object.assign(new Error(reply.error.message), reply.error);
   const success = reply.ok && reply.result?.ok !== false;
+  if (replyDecision) {
+    const project = view?.project, decision = view?.task?.decisions?.find(d => d.id === taskId);
+    const run = caller && currentRun().result?.run;
+    if (!success || !run?.id || run.id !== project?.runId || view.lead?.session?.handle !== caller && view.lead?.backup?.handle !== caller)
+      throw new Error('请在当前项目主会话的 Run 中回送决定');
+    if (decision?.answer === undefined || !decision.orcaQuestions?.length) throw new Error('没有可回送的已入账决定');
+    const feedback = decision.history.at(-1), note = feedback?.note;
+    const body = (decision.answer === null ? '此决定已撤下，请结束等待并与项目主会话核对。' : decision.answer) + (note ? `\n\n备注\n${note}` : '');
+    const replies = decision.orcaQuestions.map(q => {
+      if (q.runId !== run.id) return { questionId: q.id, runId: q.runId, error: '原问题在其他 Run，请由该 Run 当前协调者核对并回复' };
+      try {
+        const raw = execFileSync(executable, ['orchestration', 'reply', '--run', q.runId, '--id', q.id, '--body-file', '-', '--environment', 'local', '--json', '--full'],
+          { input: body, encoding: 'utf8', windowsHide: true, env: profileEnv, timeout: 25000, maxBuffer: 1024 * 1024 });
+        const receipt = JSON.parse(raw), answer = receipt.result?.message;
+        if (!receipt.ok || answer?.thread_id !== q.id || answer.run_id !== q.runId || answer.to_handle !== q.from ||
+            answer.from_handle !== `run:${q.runId}` || answer.body !== body || !/^msg_[\w-]+$/.test(answer.id))
+          throw Error('原问题答复回执待核对');
+        return { questionId: q.id, replyId: answer.id, duplicate: !!receipt.result.duplicate };
+      } catch (error) {
+        let detail;
+        try { detail = JSON.parse(error.stdout).error; } catch { /* A transport failure does not prove a send. */ }
+        return { questionId: q.id, runId: q.runId, error: detail?.message ?? '原问题答复结果待核对', ...(detail?.code && { code: detail.code }), ...(detail?.data && { recovery: detail.data }) };
+      }
+    });
+    const ok = replies.every(r => r.replyId);
+    reply = { ok, result: { projectId: argument, taskId: flag, decisionId: taskId, replies } };
+    if (!ok) process.exitCode = 1;
+  }
   let submission;
   if (operation === 'submit' && success) {
     const project = view?.project;
@@ -128,6 +163,11 @@ try {
     submission = { projectId: project.ref.id, revision: project.revision, requestId: input.requestId, taskId: task.id, phase: task.phase,
       pendingAcceptance: task.pendingAcceptance ?? task.acceptance?.some(a => a.status === 'pending') ?? false,
       pendingDecision: task.pendingDecision ?? task.decisions?.some(d => d.answer === undefined) ?? false, submittedAt: task.submittedAt };
+    if (workerQuestion) {
+      const registered = new Set(task.decisionQuestionIds ?? task.decisions?.filter(d => d.answer === undefined).flatMap(d => d.orcaQuestions?.filter(q => q.runId === project.runId).map(q => q.id) ?? []));
+      submission.runId = project.runId;
+      submission.decisionQuestionIds = input.task.decisions.map(d => d.orcaQuestionId).filter(id => registered.has(id));
+    }
   }
   if (!internal && success && view) {
     const project = view.project;
@@ -135,6 +175,7 @@ try {
       const { ref, revision, runId } = project;
       const receipt = { project: { ref, revision, runId }, projectId: ref.id, revision };
       if (operation === 'message') {
+        if (ownerRelay) receipt.sourceId = `workspace-agent:${createHash('sha256').update(JSON.stringify([ref.id, input.requestId.trim()])).digest('hex')}`;
         receipt.queued = view.queued ?? false;
         if (view.queued) {
           try {
@@ -172,6 +213,7 @@ try {
         process.stderr.write(`项目 ${argument} 中找不到任务 ${input.taskId}。\n`);
         process.exit(1);
       }
+      for (const item of task.decisions) item.fingerprint = createHash('sha256').update(JSON.stringify([item.question, item.options])).digest('hex');
       if (!readOptions.full) {
         const recent = 3;
         const { latestArtifacts } = await import(release ? '../../src/artifact-versions.mjs' : '../src/artifact-versions.mjs');

@@ -337,19 +337,25 @@ export function submitTask(project: Project, raw: unknown): void {
   for (const d of submittedItems('decision', decisions)) {
     const did = text(d.id, '决定编号', 200)
     const previous = task.decisions.find(x => x.id === did)
-    const question = text(d.question === undefined && d.artifactIds !== undefined ? previous?.question : d.question, '问题', 4000)
+    const question = text(d.question === undefined && (d.artifactIds !== undefined || d.orcaQuestionId !== undefined) ? previous?.question : d.question, '问题', 4000)
     if (previous && previous.question !== question) fail('新问题请使用新的决定编号')
-    if (previous && d.artifactIds === undefined) continue
     const options = previous && d.options === undefined ? previous.options : strings(d.options ?? [], '选项', 10).map(x => text(x, '选项', 200))
     if (previous && JSON.stringify(previous.options) !== JSON.stringify(options)) fail('新选项请使用新的决定编号')
+    if (previous && d.artifactIds === undefined) continue
     const artifactIds = d.artifactIds === undefined ? undefined : strings(d.artifactIds, '关联成果')
+    const changedArtifacts = JSON.stringify(previous?.artifactIds ?? []) !== JSON.stringify(artifactIds)
+    if (previous?.orcaQuestions?.length && changedArtifacts)
+      fail('原 Orca 问题的关联成果已固定，请先撤下原决定再登记新问题')
     if (previous?.answer !== undefined) {
-      if (JSON.stringify(previous.artifactIds ?? []) !== JSON.stringify(artifactIds)) fail('只能更新待决定项的关联成果')
+      if (changedArtifacts) fail('只能更新待决定项的关联成果')
       continue
     }
     if (artifactIds?.some(id => !task.artifacts.some(a => a.id === id && !a.expired))) fail('待决定项只能关联本任务未过期的成果')
-    if (previous) previous.artifactIds = artifactIds
-    else task.decisions.push({ id: did, question, options, ...(artifactIds && { artifactIds }), history: [] })
+    if (previous) {
+      previous.artifactIds = artifactIds
+      if (changedArtifacts) previous.presentedAt = submittedAt
+    }
+    else task.decisions.push({ id: did, question, options, ...(artifactIds && { artifactIds }), history: [], presentedAt: submittedAt })
   }
   for (const e of list(input.executions ?? [], '执行记录')) {
     const execution = { runId: text(e.runId, 'Run 编号', 200), taskId: text(e.taskId, 'Orca 任务编号', 200), dispatchId: text(e.dispatchId, '派工编号', 200), agent: text(e.agent, '执行代理', 100) }
@@ -365,6 +371,8 @@ export function submitTask(project: Project, raw: unknown): void {
   // The lead withdrew these itself, so its own notice is not queued back to it.
   if (withdrawals.length) applyFeedback(project, [task], withdrawals, '项目主会话', true)
   for (const [id, reason] of expirations) expireArtifact(task, id, reason)
+  if ((phase === 'paused' || phase === 'blocked') && task.decisions.some(d => d.answer === undefined && d.orcaQuestions?.length))
+    fail('有待答复的原 Orca 决定，请保持任务可答复')
   if (phase === 'completed' && taskState({ ...task, phase: 'ready' }) !== 'completed') fail('仍有待决定、待验收或需修改的事项，不能标记为完成')
   task.updatedAt = submittedAt
   task.submittedAt = task.updatedAt
@@ -375,11 +383,13 @@ export function submitTask(project: Project, raw: unknown): void {
 export interface FeedbackItem { taskId: string; kind: 'acceptance' | 'decision' | 'blocked'; itemId: string; itemRevision?: number; reviewTotal?: number; fingerprint?: string; result?: string; answer?: string; note?: string }
 export function feedback(project: Project, raw: unknown, source?: string, event?: SourceEvent): void {
   const items = object(raw).items
-  if (event && (!Array.isArray(items) || items.some(item => item?.taskId !== event.worker?.projectTaskId ||
-    item.kind !== 'acceptance' || item.result !== 'changes_requested'))) fail('请只代录来源对应任务的明确返修意见')
+  const sourceTask = event?.worker?.projectTaskId ?? event?.ownerDecision?.taskId
+  if (event && (!Array.isArray(items) || items.some(item => item?.taskId !== sourceTask || (event.ownerDecision
+    ? item.kind !== 'decision' || item.itemId !== event.ownerDecision.itemId
+    : item.kind !== 'decision' && (item.kind !== 'acceptance' || item.result !== 'changes_requested'))))) fail('请只代录来源对应任务的明确意见')
   applyFeedback(project, project.tasks, items, source, false, event)
   if (event) {
-    const task = project.tasks.find(t => t.id === event.worker?.projectTaskId)!
+    const task = project.tasks.find(t => t.id === sourceTask)!
     event.taskId = task.id
     task.sourceIds.push(event.id)
   }
@@ -423,6 +433,7 @@ function applyFeedback(project: Project, tasks: Task[], items: unknown, source?:
       const item = task.decisions.find(x => x.id === input.itemId)
       if (!item || item.answer !== undefined) fail('问题已回答、已丢弃或不存在，请刷新')
       if (input.fingerprint !== undefined && input.fingerprint !== fingerprint([item.question, item.options])) fail('问题内容已更新')
+      if (input.itemRevision !== undefined && input.itemRevision !== 1) fail('决定版本已更新，请刷新后确认')
       if (discarded && input.answer !== undefined) fail('丢弃的决定不能同时填写答案')
       if (input.result && !discarded) fail('决定结论不正确')
       return { task, item, note, discarded, result: discarded ? 'discarded' : text(input.answer, '决定', 8000), subject: '决定已提交', title: item.question, revision: 1 }
@@ -444,16 +455,19 @@ function applyFeedback(project: Project, tasks: Task[], items: unknown, source?:
     const actor = source ?? (v.discarded ? '主人' : undefined)
     v.item.history.push({ at, revision: v.revision, result: v.result, note: v.note, ...(actor ? { source: actor } : {}) })
   }
-  if (withdrawal) return
-  const body = validated.map(v => {
+  const reported = withdrawal ? validated.filter(v => v.item && 'orcaQuestions' in v.item) : validated
+  if (!reported.length) return
+  const body = reported.map(v => {
     const result = v.item ? (v.discarded ? '已丢弃' : v.subject + '：' + v.result) + '\n' : ''
     const note = v.item && 'status' in v.item && v.result === 'passed' && v.note ? `通过留言：${v.note}` : v.note
-    return `[项目 ${project.ref.id} / 任务 ${v.task.id}]\n${v.task.title}\n${v.title}\n${result}${note}`
+    const questions = v.item && 'orcaQuestions' in v.item && v.item.orcaQuestions?.map(q => `- ${q.runId} / ${q.id} / ${q.from}`).join('\n')
+    const followUp = questions ? `\n决定 ${v.item!.id} 的原 Orca 问题\n${questions}\n由项目主会话用 reply-decision 回送已保存的结论与补充说明。` : ''
+    return `[项目 ${project.ref.id} / 任务 ${v.task.id}]\n${v.task.title}\n${v.title}\n${result}${note}${followUp}`
   }).join('\n\n')
-  project.deliveries.push({ id: randomUUID(), subject: `用户反馈 · ${validated.length} 条`, body: source ? `${source}\n\n${body}` : body, state: 'pending' })
+  project.deliveries.push({ id: randomUUID(), subject: `${withdrawal ? '决定撤下' : '用户反馈'} · ${reported.length} 条`, body: source ? `${source}\n\n${body}` : body, state: 'pending' })
 }
 
-function recordSource(project: Project, event: SourceEvent) {
+export function recordSource(project: Project, event: SourceEvent) {
   if (project.events.some(x => x.source === event.source && x.sourceId === event.sourceId)) return false
   const earlier = !event.taskId && project.events.find(x => x.threadId === event.threadId && x.taskId)
   if (earlier) event.taskId = earlier.taskId

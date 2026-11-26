@@ -50,9 +50,16 @@ test('Claude role hooks scope actions by Orca identity and fail open', () => {
     writeFileSync(registry, 'broken');
     assert.equal(run('claude_workspace', '{}').decision, null);
     writeFileSync(registry, JSON.stringify({ version: 1, sessions }));
-    for (const command of ['orca bot item list', 'orca automations list', 'orca bot reply', 'orca computer list-apps']) {
+    for (const command of ['orca automations list', 'orca bot reply', 'orca computer list-apps',
+      'orca bot item add --title test --for bot:other', 'orca bot item set 1 --status needs-you --environment remote',
+      'orca bot item list --bot other', 'orca bot item add --title test --chat elsewhere', 'orca bot item set 1 --file profile.json']) {
       assert.equal(pre('Bash', { command }, '10000000-0000-4000-9000-000000000001'), 'deny');
       assert.equal(pre('Bash', { command }, '10000000-0000-4000-9000-000000000002'), undefined);
+    }
+    for (const command of ['orca bot item list --here --json', 'orca bot item show 1 --json',
+      'orca bot item add --title decision --done-means answered --json', 'orca bot item set 1 --status needs-you --ask "选择哪项?" --json']) {
+      assert.equal(pre('Bash', { command }, '10000000-0000-4000-9000-000000000001'), undefined);
+      assert.equal(pre('Bash', { command }, 'codex_workspace'), undefined);
     }
     for (const source of ['startup', 'resume', 'compact', 'clear']) {
       const session = id => run(id, { hook_event_name: 'SessionStart', source }).decision?.hookSpecificOutput?.additionalContext;
@@ -246,6 +253,18 @@ test('Claude role hooks scope actions by Orca identity and fail open', () => {
       assert.equal(stop(), expected, args);
     }
     setTranscript(question(), question('msg_second'), reply(), result('reply', accepted));
+    assert.equal(stop(), 'block');
+    const business = question('msg_business', '[业务决定] 选择发布顺序？');
+    const registered = (questionId, runId = 'run_fixture') => JSON.stringify({ submission: {
+      projectId: 'p1', runId, requestId: 'register', taskId: 'work', phase: 'working', pendingDecision: true, decisionQuestionIds: [questionId]
+    }, ok: true });
+    setTranscript(business, submit, result('call', registered('msg_other')));
+    assert.equal(stop(), 'block');
+    setTranscript(business, submit, result('call', registered('msg_business', 'run_unrelated')));
+    assert.equal(stop(), 'block');
+    setTranscript(business, submit, result('call', registered('msg_business')), business);
+    assert.equal(stop(), undefined);
+    setTranscript(business, question(), submit, result('call', registered('msg_business')));
     assert.equal(stop(), 'block');
     setTranscript(question(), done, submit, result('call', receipt('blocked')));
     assert.equal(stop(), undefined);

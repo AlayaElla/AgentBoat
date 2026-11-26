@@ -67,6 +67,43 @@ syncBuiltinESMExports();`);
   } finally { rmSync(dir, {recursive:true,force:true}); }
 });
 
+test('reply-decision uses the native thread and saved feedback after lead takeover', () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'business-reply-client-'));
+  const fixture = path.join(dir, 'orca-fixture.mjs');
+  writeFixture(fixture, `import cp from 'node:child_process';
+import assert from 'node:assert/strict';
+import { syncBuiltinESMExports } from 'node:module';
+const runId = 'run_fixture', id = 'msg_question', from = 'dispatch:ctx_fixture';
+const answer = '方案乙', note = '保留原反馈。';
+cp.execFileSync = (_exe, args, options) => {
+  assert.equal(args.includes('--from'), false);
+  if (args[1] === 'run-current') return JSON.stringify({ok:true,result:{run:{id:runId,consumer_generation:2}}});
+  assert.deepEqual(args, ['orchestration', 'reply', '--run', runId, '--id', id, '--body-file', '-', '--environment', 'local', '--json', '--full']);
+  assert.equal(options.input, answer + '\\n\\n备注\\n' + note);
+  if (process.env.TEST_REPLY === 'conflict') throw Object.assign(Error('已有答复'), {stdout: JSON.stringify({error:{code:'answer_conflict',message:'已有不同答复'}})});
+  return JSON.stringify({ok:true,result:{duplicate:process.env.TEST_REPLY === 'replay',message:{ id:'msg_answer',thread_id:id,run_id:runId,from_handle:'run:'+runId,to_handle:from,body:options.input }}});
+};
+const reply = (handler, input) => {
+  assert.equal(handler,'project.agent');
+  assert.deepEqual(input,{operation:'read',projectId:'p1',taskId:'work'});
+  const expectedRun = process.env.TEST_REPLY === 'elsewhere' ? 'run_old' : runId;
+  return {ok:true,result:{result:{project:{runId},lead:{session:{handle:'orca_session_id:new-lead'}},task:{decisions:[{
+    id:'direction',answer,history:[{note}],orcaQuestions:[{id,from,runId:expectedRun}]
+  }]}}}};
+};
+syncBuiltinESMExports();`);
+  const call = (mode = '') => execFileSync(process.execPath, ['--import', pathToFileURL(fixture).href, 'scripts/client.mjs', 'reply-decision', 'p1', 'work', 'direction'],
+    { encoding:'utf8', windowsHide:true, env:{ ...process.env, ORCA_AGENT_SESSION_ID:'new-lead', TEST_REPLY:mode } });
+  try {
+    const receipt = JSON.parse(call());
+    assert.deepEqual(receipt.result.replies, [{ questionId:'msg_question', replyId:'msg_answer', duplicate:false }]);
+    assert.deepEqual(JSON.parse(call('replay')).result.replies, [{ questionId:'msg_question', replyId:'msg_answer', duplicate:true }]);
+    assert.throws(() => call('conflict'), e => JSON.parse(e.stdout).result.replies[0].code === 'answer_conflict');
+    assert.throws(() => call('elsewhere'), e => JSON.parse(e.stdout).result.replies[0].runId === 'run_old');
+    console.log('原问题答复回执', JSON.stringify(receipt.result.replies[0]));
+  } finally { rmSync(dir, {recursive:true,force:true}); }
+});
+
 test('main-bind writes both role cards only after a matching receipt and retries file failures safely', () => {
   const dir = mkdtempSync(path.join(os.tmpdir(), 'main-role-client-'));
   const fixture = path.join(dir, 'orca-fixture.mjs');

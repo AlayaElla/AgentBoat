@@ -182,6 +182,16 @@ test('questions and worker reports require recent mail from a verified unfinishe
   assert.deepEqual(results.questions.map(q => q.id), ['recent', 'edge', 'legacy'])
   assert.deepEqual(results.reports.map(q => q.id), ['recent-report'])
   assert.deepEqual(await openRunMail([row('old', 'live', questionMaxAge + 1)], run, async () => { throw Error('unexpected work lookup') }, now), { questions: [], reports: [] })
+  const body = '[业务决定] 选择路线？', id = 'msg_exact'
+  const native = { ...row(id, 'live', 0), thread_id: id, body, created_at: new Date(now).toISOString().slice(0, 19).replace('T', ' '),
+    payload: JSON.stringify({ question: body, taskId: 'open', dispatchId: 'live', options: ['甲', '乙'] }) }
+  const readWork = async () => ({ workers: [worker('live')], tasks: [{ id: 'open', status: 'dispatched', run_id: run }] })
+  assert.deepEqual((await openRunMail([native], run, readWork, now, id)).questions[0].options, ['甲', '乙'])
+  for (const other of [{ ...native, type: 'approval' }, { ...native, thread_id: 'msg_other' }, { ...native, to_handle: 'run:run_other' }]) {
+    assert.equal((await openRunMail([other], run, readWork, now, id)).questions.length, 0)
+  }
+  const answered = { ...native, id: 'msg_answer', type: 'status', subject: 'Re: Question', to_handle: native.from_handle, sequence: 2 }
+  assert.equal((await openRunMail([native, answered], run, readWork, now, id)).questions.length, 0)
 })
 
 test('Run mail first reminds the project and escalates once after two hours unless the project submits', async () => {
@@ -962,7 +972,7 @@ test('decision artifact patches preserve the question, existing feedback and rep
     const attached = await read()
     await submit('attach', start.revision, patch)
     assert.equal((await read()).revision, attached.revision)
-    assert.deepEqual(attached.tasks[1].decisions[0], { ...original, artifactIds: [artifact.id] })
+    assert.deepEqual(attached.tasks[1].decisions[0], { ...original, artifactIds: [artifact.id], presentedAt: attached.tasks[1].submittedAt })
     assert.equal(attached.tasks[1].blockedRevision, previous.blockedRevision)
     await assert.rejects(() => worker.request('project.expireArtifact', { projectId: 'p1', taskId: task.id, artifactId: artifact.id, revision: attached.revision }), /待决定项/)
     await submit('legacy', attached.revision, { id: original.id, question: original.question })
@@ -970,7 +980,7 @@ test('decision artifact patches preserve the question, existing feedback and rep
     assert.deepEqual(legacy.tasks[1].decisions[0].artifactIds, [artifact.id])
     await submit('clear', legacy.revision, { ...patch, artifactIds: [] })
     const cleared = await read()
-    assert.deepEqual(cleared.tasks[1].decisions[0], { ...original, artifactIds: [] })
+    assert.deepEqual(cleared.tasks[1].decisions[0], { ...original, artifactIds: [], presentedAt: cleared.tasks[1].submittedAt })
     await submit('reattach', cleared.revision, patch)
     await worker.request('project.feedback', { projectId: 'p1', items: [{ taskId: task.id, kind: 'decision', itemId: original.id,
       answer: original.options[0], fingerprint: fingerprint([original.question, original.options]), note: '保留选择记录' }] })
@@ -1257,6 +1267,77 @@ test('chat feedback preserves the reviewed version and forwards worker sources a
       [[1, 'changes_requested', userText, receipt.sourceId]])
     assert.deepEqual(saved.tasks[1].sourceIds, [receipt.sourceId])
   } finally { coordinator.stop(); await worker.deactivate() }
+})
+
+test('an original business ask has one attention card and card or chat answers reach its Run notice', async () => {
+  const runId = 'run_business', caller = mainSession.handle, project = fresh(refs[0])
+  const p = { ...project, runId, mainAgentHandle: caller }
+  const workspace = { version: 1, revision: 0, runId: 'run_workspace', session: { ...mainSession, handle: 'orca_session_id:workspace' }, requests: [] }
+  const execution = { runId, taskId: 'task_fixture', dispatchId: 'ctx_fixture', agent: 'codex' }
+  submitTask(p, { id: 'work', title: '项目任务', goal: '业务取舍', phase: 'working', executions: [execution], artifacts: deliverable.artifacts })
+  const question = (id: string, body = '[业务决定] 选择路线？\n已有补充条件') => ({ id, subject: 'Question', body, from: 'dispatch:ctx_fixture',
+    at: Date.now() - 20 * 60_000, options: ['方案甲', '方案乙'], taskId: execution.taskId, dispatchId: execution.dispatchId })
+  const first = question('msg_card'), next = question('msg_chat'), relayed = question('msg_relay'), permission = question('msg_login', '请主人在原入口授权')
+  const receipt: string[] = [], ownerText = '明确选择方案乙，保留已有条件。'
+  let c!: ReturnType<typeof createCoordinator>
+  const worker = await mountWorker({ default: api => { c = createCoordinator(api, {
+    projects: async () => refs, runBinding: async id => ({ owner: id === runId ? caller : workspace.session.handle, generation: 1 }),
+    question: async (_run, id) => [first, next, relayed, permission].find(q => q.id === id),
+    mail: async run => ({ questions: run === runId ? [first, next, permission] : [], reports: [] }),
+    ownerMessage: async (handle, id) => {
+      assert.ok(handle === caller || handle === workspace.session.handle)
+      return { text: ownerText, receivedAt: new Date(id === 'orca:old' ? 0 : Date.now()).toISOString() }
+    },
+    send: async (_run, delivery) => { receipt.push(delivery.body); return { requestId: 'receipt' } },
+  }) } }, { host: mockHost({ storage: { 'project:p1': p as any, workspace } }) })
+  const state = () => c.store.get('p1')
+  const submit = async (requestId: string, id: string, questionId: string, phase = 'working') => worker.request('project.agent', {
+    operation: 'submit', projectId: 'p1', runId, caller, requestId, revision: (await state()).revision, task: { id: 'work', phase,
+      decisions: [{ id, question: '选择路线？\n已有补充条件', options: first.options, artifactIds: [deliverable.artifacts[0].id], orcaQuestionId: questionId }] }
+  })
+  const items = (itemId: string) => [{ taskId: 'work', kind: 'decision' as const, itemId, itemRevision: 1,
+    fingerprint: fingerprint(['选择路线？\n已有补充条件', first.options]), answer: '方案乙', note: '卡上的补充' }]
+  try {
+    await assert.rejects(() => submit('perm', 'permit', permission.id), /找不到待答复的 Orca 原业务问题/)
+    await assert.rejects(() => submit('blocked', 'card', first.id, 'blocked'), /能直接答复/)
+    await submit('first', 'card', first.id)
+    await submit('same', 'card', first.id)
+    await assert.rejects(() => submit('duplicate', 'copy', first.id), /已关联其他任务或决定/)
+    await c.refreshQuestions()
+    const pending = await worker.request('workspace.overview')
+    assert.deepEqual(pending.attention.filter(row => row.taskId === 'work').map(row => row.itemId), ['card'])
+    assert.deepEqual(pending.questions?.map(row => row.id), [next.id, permission.id])
+    await worker.request('project.feedback', { projectId: 'p1', requestId: 'card-answer', items: items('card') })
+    await c.flush('p1')
+    assert.equal(receipt.filter(body => body.includes(`决定 card 的原 Orca 问题\n- ${runId} / ${first.id} / ${first.from}`) && body.includes('卡上的补充')).length, 1)
+
+    await submit('next', 'chat', next.id)
+    const answer = async (messageId: string) => worker.request('project.feedback', { projectId: 'p1', caller, runId, revision: (await state()).revision,
+      requestId: messageId, ownerSource: { messageId }, items: items('chat') })
+    await assert.rejects(() => answer('orca:old'), /早于当前决定/)
+    await answer('orca:chat')
+    await c.flush('p1')
+    const saved = await state(), d = saved.tasks[0].decisions[1]
+    assert.deepEqual([d.answer, d.history[0].note, d.history[0].source], ['方案乙', ownerText, `项目主会话 ${caller} / 用户消息 orca:chat`])
+    assert.equal(receipt.filter(body => body.includes(`决定 chat 的原 Orca 问题\n- ${runId} / ${next.id} / ${next.from}`) && body.includes(ownerText)).length, 1)
+
+    await submit('relay', 'relay', relayed.id)
+    const relay = { projectId: 'p1', runId: workspace.runId, caller: workspace.session.handle, requestId: 'relay-source', text: '未被采用的转述',
+      ownerDecision: { messageId: 'orca:workroom', taskId: 'work', itemId: 'relay' } }
+    await assert.rejects(() => worker.request('workspace.message', { ...relay, caller }), /当前绑定的工作间主会话/)
+    await worker.request('workspace.message', relay)
+    const source = (await state()).events.find(e => e.sourceId === relay.requestId)!
+    assert.equal(source.text, ownerText)
+    await worker.request('project.feedback', { projectId: 'p1', caller, runId, revision: (await state()).revision,
+      requestId: 'save-relay', ownerSource: { eventId: source.id }, items: items('relay') })
+    await c.flush('p1')
+    const done = await state()
+    assert.deepEqual(done.tasks[0].decisions[2].history.map(h => [h.note, h.source]), [[ownerText, source.id]])
+    assert.equal(receipt.filter(body => body.includes(`决定 relay 的原 Orca 问题\n- ${runId} / ${relayed.id} / ${relayed.from}`) && body.includes(ownerText)).length, 1)
+    assert.equal(attention(done).length, 0)
+    assert.deepEqual(done.events.filter(e => e.source === 'orca-question').map(e => e.sourceId), [first.id, next.id, relayed.id])
+    console.log('业务决定回执', JSON.stringify({ card: first.id, chat: next.id, workroomChat: relayed.id, permissionUnchanged: permission.id, notices: 3 }))
+  } finally { c.stop(); await worker.deactivate() }
 })
 
 test('main messages use the existing source queue and retries never duplicate a delivery', async () => {

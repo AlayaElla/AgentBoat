@@ -4,8 +4,6 @@ import type { LeadContact, ContactRoutes } from './model'
 import { execFile, type ExecFileOptions } from 'node:child_process'
 import { promisify } from 'node:util'
 import { existsSync } from 'node:fs'
-import { realpath } from 'node:fs/promises'
-import { createRequire } from 'node:module'
 import path from 'node:path'
 import os from 'node:os'
 import { pathToFileURL } from 'node:url'
@@ -15,9 +13,9 @@ import { readAgents, type AgentsSnapshot } from './agents'
 import type { Project } from './model'
 import type { HostApi } from 'orca/host'
 import { agentFlags, launchReceipt, validAgentId, type AgentLaunch } from '../../workspace/agent-launch.mjs'
-import { inboxLimit, openRunMail, type OrcaQuestion, type OrcaWorkerRecord } from '../scripts/orca-questions.mjs'
+import { inboxLimit, openRunMail, type OrcaQuestion, type VerifiedOrcaQuestion, type OrcaWorkerRecord } from '../scripts/orca-questions.mjs'
 import { workerReport, type WorkerReport } from '../scripts/worker-reports.mjs'
-import { activeUserDataPath, pluginKey, release } from '../scripts/orca-cli.mjs'
+import { activeUserDataPath, ownerMessages, pluginKey, release } from '../scripts/orca-cli.mjs'
 
 export const readTimeout = 5000
 const execute = promisify(execFile)
@@ -64,6 +62,8 @@ export interface CoordinatorRuntime {
   removeProject(ref: ProjectRef, host: HostApi<'worker'>): Promise<void>
   agents(projects: Project[], host: HostApi<'worker'>, main?: AgentSession, targets?: Promise<TargetInventory | undefined>): Promise<AgentsSnapshot>
   mail(runId: string, submitted?: (reports: WorkerReport[]) => Promise<Set<string>>): Promise<{ questions: OrcaQuestion[]; reports: WorkerReport[]; waiting?: { at: number; title: string; read?: boolean; report?: WorkerReport }[] }>
+  question(runId: string, id: string): Promise<VerifiedOrcaQuestion | undefined>
+  ownerMessage(caller: string, sourceId: string): Promise<{ text: string; receivedAt: string }>
   workerFeedback(caller: string, taskId: string, dispatchId: string, sourceId: string): Promise<{ runId: string; text: string; receivedAt: string }>
   hermesApprovalMode(): Promise<string>
   send(runId: string, delivery: Delivery): Promise<{ requestId?: string }>
@@ -186,21 +186,31 @@ export class OrcaRuntime implements CoordinatorRuntime {
   async agents(projects: Project[], host: HostApi<'worker'>, main?: AgentSession, targets?: Promise<TargetInventory | undefined>) {
     return readAgents(host, args => this.list(args, readTimeout, args[0] !== 'orchestration'), projects, main, targets)
   }
-  async mail(runId: string, submitted?: (reports: WorkerReport[]) => Promise<Set<string>>) {
+  private async runInbox(runId: string) {
     // shortcut: Orca inbox has no pagination; scan the newest bounded window.
     const result = await this.call(['orchestration', 'inbox', '--run', runId, '--limit', String(inboxLimit)], readTimeout)
     if (!Array.isArray(result.messages) || result.messages.some((m: any) => !m || m.run_id !== runId)) fail('Orca 运行邮件无法核对')
-    const reports = result.messages.map(workerReport).filter((r: WorkerReport | undefined): r is WorkerReport => !!r)
-    const done = await submitted?.(reports)
-    const pending = done?.size ? result.messages.filter((m: any) => !done.has(m.id)) : result.messages
-    const actionable = await openRunMail(pending, runId, async ids => {
+    return result.messages as Record<string, any>[]
+  }
+  private openMail(messages: Record<string, any>[], runId: string, questionId?: string) {
+    return openRunMail(messages, runId, async ids => {
       const [taskList, workers] = await Promise.all([
         this.call(['orchestration', 'task-list', '--run', runId], readTimeout),
-        this.questionWorkers(runId, ids)
+        this.questionWorkers(runId, ids, questionId !== undefined)
       ])
       if (!Array.isArray(taskList.tasks) || taskList.runId !== runId) fail('Orca 项目任务状态无法核对')
       return { tasks: taskList.tasks, workers }
-    })
+    }, Date.now(), questionId)
+  }
+  async question(runId: string, id: string) {
+    return (await this.openMail(await this.runInbox(runId), runId, id)).questions[0]
+  }
+  async mail(runId: string, submitted?: (reports: WorkerReport[]) => Promise<Set<string>>) {
+    const messages = await this.runInbox(runId)
+    const reports = messages.map(workerReport).filter((r): r is WorkerReport => !!r)
+    const done = await submitted?.(reports)
+    const pending = done?.size ? messages.filter(m => !done.has(m.id)) : messages
+    const actionable = await this.openMail(pending, runId)
     const waiting = pending.flatMap((m: any) => {
       if (m.to_handle !== 'run:' + runId || !Number.isFinite(Date.parse(m.created_at))) return []
       if (m.type === 'worker_done') {
@@ -218,30 +228,22 @@ export class OrcaRuntime implements CoordinatorRuntime {
       dispatch.hostScope?.kind !== 'local' || !caller.startsWith('orca_session_id:') ||
       dispatch.processIncarnation !== `structured:${caller.slice('orca_session_id:'.length)}`)
       fail('当前会话不是这项在途派工的本机执行者')
-    let message
-    try {
-      // worker-read omits typedBy, so use the matching Orca build's local journal reader for this exact message.
-      const cli = await realpath(await this.executable())
-      const { RuntimeClient } = createRequire(import.meta.url)(path.resolve(path.dirname(cli), '../app.asar.unpacked/out/cli/runtime/client.js'))
-      const client = new RuntimeClient(activeUserDataPath(), readTimeout, null, null, cli)
-      const reply = await client.call('agentSession.item', { sessionId: caller.slice('orca_session_id:'.length), itemId: sourceId })
-      message = reply.ok && reply.result?.item
-    } catch { fail('Orca 无法核对原消息来源，请让主人在项目主会话指明反馈') }
-    const body = message?.body, block = body?.blocks?.length === 1 && body.blocks[0], typist = body?.typedBy
+    const origin = await this.ownerMessage(caller, sourceId)
     const dispatchedAt = Date.parse(dispatch.dispatchedAt?.replace(/^(\d{4}-\d\d-\d\d) (\d\d:\d\d:\d\d)$/, '$1T$2Z'))
-    if (message?.itemId !== sourceId || !sourceId.startsWith('orca:') || !(message?.observedAt >= dispatchedAt) ||
-      !Number.isFinite(message.observedAt) ||
-      body?.kind !== 'message' || body.role !== 'user' || body.from !== undefined ||
-      (typist?.by !== 'host' && !(typist?.by === 'device' && typist.own === true)) ||
-      block?.type !== 'text' || typeof block.text !== 'string' || !block.text.trim() || block.text.length > 8000)
-      fail('未在原派工转录中核对到完整的用户原话，请让主人在项目主会话指明反馈')
-    return { runId: dispatch.runId, text: block.text, receivedAt: new Date(message.observedAt).toISOString() }
+    if (!(Date.parse(origin.receivedAt) >= dispatchedAt)) fail('用户消息早于当前派工，请核对来源')
+    return { runId: dispatch.runId, ...origin }
   }
-  private async questionWorkers(runId: string, ids: Set<string>) {
+  async ownerMessage(caller: string, sourceId: string) {
+    const [message] = await ownerMessages(caller, await this.executable(), sourceId)
+      .catch(() => fail('Orca 无法核对用户原消息来源'))
+    if (!message) fail('未在 Orca 聊天中核对到完整的用户原话')
+    return { text: message.text, receivedAt: message.receivedAt }
+  }
+  private async questionWorkers(runId: string, ids: Set<string>, fresh = false) {
     const workers: OrcaWorkerRecord[] = [], visited = new Set<string>()
     let cursor: string | undefined
     do {
-      const page = await this.list(['orchestration', 'worker-list', '--run', runId, ...(cursor ? ['--cursor', cursor] : [])])
+      const page = await this.list(['orchestration', 'worker-list', '--run', runId, ...(cursor ? ['--cursor', cursor] : [])], readTimeout, fresh)
       if (!Array.isArray(page.workers) || !page.page) fail('Orca 执行者状态无法核对')
       for (const worker of page.workers) if (worker?.runId === runId && ids.delete(worker.dispatchId)) workers.push(worker)
       if (!page.page.hasMore || !ids.size) break

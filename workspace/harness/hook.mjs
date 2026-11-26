@@ -3,6 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { roleRegistryPath, stableRoot, clientPath, promptClientPath, pluginKey } from '../../coordinator/scripts/orca-cli.mjs';
+import { businessQuestion } from '../../coordinator/scripts/orca-questions.mjs';
 
 const workspaceDir = fileURLToPath(new URL('../', import.meta.url));
 const agentboatHome = path.resolve(process.env.AGENTBOAT_HOME || path.join(os.homedir(), '.agentboat'));
@@ -25,6 +26,7 @@ const rules = {
 const redirect = '你是工作间管理员。已明确归属项目的请求先核对项目身份，再用 client.mjs message 转达用户原话和要求，由项目主会话安排执行。独立工作间事项按 $agentboat-workspace 办理。';
 const stopReason = '执行者已回报。先核对成果，用 submit 登记完成并直接交付。重要阶段确需主人验收时登记待验收。';
 const questionReason = '有执行者的问题可能需要主人处理。先用 read 核对待处理事项，用 orca orchestration reply 回复原问题。已有同一验收或决定时沿用原项，在回复里注明原任务和事项编号。确需主人另做操作时，用 submit 登记对应事项。';
+const businessQuestionReason = '有待登记的业务决定。核对项目任务和原问题，用 submit 的 orcaQuestionId 关联这条原问题。收到登记回执后结束等待，主人答复入账后用 reply-decision 回送。';
 const diagnostic = error => console.error('AgentBoat hook：' + (error.code || error.name || '读取失败'));
 const same = (a, b) => path.relative(a, b) === '';
 const inside = (root, file) => {
@@ -171,6 +173,8 @@ function commandAllowed(input, role) {
 }
 function primaryAllowed(name, args, cwd, bash) {
   if (name === 'node') return nodeAllowed(args, cwd, bash);
+  if (name === 'orca' && args[0] === 'bot') return args[1] === 'item' && ['list', 'show', 'add', 'set'].includes(args[2]) &&
+    !args.slice(3).some(arg => /^--(?:for|bot|chat|environment|pairing-code|file)(?:=|$)/.test(arg));
   if (name === 'orca') return rules.orca.has(args[0]) || rules.orca.has(args.slice(0, 2).join(' '));
   if (name !== 'git') return readAllowed(name, args);
   const withDirectory = args[0] === '-C' && !!args[1], op = args[withDirectory ? 2 : 0];
@@ -196,7 +200,7 @@ const ownerAction = /主人|用户|人工|本人|手动|登录|验证码|扫码|
 function receivedQuestions(text, check = false) {
   const envelope = /^─{4} From: [^\r\n]+ \(question\)(?: ─{4})?\r?\n([\s\S]*?)^\[Reply: orca orchestration reply --id (msg_[\w-]+)[^\r\n]*\]\r?$/gm;
   const delivered = /^\s*(msg_[\w-]+) question from [^\r\n]+\r?\n([\s\S]*?)^\s*Reply: orca orchestration reply --id \1\b/gm;
-  return [...text.matchAll(check ? delivered : envelope)].flatMap(([, a, b]) => ownerAction.test(check ? b : a) ? [check ? a : b] : []);
+  return [...text.matchAll(check ? delivered : envelope)].map(([, a, b]) => check ? [a, b] : [b, a]);
 }
 function replyTarget(args) {
   let id;
@@ -241,6 +245,13 @@ async function stopBlocker(input, role, codex) {
   if (input.stop_hook_active || typeof input.transcript_path !== 'string') return;
   const rows = transcriptTail(input.transcript_path);
   const shells = new Set(), checks = new Map(), replies = new Map(), questions = new Set();
+  const business = new Set(), handled = new Set();
+  const markQuestion = (id, body, envelope = false) => {
+    if (handled.has(id)) return;
+    const isBusiness = envelope ? /^\[业务决定\]/m.test(body) : businessQuestion.test(body);
+    if (isBusiness) business.add(id);
+    else if (ownerAction.test(body)) questions.add(id);
+  };
   const seenDone = new Set(), pending = new Map();
   const { workerReport, reportSubmitted } = await import('../../coordinator/scripts/worker-reports.mjs');
   const markDone = message => {
@@ -263,7 +274,7 @@ async function stopBlocker(input, role, codex) {
           from: header.match(/\(([^()]+)\)(?: \[(?:URGENT|HIGH)\])? \(worker_done\)/)?.[1],
           payload: block.text.match(/^Payload: (\{[^\r\n]+\})\s*$/mi)?.[1]
         });
-        for (const id of receivedQuestions(block.text)) questions.add(id);
+        for (const [id, body] of receivedQuestions(block.text)) markQuestion(id, body, true);
       } else if (row.type === 'user' && !row.isMeta) questions.clear();
     }
     for (const block of blocks) {
@@ -295,28 +306,35 @@ async function stopBlocker(input, role, codex) {
             if (check && workerDone.test(body)) markDone({ type: 'worker_done', id: row.uuid ?? block.tool_use_id });
           }
           if (check) {
-            for (const id of receivedQuestions(body, true)) questions.add(id);
+            for (const [id, text] of receivedQuestions(body, true)) markQuestion(id, text, true);
             if (result?.ok && Array.isArray(messages)) for (const m of messages)
-              if (m.type === 'question' && /^msg_[\w-]+$/.test(m.id ?? '') && typeof m.body === 'string' && ownerAction.test(m.body)) questions.add(m.id);
+              if (m.type === 'question' && /^msg_[\w-]+$/.test(m.id ?? '') && typeof m.body === 'string') markQuestion(m.id, m.body);
           }
         }
         if (!block.is_error && replies.has(block.tool_use_id)) {
           const result = jsonResult(body);
           const id = result?.result?.messageId ?? result?.result?.message?.id;
-          if (result?.ok && /^msg_[\w-]+$/.test(id ?? '') || /^(?:Replied msg_[\w-]+\s*$|.*\bmessageId=msg_[\w-]+\s*$)/m.test(body))
-            questions.delete(replies.get(block.tool_use_id));
+          if (result?.ok && /^msg_[\w-]+$/.test(id ?? '') || /^(?:Replied msg_[\w-]+\s*$|.*\bmessageId=msg_[\w-]+\s*$)/m.test(body)) {
+            const target = replies.get(block.tool_use_id);
+            questions.delete(target);
+            business.delete(target);
+            handled.add(target);
+          }
         }
         for (const [, receipt] of body.matchAll(/\{"submission":(\{[^\r\n]*?\}),"ok":true[,}]/g)) {
           const submission = jsonResult(receipt);
           if (submission?.projectId !== role.projectId || typeof submission.requestId !== 'string') continue;
           const time = Date.parse(submission.submittedAt ?? raw.timestamp);
           for (const report of pending.values()) if (reportSubmitted(report, { at: Number.isFinite(time) ? time : undefined })) pending.delete(report.id);
-          if (submission.phase === 'blocked' || submission.pendingDecision) questions.clear();
+          if (submission.phase === 'blocked' || submission.pendingDecision && !submission.decisionQuestionIds?.length) questions.clear();
+          if (!block.is_error && submission.runId === role.runId && Array.isArray(submission.decisionQuestionIds)) {
+            for (const id of submission.decisionQuestionIds) if (/^msg_[\w-]+$/.test(id)) { business.delete(id); handled.add(id); }
+          }
         }
       }
     }
   }
-  return questions.size ? questionReason : pending.size ? stopReason : undefined;
+  return business.size ? businessQuestionReason : questions.size ? questionReason : pending.size ? stopReason : undefined;
 }
 const antigravity = process.argv.includes('--antigravity');
 async function run() {
