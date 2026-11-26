@@ -1343,9 +1343,9 @@ export default async function activate(orca: OrcaWorkerApi): Promise<void> {
   coordinator = createCoordinator(cli.api, runtime, undefined, undefined, undefined, roleRegistryPath(), {
     preview: async () => {
       const saved = await codexHome()
-      return { ...previewSetup({ codexHome: saved }), codexHome: saved }
+      return { ...previewSetup({ codexHome: saved, fromSettings: true }), codexHome: saved }
     },
-    apply: async confirmation => applySetup(confirmation, { codexHome: await codexHome() }),
+    apply: async confirmation => applySetup(confirmation, { codexHome: await codexHome(), fromSettings: true }),
     saveCodexHome: async value => {
       const validated = validateCodexHome(value)
       await orca.storage.set(codexHomeKey, validated)

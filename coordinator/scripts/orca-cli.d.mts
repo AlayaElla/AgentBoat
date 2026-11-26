@@ -3,6 +3,7 @@ export function userDataPath(platform?: NodeJS.Platform, env?: NodeJS.ProcessEnv
 export const clientPath: string;
 export function promptClientPath(): string;
 export function installationRoot(options?: { repair?: boolean }): string;
+export function candidateSetupEntry(env: NodeJS.ProcessEnv, home: string): string | undefined;
 export const release: boolean;
 export function refreshReleaseSetup(codexHome?: string): Promise<string | undefined>;
 export function pluginVersionLabel(): string;

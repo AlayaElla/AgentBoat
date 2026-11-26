@@ -131,6 +131,65 @@ test('entry refuses occupied files, directories and foreign directory links', as
   assert.equal(realpathSync(stable), other);
 });
 
+test('packaged candidate settings read the verified release without getting setup write access', async t => {
+  const { temp, profile, home, key, stable, run, version } = fixture(t);
+  const official = version('a'), candidate = path.join(temp, 'local-candidate');
+  const kind = process.platform === 'win32' ? 'junction' : 'dir';
+  symlinkSync(official, stable, kind);
+  cpSync(official, candidate, { recursive: true });
+  const source = path.join(candidate, 'workspace/skill/agentboat-workspace/SKILL.md');
+  writeFileSync(source, readFileSync(source, 'utf8') + '\ncandidate-only change');
+  const installer = pathToFileURL(path.join(candidate, 'workspace/install.mjs')).href;
+  const evaluate = (expression, overrides) => run(['--input-type=module', '-e',
+    `import { previewSetup, applySetup } from ${JSON.stringify(installer)}; console.log(JSON.stringify(${expression}));`], undefined, overrides);
+  const preview = async overrides => JSON.parse((await evaluate('previewSetup({ fromSettings: true })', overrides)).stdout);
+
+  await run([path.join(stable, 'setup.mjs')], 'yes\n');
+  const skill = path.join(home, '.agents/skills/agentboat-workspace/SKILL.md');
+  const original = readFileSync(skill, 'utf8');
+  assert.equal(original, readFileSync(path.join(official, path.relative(candidate, source)), 'utf8')
+    .replaceAll('{{AGENTBOAT_REPO}}', stable.replaceAll('\\', '/')));
+  const extra = path.join(path.dirname(skill), 'personal.md');
+  writeFileSync(extra, 'keep');
+  const hooks = path.join(home, '.codex/hooks.json'), originalHooks = readFileSync(hooks);
+  const ready = await preview();
+  assert.equal(ready.error, undefined);
+  assert.equal(ready.confirmation, undefined);
+  assert.deepEqual(ready.paths, []);
+  await assert.rejects(evaluate('applySetup("a".repeat(64), { fromSettings: true })'), /请通过正式版 AgentBoat/);
+
+  const other = path.join(temp, 'other-profile/agentboat-current').replaceAll('\\', '/');
+  for (const [content, error] of [
+    [original.replaceAll(stable.replaceAll('\\', '/'), other), /归属未知/],
+    ['---\nname: agentboat-workspace\n---\nPersonal skill', /归属未知/],
+    [original + '\nPersonal text', /请通过正式版 AgentBoat/]
+  ]) {
+    writeFileSync(skill, content);
+    const result = await preview();
+    assert.match(result.error, error);
+    assert.equal(result.confirmation, undefined);
+    assert.equal(readFileSync(skill, 'utf8'), content);
+  }
+  writeFileSync(skill, original);
+  assert.match((await preview({ ORCA_USER_DATA_PATH: path.dirname(other) })).error, /归属未知/);
+  assert.equal(readFileSync(extra, 'utf8'), 'keep');
+  assert.deepEqual(readFileSync(hooks), originalHooks);
+
+  const alias = path.join(temp, 'aliased-profile');
+  mkdirSync(alias);
+  symlinkSync(path.join(profile, 'plugins'), path.join(alias, 'plugins'), kind);
+  assert.match((await preview({ ORCA_USER_DATA_PATH: alias })).error, /当前版本入口无效/);
+  unlinkSync(stable);
+  symlinkSync(candidate, stable, kind);
+  assert.match((await preview()).error, /固定入口已有其他内容/);
+  assert.equal(realpathSync(stable), candidate);
+  writeFileSync(path.join(key, 'current'), 'b'.repeat(64));
+  assert.match((await preview()).error, /当前版本文件尚未就绪/);
+  unlinkSync(path.join(key, 'current'));
+  assert.match((await preview()).error, /找不到 AgentBoat 当前安装版本/);
+  assert.equal(realpathSync(stable), candidate);
+});
+
 test('repository client sends stdin once to the release bridge in its profile', async t => {
   const { run, version } = fixture(t);
   const args = [path.join(repo, client), 'links-rename'];

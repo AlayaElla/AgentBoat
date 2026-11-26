@@ -5,7 +5,7 @@ import { isDeepStrictEqual } from 'node:util';
 import { serialize } from 'node:v8';
 import path from 'node:path';
 import os from 'node:os';
-import { installationRoot } from '../coordinator/scripts/orca-cli.mjs';
+import { candidateSetupEntry, installationRoot } from '../coordinator/scripts/orca-cli.mjs';
 
 const stat = file => lstatSync(file, { throwIfNoEntry: false });
 const backupRoot = home => path.join(home, '.agentboat/backups');
@@ -316,6 +316,7 @@ function setupPlan(home, codexHome, repository, node) {
 }
 
 const setupRepository = () => installationRoot({ repair: false }).replaceAll('\\', '/');
+const useOfficialSetup = entry => Error('请通过正式版 AgentBoat 完成本机设置。安装脚本 ' + path.join(entry, 'setup.mjs'));
 
 export function validateCodexHome(value, platform = process.platform) {
   if (value === '') return value;
@@ -333,17 +334,19 @@ function codexDirectory(home, env, override) {
   return path.resolve(validateCodexHome(override || envValue(env, 'CODEX_HOME') || path.join(home, '.codex')));
 }
 
-export function previewSetup({ home = os.homedir(), env = process.env, codexHome } = {}) {
+export function previewSetup({ home = os.homedir(), env = process.env, codexHome, fromSettings = false } = {}) {
   let codexHooks = '';
   const backups = backupRoot(home);
   try {
     const directory = codexDirectory(home, env, codexHome);
     codexHooks = path.join(directory, 'hooks.json');
-    const repository = setupRepository();
+    const official = fromSettings && candidateSetupEntry(env, home);
+    const repository = official ? official.replaceAll('\\', '/') : setupRepository();
     // A preview can finish restoring files moved by an earlier, authorized setup.
-    if (setupRecovery(home, directory, repository).length)
+    if (!official && setupRecovery(home, directory, repository).length)
       withSetupLock(home, () => setupRecovery(home, directory, repository).forEach(recover => recover()));
     const plan = setupPlan(home, directory, repository, setupEnvironment(env));
+    if (official && plan.changes.length) throw useOfficialSetup(official);
     return { backupRoot: backups, codexHooks, paths: plan.changes.map(p => p.file), ...(plan.changes.length ? { confirmation: plan.confirmation } : {}) };
   } catch (error) {
     return { paths: [], backupRoot: backups, codexHooks, error: error.message };
@@ -558,15 +561,20 @@ function saveTarget(plan, repository) {
   }
 }
 
-export function applySetup(confirmation, { home = os.homedir(), env = process.env, codexHome } = {}) {
+export function applySetup(confirmation, { home = os.homedir(), env = process.env, codexHome, fromSettings = false } = {}) {
+  const writableRepository = () => {
+    const official = fromSettings && candidateSetupEntry(env, home);
+    if (official) throw useOfficialSetup(official);
+    return setupRepository();
+  };
   return withSetupLock(home, () => {
-    const repository = setupRepository(), directory = codexDirectory(home, env, codexHome);
+    const repository = writableRepository(), directory = codexDirectory(home, env, codexHome);
     setupRecovery(home, directory, repository).forEach(recover => recover());
     const plan = setupPlan(home, directory, repository, setupEnvironment(env));
     if (!plan.changes.length) return { completed: [] };
     if (plan.confirmation !== confirmation) throw Error('首次设置的路径或文件已更改，请刷新并重新核对。');
     const assertEntry = () => {
-      const repository = installationRoot({ repair: false });
+      const repository = writableRepository();
       const link = lstatSync(repository);
       if (!isDeepStrictEqual([realpathSync(repository), identity(link), link.isSymbolicLink() ? readlinkSync(repository) : ''], plan.entry))
         throw Error('AgentBoat 固定入口已更改，请重新核对：' + repository);
