@@ -1153,6 +1153,7 @@ try {
     await currentLayer().getByRole('textbox', {name:'受阻备注'}).fill('补建完成');
     await row('设计决定').click();
     await currentLayer().getByRole('radio', {name:'方案一'}).check();
+    await currentLayer().getByRole('textbox', {name:'补充说明（选填）'}).fill('保留现有配色');
     await (await openReview()).getByRole('button', {name:'通过',exact:true}).first().click();
     await dock().getByRole('button', {name:'提交 3 条'}).click();
     await row('等待补建').getByText(/已答复，等项目处理/).waitFor();
@@ -1160,6 +1161,8 @@ try {
     assert.equal(sent.length, 1);
     assert.deepEqual(sent[0].input.items.map(i => i.kind), ['blocked', 'decision', 'acceptance']);
     assert.equal(sent[0].input.items[0].note, '补建完成');
+    assert.equal(sent[0].input.items[1].answer, '方案一');
+    assert.equal(sent[0].input.items[1].note, '保留现有配色');
     await row('等待补建').click();
     await currentLayer().getByRole('button', {name:'丢弃',exact:true}).click();
     await dock().getByRole('button', {name:'提交 1 条'}).click();
@@ -1883,8 +1886,8 @@ try {
     assert.equal(await page.locator('dialog').count(), 0);
     assert.equal(await page.evaluate(() => fixture.calls.find(c => c.name === 'project.openArtifact')?.input.connectionId), 'up');
     const preview = async () => {
-      await remoteFile.focus();
-      await page.keyboard.press('Shift+F10');
+      await page.locator('#panel[aria-busy="false"]').waitFor();
+      await remoteFile.press('Shift+F10');
       await page.getByRole('menuitem', { name: '预览或保存共享文件' }).waitFor();
       await page.keyboard.press('Enter');
     };

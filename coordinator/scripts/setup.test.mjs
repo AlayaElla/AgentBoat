@@ -90,6 +90,7 @@ for (const [file, bundled, id, pattern] of [
   }
   const roleCard = actual.replaceAll('\r\n', '\n').split('## 角色卡\n\n')[1].split('\n\n')[0];
   assert.match(roleCard, pattern);
+  assert.match(roleCard, /按实际差异归并/);
   assert.match(roleCard, /项目主会话和执行者禁用 Computer Use.*「等你处理」/);
   for (const source of ['startup', 'resume']) {
     const context = JSON.parse(execFileSync(process.execPath, installedHook.args, {

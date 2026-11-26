@@ -880,8 +880,10 @@ function feedbackCards(projectId: string, tasks: FeedbackTask[], title = '要你
     return b
   }
   function noteField(k: string, draft?: Draft) {
-    if (!draft?.result || !Object.hasOwn(feedbackNoteLabels, draft.result)) return null
-    const label = feedbackNoteLabels[draft.result]
+    if (!draft) return null
+    const label = draft.result && Object.hasOwn(feedbackNoteLabels, draft.result) ? feedbackNoteLabels[draft.result]
+      : draft.kind === 'decision' && draft.answer !== undefined ? '补充说明（选填）' : undefined
+    if (!label) return null
     return input(`${label} ${k}`, draft.note ?? '', 'textarea', note => { choose(projectId, { ...draft, note }); render() }, undefined, {}, true)
   }
   return tasks.map(t => {
@@ -902,10 +904,10 @@ function feedbackCards(projectId: string, tasks: FeedbackTask[], title = '要你
       const group = `${active.key}-${projectId}-${k}-${only ?? 'full'}`
       return keyed(card(el('h3', { class: 'h2 any' }, d.question), artifactButtons(t, d.artifactIds),
         [...d.options, '其他'].map(option => check(option, option === '其他' ? draft?.answer !== undefined && !d.options.includes(draft.answer) : draft?.answer === option, () => {
-          choose(projectId, { ...base, answer: option === '其他' ? '' : option }); render()
+          choose(projectId, { ...base, answer: option === '其他' ? '' : option, note: draft?.answer === undefined ? '' : draft.note ?? '' }); render()
         }, { type: 'radio', name: group, value: option })),
         draft?.answer !== undefined && !d.options.includes(draft.answer) ? input(field, draft.answer, 'textarea', value => {
-          choose(projectId, { ...base, answer: value }); render()
+          choose(projectId, { ...base, answer: value, note: draft.note ?? '' }); render()
         }, undefined, {}, true) : null, row(resultButton(base, draft, 'discarded'), draft ? button('撤销', () => removeChoice(projectId, k), 'text sm') : null), noteField(k, draft)), k)
     }), acceptance.map(a => {
       const k = key(t.id, 'acceptance', a.id), draft = choices(projectId)[k], base = acceptanceDraft(t.id, a)

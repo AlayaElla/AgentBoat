@@ -337,7 +337,7 @@ export function dispatch(input) {
       id: taskId, title: input.title || name, goal, phase: 'working', progress: '已登记直接派活，尚未确认启动', artifacts: [artifact],
     });
     j.update('launching', { taskId, sourcePath: provenance, sender });
-    const prompt = `项目直接任务：${goal}\n来源：${source}；项目编号：${p.ref.id}；任务编号：${taskId}。只做此任务，保留他人改动，不再派子任务。禁用 Computer Use，也不得用其他工具操控真实桌面、窗口或键鼠。用 CLI、API、编辑器专用 MCP、隔离自动化测试或只读结果验证。完成或需要主人操作时，用 node ${JSON.stringify(promptClientPath())} read ${p.ref.id} 核对项目待处理事项和当前绑定的 runId，再从自己的会话用 orca orchestration send --to run:<runId> 回报成果与验证边界，或告知项目主会话正在等什么。须主人亲自操作时写明未验证范围和最少步骤。需要主人作业务决定时，随原任务交给项目主会话登记，提供选项和相关成果，不向主人发聊天选择框。已有同一验收或决定时，在回报里带上原任务和事项编号。尚未绑定时先保存回报，等项目主会话绑定后送达。不要改项目或工作间主 Run 的绑定。`;
+    const prompt = `项目直接任务：${goal}\n来源：${source}；项目编号：${p.ref.id}；任务编号：${taskId}。只做此任务，保留他人改动，不再派子任务。禁用 Computer Use，也不得用其他工具操控真实桌面、窗口或键鼠。用 CLI、API、编辑器专用 MCP、隔离自动化测试或只读结果验证。验证按实际差异归并，共用呈现或行为只查一次，先复用已有证据，给结果不同的受影响状态各补一个代表例。提交差异及必要证据。完成或需要主人操作时，用 node ${JSON.stringify(promptClientPath())} read ${p.ref.id} 核对项目待处理事项和当前绑定的 runId，再从自己的会话用 orca orchestration send --to run:<runId> 回报成果与验证边界，或告知项目主会话正在等什么。须主人亲自操作时写明未验证范围和最少步骤。需要主人作业务决定时，随原任务交给项目主会话登记，提供选项和相关成果，不向主人发聊天选择框。已有同一验收或决定时，在回报里带上原任务和事项编号。尚未绑定时先保存回报，等项目主会话绑定后送达。不要改项目或工作间主 Run 的绑定。`;
     const launched = call(['worktree', 'create', '--repo', `id:${p.ref.repoId}`, '--name', name, '--no-parent',
       '--setup', 'skip', ...agentFlags(launchRole), '--prompt', prompt], p.ref.path);
     j.update('launch-returned', { launched });
