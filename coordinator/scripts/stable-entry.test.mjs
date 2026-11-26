@@ -20,7 +20,7 @@ function fixture(t) {
     ORCA_USER_DATA_PATH: profile, AGENTBOAT_HOME: path.join(home, '.agentboat'), ORCA_AGENT_SESSION_ID: '' };
   function version(letter) {
     const hash = letter.repeat(64), directory = path.join(key, hash);
-    for (const file of ['workspace', 'coordinator/skill', 'coordinator/LINKS.md', client, ...['orca-cli', 'cli-bridge', 'main-role-card', 'worker-reports'].map(s => 'coordinator/scripts/' + s + '.mjs')])
+    for (const file of ['workspace', 'coordinator/skill', 'coordinator/LINKS.md', client, ...['orca-cli', 'cli-bridge', 'main-role-card', 'worker-reports', 'orca-questions'].map(s => 'coordinator/scripts/' + s + '.mjs')])
       cpSync(path.join(repo, file), path.join(directory, file), { recursive: true });
     cpSync(path.join(repo, 'coordinator/scripts/setup.mjs'), path.join(directory, 'setup.mjs'));
     writeFileSync(path.join(directory, 'orca-plugin.json'), '{"id":"agentboat"}');

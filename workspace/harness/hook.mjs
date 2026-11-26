@@ -3,7 +3,6 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { roleRegistryPath, stableRoot, clientPath, promptClientPath, pluginKey } from '../../coordinator/scripts/orca-cli.mjs';
-import { businessQuestion } from '../../coordinator/scripts/orca-questions.mjs';
 
 const workspaceDir = fileURLToPath(new URL('../', import.meta.url));
 const agentboatHome = path.resolve(process.env.AGENTBOAT_HOME || path.join(os.homedir(), '.agentboat'));
@@ -245,6 +244,7 @@ async function stopBlocker(input, role, codex) {
   if (input.stop_hook_active || typeof input.transcript_path !== 'string') return;
   const rows = transcriptTail(input.transcript_path);
   const shells = new Set(), checks = new Map(), replies = new Map(), questions = new Set();
+  const { businessQuestion } = await import('../../coordinator/scripts/orca-questions.mjs');
   const business = new Set(), handled = new Set();
   const markQuestion = (id, body, envelope = false) => {
     if (handled.has(id)) return;
