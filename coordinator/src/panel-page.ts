@@ -459,6 +459,13 @@ function feedbackItems(drafts: Draft[]): Promise<FeedbackItem[]> {
 function choose(projectId: string, ...items: Draft[]) {
   editChoices(projectId, items.map(item => [key(item.taskId, item.kind, item.itemId), item]))
 }
+function choosePasses(projectId: string, items: Draft[]) {
+  choose(projectId, ...items.map(item => {
+    const saved = choices(projectId)[key(item.taskId, item.kind, item.itemId)]
+    return saved?.result === 'passed' && saved.itemRevision === item.itemRevision && saved.fingerprint === item.fingerprint
+      ? { ...item, note: saved.note } : item
+  }))
+}
 function removeChoice(projectId: string, itemKey: string) {
   editChoices(projectId, [[itemKey, null]]); render()
 }
@@ -590,7 +597,7 @@ function reviewDrafts(r: InboxRow) {
     ? [{ ...acceptanceDraft(i.taskId, { id: i.itemId, revision: i.itemRevision, fingerprint: i.fingerprint, title: i.summary }), result: 'passed', reviewTotal: r.count }] : [])
 }
 function selectReview(r: InboxRow, checked: boolean) {
-  if (checked) choose(r.projectId!, ...reviewDrafts(r))
+  if (checked) choosePasses(r.projectId!, reviewDrafts(r))
   else {
     const group = choices(r.projectId!)
     editChoices(r.projectId!, Object.entries(group).filter(([, item]) => item.taskId === r.taskId && item.kind === 'acceptance').map(([key]) => [key, null]))
@@ -797,6 +804,7 @@ function artifactEntry(entry: HTMLElement, projectId: string, taskId: string, ar
   return entry
 }
 const feedbackActions: Record<string, string> = { passed: '通过', changes_requested: '需要修改', discarded: '丢弃' }
+const feedbackNoteLabels: Record<string, string> = { passed: '通过留言（选填）', changes_requested: '修改意见', discarded: '丢弃原因（选填）' }
 const acceptanceStatuses: Record<string, string> = { pending: '待验收', passed: '已通过', changes_requested: '需要修改', discarded: '已丢弃' }
 function feedbackCards(projectId: string, tasks: FeedbackTask[], title = '要你处理', only?: Attention['kind']) {
   function resultButton(base: Draft, draft: Draft | undefined, result: string) {
@@ -807,8 +815,8 @@ function feedbackCards(projectId: string, tasks: FeedbackTask[], title = '要你
     return b
   }
   function noteField(k: string, draft?: Draft) {
-    if (draft?.result !== 'changes_requested' && draft?.result !== 'discarded') return null
-    const label = draft.result === 'discarded' ? '丢弃原因（选填）' : '修改意见'
+    if (!draft?.result || !Object.hasOwn(feedbackNoteLabels, draft.result)) return null
+    const label = feedbackNoteLabels[draft.result]
     return input(`${label} ${k}`, draft.note ?? '', 'textarea', note => { choose(projectId, { ...draft, note }); render() }, undefined, {}, true)
   }
   return tasks.map(t => {
@@ -820,7 +828,7 @@ function feedbackCards(projectId: string, tasks: FeedbackTask[], title = '要你
     const k = key(t.id, 'blocked', t.id), draft = choices(projectId)[k]
     const base: Draft = { taskId: t.id, kind: 'blocked', itemId: t.id, itemRevision: version, title: t.title, signature: String(version) }
     return section(title, acceptance.length > 1 ? button(`这 ${acceptance.length} 项全部通过`, () => {
-      choose(projectId, ...acceptance.map(a => ({ ...acceptanceDraft(t.id, a), result: 'passed', reviewTotal: acceptance.length }))); render()
+      choosePasses(projectId, acceptance.map(a => ({ ...acceptanceDraft(t.id, a), result: 'passed', reviewTotal: acceptance.length }))); render()
     }, 'sm') : null, decisions.map(d => {
       const k = key(t.id, 'decision', d.id), draft = choices(projectId)[k]
       const base: Draft = { taskId: t.id, kind: 'decision', itemId: d.id, title: d.question, signature: JSON.stringify([d.question, d.options]) }
@@ -1092,10 +1100,12 @@ function projectPage() {
     })
     const workers = projectAgents(p.ref.id).filter(a => a.taskId === t.id && a.state !== 'done')
     const messages = archive ? [] : p.events.filter(e => t.sourceIds.includes(e.id) || e.taskId === t.id)
-    const historyRow = (title: string, h: Acceptance['history'][number], result: string) =>
-      small([title, result, h.source, h.at && new Date(h.at).toLocaleString(), h.note].filter(Boolean).join(' · '))
+    const historyRow = (title: string, h: Acceptance['history'][number], result: string, noteLabel?: string) => {
+      const summary = small([title, result, h.source, h.at && new Date(h.at).toLocaleString(), !noteLabel && h.note].filter(Boolean).join(' · '))
+      return noteLabel && h.note ? el('div', {}, summary, el('p', { class: 'any' }, `${noteLabel}：${h.note}`)) : summary
+    }
     const records = [...t.decisions.flatMap(d => d.history.map(h => historyRow(d.question, h, d.answer === null ? '已丢弃' : h.result))),
-      ...t.acceptance.flatMap(a => a.history.map(h => historyRow(`${a.title} · 第 ${h.revision} 版`, h, acceptanceStatuses[h.result])))]
+      ...t.acceptance.flatMap(a => a.history.map(h => historyRow(`${a.title} · 第 ${h.revision} 版`, h, acceptanceStatuses[h.result], h.result === 'passed' ? '通过留言' : undefined)))]
     return [row(tag(labels[taskState(t)]), small(`${p.ref.name} · ${relative(t.updatedAt)}更新`)),
       archive ? null : feedbackCards(p.ref.id, [t]),
       section('进展', el('p', { class: 'any' }, t.progress), archive ? null : [small('现在谁在做'),

@@ -237,20 +237,38 @@ test('Run mail first reminds the project and escalates once after two hours unle
 })
 
 test('feedback returns the committed snapshot without waiting for delivery or session inventory', async () => {
-  const project = fresh(refs[0]); project.runId = 'run_fake'; project.mainAgentHandle = 'test-session'; submitTask(project, deliverable)
+  const project = fresh(refs[0]); project.runId = 'run_fake'; project.mainAgentHandle = 'test-session'
+  const executions = [{ runId: 'run_original', taskId: 'original-task', dispatchId: 'original-dispatch', agent: 'codex' }]
+  submitTask(project, { ...deliverable, executions })
   const host = mockHost({ storage: { 'project:p1': project as any } })
-  let coordinator!: ReturnType<typeof createCoordinator>, release!: () => void, sends = 0, reads = 0
+  const sends: { run: string; body: string }[] = []
+  let coordinator!: ReturnType<typeof createCoordinator>, release!: () => void, reads = 0
   const gate = new Promise<void>(resolve => {release=resolve})
   const worker = await mountWorker({ default: api => {coordinator=createCoordinator(api, {projects: async()=>refs,
-    targets: async()=>{reads++;await gate;return {workspaces:[],sessions:[]}},send: async()=>{sends++;await gate;return {}}})}}, {host})
+    targets: async()=>{reads++;await gate;return {workspaces:[],sessions:[]}},
+    send: async(run, item)=>{sends.push({ run, body: item.body });await gate;return {requestId:'fixture-send'}}})}}, {host})
   try {
-    const input = {projectId:'p1', revision:0, requestId:'timing', items:[{taskId:'task-1',kind:'acceptance' as const,itemId:'page-check',itemRevision:1,result:'passed'}]}
+    const note = '按报告里的建议开始修改\n先处理第一项'
+    const input = {projectId:'p1', revision:0, requestId:'timing', items:[{taskId:'task-1',kind:'acceptance' as const,itemId:'page-check',itemRevision:1,result:'passed',note}]}
     const start=performance.now()
     const reply=await Promise.race([worker.request('project.feedback',input), new Promise<never>((_,reject)=>{setTimeout(()=>reject(Error('反馈等待后台操作')),1000).unref()})])
     assert.ok(performance.now()-start<1000);assert.equal(reads,0)
-    assert.equal(reply.project!.tasks[0].acceptance[0].status,'passed')
     assert.equal(reply.project!.requests[0].id,input.requestId)
-    await new Promise<void>(resolve=>setImmediate(resolve));assert.ok(sends>0)
+    const check = reply.project!.tasks[0].acceptance[0]
+    assert.equal(check.status, 'passed')
+    assert.deepEqual(check.history.map(h => [h.result, h.revision, h.note]), [['passed', 1, note]])
+    await new Promise<void>(resolve=>setImmediate(resolve));assert.equal(sends.length, 1)
+    release(); await coordinator.flush('p1')
+    const replay = await worker.request('project.feedback', input)
+    assert.equal(replay.project!.runId, 'run_fake')
+    assert.deepEqual(replay.project!.tasks[0].executions, executions)
+    assert.equal(replay.project!.tasks[0].acceptance[0].status, 'passed')
+    assert.deepEqual(replay.project!.tasks[0].acceptance[0].history, check.history)
+    await coordinator.flush('p1')
+    const saved = await coordinator.store.get('p1')
+    assert.deepEqual(saved.deliveries.map(d => [d.state, d.targetRunId, d.requestId]), [['sent', 'run_fake', 'fixture-send']])
+    assert.deepEqual(sends.map(s => s.run), ['run_fake'])
+    assert.ok(sends[0].body.includes(`[项目 p1 / 任务 task-1]\n项目首页\n首页布局 · 第 1 版\n验收通过：passed\n通过留言：${note}`))
   } finally {release();await coordinator.flush('p1');coordinator.stop();await worker.deactivate()}
 })
 
@@ -1278,6 +1296,8 @@ test('batch feedback validates every item before one commit and one summary deli
   assert.equal(saved.revision, 1); assert.equal(saved.deliveries.length, 1)
   assert.equal(saved.tasks[0].acceptance[0].status, 'passed'); assert.equal(saved.tasks[0].decisions[0].answer, '甲')
   assert.ok(saved.deliveries[0].body.includes('验收通过')); assert.ok(saved.deliveries[0].body.includes('决定已提交'))
+  assert.equal(saved.tasks[0].acceptance[0].history[0].note, '')
+  assert.ok(!saved.deliveries[0].body.includes('通过留言'))
   await assert.rejects(() => store.mutate('p1', 1, p => feedback(p, { items: [items[1]] })), /问题已回答/)
   assert.equal((await store.get('p1')).revision, 1)
 })

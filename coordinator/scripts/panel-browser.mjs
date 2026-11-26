@@ -735,13 +735,20 @@ try {
     await rail().getByRole('radio', { name: '方案一' }).check();
     assert.equal(await page.locator('.pane').count(), 0);
     await dock().getByRole('button', { name: '提交 1 条' }).waitFor();
-    await openReview();
+    const body = await openReview();
     assert.equal(await row('设计决定').getAttribute('aria-expanded'), 'true');
+    await body.getByRole('button', { name: '通过', exact: true }).first().click();
+    const passNote = body.getByRole('textbox', { name: '通过留言（选填）' }).first();
+    await passNote.fill('请继续完善页面');
     await review('页面交付').check();
     assert.equal(await rail().getByRole('button', { name: '通过', exact: true, pressed: true }).count(), 2);
+    assert.equal(await passNote.inputValue(), '请继续完善页面');
+    await body.getByRole('button', { name: '这 2 项全部通过' }).click();
+    assert.equal(await passNote.inputValue(), '请继续完善页面');
     await rail().getByRole('button', { name: '需要修改', exact: true }).first().click();
     assert.equal(await review('页面交付').evaluate(e => e.indeterminate), true);
     assert.equal(await dock().getByRole('button', { name: '提交 3 条' }).isDisabled(), true);
+    assert.equal(await rail().getByRole('textbox', { name: '修改意见' }).inputValue(), '');
     await rail().getByRole('textbox', { name: '修改意见' }).fill('请调整标题');
     assert.equal(await dock().getByRole('button', { name: '提交 3 条' }).isEnabled(), true);
     await dock().getByRole('button', { name: '已选 3 条 · 1 个项目' }).click();
@@ -841,6 +848,77 @@ try {
     await dock().getByRole('button', { name: '提交 2 条' }).click();
     await dock().waitFor({ state: 'hidden' });
     assert.equal(await page.evaluate(() => fixture.calls.filter(c => c.name === 'project.feedback').length), 1);
+  });
+  await setup({ width: 1040 });
+  await test('a pass note is optional, survives a failed write and appears in the passed history', async () => {
+    const title = '调研 Orca v1.4.277 对 AgentBoat 的可用更新';
+    const note = '按报告里的建议开始修改';
+    await page.evaluate(title => {
+      fixture.project.ref.name = 'AgentBoat（隔离夹具）';
+      const task = fixture.project.tasks[0];
+      task.title = title;
+      task.goal = '核对 Orca 更新对 AgentBoat 的可用建议';
+      task.progress = '已提交 Orca 更新调研报告';
+      task.acceptance.splice(1);
+      task.artifacts = [{ id: 'report', label: 'Orca 1.4.277 更新调研报告', version: 'v1', url: '/fixture/report.md' }];
+      Object.assign(task.acceptance[0], { title: '核对 Orca 更新建议', artifactIds: ['report'],
+        details: '从成果打开报告。确认它按优先级列出 Antigravity 技能与角色提示、保留原 Run 的恢复、清理设置和旧会话卡顿。可用 orca status --environment local --json 和 orca plugin list --environment local --json 复核 Windows 版本。预期报告明确标出 Mac、手机和本轮未实测的操作。' });
+      fixture.emit();
+    }, title);
+    await row(title).waitFor();
+    await project();
+    await currentLayer().getByRole('tab', { name: '任务', exact: true }).click();
+    await currentLayer().getByRole('button', { name: title, exact: true }).click();
+    const card = currentLayer().getByRole('region', { name: '要你处理', exact: true });
+    const pass = card.getByRole('button', { name: '通过', exact: true });
+    const field = card.getByRole('textbox', { name: '通过留言（选填）' });
+    const submit = dock().getByRole('button', { name: '提交 1 条' });
+    await pass.waitFor();
+    assert.equal(await field.count(), 0);
+    await pass.click();
+    assert.equal(await submit.isEnabled(), true);
+    await field.fill(note);
+    await card.getByRole('button', { name: '需要修改', exact: true }).click();
+    assert.equal(await field.count(), 0);
+    assert.equal(await submit.isDisabled(), true);
+    assert.equal(await card.getByRole('textbox', { name: '修改意见' }).inputValue(), '');
+    await card.getByRole('button', { name: '丢弃', exact: true }).click();
+    assert.equal(await submit.isEnabled(), true);
+    assert.equal(await card.getByRole('textbox', { name: '丢弃原因（选填）' }).inputValue(), '');
+    await pass.click();
+    assert.equal(await field.inputValue(), '');
+    await field.fill(note);
+    assert.equal(await page.evaluate(() => fixture.calls.filter(c => c.name === 'project.feedback').length), 0);
+    const evidence = process.env.PANEL_EVIDENCE_DIR;
+    if (evidence) await page.screenshot({ path: path.join(evidence, 'acceptance-pass-note-draft.png'), animations: 'disabled' });
+    await page.evaluate(() => { fixture.failFeedback = true; });
+    await submit.click();
+    await page.getByRole('alert').filter({ hasText: '回执连接中断' }).waitFor();
+    assert.equal(await field.inputValue(), note);
+    assert.equal(await pass.getAttribute('aria-pressed'), 'true');
+    if (evidence) await page.screenshot({ path: path.join(evidence, 'acceptance-pass-note-retry.png'), animations: 'disabled' });
+    await submit.click();
+    await page.getByRole('status').filter({ hasText: '已提交 1 条' }).waitFor();
+    await currentLayer().getByRole('button', { name: /^记录/ }).click();
+    await currentLayer().getByText(/核对 Orca 更新建议.*第 1 版.*已通过/).waitFor();
+    await currentLayer().getByText(`通过留言：${note}`, { exact: true }).waitFor();
+    const receipt = await page.evaluate(() => ({
+      submissions: fixture.calls.filter(c => c.name === 'project.feedback').map(c => c.input),
+      receipts: fixture.project.requests,
+      acceptance: fixture.project.tasks[0].acceptance[0],
+      deliveries: fixture.project.deliveries.length,
+    }));
+    assert.equal(receipt.submissions.length, 2);
+    assert.deepEqual(receipt.submissions[0], receipt.submissions[1]);
+    assert.deepEqual(receipt.submissions[0].items.map(i => [i.itemId, i.result, i.note]), [['a1', 'passed', note]]);
+    assert.deepEqual(receipt.receipts.map(r => r.id), [receipt.submissions[0].requestId]);
+    assert.equal(receipt.deliveries, 1);
+    assert.equal(receipt.acceptance.status, 'passed');
+    assert.deepEqual(receipt.acceptance.history.map(h => [h.result, h.note]), [['passed', note]]);
+    if (evidence) {
+      await page.screenshot({ path: path.join(evidence, 'acceptance-pass-note-history.png'), animations: 'disabled' });
+      await fs.writeFile(path.join(evidence, 'acceptance-pass-note-receipt.json'), JSON.stringify(receipt, null, 2));
+    }
   });
   await setup({ width: 1040, inboxBatch: true });
   await test('decision text and reviews share one strict-JSON batch and close a completed detail', async () => {
@@ -1720,6 +1798,7 @@ try {
     const remoteRow = row('对方页面交付').locator('..');
     await remoteRow.getByText(/对方示例项目 · 工作间 up/).waitFor();
     await review('对方页面交付').check();
+    await currentLayer().getByRole('textbox', { name: '通过留言（选填）' }).fill('按报告里的建议开始修改');
     await review('页面交付 · 示例项目').check();
     if (process.env.PANEL_EVIDENCE_DIR) await page.screenshot({ path: path.join(process.env.PANEL_EVIDENCE_DIR, 'delegated-inbox.png'), animations: 'disabled' });
     await page.evaluate(() => {
@@ -1739,6 +1818,8 @@ try {
     assert.deepEqual(local.map(c => [c.input.projectId, c.input.items.length]), [['p1', 2]]);
     assert.deepEqual(remote.map(c => [c.input.projectId, c.input.items.length]), [['p1', 3], ['p1', 3]]);
     assert.deepEqual(remote[0].input.items.find(i => i.kind === 'blocked'), {taskId:'b', kind:'blocked', itemId:'b', itemRevision:3, note:'已补建'});
+    assert.deepEqual(remote[0].input.items.find(i => i.kind === 'acceptance'), {taskId:'t1', kind:'acceptance', itemId:'remote-a', itemRevision:1,
+      reviewTotal:1, result:'passed', note:'按报告里的建议开始修改', fingerprint:'version-1-remote-a'});
     assert.deepEqual(remote[0], remote[1]);
     assert.deepEqual(await page.evaluate(() => fixture.calls.find(c => c.name === 'shell.openExternal').input), 'https://example.com/preview');
   });
