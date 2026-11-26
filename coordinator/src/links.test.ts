@@ -5,7 +5,7 @@ import path from 'node:path'
 import os from 'node:os'
 import { setTimeout as delay } from 'node:timers/promises'
 import { test as timedTest } from 'node:test'
-import { mkdtemp, mkdir, rm, writeFile, truncate, symlink } from 'node:fs/promises'
+import { mkdtemp, mkdir, readFile, rm, writeFile, truncate, symlink } from 'node:fs/promises'
 import { artifactChunkBytes, fileChunkBytes, maxLinkFileBytes } from './link-files'
 import type { OrcaWorkerApi } from 'orca/worker'
 import type { ArtifactProgress } from './link-artifacts'
@@ -88,6 +88,9 @@ test('delegated feedback applies once in both directions and rechecks sharing on
     assert.deepEqual(shared[0].feedback?.tasks[0].artifacts.map(x => x.kind), [undefined, 'document'])
     assert.equal(JSON.stringify(outgoing).includes('/private/design.md'), false)
     assert.equal(shared[0].feedback?.tasks[0].artifacts[0].registeredAt, review.artifacts[0].registeredAt)
+    const browserRef = { projectId: 'p1', taskId: review.id, artifactId: review.artifacts[0].id }
+    assert.equal(await b.c.links.browserArtifact(id, browserRef), 'https://example.com/preview')
+    await assert.rejects(() => b.c.links.browserArtifact(id, { ...browserRef, projectId: 'p2' }), /未开放/)
     a.c.links.stop()
     const offline = (await b.c.links.refresh()).peers[0]
     assert.equal(offline.status, 'offline')
@@ -391,6 +394,12 @@ test('peer artifacts use authenticated loopback in both directions, cache comple
     assert.ok(a.logs.some(s => s.includes('stage=authorize reason=expired')))
     assert.ok(b.logs.some(s => s.includes('reason=too_large')))
     assert.ok([...a.logs, ...b.logs].every(s => !s.includes(dir) && !s.includes('drawing.md')))
+    const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a82kAAAAASUVORK5CYII=', 'base64')
+    local.url = path.join(dir, 'review.png'); await writeFile(local.url, png)
+    await b.links.refresh()
+    const cachedImage = await b.links.browserArtifact(id, ref)
+    assert.notEqual(cachedImage, local.url)
+    assert.deepEqual(await readFile(cachedImage), png)
     a.links.stop(); await b.links.refresh(); await assert.rejects(get, /离线/)
   } finally { a.links.stop(); b.links.stop(); await rm(root, { recursive: true, force: true }) }
 })

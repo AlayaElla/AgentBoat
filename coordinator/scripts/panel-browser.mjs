@@ -290,10 +290,13 @@ async function setup(options = {}, hub) {
       }
       if (name === 'workspace.readLinkArtifact') return window.fixture.peerFile.data;
       if (name === 'project.openArtifact' || name === 'project.openArtifactFolder') {
-        const target = input.archiveEnd === 50 && input.projectId === 'p1' && input.taskId === archivedTask.id ? archivedTask :
+        const peer = window.fixture.links.peers.find(p => p.id === input.connectionId);
+        const target = input.connectionId ? (peer?.report?.projects ?? peer?.offlineFeedback)?.find(p => p.id === input.projectId)?.feedback?.tasks.find(t => t.id === input.taskId) :
+          input.archiveEnd === 50 && input.projectId === 'p1' && input.taskId === archivedTask.id ? archivedTask :
           projects.find(p => p.ref.id === input.projectId)?.tasks.find(t => t.id === input.taskId);
-        if (!target?.artifacts.some(a => a.id === input.artifactId)) throw Error('请选择本项目的本机成果');
-        if (name === 'project.openArtifact' && window.fixture.workspaceTarget.error) throw Error(window.fixture.workspaceTarget.error);
+        const artifact = target?.artifacts.find(a => a.id === input.artifactId);
+        if (!artifact) throw Error('请选择本项目的本机成果');
+        if (name === 'project.openArtifact' && window.fixture.workspaceTarget.error && !/^https?:/.test(artifact.url)) throw Error('此格式无法跨工作区打开，可右键打开所在文件夹');
         if (window.fixture.artifactError) throw Error(window.fixture.artifactError);
         return { opened: true };
       }
@@ -1273,15 +1276,21 @@ try {
       await page.keyboard.press('Enter');
       assert.deepEqual(await page.evaluate(() => fixture.calls.filter(c => c.name === 'project.openArtifactFolder').map(c => c.input)), [expected('md')]);
       await webEntry.click({ button: 'right' });
-      assert.equal(await menu.count(), 0);
-      await webEntry.click();
+      await menu.getByRole('menuitem', { name: '在系统浏览器打开' }).click();
       assert.deepEqual(await page.evaluate(() => fixture.calls.filter(c => c.name === 'shell.openExternal').map(c => c.input)), ['https://example.com/preview']);
+      await webEntry.click();
+      assert.equal(await page.locator('dialog').count(), 0);
+      assert.deepEqual(await page.evaluate(() => fixture.calls.filter(c => c.name === 'shell.openExternal').map(c => c.input)), ['https://example.com/preview']);
+      await body.getByRole('button', { name: '需要修改', exact: true }).click();
+      const note = body.getByRole('textbox', { name: '修改意见' });
+      await note.fill('保持当前卡片草稿');
       await entry.click();
+      assert.equal(await note.inputValue(), '保持当前卡片草稿');
       await page.evaluate(() => { fixture.artifactError = '成果文件不存在或无法访问'; });
       await htmlEntry.click();
       const error = page.getByRole('alert').filter({ hasText: '打不开「样稿 v9」：成果文件不存在或无法访问' });
       await error.waitFor();
-      assert.deepEqual(await calls(), ['md', 'html'].map(expected));
+      assert.deepEqual(await calls(), ['web', 'md', 'html'].map(expected));
       await page.evaluate(() => { delete fixture.artifactError; });
       await error.getByRole('button', { name: '重试' }).click();
       await error.waitFor({ state: 'detached' });
@@ -1297,7 +1306,7 @@ try {
       await rightClickArtifact(taskEntry);
       await page.keyboard.press('ArrowDown');
       await page.keyboard.press('Enter');
-      assert.deepEqual(await calls(), ['md', 'html', 'html', 'html', 'md'].map(expected));
+      assert.deepEqual(await calls(), ['web', 'md', 'html', 'html', 'html', 'md'].map(expected));
     });
   }
   await setup({ archive: true });
@@ -1869,11 +1878,19 @@ try {
     const artifacts = currentLayer().getByRole('tabpanel');
     assert.equal(await artifacts.getByText('设计原稿 · v1', { exact: true }).count(), 1);
     assert.equal(await artifacts.getByRole('button', { name: /旧版本|标为过期/ }).count(), 0);
-    await artifacts.getByRole('button', { name: '设计原稿 · v1' }).click({ button: 'right' });
-    assert.equal(await page.getByRole('menu', { name: '成果操作' }).count(), 0);
+    const remoteFile = artifacts.getByRole('button', { name: '设计原稿 · v1' });
+    await remoteFile.click();
+    assert.equal(await page.locator('dialog').count(), 0);
+    assert.equal(await page.evaluate(() => fixture.calls.find(c => c.name === 'project.openArtifact')?.input.connectionId), 'up');
+    const preview = async () => {
+      await remoteFile.focus();
+      await page.keyboard.press('Shift+F10');
+      await page.getByRole('menuitem', { name: '预览或保存共享文件' }).waitFor();
+      await page.keyboard.press('Enter');
+    };
     const openFile = async (name, type, data) => {
       await page.evaluate(f => { fixture.peerFile = f; }, { name, type, data });
-      await artifacts.getByRole('button', { name: '设计原稿 · v1' }).click();
+      await preview();
       return page.getByRole('dialog', { name: '设计原稿 · v1' });
     };
     await page.evaluate(() => { fixture.delayArtifact = true; });
@@ -1910,7 +1927,7 @@ try {
     });
     await pdf.getByRole('button', { name: '关闭' }).click();
     await page.evaluate(() => { fixture.artifactError = '对方离线，暂时无法获取成果'; });
-    await artifacts.getByRole('button', { name: '设计原稿 · v1' }).click();
+    await preview();
     const offline = page.getByRole('dialog');
     await offline.getByRole('status').filter({ hasText: '对方离线' }).waitFor();
     assert.equal(await offline.getByRole('alert').count(), 0);
@@ -1919,7 +1936,7 @@ try {
     await page.getByRole('dialog').locator('canvas').waitFor();
     await page.getByRole('button', { name: '关闭', exact: true }).last().click();
     await artifacts.getByRole('button', { name: '网页预览 · v1' }).click();
-    assert.equal(await page.evaluate(() => fixture.calls.filter(c => c.name === 'shell.openExternal').at(-1).input), 'https://example.com/preview');
+    assert.equal(await page.evaluate(() => fixture.calls.filter(c => c.name === 'project.openArtifact').at(-1).input.artifactId), 'web');
     await currentLayer().getByText('来自「工作间 up」，可代为处理').waitFor();
     await tab('任务').click();
     assert.deepEqual(await currentLayer().locator('.item .body .xs').allTextContents(), ['待验收', '待决定', '待验收']);
@@ -2035,7 +2052,7 @@ try {
     assert.deepEqual(remote[0].input.items.find(i => i.kind === 'acceptance'), {taskId:'t1', kind:'acceptance', itemId:'remote-a', itemRevision:1,
       reviewTotal:1, result:'passed', note:'按报告里的建议开始修改', fingerprint:'version-1-remote-a'});
     assert.deepEqual(remote[0], remote[1]);
-    assert.deepEqual(await page.evaluate(() => fixture.calls.find(c => c.name === 'shell.openExternal').input), 'https://example.com/preview');
+    assert.equal(await page.evaluate(() => fixture.calls.find(c => c.name === 'project.openArtifact').input.artifactId), 'web');
   });
   const selectTwoPeerProjects = async () => {
     await setup({ width: 1040, delegatedFeedback: true, peerProjectPage: true, delayLinkReply: true });
@@ -2240,9 +2257,9 @@ try {
     await page.getByRole('button', { name: '移动端交付', exact: true }).click();
     await page.getByRole('button', { name: /^成果 / }).click();
     await page.getByRole('button', { name: '本机成果 · v1', exact: true }).click();
-    await page.getByRole('alert').filter({ hasText: '打不开「本机成果」：这个项目当前没有工作区' }).waitFor();
+    await page.getByRole('alert').filter({ hasText: '打不开「本机成果」：此格式无法跨工作区打开' }).waitFor();
     await page.getByRole('button', { name: '网页成果 · v1', exact: true }).click();
-    assert.deepEqual(await page.evaluate(() => fixture.calls.filter(c => c.name === 'shell.openExternal').map(c => c.input)), ['https://example.com/']);
+    assert.equal(await page.evaluate(() => fixture.calls.filter(c => c.name === 'project.openArtifact').at(-1).input.artifactId), 'link');
   });
   await setup({ inboxBatch: true, boundMainFolder: true, width: 1040 });
   await test('the home project cards omit the bound main directory but retain the main agent', async () => {

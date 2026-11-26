@@ -26,6 +26,7 @@ import { applyDelta, type Sheets } from './feedback-drafts'
 import { roleRegistry } from './role-registry'
 import { escalationWait } from '../scripts/worker-reports.mjs'
 import type { ProjectArtifactRef } from './protocol'
+import { kindFromFilename } from './artifact-kind'
 
 const activityInterval = 60_000
 const activityDebounce = 150
@@ -1045,35 +1046,52 @@ export function createCoordinator(api: OrcaWorkerApi, runtime: CoordinatorRuntim
     changed(ref.id)
     return { projects: refs, project: projectView(project) }
   })
-  async function localArtifact(input: ProjectArtifactRef, needsWorkspace: boolean) {
+  async function registeredArtifact(input: ProjectArtifactRef) {
     const ref = await requireProject(input.projectId)
     if (ref.hostId !== 'local') fail('请选择本项目的本机成果')
     const p = await store.register(ref)
     const tasks = input.archiveEnd === undefined ? p.tasks : (await store.archive.page(p, input.archiveEnd)).tasks
     const a = tasks?.find(x => x.id === input.taskId)?.artifacts.find(x => x.id === input.artifactId)
-    if (!a || /^https?:/i.test(a.url)) fail('请选择本项目的本机成果')
-    if (needsWorkspace && !ref.workspace) fail('这个项目当前没有工作区')
-    const url = artifactUrl(a.url, ref.path)
+    if (!a) fail('请选择本项目的本机成果')
+    return { ref, url: artifactUrl(a.url, ref.path) }
+  }
+  async function localArtifact(ref: ProjectRef, url: string) {
+    if (/^https?:/i.test(url)) fail('请选择本项目的本机成果')
     const [root, file] = await Promise.all([realpath(ref.path), realpath(url)]).catch(() => fail('成果文件不存在或无法访问'))
     const relative = path.relative(root, file)
     if (!relative || relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) fail('成果路径不属于当前项目')
     const info = await stat(file).catch(() => fail('成果文件不存在或无法访问'))
-    return { ref, url, file, info }
+    return { file, info }
   }
   orca.panels.handle('project.openArtifact', async input => {
-    const { ref, url, file, info } = await localArtifact(input, true)
-    if (!info.isFile()) fail('成果文件不存在或无法访问')
-    const target = workspaceId(ref.workspace)
-    if (/^\.html?$/i.test(path.extname(url))) {
-      if (!/^\.html?$/i.test(path.extname(file))) fail('成果实际文件的扩展名不是 HTML')
-      await runtime.openArtifactPage(ref.workspace, file)
-    } else {
-      await orca.host.call('editor.open', { workspaceId: target, path: path.relative(ref.path, url).split(path.sep).join('/') }, { signal: AbortSignal.timeout(readTimeout) })
+    const { workspaceId: active } = await orca.host.call('workspace.readContext', {}, { signal: AbortSignal.timeout(readTimeout) }) ?? {}
+    if (!active) fail('Orca 当前没有可打开成果的工作区')
+    const target = /^(?:id:|identity:|folder:)/.test(active) ? active : `id:${active}`
+    if (input.connectionId !== undefined) {
+      const source = await links.browserArtifact(text(input.connectionId, '连接编号', 64), input)
+      await runtime.openArtifactPage(target, source)
+      return { opened: true }
     }
-    return orca.host.call('workspace.open', { workspaceId: target }, { signal: AbortSignal.timeout(readTimeout) })
+    const { ref, url } = await registeredArtifact(input)
+    if (/^https?:\/\//i.test(url)) {
+      await runtime.openArtifactPage(target, url)
+      return { opened: true }
+    }
+    const { file, info } = await localArtifact(ref, url)
+    if (!info.isFile()) fail('成果文件不存在或无法访问')
+    const canBrowse = (name: string) => /^\.(?:html?|jpe?g|png|gif|webp|svg|avif|bmp|ico|pdf|txt|mp4|webm)$/i.test(path.extname(name))
+    if (canBrowse(url)) {
+      if (!canBrowse(file) || kindFromFilename(url) !== kindFromFilename(file)) fail('成果实际文件类型与登记不符')
+      await runtime.openArtifactPage(target, file)
+    } else {
+      if (workspaceId(ref.workspace) !== workspaceId(active)) fail('此格式无法跨工作区打开，可右键打开所在文件夹')
+      await runtime.openArtifactFile(target, url)
+    }
+    return { opened: true }
   })
   orca.panels.handle('project.openArtifactFolder', async input => {
-    const { file, info } = await localArtifact(input, false)
+    const { ref, url } = await registeredArtifact(input)
+    const { file, info } = await localArtifact(ref, url)
     const directory = info.isDirectory()
     if (!directory && !info.isFile()) fail('成果文件不存在或无法访问')
     await runtime.revealArtifact(file, directory)

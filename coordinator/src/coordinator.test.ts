@@ -355,7 +355,8 @@ test('local artifact actions validate registered paths and archived tasks before
   const files = ['设计稿.md', '样稿 v9.HTML', 'missing.md', '图片.png', '评审.pdf', '包.zip', '网页.htm']
   const docs = path.join(dir, '设计 design files')
   const link = path.join(dir, 'outside-link'), revealed: [string, boolean][] = [], browsed: [string, string][] = []
-  let c!: ReturnType<typeof createCoordinator>, workspace = ref.workspace
+  const presentation = 'folder:bot-current', editors: [string, string][] = []
+  let c!: ReturnType<typeof createCoordinator>, workspace = ref.workspace, active: string | undefined = presentation
   try {
     await mkdir(docs, { recursive: true })
     await mkdir(outside)
@@ -372,22 +373,27 @@ test('local artifact actions validate registered paths and archived tasks before
     ], acceptance: [] })
     p.tasks[0].artifacts.push(artifact('outside', `${dir}${path.sep}..${path.sep}outside`))
     const host = mockHost({ storage: { 'project:p2': p as any }, results: {
-      'editor.open': async (input: any) => {
-        await readFile(path.join(dir, input.path))
-        return { opened: true }
-      }, 'workspace.open': { opened: true }
+      'workspace.readContext': async () => active ? { workspaceId: active, displayName: 'Current', branch: '', terminals: [] } : null
     } })
     const worker = await mountWorker({ default: api => { c = createCoordinator(api, {
       projects: async () => [refs[0], { ...ref, workspace }, remote],
       openArtifactPage: async (workspaceId, file) => { browsed.push([workspaceId, file]) },
+      openArtifactFile: async (workspaceId, file) => { editors.push([workspaceId, file]) },
       revealArtifact: async (file, directory) => { revealed.push([file, directory]) }
     }, undefined, path.join(dir, 'exports')) } }, { host })
     try {
       const open = (artifactId: string, projectId = ref.id) => worker.request('project.openArtifact', { projectId, taskId: deliverable.id, artifactId })
       const reveal = (artifactId: string, projectId = ref.id) => worker.request('project.openArtifactFolder', { projectId, taskId: deliverable.id, artifactId })
-      assert.deepEqual(await open('a0'), { opened: true })
+      await assert.rejects(() => open('a0'), /无法跨工作区打开/)
       assert.deepEqual(await open('a1'), { opened: true })
-      for (const id of ['a3', 'a4', 'a5', 'a6']) assert.deepEqual(await open(id), { opened: true })
+      for (const id of ['a3', 'a4', 'a6', 'web']) assert.deepEqual(await open(id), { opened: true })
+      await assert.rejects(() => open('a5'), /无法跨工作区打开/)
+      active = ref.workspace.slice(3)
+      assert.deepEqual(await open('a0'), { opened: true })
+      assert.deepEqual(editors, [[ref.workspace, path.join(docs, files[0])]])
+      active = undefined
+      await assert.rejects(() => open('a1'), /当前没有可打开成果的工作区/)
+      active = presentation
       await assert.rejects(() => open('a2'), /成果文件不存在或无法访问/)
       await assert.rejects(() => open('a0', refs[0].id), /请选择本项目的本机成果/)
       assert.deepEqual(await reveal('a1'), { opened: true })
@@ -400,13 +406,8 @@ test('local artifact actions validate registered paths and archived tasks before
       await assert.rejects(() => reveal('web'), /请选择本项目的本机成果/)
       await assert.rejects(() => reveal('a0', remote.id), /请选择本项目的本机成果/)
       workspace = ''
-      await assert.rejects(() => open('a0'), /这个项目当前没有工作区/)
-      await assert.rejects(() => open('a1'), /这个项目当前没有工作区/)
+      assert.deepEqual(await open('a1'), { opened: true })
       assert.deepEqual(await reveal('directory'), { opened: true })
-      const workspaceId = ref.workspace.slice(3)
-      assert.deepEqual(host.calls.filter(c => c.method === 'editor.open'), [0, 3, 4, 5].map(i =>
-        ({ method: 'editor.open', params: { workspaceId, path: `设计 design files/${files[i]}` } })))
-      assert.deepEqual(host.calls.filter(c => c.method === 'workspace.open').map(c => c.params), Array.from({ length: 6 }, () => ({ workspaceId })))
       workspace = ref.workspace
       const saved = await c.store.mutate(ref.id, 0, project => {
         project.tasks[0].updatedAt = '2020-01-01'
@@ -418,7 +419,8 @@ test('local artifact actions validate registered paths and archived tasks before
       await assert.rejects(() => open('a1'), /请选择本项目的本机成果/)
       await assert.rejects(() => worker.request('project.openArtifact', { ...archived, archiveEnd: 1 }), /归档批次不存在/)
       const file = await realpath(path.join(docs, files[1]))
-      assert.deepEqual(browsed, [[workspace, file], [workspace, await realpath(path.join(docs, files[6]))], [workspace, file]])
+      assert.deepEqual(browsed, [...await Promise.all([1, 3, 4, 6].map(i => realpath(path.join(docs, files[i])))), 'https://example.com/preview', file, file].map(source => [presentation, source]))
+      assert.equal(host.calls.some(c => c.method === 'workspace.open' || c.method === 'editor.open'), false)
       assert.deepEqual(revealed, [[file, false], [await realpath(docs), true], [file, false]])
     } finally { c.stop(); await worker.deactivate() }
   } finally { await rm(temp, { recursive: true, force: true }) }
@@ -442,7 +444,7 @@ test('artifact page asks Orca to display an encoded local file URL in the target
   }
   await runtime.openArtifactPage('id:target', file)
   ;(runtime as any).call = async () => ({})
-  await assert.rejects(() => runtime.openArtifactPage('id:target', file), /Orca 未打开网页标签/)
+  await assert.rejects(() => runtime.openArtifactPage('id:target', file), /Orca 未打开成果标签/)
 })
 
 test('artifact reveal passes native paths as arguments and accepts Explorer exit code 1', async () => {

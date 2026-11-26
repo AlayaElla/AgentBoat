@@ -602,6 +602,18 @@ export class WorkspaceLinks {
     if (!peer) fail(reasonText('offline'))
     return this.artifacts.files.readArtifact(peer.id, peer.workspaceId, key, offset)
   }
+  async browserArtifact(connectionId: string, input: ArtifactRef) {
+    const ref = artifactRef(input), link = (await this.snapshot()).peers.find(p => p.id === connectionId && p.state === 'active')
+    const artifact = (link?.report?.projects ?? link?.offlineFeedback)?.find(p => p.id === ref.projectId)?.feedback?.tasks
+      .find(t => t.id === ref.taskId)?.artifacts.find(a => a.id === ref.artifactId)
+    if (!link || !artifact) fail(reasonText('denied'))
+    if (artifact.url) return artifact.url
+    const file = await this.openArtifact(connectionId, ref)
+    if (!['image/png', 'image/jpeg', 'image/gif', 'image/webp', 'application/pdf', 'text/plain'].includes(file.type))
+      fail('请右键选择「预览或保存共享文件」查看此成果')
+    if (!(await this.data()).peers.some(p => p.id === connectionId && p.state === 'active')) fail(reasonText('offline'))
+    return this.artifacts.files.artifactPath(link.id, link.workspaceId, file.key)
+  }
   private async artifactSource(peer: Peer, ref: ArtifactRef) {
     const project = (await this.projects()).find(p => p.ref.id === ref.projectId)
     if (!project || project.ref.hostId !== 'local' || !canDelegate(peer) || !isProjectShared(project, peer)) fail(reasonText('denied'))

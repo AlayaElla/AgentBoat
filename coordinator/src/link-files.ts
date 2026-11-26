@@ -264,8 +264,8 @@ export class LinkFiles {
     }))
   }
 
-  async readArtifact(peer: string, workspace: string, key: string, offset: number) {
-    if (typeof key !== 'string' || !/^[\w-]{1,100}$/.test(key) || !Number.isSafeInteger(offset) || offset < 0) fail('未找到已接收的成果')
+  private async receivedArtifact(peer: string, workspace: string, key: string) {
+    if (typeof key !== 'string' || !/^[\w-]{1,100}$/.test(key)) fail('未找到已接收的成果')
     const folder = await this.existingFolder('received', segment(workspace), key)
     if (!folder) fail('未找到已接收的成果')
     const manifest = path.join(folder, manifestName)
@@ -273,9 +273,23 @@ export class LinkFiles {
     const record: Manifest = JSON.parse(await readFile(manifest, 'utf8'))
     if (!isArtifactTransfer(record.requestId) || record.key !== fingerprint([peer, record.requestId])) fail('此文件不属于本次成果传输')
     const [f] = safeFiles(record.files)
-    const { input, size } = await openContained(this.root, path.join(folder, f.name))
+    return { file: path.join(folder, f.name), expectedSize: f.size }
+  }
+
+  async artifactPath(peer: string, workspace: string, key: string) {
+    const { file, expectedSize } = await this.receivedArtifact(peer, workspace, key)
+    const { input, size } = await openContained(this.root, file)
+    await input.close()
+    if (size !== expectedSize) fail('接收的成果已变化，请重新获取')
+    return file
+  }
+
+  async readArtifact(peer: string, workspace: string, key: string, offset: number) {
+    if (!Number.isSafeInteger(offset) || offset < 0) fail('未找到已接收的成果')
+    const { file, expectedSize } = await this.receivedArtifact(peer, workspace, key)
+    const { input, size } = await openContained(this.root, file)
     try {
-      if (size !== f.size || offset > size) fail('接收的成果已变化，请重新获取')
+      if (size !== expectedSize || offset > size) fail('接收的成果已变化，请重新获取')
       // Orca limits each JSON panel response to 1 MiB, including base64 encoding.
       const bytes = Buffer.alloc(Math.min(256 * 1024, size - offset))
       const { bytesRead } = await input.read(bytes, 0, bytes.length, offset)

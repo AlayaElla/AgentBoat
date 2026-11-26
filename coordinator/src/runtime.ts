@@ -59,6 +59,7 @@ export interface CoordinatorRuntime {
   launchMain(workspace: string, agent: string, prompt: string, options?: Omit<AgentLaunch, 'agent'>): Promise<string>
   openOverview(): Promise<void>
   openArtifactPage(workspace: string, file: string): Promise<void>
+  openArtifactFile(workspace: string, file: string): Promise<void>
   revealArtifact(file: string, directory: boolean): Promise<void>
   removeProject(ref: ProjectRef, host: HostApi<'worker'>): Promise<void>
   agents(projects: Project[], host: HostApi<'worker'>, main?: AgentSession, targets?: Promise<TargetInventory | undefined>): Promise<AgentsSnapshot>
@@ -79,10 +80,13 @@ export function targetOnline(inventory: TargetInventory | undefined, handle: str
 export class OrcaRuntime implements CoordinatorRuntime {
   constructor(private executable: () => Promise<string>) {}
   async openArtifactPage(workspace: string, file: string) {
-    const url = pathToFileURL(file)
-    if (url.hostname) fail('仅可预览本机磁盘上的网页文件')
+    const url = /^https?:\/\//i.test(file) ? new URL(file) : pathToFileURL(file)
+    if (url.protocol === 'file:' && url.hostname) fail('仅可预览本机磁盘上的成果')
     const { browserPageId } = await this.call(['tab', 'create', '--worktree', workspace, '--url', url.href, '--focus'], readTimeout)
-    if (!browserPageId) fail('Orca 未打开网页标签')
+    if (!browserPageId) fail('Orca 未打开成果标签')
+  }
+  async openArtifactFile(workspace: string, file: string) {
+    await this.call(['file', 'open', file, '--worktree', workspace, '--focus'], readTimeout)
   }
   revealArtifact(file: string, directory: boolean) { return revealArtifact(file, directory) }
   bots = new LocalBots(args => this.call(args, readTimeout))

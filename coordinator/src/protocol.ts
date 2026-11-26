@@ -46,7 +46,7 @@ declare module 'orca' {
     'project.workerFeedback': { input: { projectId: string; projectTaskId: string; taskId: string; dispatchId: string; sourceId: string; caller: string }; output: { sourceId: string; requestId: string; state: import('./model').Delivery['state'] | 'recorded' } }
     'project.deliver': { input: { projectId: string; deliveryId: string }; output: Snapshot }
     'project.expireArtifact': { input: { projectId: string; revision: number; taskId: string; artifactId: string }; output: Snapshot }
-    'project.openArtifact': { input: ProjectArtifactRef; output: { opened: boolean } }
+    'project.openArtifact': { input: ProjectArtifactRef & { connectionId?: string }; output: { opened: boolean } }
     'project.openArtifactFolder': { input: ProjectArtifactRef; output: { opened: boolean } }
     'project.agent': { input: { operation: 'read' | 'bind' | 'submit'; projectId: string; revision?: number; requestId?: string; runId?: string; caller?: string; currentRunId?: string; token?: string; task?: unknown; taskId?: string }; output: Snapshot & { task?: import('./model').Task; submitted?: Pick<import('./model').Task, 'id' | 'phase' | 'submittedAt'> & { pendingAcceptance: boolean; pendingDecision: boolean }; archiveStatus?: '已归档' } }
   }

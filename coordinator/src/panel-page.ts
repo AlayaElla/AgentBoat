@@ -777,20 +777,10 @@ function organization() {
     el('div', { class: `org-in ${up.length || side.length ? 'l1' : ''} ${up.length ? 'up' : ''}` }, el('div', { class: `org-self ${side.length ? 'sib' : ''}` }, workspaceNode(), down.length ? el('div', { class: 'org-kids', role: 'group', 'aria-label': '下级' }, down.length > 8 ? el('div', { class: 'org-tools' }, input('找工作间', '', 'search', () => render(), undefined, homeFrame.form)) : null, down.filter(p => !homeFrame.form['找工作间'] || p.name.includes(homeFrame.form['找工作间'])).map(p => workspaceNode(p))) : null), side.length ? el('div', { class: 'org-side', role: 'group', 'aria-label': '平级' }, side.map(p => workspaceNode(p))) : null), free.length ? el('div', { class: 'org-free', role: 'group', 'aria-label': '还没标关系' }, free.map(p => workspaceNode(p))) : null))
 }
 function openArtifact(projectId: string, taskId: string, artifact: Artifact, archiveEnd?: number) {
-  if (!artifact.url && isRemote(projectId)) {
-    const [id, remoteProject] = JSON.parse(projectId)
-    const ref = { id, projectId: remoteProject, taskId, artifactId: artifact.id }
-    return previewArtifact(artifactTitle(artifact), ref,
-      () => req('workspace.linkArtifact', ref, 120_000),
-      (key, offset) => req('workspace.readLinkArtifact', { id, key, offset }))
-  }
   return act(async () => {
     try {
-      if (/^https?:\/\//i.test(artifact.url)) {
-        if (!orca.shell) throw Error('请在 Orca 桌面应用中打开链接')
-        const result = await orca.shell.openExternal(artifact.url)
-        if (!result.opened && result.reason !== 'cancelled') throw Error('请在 Orca 窗口可见时重试')
-      } else if (!(await req('project.openArtifact', { projectId, taskId, artifactId: artifact.id, archiveEnd })).opened) {
+      const [connectionId, sourceProject] = isRemote(projectId) ? JSON.parse(projectId) : [undefined, projectId]
+      if (!(await req('project.openArtifact', { projectId: sourceProject, taskId, artifactId: artifact.id, archiveEnd, connectionId }, connectionId ? 120_000 : undefined)).opened) {
         throw Error('Orca 未打开文件')
       }
     } catch (e) {
@@ -798,6 +788,20 @@ function openArtifact(projectId: string, taskId: string, artifact: Artifact, arc
       throw Error(`打不开「${artifact.label}」：${e instanceof Error ? e.message : '请在 Orca 桌面应用中重试'}`)
     }
   }, false)
+}
+function openArtifactExternal(url: string) {
+  return act(async () => {
+    if (!orca.shell) throw Error('请在 Orca 桌面应用中打开链接')
+    const result = await orca.shell.openExternal(url)
+    if (!result.opened && result.reason !== 'cancelled') throw Error('请在 Orca 窗口可见时重试')
+  }, false)
+}
+function previewSharedArtifact(projectId: string, taskId: string, artifact: Artifact) {
+  const [id, sourceProject] = JSON.parse(projectId)
+  const ref = { id, projectId: sourceProject, taskId, artifactId: artifact.id }
+  return previewArtifact(artifactTitle(artifact), ref,
+    () => req('workspace.linkArtifact', ref, 120_000),
+    (key, offset) => req('workspace.readLinkArtifact', { id, key, offset }))
 }
 function openArtifactFolder(input: ProjectArtifactRef, label: string) {
   return act(async () => {
@@ -824,28 +828,32 @@ function artifactEntry(entry: HTMLElement, projectId: string, taskId: string, ar
   entry.insertBefore(badge, entry.querySelector('.chev'))
   entry.setAttribute('aria-description', [kind, entry.getAttribute('aria-description')].filter(Boolean).join(' · '))
   const ref = current?.ref.id === projectId ? current.ref : all.projects.find(p => p.ref.id === projectId)?.ref
-  if (isRemote(projectId) || ref?.hostId !== 'local' || !artifact.url || /^https?:/i.test(artifact.url)) return entry
-  entry.title += ' · 右键打开所在文件夹'
+  const web = /^https?:\/\//i.test(artifact.url), sharedFile = isRemote(projectId) && !artifact.url
+  const reveal = !isRemote(projectId) && ref?.hostId === 'local' && !!artifact.url && !web
+  if (!reveal && !web && !sharedFile) return entry
+  entry.title += reveal ? ' · 右键打开所在文件夹' : ' · 右键查看操作'
   entry.setAttribute('aria-haspopup', 'menu')
   function show(opener: HTMLElement, x: number, y: number) {
     closeArtifactMenu()
     const action = (label: string, run: () => void) => el('button', { type: 'button', class: 'btn text', role: 'menuitem', tabIndex: -1,
       onclick: () => { clickedAction = ''; closeArtifactMenu(true); run() } }, label)
-    const folder = action('打开所在文件夹', () => openArtifactFolder({ projectId, taskId, artifactId: artifact.id, archiveEnd }, artifact.label))
+    const extra = reveal ? action('打开所在文件夹', () => openArtifactFolder({ projectId, taskId, artifactId: artifact.id, archiveEnd }, artifact.label)) : web
+      ? action('在系统浏览器打开', () => openArtifactExternal(artifact.url))
+      : action('预览或保存共享文件', () => previewSharedArtifact(projectId, taskId, artifact))
     const open = action('打开成果', () => { opener.click() })
     const node = el('div', { class: 'artifact-menu', role: 'menu', 'aria-label': '成果操作', onkeydown: (e: KeyboardEvent) => {
       if (e.key === 'Tab') { closeArtifactMenu(true); return }
       if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return
       e.preventDefault()
-      const next = document.activeElement === folder ? open : folder
+      const next = document.activeElement === extra ? open : extra
       next.focus()
-    } }, folder, open)
+    } }, extra, open)
     artifactMenu = { node, opener }
     document.body.append(node)
     const { width, height } = node.getBoundingClientRect()
     node.style.left = `${Math.max(4, Math.min(x, innerWidth - width - 4))}px`
     node.style.top = `${Math.max(4, Math.min(y, innerHeight - height - 4))}px`
-    folder.focus({ preventScroll: true })
+    extra.focus({ preventScroll: true })
   }
   entry.oncontextmenu = e => { e.preventDefault(); if (!busy) show(e.currentTarget as HTMLElement, e.clientX, e.clientY) }
   entry.onkeydown = e => {
