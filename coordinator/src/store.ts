@@ -418,7 +418,11 @@ function applyFeedback(project: Project, tasks: Task[], items: unknown, source?:
     v.item.history.push({ at, revision: v.revision, result: v.result, note: v.note, ...(actor ? { source: actor } : {}) })
   }
   if (withdrawal) return
-  const body = validated.map(v => `[项目 ${project.ref.id} / 任务 ${v.task.id}]\n${v.task.title}\n${v.title}\n${v.item ? (v.discarded ? '已丢弃' : v.subject + '：' + v.result) + '\n' : ''}${v.note}`).join('\n\n')
+  const body = validated.map(v => {
+    const result = v.item ? (v.discarded ? '已丢弃' : v.subject + '：' + v.result) + '\n' : ''
+    const note = v.item && 'status' in v.item && v.result === 'passed' && v.note ? `通过留言：${v.note}` : v.note
+    return `[项目 ${project.ref.id} / 任务 ${v.task.id}]\n${v.task.title}\n${v.title}\n${result}${note}`
+  }).join('\n\n')
   project.deliveries.push({ id: randomUUID(), subject: `用户反馈 · ${validated.length} 条`, body: source ? `${source}\n\n${body}` : body, state: 'pending' })
 }
 

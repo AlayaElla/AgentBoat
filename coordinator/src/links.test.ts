@@ -57,7 +57,8 @@ test('delegated feedback applies once in both directions and rechecks sharing on
   const a = await open('甲工作间'), b = await open('乙工作间')
   let resumeReports = () => {}
   const { project } = a, [review, decision] = project.tasks, check = review.acceptance[0], d = decision.decisions[0]
-  const items: FeedbackItem[] = [{ taskId: review.id, kind: 'acceptance', itemId: check.id, itemRevision: check.revision, fingerprint: check.fingerprint, result: 'passed' },
+  const note = '按报告里的建议开始修改'
+  const items: FeedbackItem[] = [{ taskId: review.id, kind: 'acceptance', itemId: check.id, itemRevision: check.revision, fingerprint: check.fingerprint, result: 'passed', note },
     { taskId: decision.id, kind: 'decision', itemId: d.id, fingerprint: fingerprint([d.question, d.options]), answer: d.options[0] },
     { taskId: decision.id, kind: 'blocked', itemId: decision.id, itemRevision: decision.blockedRevision, note: '已经做好了' }]
   try {
@@ -110,13 +111,17 @@ test('delegated feedback applies once in both directions and rechecks sharing on
     const joinerMs = performance.now() - joinerStarted
     assert.equal((await send(b)).state, 'submitted')
     await a.c.flush('p1')
-    assert.equal((await a.c.store.get('p1')).tasks[0].acceptance[0].history.length, 1)
+    const savedCheck = (await a.c.store.get('p1')).tasks[0].acceptance[0]
+    assert.equal(savedCheck.status, 'passed')
+    assert.deepEqual(savedCheck.history.map(h => [h.result, h.revision, h.note]), [['passed', 1, note]])
     assert.equal((await a.c.store.get('p1')).tasks[1].decisions[0].history[0].source, '主人在工作间 乙工作间 提交')
     const replies = (await a.c.store.get('p1')).events
     assert.deepEqual(replies.map(e => [e.text, e.taskId, e.senderId]), [['已经做好了', decision.id, '主人在工作间 乙工作间 提交']])
     assert.deepEqual(a.notices.map(([run]) => run).sort(), ['run_example', 'workspace-甲工作间'])
     assert.ok(a.notices.every(([, body]) => body.includes('主人在工作间 乙工作间 提交')))
-    assert.ok(a.notices.find(([run]) => run === 'run_example')![1].endsWith(roleReminder.project))
+    const projectNotice = a.notices.find(([run]) => run === 'run_example')![1]
+    assert.ok(projectNotice.includes(`[项目 p1 / 任务 ${review.id}]\n${review.title}\n${check.title} · 第 ${check.revision} 版\n验收通过：passed\n通过留言：${note}`))
+    assert.ok(projectNotice.endsWith(roleReminder.project))
     assert.ok(!a.notices.find(([run]) => run === 'workspace-甲工作间')![1].includes('提醒：'))
     assert.ok((await a.c.store.get('p1')).deliveries.every(d => !d.body.includes('你是工作间管理员') && !d.body.includes('你是项目管理员')))
 
