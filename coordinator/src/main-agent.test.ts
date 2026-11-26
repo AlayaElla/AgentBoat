@@ -7,7 +7,7 @@ import { refs } from './fixtures'
 import { mainTargets, OrcaRuntime } from './runtime'
 import { roleReminder } from './role-registry'
 import path from 'node:path'
-import { existsSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { defaultAgent } from './model'
 
 const session: AgentSession = { handle: 'orca_session_id:test-next', title: '测试接管会话', workspace: 'identity:test-workspace', workspaceName: '测试工作区', path: '/test/workspace', agent: 'claude', online: 'online' }
@@ -370,7 +370,9 @@ for (const mode of ['existing', 'new'] as const) test(`main takeover ${mode}: ta
     const script = JSON.parse(/接管脚本绝对路径：([^\n]+)/.exec(prompts[0])![1])
     assert.ok(path.isAbsolute(script)); assert.ok(existsSync(script)); assert.ok(prompts[0].includes('main-bind --check'))
     assert.ok(prompts[0].endsWith(roleReminder.workspace))
-    assert.match(prompts[0], /核对项目 ID、完整路径、repoId 和 hostId.*client\.mjs message.*小拾检索.*项目主会话组织/)
+    assert.match(prompts[0], /先读 \$agentboat-workspace 的角色卡.*client\.mjs message.*项目主会话组织执行/)
+    const skill = readFileSync(path.resolve(path.dirname(script), '../../workspace/skill/agentboat-workspace/SKILL.md'), 'utf8')
+    assert.match(skill, /核对项目 ID、完整路径、repoId 和 hostId.*client\.mjs message.*小拾检索.*项目主会话组织/)
     assert.equal(JSON.stringify(switching).includes('tokenHash'), false)
     const current = () => worker.request('workspace.agent', { operation: 'read' })
     await assert.rejects(() => worker.request('workspace.agent', { ...bind, revision: switching.revision, token: 'wrong' }))
