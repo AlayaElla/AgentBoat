@@ -64,6 +64,7 @@ async function saveSubmission(change: Delta) {
 function clearChoices(id: string) { editChoices(id, Object.keys(choices(id)).map(key => [key, null])) }
 const inlineRows = new Map<string, Frame>()
 const expandedRows = new Set<string>(), folded = new Map<string, boolean>()
+const collapsedInboxGroups = new Set<string>()
 let error = '', notice = '', busy = false, more = false, nav = 0, refreshing = false, refreshSeq = 0
 let overviewIssue = ''
 let direction = '', leaving: Frame | undefined, lastInline = '', organizationScroll = 0, trayOpen = false
@@ -76,7 +77,7 @@ const persist = (key: string, value: any) => {
     if (!error.startsWith('草稿保存失败')) { error = `草稿保存失败：${e.message}`; render() }
   })
 }
-const remember = () => persist('panel.home', { at: Date.now(), pages: stack.map(f => f.page), opened, tabs: tabsOf, more })
+const remember = () => persist('panel.home', { at: Date.now(), pages: stack.map(f => f.page), opened, tabs: tabsOf, more, collapsedInboxGroups: [...collapsedInboxGroups] })
 document.addEventListener('visibilitychange', () => { if (document.hidden && all) remember() })
 const key = (t: string, k: string, id: string) => JSON.stringify([t, k, id])
 const choices = (id: string) => drafts[id] ?? {}
@@ -557,10 +558,10 @@ function workspaceNode(p?: LinksSnapshot['peers'][number]) {
     p && !p.relation ? button('标关系', () => go({ kind: 'relation', id }), 'sm') : null), expansion(open, open || id in opened ? el('div', { class: 'wsr-b', id: `workspace-${id}`, 'data-skip': open ? undefined : '' }, open ? body : null) : null))
 }
 
-const inboxProjectName = (id: string) => {
+const inboxProjectName = (id: string, includeWorkspace = true) => {
   if (isRemote(id)) {
     const { peer, project } = remoteSource(id)
-    return [project?.name ?? '对方项目', peer?.name].filter(Boolean).join(' · ')
+    return [project?.name ?? '对方项目', includeWorkspace && peer?.name].filter(Boolean).join(' · ')
   }
   return all.projects.find(p => p.ref.id === id)?.ref.name ?? all.hidden?.find(p => p.id === id)?.name ?? id
 }
@@ -657,7 +658,7 @@ function renderInboxRow(r: DisplayRow, scope: string) {
     return saved?.result === 'passed' && saved.fingerprint === d.fingerprint && saved.itemRevision === d.itemRevision
   }) : !!awaiting && passed === r.count
   const summary = r.kind === 'agent' && r.details ? 'Agent · 需要你' : r.agent ? `${agentName(r.agent.agent)} · ${relative(r.agent.since)}开始等待`
-    : `${review ? `${r.count} 项成果` : r.kind === 'decision' ? '待决定' : r.replied ? '已答复，等项目处理' : '受阻'} · ${inboxProjectName(r.projectId!)}${unavailable && scope === homeFrame.key ? ' · 暂不可提交' : ''}`
+    : `${review ? `${r.count} 项成果` : r.kind === 'decision' ? '待决定' : r.replied ? '已答复，等项目处理' : '受阻'} · ${inboxProjectName(r.projectId!, scope !== homeFrame.key)}${unavailable && scope === homeFrame.key ? ' · 暂不可提交' : ''}`
   const action = item(r.title, summary, () => {
     if (!r.details) return openInbox(r, scope)
     if (open) expandedRows.delete(k)
@@ -680,14 +681,49 @@ function renderInboxRow(r: DisplayRow, scope: string) {
     inRail ? null : expansion(open, r.details ? el('div', { id: `detail-${k}`, class: 'irow-b' }, open ? r.details.map(small) : null) : inlineRows.has(k) ? el('div', { id: `detail-${k}`, class: 'irow-b', 'data-skip': !open ? '' : undefined },
       open ? inboxBody(inlineRows.get(k)!) : null) : null, k))
 }
+function inboxList(rows: DisplayRow[], scope: string) {
+  return el('div', { class: 'irows', 'data-animate': 'row' }, rows.map(r => renderInboxRow(r, scope)))
+}
+function inboxGroups(entries: DisplayRow[]) {
+  const groups = new Map<string, { name: string; count: number; previewCount: number; rows: DisplayRow[] }>()
+  entries.forEach((r, i) => {
+    const [peerId] = r.projectId && isRemote(r.projectId) ? JSON.parse(r.projectId) as [string, string] : []
+    const id = peerId ? 'peer-' + peerId : 'local'
+    let group = groups.get(id)
+    if (!group) {
+      const name = peerId ? peers().find(p => p.id === peerId)?.name ?? '已断开的工作间' : all.links?.name ?? '我的工作间'
+      groups.set(id, group = { name, count: 0, previewCount: 0, rows: [] })
+    }
+    // Keep the narrow preview useful for workspaces that start after its first three rows.
+    const preview = !group.count || i < 3 || expandedRows.has(homeFrame.key + r.id)
+    group.count++
+    if (preview) group.previewCount++
+    if (wideInbox || more || preview) group.rows.push(r)
+  })
+  let remaining = 0
+  const body = el('div', { class: 'inbox-groups' }, Array.from(groups, ([id, { name, count, previewCount, rows }]) => {
+    const open = !collapsedInboxGroups.has(id), bodyId = 'inbox-workspace-' + id
+    if (open) remaining += count - previewCount
+    return el('div', { class: 'inbox-group', 'data-key': bodyId },
+      el('button', { type: 'button', class: 'fold-h', 'aria-expanded': String(open), 'aria-controls': bodyId, 'aria-label': `${name}，${count} 条待处理`, title: name, onclick: (e: MouseEvent) => {
+        if (open) {
+          const toggle = e.currentTarget as HTMLButtonElement
+          if (toggle.parentElement?.contains(document.activeElement)) toggle.focus({ preventScroll: true })
+          collapsedInboxGroups.add(id)
+        } else collapsedInboxGroups.delete(id)
+        remember(); render()
+      } }, icon('chevron', 'turn'), el('span', { class: 'grow trunc' }, name), el('span', { class: 'muted xs', 'aria-hidden': 'true' }, count)),
+      expansion(open, el('div', { id: bodyId }, inboxList(rows, homeFrame.key))))
+  }))
+  return { body, remaining }
+}
 function inbox(projectId?: string, entries: DisplayRow[] = inboxRows(projectId)) {
   const scope = projectId ? active.key : homeFrame.key
   const reviews = entries.filter(r => r.kind === 'review' && !r.details && !finishing.has(r.id) && !(r.projectId && isRemote(r.projectId) && remoteUnavailable(r.projectId)))
-  const limit = projectId || wideInbox || more ? entries.length : 3
-  const visible = entries.filter((r, i) => i < limit || expandedRows.has(scope + r.id))
+  const { body, remaining } = projectId ? { body: inboxList(entries, scope), remaining: 0 } : inboxGroups(entries)
   const move = (e: KeyboardEvent) => {
     if (!['ArrowUp', 'ArrowDown'].includes(e.key)) return
-    const host = e.currentTarget as HTMLElement, buttons = Array.from(host.querySelectorAll<HTMLElement>('[data-inbox-row]:not([disabled])'))
+    const host = e.currentTarget as HTMLElement, buttons = Array.from(host.querySelectorAll<HTMLElement>('[data-inbox-row]:not([disabled])')).filter(button => !button.closest('[inert]'))
     const at = buttons.indexOf(e.target as HTMLElement), next = buttons[at + (e.key === 'ArrowUp' ? -1 : 1)]
     if (at < 0 || !next) return
     e.preventDefault(); next.focus({ preventScroll: true }); next.scrollIntoView({ block: 'nearest' })
@@ -700,8 +736,8 @@ function inbox(projectId?: string, entries: DisplayRow[] = inboxRows(projectId))
     el('div', { class: 'sec-h between' }, row(el('h2', { class: 'h2' }, '等你处理'), pill(entries.length)),
       reviews.length >= 2 ? button('全选验收', () => { for (const r of reviews) selectReview(r, true); render() }, 'text sm') : null),
     !projectId ? peers().filter(p => p.report?.feedbackTruncated).map(p => small(`「${p.name}」开放的待处理内容超过同步上限，部分项目暂未列出`)) : null,
-    el('div', { class: 'irows', 'data-animate': 'row' }, visible.map(r => renderInboxRow(r, scope))),
-    !wideInbox && !projectId && entries.length > 3 && (more || visible.length < entries.length) ? button(more ? '收起' : `再看 ${entries.length - visible.length} 条`, () => { more = !more; remember(); render() }, 'text sm inbox-more') : null,
+    body,
+    !wideInbox && remaining ? keyed(button(more ? '收起' : `再看 ${remaining} 条`, () => { more = !more; remember(); render() }, 'text sm inbox-more'), 'inbox-more') : null,
     !entries.length ? small('没有要你处理的事') : null)
 }
 function home() {
@@ -1582,8 +1618,9 @@ new ResizeObserver(([entry]) => {
   wideInbox = wide
   if (wide && active === homeFrame && lastInline && expandedRows.has(lastInline)) {
     const detail = inlineRows.get(lastInline)
-    if (detail) {
-      detail.opener = Array.from(root.querySelectorAll<HTMLElement>('[data-inbox-row]')).find(e => e.dataset.inboxRow === detail.page.inboxRow)
+    const opener = detail && Array.from(root.querySelectorAll<HTMLElement>('[data-inbox-row]')).find(e => e.dataset.inboxRow === detail.page.inboxRow && !e.closest('[inert]'))
+    if (detail && opener) {
+      detail.opener = opener
       organizationScroll = root.querySelector<HTMLElement>('.home-layer')?.scrollTop ?? 0
       stack.push(detail); useFrame(detail); remember()
     }
@@ -1593,6 +1630,7 @@ new ResizeObserver(([entry]) => {
 async function start() {
   try {
     const [saved, opening] = await Promise.all([orca.storage.get('panel.home'), orca.storage.get('workspace.navigation'), readSheets()]) as any[]
+    if (Array.isArray(saved?.collapsedInboxGroups)) for (const id of saved.collapsedInboxGroups) collapsedInboxGroups.add(id)
     if (saved?.at && Date.now() - saved.at < 30 * 60_000) {
       opened = saved.opened ?? opened; Object.assign(tabsOf, saved.tabs); more = !!saved.more
       stack.push(...saved.pages.slice(1).filter((p: Page) => p.kind !== 'question').map((p: Page) => frameFor(p))); useFrame(stack.at(-1)!)
