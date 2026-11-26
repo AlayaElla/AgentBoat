@@ -42,7 +42,8 @@ declare module 'orca' {
     'project.lead': { input: { projectId: string } | (ProjectLeadRequest & { projectId: string }); output: ProjectLead }
     'project.openMain': { input: { projectId: string }; output: { opened: boolean; multipleConversations?: boolean } }
     'project.settings': { input: { projectId: string; revision: number; roles?: Project['roles']; leadAgents?: Project['leadAgents']; template?: string; runId?: string; caller?: string }; output: Snapshot }
-    'project.feedback': { input: { projectId: string; revision?: number; requestId?: string; runId?: string; caller?: string; items: import('./store').FeedbackItem[] }; output: Snapshot }
+    'project.feedback': { input: { projectId: string; revision?: number; requestId?: string; runId?: string; caller?: string; items: import('./store').FeedbackItem[]; ownerSource?: { eventId: string } | { messageId: string } }; output: Snapshot }
+    'project.workerFeedback': { input: { projectId: string; projectTaskId: string; taskId: string; dispatchId: string; sourceId: string; caller: string }; output: { sourceId: string; requestId: string; state: import('./model').Delivery['state'] | 'recorded' } }
     'project.deliver': { input: { projectId: string; deliveryId: string }; output: Snapshot }
     'project.expireArtifact': { input: { projectId: string; revision: number; taskId: string; artifactId: string }; output: Snapshot }
     'project.openArtifact': { input: ProjectArtifactRef; output: { opened: boolean } }

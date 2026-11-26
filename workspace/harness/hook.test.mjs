@@ -68,6 +68,7 @@ test('Claude role hooks scope actions by Orca identity and fail open', () => {
     const ordinary = '请继续补上这个设置的保存提示';
     const prompt = { hook_event_name: 'UserPromptSubmit', prompt: ordinary };
     const codexContext = run('codex_project', prompt).decision.hookSpecificOutput.additionalContext;
+    assert.match(codexContext, /原话、关联任务、验收编号和原版本.*先代录「需要修改」.*沿用验收编号提交新版/);
     assert.match(codexContext, /无需触发词[\s\S]+submit[\s\S]+run-current 核对 Run run_fixture[\s\S]+read p1/);
     assert.match(codexContext, /已有验收或决定的后续任务沿用原事项.*paused.*原任务和事项编号.*回复原问题.*独立受阻.*submit/);
     assert.equal(run('codex_ordinary', prompt).decision, null);

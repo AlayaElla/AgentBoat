@@ -12,7 +12,7 @@ import { takeoverActive, waitingForProjectLead, actingMain, workspaceBackupInFli
 import type { ProjectLeadRequest } from './protocol'
 import { FeishuSources, notifyFeishu, type MessageTransport } from './feishu'
 import { OrcaRuntime, defaultExecutable, readTimeout, targetOnline, type CoordinatorRuntime, type TargetInventory } from './runtime'
-import { ProjectStore, artifactUrl, expireArtifact, fail, feedback, fingerprint, fresh, maxMessageLength, notifyWorkspace, object, overview, resetBackup, retainRecent, receiveEvent, submitTask, strings, text, revision, mergeProjects, feishuConfig, verifyTakeover } from './store'
+import { ProjectStore, artifactUrl, expireArtifact, fail, feedback, fingerprint, fresh, maxMessageLength, notifyWorkspace, object, overview, resetBackup, retainRecent, receiveEvent, submitTask, strings, text, revision, mergeProjects, feishuConfig, verifyTakeover, workerFeedbackNotice } from './store'
 import { WorkspaceLinks } from './links'
 import { fileErrorText, incomingHash, linkMessageHistory } from './link-messages'
 import { LinkFiles } from './link-files'
@@ -765,6 +765,24 @@ export function createCoordinator(api: OrcaWorkerApi, runtime: CoordinatorRuntim
     const result = await snapshot(id, written)
     return { ...result, ...(!result.project?.runId ? { queued: '项目还没有主会话，已排队' } : {}) }
   })
+  orca.panels.handle('project.workerFeedback', async input => {
+    const id = text(input.projectId, '项目编号', 200), projectTaskId = text(input.projectTaskId, '项目任务编号', 200)
+    const taskId = text(input.taskId, 'Orca 任务编号', 200), dispatchId = text(input.dispatchId, '派工编号', 200)
+    const caller = text(input.caller, '执行者会话', 500), sourceId = text(input.sourceId, '用户消息编号', 200)
+    const eventId = `worker-user:${fingerprint([id, caller, sourceId])}`
+    await ensure(id)
+    const written = await store.mutate(id, undefined, async p => {
+      if (p.hidden) fail('项目已隐藏，请联系项目主会话')
+      const origin = await runtime.workerFeedback(caller, taskId, dispatchId, sourceId)
+      const matches = p.tasks.filter(task => task.executions.some(x => x.runId === origin.runId && x.taskId === taskId && x.dispatchId === dispatchId))
+      if (matches.length !== 1 || matches[0].id !== projectTaskId) fail('派工未唯一关联这个项目任务，请项目主会话核对执行记录')
+      receiveEvent(p, { id: eventId, source: 'worker-user', sourceId, threadId: eventId, chatId: '', senderId: caller,
+        text: origin.text, receivedAt: origin.receivedAt, worker: { runId: origin.runId, taskId, dispatchId, projectTaskId } })
+    }, { id: eventId, input })
+    changed(id); defer(id)
+    const delivery = written.deliveries.find(d => d.id === eventId)
+    return { sourceId: eventId, requestId: eventId, state: delivery?.state ?? 'recorded' as const }
+  })
   orca.panels.handle('projects.list', async () => {
     const { refs, error } = await availableProjects()
     return { projects: refs, ...(error ? { error } : {}) }
@@ -886,10 +904,35 @@ export function createCoordinator(api: OrcaWorkerApi, runtime: CoordinatorRuntim
   })
   async function recordFeedback(input: Record<string, any>, expected: number | undefined, remote?: { source: string; connectionId: string; authorize: (p: Project) => void }) {
     const request = input.requestId ? text(input.requestId, '请求编号', 200) : undefined
+    const owner = !remote && input.ownerSource !== undefined ? object(input.ownerSource) : undefined
+    const leadRun = owner ? text(input.runId, 'Run 编号', 200) : undefined
+    const caller = owner ? text(input.caller, '项目主会话', 500) : undefined
+    if (owner && (!request || expected === undefined)) fail('代录反馈需要项目版本和请求编号')
+    const binding = leadRun ? await runtime.runBinding(leadRun) : undefined
+    function authorizeLead(p: Project) {
+      if (leadRun !== p.runId || actingMain(projectBinding(p))?.handle !== caller ||
+        (binding?.owner !== caller && !(binding?.owner === null && caller?.startsWith('orca_session_id:'))))
+        fail('请由当前绑定的项目主会话代录反馈')
+    }
+    const { caller: _caller, runId: _runId, ...ownerInput } = input
     const project = await store.mutate(input.projectId, expected, async p => {
       const before = remote ? undefined : structuredClone(p)
       if (p.hidden) fail('项目已隐藏，请先恢复显示')
-      feedback(p, input, remote?.source)
+      let source = remote?.source, event: SourceEvent | undefined
+      if (owner) {
+        if (Object.hasOwn(owner, 'eventId')) {
+          event = p.events.find(e => e.id === owner.eventId && !!e.worker && e.source === 'worker-user')
+          if (!event || event.taskId) fail('执行者反馈来源无法核对，或已关联项目任务')
+          source = event.id
+        } else {
+          const message = text(owner.messageId, '用户消息来源', 300)
+          if (!Array.isArray(input.items) || input.items.some(item => item?.kind !== 'acceptance' ||
+            item.result !== 'changes_requested' || typeof item.note !== 'string' || !item.note.trim() || item.note.length > 8000))
+            fail('请代录明确的返修意见并保留用户原话')
+          source = `项目主会话 ${caller} / 用户消息 ${message}`
+        }
+      }
+      feedback(p, input, source, event)
       if (before) {
         rememberProjectCaller(p, input)
         await notify(before, p)
@@ -900,7 +943,8 @@ export function createCoordinator(api: OrcaWorkerApi, runtime: CoordinatorRuntim
           p.deliveries.push({ ...summary, id: `${summary.id}:workspace`, targetRunId: workspaceRun })
         }
       }
-    }, request ? { id: remote ? `link-feedback:${fingerprint([remote.connectionId, request])}` : request, input, authorize: remote?.authorize } : undefined, !input.caller)
+    }, request ? { id: remote ? `link-feedback:${fingerprint([remote.connectionId, request])}` : request,
+      input: owner ? ownerInput : input, authorize: owner ? authorizeLead : remote?.authorize } : undefined, !input.caller)
     changed(input.projectId); defer(input.projectId)
     return project
   }
@@ -942,6 +986,10 @@ export function createCoordinator(api: OrcaWorkerApi, runtime: CoordinatorRuntim
           if (projectBackupBusy(p.backup) && !await confirmProjectRecovery(p)) fail('原主会话仍可能接回 Run，请先核对项目主会话')
           if (p.runId) p.deliveries.push({ id: `retired:${t.id}`, targetRunId: p.runId, subject: '项目主会话已切换',
             body: `项目「${p.ref.name}」的主会话已换成「${takeoverSession.title || takeoverSession.handle}」。你不再是主会话。请停止派活，把进行中的情况交给新主会话。`, state: 'pending' })
+          for (const event of p.events.filter(e => e.worker && !e.taskId)) {
+            if (!p.deliveries.some(d => (d.id === event.id || d.id.startsWith(event.id + ':')) && d.state === 'pending' && !d.targetRunId))
+              p.deliveries.push(workerFeedbackNotice(p, event, `${event.id}:${t.id}`))
+          }
           resetBackup(p, takeoverSession.handle)
           p.mainSession = takeoverSession
           p.mainAgentHandle = takeoverSession.handle

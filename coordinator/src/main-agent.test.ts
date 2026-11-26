@@ -26,6 +26,11 @@ test('project lead switches only within its workspace and preserves tasks and qu
     { runId: 'run_existing', taskId: 'task_existing', dispatchId: 'dispatch_existing', agent: 'codex' }
   ], artifacts: [], decisions: [{ id: 'decision', question: '下一步', options: ['继续'], history: [] }], acceptance: [], sourceIds: [], updatedAt: '' })
   p.deliveries.push({ id: 'queued', subject: '队列', body: '给当前项目主会话', state: 'pending' })
+  const feedback = { id: 'worker-user:original', source: 'worker-user', sourceId: 'orca:original', threadId: 'orca:original',
+    senderId: 'orca_session_id:worker', chatId: '', text: '第一版标题请修改', receivedAt: new Date().toISOString(),
+    worker: { runId: 'run_existing', taskId: 'task_existing', dispatchId: 'dispatch_existing', projectTaskId: 'task' } }
+  p.events.push(feedback)
+  p.deliveries.push({ id: feedback.id, subject: '用户反馈', body: feedback.text, state: 'uncertain', targetRunId: 'run_old' })
   other.runId = 'run_taken'
   const old: AgentSession = { ...projectSession, handle: p.mainAgentHandle, title: '当前会话' }
   const replacement: AgentSession = { ...projectSession, handle: 'orca_session_id:antigravity_replacement', title: '替补会话', agent: 'antigravity' }
@@ -105,10 +110,14 @@ test('project lead switches only within its workspace and preserves tasks and qu
     assert.deepEqual(bound.project?.tasks, p.tasks)
     await c.flush('p1')
     assert.equal(notices.filter(n => n.run === 'run_old' && n.body.includes('停止派活') && n.body.includes(replacement.title)).length, 1)
-    assert.deepEqual(notices.filter(n => n.run === 'run_next').map(n => n.body), [`给当前项目主会话\n\n${roleReminder.project}`])
+    const received = notices.filter(n => n.run === 'run_next').map(n => n.body)
+    assert.equal(received.length, 2)
+    assert.equal(received[0], `给当前项目主会话\n\n${roleReminder.project}`)
+    assert.ok(received[1].includes(feedback.text) && received[1].includes(feedback.id))
+    assert.equal((await c.store.get('p1')).deliveries.find(d => d.id === feedback.id)?.state, 'uncertain')
     await bind(final.binding.revision, 3, 'run_next')
     await c.flush('p1')
-    assert.equal(notices.length, 2)
+    assert.equal(notices.length, 3)
     const message = '把这个设置的保存提示补上。'
     const forwarded = await worker.request('workspace.message', { projectId: 'p1', requestId: 'forwarded', runId: 'run_owner', text: message })
     const source = forwarded.project!.events.find(e => e.source === 'workspace-agent')!
