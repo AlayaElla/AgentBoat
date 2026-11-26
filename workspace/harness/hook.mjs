@@ -3,8 +3,6 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { roleRegistryPath, stableRoot, clientPath, promptClientPath, pluginKey } from '../../coordinator/scripts/orca-cli.mjs';
-import { readRoleCard } from '../../coordinator/scripts/main-role-card.mjs';
-import { workerReport, reportSubmitted } from '../../coordinator/scripts/worker-reports.mjs';
 
 const workspaceDir = fileURLToPath(new URL('../', import.meta.url));
 const agentboatHome = path.resolve(process.env.AGENTBOAT_HOME || path.join(os.homedir(), '.agentboat'));
@@ -184,8 +182,9 @@ function primaryAllowed(name, args, cwd, bash) {
   return rules.gitMemory.has(op) && same(canonical(directory), memory) && !rest.includes('--no-index');
 }
 
-function context(role, includeSummary = true) {
+async function context(role, includeSummary = true) {
   if (role.standby) return '当前待命。收到插件的接管、恢复探测或交接通知时，执行通知中的命令。'
+  const { readRoleCard } = await import('../../coordinator/scripts/main-role-card.mjs');
   const card = readRoleCard(role.role);
   const guide = role.role === 'workspace-main' ? '先读 $agentboat-workspace。' :
     `执行者按自己的 Orca Task / Dispatch 行动。处理项目请求前，用 orca orchestration run-current 核对 Run ${role.runId}，并用 node ${JSON.stringify(promptClientPath())} read ${role.projectId} 核对项目绑定。沿用已有 Run。先读 $orca-project-coordinator，必要时直接读 ${JSON.stringify(path.join(path.dirname(promptClientPath()), '../skill/orca-project-coordinator/SKILL.md'))}。`;
@@ -238,11 +237,12 @@ function transcriptTail(file) {
     return lines.filter(Boolean).map(line => JSON.parse(line)).filter(row => !row.isSidechain);
   } finally { closeSync(fd); }
 }
-function stopBlocker(input, role, codex) {
+async function stopBlocker(input, role, codex) {
   if (input.stop_hook_active || typeof input.transcript_path !== 'string') return;
   const rows = transcriptTail(input.transcript_path);
   const shells = new Set(), checks = new Map(), replies = new Map(), questions = new Set();
   const seenDone = new Set(), pending = new Map();
+  const { workerReport, reportSubmitted } = await import('../../coordinator/scripts/worker-reports.mjs');
   const markDone = message => {
     const report = workerReport({ run_id: role.runId, ...message });
     if (report && (!role.runId || report.runId === role.runId) && !seenDone.has(report.id)) {
@@ -319,7 +319,7 @@ function stopBlocker(input, role, codex) {
   return questions.size ? questionReason : pending.size ? stopReason : undefined;
 }
 const antigravity = process.argv.includes('--antigravity');
-function run() {
+async function run() {
   const codex = process.argv.includes('--codex');
   const id = process.env.ORCA_AGENT_SESSION_ID?.replace(/^orca_session_id:/, '');
   const uuid = /^[\da-f]{8}(?:-[\da-f]{4}){3}-[\da-f]{12}$/i.test(id ?? '');
@@ -337,15 +337,15 @@ function run() {
   if (input.agent_id) return;
   if (antigravity) {
     // One reminder before the first model call, not on every tool round trip.
-    if (input.invocationNum === 0) return { injectSteps: [{ systemMessage: { systemMessage: context(role, false) } }] };
+    if (input.invocationNum === 0) return { injectSteps: [{ systemMessage: { systemMessage: await context(role, false) } }] };
     return;
   }
   if (input.hook_event_name === 'SessionStart')
-    return { hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: context(role) } };
+    return { hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: await context(role) } };
   if (codex && input.hook_event_name === 'UserPromptSubmit' && role.role === 'project-lead')
-    return { hookSpecificOutput: { hookEventName: 'UserPromptSubmit', additionalContext: context(role, false) } };
+    return { hookSpecificOutput: { hookEventName: 'UserPromptSubmit', additionalContext: await context(role, false) } };
   if (input.hook_event_name === 'Stop' && role.role === 'project-lead' && !role.standby) {
-    const reason = stopBlocker(input, role, codex);
+    const reason = await stopBlocker(input, role, codex);
     if (reason) return { decision: 'block', reason };
   }
   if (input.hook_event_name !== 'PreToolUse' || role.role !== 'workspace-main') return;
@@ -355,5 +355,5 @@ function run() {
   if (denied) return { hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: redirect } };
 }
 
-try { const result = run(); if (result || antigravity) process.stdout.write(JSON.stringify(result ?? {}) + '\n'); }
+try { const result = await run(); if (result || antigravity) process.stdout.write(JSON.stringify(result ?? {}) + '\n'); }
 catch (e) { diagnostic(e); if (antigravity) process.stdout.write('{}\n'); }

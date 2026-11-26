@@ -52,7 +52,7 @@ function setupEnvironment(env) {
   return node;
 }
 
-function settingsPlan(file, original, { handler, matchers, codex, antigravity }, repository) {
+function settingsPlan(file, original, { handler: defaultHandler, matchers, codex, antigravity }, repository) {
   const isObject = value => value && typeof value === 'object' && !Array.isArray(value);
   let settings;
   try { settings = original ? JSON.parse(original.toString('utf8').replace(/^\uFEFF/, '')) : {}; }
@@ -61,9 +61,9 @@ function settingsPlan(file, original, { handler, matchers, codex, antigravity },
     if (!isObject(settings)) throw Error(file + ' 的 hooks 格式不正确');
     const key = 'agentboat-project-lead', existing = settings[key];
     if (Object.hasOwn(settings, key) && (!isObject(existing) || !Array.isArray(existing.PreInvocation) ||
-        existing.PreInvocation.length !== 1 || existing.PreInvocation[0]?.command !== handler.command))
+        existing.PreInvocation.length !== 1 || existing.PreInvocation[0]?.command !== defaultHandler.command))
       throw Error(file + ' 的 ' + key + ' 含有其他 Orca 配置或归属未知的 AgentBoat hook');
-    const desired = { ...existing, PreInvocation: [handler] };
+    const desired = { ...existing, PreInvocation: [defaultHandler] };
     if (isDeepStrictEqual(existing, desired)) return { registered: true, desired: original };
     settings[key] = desired;
     return { registered: !!existing, desired: Buffer.from(JSON.stringify(settings, null, 2) + '\n') };
@@ -76,6 +76,9 @@ function settingsPlan(file, original, { handler, matchers, codex, antigravity },
   let changed = false, registered = false;
   for (const event of new Set([...Object.keys(matchers), ...Object.keys(hooks)])) {
     const required = Object.hasOwn(matchers, event), matcher = matchers[event];
+    // Codex includes Windows shell and Node startup in the synchronous hook deadline.
+    const handler = codex && process.platform === 'win32' && event === 'PreToolUse'
+      ? { ...defaultHandler, timeout: 10 } : defaultHandler;
     const groups = hooks[event] ?? [];
     if (!Array.isArray(groups) || groups.some(group => !isObject(group) || !Array.isArray(group.hooks))) {
       if (required || JSON.stringify(groups).includes(marker)) throw Error(file + ' 的 ' + event + ' hooks 格式不正确');
@@ -90,7 +93,16 @@ function settingsPlan(file, original, { handler, matchers, codex, antigravity },
       registered = true;
     }
     if (!required && !found.length) continue;
-    if (required && found.length === 1 && found[0].matcher === matcher && isDeepStrictEqual(found[0].hook, handler)) continue;
+    if (required && found.length === 1 && found[0].matcher === matcher) {
+      const { hook } = found[0];
+      if (isDeepStrictEqual(hook, handler)) continue;
+      if (isDeepStrictEqual({ ...hook, timeout: handler.timeout }, handler)) {
+        // Keep the Codex trust keys of neighboring handlers tied to their original indices.
+        hook.timeout = handler.timeout;
+        changed = true;
+        continue;
+      }
+    }
     changed = true;
     hooks[event] = groups.flatMap(group => {
       if (!group.hooks.some(owned)) return [group];
