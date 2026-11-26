@@ -31,8 +31,8 @@ export function reportSubmitted(report, submission) {
 
 export function projectSubmissions(project) {
   return project.tasks.map(task => {
-    const legacySubmit = ![...task.acceptance, ...task.decisions].some(item => item.history.some(entry => entry.at === task.updatedAt));
-    const time = Date.parse(task.submittedAt ?? (legacySubmit ? task.updatedAt : ''));
+    const legacyFeedback = task.submittedAt == null && [...task.acceptance, ...task.decisions].some(item => item.history.some(entry => entry.at === task.updatedAt));
+    const time = Date.parse(task.submittedAt ?? (legacyFeedback ? '' : task.updatedAt));
     return { at: Number.isFinite(time) ? time : undefined, updatedAt: Date.parse(task.updatedAt), executions: task.executions };
   });
 }

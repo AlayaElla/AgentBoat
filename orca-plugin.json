@@ -3,7 +3,7 @@
   "id": "agentboat",
   "publisher": "alayaella",
   "name": "AgentBoat",
-  "version": "0.1.50",
+  "version": "0.1.51",
   "description": "分项目处理决定与成果验收，保存任务记录并接收飞书消息。",
   "engines": {
     "orca": ">=1.4.261"
