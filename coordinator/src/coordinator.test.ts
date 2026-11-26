@@ -374,6 +374,16 @@ test('local artifact actions validate registered paths and archived tasks before
     assert.ok((await realpath(link)).endsWith('\u00a0'))
     for (const name of files.filter((_, i) => i !== 2)) await writeFile(path.join(docs, name), 'fixture')
     await writeFile(path.join(outside, 'outside.html'), 'fixture')
+    const image = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aM1sAAAAASUVORK5CYII='
+    await writeFile(path.join(docs, '对照 图.png'), Buffer.from(image, 'base64'))
+    await writeFile(path.join(outside, 'private.png'), 'private-image-bytes')
+    await writeFile(path.join(docs, files[0]), [
+      '# 中文设计稿', '', '| 道具 | 画面 |', '| --- | --- |', '| 轨道 | F3 |', '',
+      '[已有实窗对照](%E5%AF%B9%E7%85%A7%20%E5%9B%BE.png)', '',
+      '[外部图片](../../project%C2%A0/private.png) [符号链接](../outside-link/private.png)', '',
+      '[系统文件](file:///secrets.png) [网络](https://example.com/secret.png) [执行](javascript:alert%281%29)', '',
+      '<script>globalThis.executed = true</script><img src="file:///secrets.png" onerror="alert(1)">'
+    ].join('\n'))
     await mkdir(path.join(docs, 'directory.htm'))
     const artifact = (id: string, url: string) => ({ id, label: id, version: 'v1', url })
     submitTask(p, { ...deliverable, artifacts: [
@@ -394,13 +404,24 @@ test('local artifact actions validate registered paths and archived tasks before
     try {
       const open = (artifactId: string, projectId = ref.id) => worker.request('project.openArtifact', { projectId, taskId: deliverable.id, artifactId })
       const reveal = (artifactId: string, projectId = ref.id) => worker.request('project.openArtifactFolder', { projectId, taskId: deliverable.id, artifactId })
-      await assert.rejects(() => open('a0'), /无法跨工作区打开/)
+      assert.deepEqual(await open('a0'), { opened: true })
+      const [[markdownWorkspace, previewFile]] = browsed.splice(0)
+      assert.equal(markdownWorkspace, presentation)
+      assert.equal(path.dirname(previewFile), path.join(dir, 'exports', 'markdown-previews'))
+      const html = await readFile(previewFile, 'utf8')
+      assert.match(html, /<h1>中文设计稿<\/h1>/)
+      assert.match(html, /<table>.*<td>轨道<\/td>.*<\/table>/s)
+      assert.match(html, /href="#image-1">已有实窗对照/)
+      assert.match(html, /href="#link-1">返回正文/)
+      assert.ok(html.includes(`src="data:image/png;base64,${image}"`))
+      assert.match(html, /&lt;script&gt;globalThis\.executed/)
+      assert.equal(/<script|<img\s+src="file:|href="(?:file:|https?:|javascript:)|id="image-2"|private-image-bytes/.test(html), false)
       assert.deepEqual(await open('a1'), { opened: true })
       for (const id of ['a3', 'a4', 'a6', 'web']) assert.deepEqual(await open(id), { opened: true })
       await assert.rejects(() => open('a5'), /无法跨工作区打开/)
       active = ref.workspace.slice(3)
-      assert.deepEqual(await open('a0'), { opened: true })
-      assert.deepEqual(editors, [[ref.workspace, path.join(docs, files[0])]])
+      assert.deepEqual(await open('a5'), { opened: true })
+      assert.deepEqual(editors, [[ref.workspace, path.join(docs, files[5])]])
       active = undefined
       await assert.rejects(() => open('a1'), /当前没有可打开成果的工作区/)
       active = presentation

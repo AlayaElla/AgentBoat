@@ -28,6 +28,7 @@ import { escalationWait } from '../scripts/worker-reports.mjs'
 import { businessQuestion, questionSourceId } from '../scripts/orca-questions.mjs'
 import type { ProjectArtifactRef } from './protocol'
 import { kindFromFilename } from './artifact-kind'
+import { artifactMarkdownPage, isMarkdownArtifact } from './artifact-markdown'
 
 const activityInterval = 60_000
 const activityDebounce = 150
@@ -1136,7 +1137,7 @@ export function createCoordinator(api: OrcaWorkerApi, runtime: CoordinatorRuntim
     const relative = path.relative(root, file)
     if (!relative || relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) fail('成果路径不属于当前项目')
     const info = await stat(file).catch(() => fail('成果文件不存在或无法访问'))
-    return { file, info }
+    return { root, file, info }
   }
   orca.panels.handle('project.openArtifact', async input => {
     const { workspaceId: active } = await orca.host.call('workspace.readContext', {}, { signal: AbortSignal.timeout(readTimeout) }) ?? {}
@@ -1152,10 +1153,13 @@ export function createCoordinator(api: OrcaWorkerApi, runtime: CoordinatorRuntim
       await runtime.openArtifactPage(target, url)
       return { opened: true }
     }
-    const { file, info } = await localArtifact(ref, url)
+    const { root, file, info } = await localArtifact(ref, url)
     if (!info.isFile()) fail('成果文件不存在或无法访问')
     const canBrowse = (name: string) => /^\.(?:html?|jpe?g|png|gif|webp|svg|avif|bmp|ico|pdf|txt|mp4|webm)$/i.test(path.extname(name))
-    if (canBrowse(url)) {
+    if (isMarkdownArtifact(url)) {
+      if (!isMarkdownArtifact(file)) fail('成果实际文件类型与登记不符')
+      await runtime.openArtifactPage(target, await artifactMarkdownPage(root, file, exportDirectory))
+    } else if (canBrowse(url)) {
       if (!canBrowse(file) || kindFromFilename(url) !== kindFromFilename(file)) fail('成果实际文件类型与登记不符')
       await runtime.openArtifactPage(target, file)
     } else {

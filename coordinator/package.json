@@ -9,6 +9,7 @@
   },
   "dependencies": {
     "@larksuiteoapi/node-sdk": "1.76.0",
+    "marked": "17.0.6",
     "pdfjs-dist": "6.5.438"
   },
   "devDependencies": {

@@ -18,7 +18,7 @@ type Manifest = { key: string; requestId: string; hash: string; at: string; file
 export type ReceivedFile = LinkFile & { path: string }
 const mime = new Map(Object.entries({ '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
   '.webp': 'image/webp', '.gif': 'image/gif', '.pdf': 'application/pdf', '.txt': 'text/plain', '.svg': 'image/svg+xml', '.md': 'text/markdown', '.markdown': 'text/markdown', '.zip': 'application/zip' }))
-const fileType = (name: string) => mime.get(path.extname(name).toLowerCase()) ?? 'application/octet-stream'
+export const fileType = (name: string) => mime.get(path.extname(name).toLowerCase()) ?? 'application/octet-stream'
 const hashPattern = /^[a-f0-9]{64}$/
 const segment = (value: string) => /^[\w-]{1,64}$/.test(value) ? value : fail('工作间文件目录编号不正确')
 const isArtifactTransfer = (id: string) => /^artifact:[0-9a-f]{64}$/.test(id)
@@ -78,8 +78,9 @@ async function readChunk(input: Awaited<ReturnType<typeof open>>, size: number, 
 }
 
 // Check the registered name, its resolved location and the opened file before reading any bytes.
-async function openContained(root: string, file: string) {
+async function openContained(root: string, file: string, canonicalRoot = false) {
   const base = await realpath(root)
+  if (canonicalRoot && path.relative(root, base)) fail(reasonText('outside'))
   // macOS can register a canonical filename while the project uses a root alias such as /var.
   let anchor = root, target: string
   try { target = artifactUrl(file, anchor) }
@@ -101,6 +102,17 @@ async function openContained(root: string, file: string) {
       path.relative(actual, await realpath(target))) fail(reasonText('changed'))
     return { input, size: pinned.size }
   } catch (e) { await input.close(); throw e }
+}
+
+export async function readContainedArtifact(root: string, file: string, limit: number) {
+  const { input, size } = await openContained(root, file, true)
+  try {
+    if (size > limit) fail('成果预览超过大小限制')
+    const data = Buffer.alloc(size)
+    const { bytesRead } = await input.read(data, 0, size, 0)
+    if (bytesRead !== size) fail(reasonText('changed'))
+    return data
+  } finally { await input.close() }
 }
 
 async function artifactMetadata(input: Awaited<ReturnType<typeof open>>, file: string, size: number, signal?: AbortSignal) {
