@@ -5,6 +5,7 @@ import { promptClientPath } from '../scripts/orca-cli.mjs'
 import { awaitingLeadControl, expectedPhases, backupInCharge, workspaceBackupInFlight, type AgentSession, type BackupLead, type BotTarget, type ContactRoutes, type Delivery, type LeadAction, type Project, type Workspace } from './model'
 import { targetOnline, type CoordinatorRuntime, type TargetInventory } from './runtime'
 import { fail, fingerprint, ProjectStore, resetBackup, takeoverActive, text } from './store'
+import { roleReminder } from './role-registry'
 
 function ownerAlert(w: Workspace, message: string) {
   w.bot!.result = message
@@ -405,7 +406,7 @@ export class BackupLeads {
         if (row.botSwitch?.cycle === cycle && !row.botStopped && available(row)) row.botSwitch.recipient = next
       })
       if (latest.botSwitch?.cycle !== cycle || latest.botSwitch.recipient !== next || latest.botStopped || !available(latest)) return
-      const prompt = `请接回工作间协调 Run，完成后读 overview。一次性命令：\nnode ${JSON.stringify(promptClientPath())} lead-take ${w.runId} ${token}`
+      const prompt = `请接回工作间协调 Run，完成后读 overview。\n\n${roleReminder.workspace}\n\n一次性命令：\nnode ${JSON.stringify(promptClientPath())} lead-take ${w.runId} ${token}`
       const { recipient, quota } = await this.runtime.botMail!(next, '接回工作间协调 Run', prompt, 'handoff')
       if (quota) return this.stopBot(claimed, '新主对话也停在额度上限', bot.name)
       if (recipient !== next) fail('未确认 bot 对话的收件地址')
@@ -479,7 +480,8 @@ export class BackupLeads {
       probing = b.phase === 'probing'
       if (c.action === 'ready' && !probing) b.lastProbe = Date.now()
       const command = `node ${JSON.stringify(promptClientPath())} lead-${c.action} ${r.runId} ${token}`
-      body = d.body + '\n' + command + (c.action === 'handoff' ? ' "已做事项和剩余工作"' : '')
+      const reminder = c.action === 'take' || c.action === 'resume' ? '\n\n' + roleReminder[id ? 'project' : 'workspace'] + '\n' : ''
+      body = d.body + reminder + '\n' + command + (c.action === 'handoff' ? ' "已做事项和剩余工作"' : '')
     })
     if (body) await this.runtime.requestTakeover(target, body, d.subject)
     // Start the grace period only after Orca acknowledges delivery.

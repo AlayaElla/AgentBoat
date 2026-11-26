@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmdirSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -14,6 +14,7 @@ const agentboat = path.join(home, '.agentboat');
 const claude = path.join(home, '.claude', 'settings.json');
 const hooks = path.join(codex, 'hooks.json');
 const skill = path.join(home, '.agents', 'skills', 'agentboat-workspace', 'SKILL.md');
+const projectSkill = path.join(home, '.agents', 'skills', 'orca-project-coordinator', 'SKILL.md');
 const agySkill = path.join(home, '.gemini/config/skills/agentboat-workspace/SKILL.md');
 const personal = path.join(home, '.gemini/config/skills/personal/SKILL.md');
 const settings = { hooks: { Stop: [{ hooks: [{ type: 'command', command: 'existing-test-hook' }] }] } };
@@ -67,4 +68,35 @@ assert.equal(readFileSync(path.join(backups, nextBackup, path.relative(home, agy
 assert.deepEqual(readFileSync(agySkill), readFileSync(skill));
 assert.deepEqual([claude, hooks].map(file => readFileSync(file, 'utf8')), after);
 assert.equal(existsSync(path.join(codex, 'config.toml')), false);
+const release = path.dirname(setup);
+const registry = path.join(env.ORCA_USER_DATA_PATH, 'plugins-data/alayaella.agentboat/roles.json');
+mkdirSync(path.dirname(registry), { recursive: true });
+writeFileSync(registry, JSON.stringify({ version: 1, sessions: {
+  'orca_session_id:claude_workspace': { role: 'workspace-main', directory: home },
+  'orca_session_id:claude_project': { role: 'project-lead', projectId: 'boardingtime-fixture', runId: 'run_project_fixture' }
+} }));
+const installedHook = JSON.parse(readFileSync(claude, 'utf8')).hooks.SessionStart[0].hooks[0];
+assert.equal(realpathSync(installedHook.args[0]), realpathSync(path.join(release, 'workspace/harness/hook.mjs')));
+for (const [file, bundled, id, pattern] of [
+  [skill, 'workspace/skill/agentboat-workspace/SKILL.md', 'claude_workspace', /client\.mjs message.*转给该项目主会话.*小拾检索.*项目主会话组织/],
+  [projectSkill, 'coordinator/skill/orca-project-coordinator/SKILL.md', 'claude_project', /无需触发词.*派给实际执行者.*小拾检索.*`submit` 登记待验收/]
+]) {
+  const published = readFileSync(path.join(release, bundled), 'utf8');
+  const actual = readFileSync(file, 'utf8');
+  assert.equal(actual, published.replaceAll('{{AGENTBOAT_REPO}}', release.replaceAll('\\', '/')));
+  const suffix = path.join(path.basename(path.dirname(file)), 'SKILL.md');
+  for (const provider of ['.claude/skills', '.gemini/config/skills']) {
+    assert.equal(readFileSync(path.join(home, provider, suffix), 'utf8'), actual);
+  }
+  const roleCard = actual.replaceAll('\r\n', '\n').split('## 角色卡\n\n')[1].split('\n\n')[0];
+  assert.match(roleCard, pattern);
+  for (const source of ['startup', 'resume']) {
+    const context = JSON.parse(execFileSync(process.execPath, installedHook.args, {
+      input: JSON.stringify({ hook_event_name: 'SessionStart', source, cwd: home }),
+      env: { ...env, ORCA_AGENT_SESSION_ID: id }, encoding: 'utf8', cwd: home, windowsHide: true
+    })).hookSpecificOutput.additionalContext;
+    assert.ok(context.startsWith(roleCard + '\n'));
+  }
+}
 console.log('PASS setup consent, shared lock, conflict, backups, both hooks, Antigravity, and repeat setup');
+console.log('PASS both published role skills, installed hook provenance, startup and resume role cards');

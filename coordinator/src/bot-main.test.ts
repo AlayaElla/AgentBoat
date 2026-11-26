@@ -527,6 +527,7 @@ test('面板绑定、无需备用、切换宽限、凭据接回原 Run、到点�
     await poll(); await poll()
     assert.equal((await store.workspace()).backup, undefined)
     const confirm = async (handle: string, agent: string) => {
+      assert.match(env.sends.at(-1)!.body, /\$agentboat-workspace.*client\.mjs message.*转给项目主会话/)
       const token = env.sends.at(-1)!.body.split(' ').at(-1)!
       const input = { action: 'take' as const, caller: handle, runId: 'run_bot', token }
       await assert.rejects(() => backups.command(input))

@@ -60,6 +60,11 @@ test('Claude role hooks scope actions by Orca identity and fail open', () => {
       assert.match(session('claude_project'), /项目管理员.*等待已有验收或决定的后续任务沿用原事项[\s\S]+待验收 1 项/);
       assert.equal(session('claude_worker'), undefined);
     }
+    const redirect = run('claude_workspace', { hook_event_name: 'PreToolUse', tool_name: 'Bash',
+      tool_input: { command: 'npm run build' } }).decision.hookSpecificOutput;
+    assert.equal(redirect.permissionDecision, 'deny');
+    assert.match(redirect.permissionDecisionReason, /核对项目身份.*client\.mjs message.*项目主会话安排执行/);
+    assert.doesNotMatch(redirect.permissionDecisionReason, /dispatch|worker-start/);
     const ordinary = '请继续补上这个设置的保存提示';
     const prompt = { hook_event_name: 'UserPromptSubmit', prompt: ordinary };
     const codexContext = run('codex_project', prompt).decision.hookSpecificOutput.additionalContext;
@@ -97,7 +102,7 @@ test('Claude role hooks scope actions by Orca identity and fail open', () => {
 
     for (const command of ['ls', 'rg --line-number todo', 'find . -name "*.md" -print', 'orca orchestration check --json',
       'orca orchestration worker-start --spec "execute delegated work"', 'git status --short', 'git log --oneline',
-      'node "' + client + '" overview', 'node "' + client + '" main-bind < input.json',
+      'node "' + client + '" overview', 'node "' + client + '" message input.json', 'node "' + client + '" main-bind < input.json',
       "printf '%s' '{\"text\":\"message\"}' | node \"" + client + '" links-send',
       'git -C "' + path.join(home, 'memory').replaceAll('\\', '/') + '" add notes.md',
       'git -C "' + path.join(home, 'memory').replaceAll('\\', '/') + '" commit -m "notes"']) assert.equal(cmd(command), undefined, command);

@@ -88,6 +88,8 @@ node workspace/project-skills.mjs publish --root <工作树> --name demo-check -
 
 ## 直接派活
 
+项目请求默认用 `client.mjs message` 交给项目主会话拆解、派工和验收。以下入口用于主人明确要求直接派活的情况。
+
 从 `node coordinator/scripts/client.mjs projects` 取得完整项目编号，核对路径、repoId、hostId。项目必须是本机登记且已有提交的 Git 仓库。未绑定项目主 agent 时，工作间主 agent 先自动开主会话。
 
 ```json
