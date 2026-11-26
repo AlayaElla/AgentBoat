@@ -208,7 +208,7 @@ test('brief and single-task reads preserve the bridge envelope and omit unrelate
   writeFixture(fixture, `const ref={id:'p1',name:'示例',path:'/private/path',repoId:'repo'}, counts={working:2};
 const hidden='history-marker', backup={phase:'taking',history:[hidden.repeat(4096),'a','b','c']};
 const project={ref, revision:3, archive:{id:hidden}, backup, requests:[], deliveries:[{state:'sent',body:'live'}],
-  tasks:[{id:'t1',title:'一',phase:'ready',updatedAt:'today',decisions:[{id:'d',history:['current'],archivedHistory:12},{id:'closed',answer:null}],
+  tasks:[{id:'t1',title:'一',phase:'ready',updatedAt:'today',decisions:[{id:'d',artifactIds:['5'],history:['current'],archivedHistory:12},{id:'closed',answer:null,artifactIds:['2']}],
     acceptance:[{id:'a',status:'pending',artifactIds:['1']},{id:'old',status:'discarded',artifactIds:['2']},{id:'done',status:'passed',artifactIds:['8']}],
     artifacts:['页面','旧文档','说明','图标','页面','页面','参考图','参考图'].map((label,i)=>({id:String(i+1),label,...(i===7&&{expired:true})})),executions:[1,2,3,4]},
     {id:'t2',title:'二',phase:'working',acceptance:[],decisions:[],artifacts:[],executions:[]}],
@@ -239,8 +239,8 @@ return {ok:true,id:'fixture',result:{result:name==='workspace.overview'?overview
       assert.equal(detail.revision, 3);
       assert.equal(detail.task.id, id);
       assert.equal(detail.archiveStatus, id === 'old' ? '已归档' : undefined);
-      assert.deepEqual(detail.task.artifacts.map(a => a.id), ['1','3','4','6']);
-      assert.equal(detail.task.omittedArtifacts, 4);
+      assert.deepEqual(detail.task.artifacts.map(a => a.id), ['1','3','4','5','6']);
+      assert.equal(detail.task.omittedArtifacts, 3);
       assert.deepEqual(detail.task.executions, [2,3,4]);
       assert.equal(detail.task.omittedExecutions, 1);
       const all = call('read', 'p1', '--task', id, '--full').result.result.task;

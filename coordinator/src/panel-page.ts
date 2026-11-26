@@ -805,6 +805,10 @@ function artifactEntry(entry: HTMLElement, projectId: string, taskId: string, ar
 const feedbackActions: Record<string, string> = { passed: '通过', changes_requested: '需要修改', discarded: '丢弃' }
 const acceptanceStatuses: Record<string, string> = { pending: '待验收', passed: '已通过', changes_requested: '需要修改', discarded: '已丢弃' }
 function feedbackCards(projectId: string, tasks: FeedbackTask[], title = '要你处理', only?: Attention['kind']) {
+  function artifactButtons(t: FeedbackTask, ids?: string[]) {
+    return t.artifacts.filter(ar => ids?.includes(ar.id) && !ar.expired).map(ar =>
+      artifactEntry(button(`打开成果 · ${artifactTitle(ar)}`, () => openArtifact(projectId, t.id, ar), 'sm'), projectId, t.id, ar))
+  }
   function resultButton(base: Draft, draft: Draft | undefined, result: string) {
     const b = button(feedbackActions[result], () => {
       choose(projectId, { ...base, result, note: draft?.result === result ? draft.note : '' }); render()
@@ -833,7 +837,7 @@ function feedbackCards(projectId: string, tasks: FeedbackTask[], title = '要你
       const field = `决定 ${k}`
       // Controls can also be mounted in an inline row of the same task.
       const group = `${active.key}-${projectId}-${k}-${only ?? 'full'}`
-      return keyed(card(el('h3', { class: 'h2 any' }, d.question),
+      return keyed(card(el('h3', { class: 'h2 any' }, d.question), artifactButtons(t, d.artifactIds),
         [...d.options, '其他'].map(option => check(option, option === '其他' ? draft?.answer !== undefined && !d.options.includes(draft.answer) : draft?.answer === option, () => {
           choose(projectId, { ...base, answer: option === '其他' ? '' : option }); render()
         }, { type: 'radio', name: group, value: option })),
@@ -843,7 +847,7 @@ function feedbackCards(projectId: string, tasks: FeedbackTask[], title = '要你
     }), acceptance.map(a => {
       const k = key(t.id, 'acceptance', a.id), draft = choices(projectId)[k], base = acceptanceDraft(t.id, a)
       return keyed(card(row(el('h3', { class: 'h2 any grow' }, a.title), tag(`第 ${a.revision} 版`)), el('p', { class: 'any' }, a.details),
-        t.artifacts.filter(ar => a.artifactIds.includes(ar.id)).map(ar => artifactEntry(button(`打开成果 · ${artifactTitle(ar)}`, () => openArtifact(projectId, t.id, ar), 'sm'), projectId, t.id, ar)),
+        artifactButtons(t, a.artifactIds),
         row(...Object.keys(feedbackActions).map(result => resultButton(base, draft, result)),
           draft ? button('撤销', () => removeChoice(projectId, k), 'text sm') : null), noteField(k, draft)), k)
     }), blocked ? keyed(card(callout(t.progress || t.goal || '任务受阻', 'danger'),

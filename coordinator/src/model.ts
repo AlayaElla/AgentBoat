@@ -18,7 +18,7 @@ export interface Acceptance {
 }
 interface Decision {
   // An omitted answer is pending. Null records a discard without inventing an answer.
-  id: string; question: string; options: string[]; answer?: string | null; history: UserFeedback[]; archivedHistory?: number
+  id: string; question: string; options: string[]; artifactIds?: string[]; answer?: string | null; history: UserFeedback[]; archivedHistory?: number
 }
 export interface Task {
   id: string; title: string; goal: string; progress: string

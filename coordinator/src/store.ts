@@ -261,6 +261,8 @@ export function expireArtifact(task: Task, id: string, reason?: string): void {
   if (!artifact) fail('要标为过期的成果不存在')
   const pending = task.acceptance.find(a => a.status === 'pending' && a.artifactIds.includes(id))
   if (pending) fail(`请先撤下或处理引用该成果的待验收项「${pending.title}」`)
+  const decision = task.decisions.find(d => d.answer === undefined && d.artifactIds?.includes(id))
+  if (decision) fail(`请先更新成果关联、撤下或处理待决定项「${decision.question}」`)
   artifact.expired = true
   if (reason) artifact.expiryReason = reason
 }
@@ -295,7 +297,12 @@ export function submitTask(project: Project, raw: unknown): void {
     } else task.artifacts.push({ ...artifact, registeredAt: submittedAt })
   }
   const withdrawals: FeedbackItem[] = []
-  if (!(expirations.size && old?.phase === 'blocked' && phase === 'blocked' && task.progress === old.progress)) {
+  const decisions = list(input.decisions ?? [], '待决定事项', 30)
+  const linksOnly = !!old && !artifacts.length && !input.acceptance?.length && !input.executions?.length && !input.sourceIds?.length &&
+    task.title === old.title && task.goal === old.goal && decisions.length > 0 &&
+    decisions.every(d => d.artifactIds !== undefined && d.discarded !== true && typeof d.id === 'string' &&
+      old.decisions.some(x => x.id === d.id.trim() && x.answer === undefined))
+  if (!((expirations.size || linksOnly) && old?.phase === 'blocked' && phase === 'blocked' && task.progress === old.progress)) {
     delete task.blockedStatus
     if (phase === 'blocked') task.blockedRevision = project.revision + 1
     else delete task.blockedRevision
@@ -327,12 +334,22 @@ export function submitTask(project: Project, raw: unknown): void {
     if (previous) task.acceptance[task.acceptance.indexOf(previous)] = item
     else task.acceptance.push(item)
   }
-  for (const d of submittedItems('decision', list(input.decisions ?? [], '待决定事项', 30))) {
+  for (const d of submittedItems('decision', decisions)) {
     const did = text(d.id, '决定编号', 200)
     const previous = task.decisions.find(x => x.id === did)
-    const question = text(d.question, '问题', 4000)
-    if (previous) { if (previous.question !== question) fail('新问题请使用新的决定编号'); continue }
-    task.decisions.push({ id: did, question, options: strings(d.options ?? [], '选项', 10).map(x => text(x, '选项', 200)), history: [] })
+    const question = text(d.question === undefined && d.artifactIds !== undefined ? previous?.question : d.question, '问题', 4000)
+    if (previous && previous.question !== question) fail('新问题请使用新的决定编号')
+    if (previous && d.artifactIds === undefined) continue
+    const options = previous && d.options === undefined ? previous.options : strings(d.options ?? [], '选项', 10).map(x => text(x, '选项', 200))
+    if (previous && JSON.stringify(previous.options) !== JSON.stringify(options)) fail('新选项请使用新的决定编号')
+    const artifactIds = d.artifactIds === undefined ? undefined : strings(d.artifactIds, '关联成果')
+    if (previous?.answer !== undefined) {
+      if (JSON.stringify(previous.artifactIds ?? []) !== JSON.stringify(artifactIds)) fail('只能更新待决定项的关联成果')
+      continue
+    }
+    if (artifactIds?.some(id => !task.artifacts.some(a => a.id === id && !a.expired))) fail('待决定项只能关联本任务未过期的成果')
+    if (previous) previous.artifactIds = artifactIds
+    else task.decisions.push({ id: did, question, options, ...(artifactIds && { artifactIds }), history: [] })
   }
   for (const e of list(input.executions ?? [], '执行记录')) {
     const execution = { runId: text(e.runId, 'Run 编号', 200), taskId: text(e.taskId, 'Orca 任务编号', 200), dispatchId: text(e.dispatchId, '派工编号', 200), agent: text(e.agent, '执行代理', 100) }
