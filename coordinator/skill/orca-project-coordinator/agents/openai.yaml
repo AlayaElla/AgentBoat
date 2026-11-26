@@ -1,0 +1,6 @@
+interface:
+  display_name: "项目协作"
+  short_description: "用中文触发词开启 Orca 项目协作，统一处理决定、成果验收和返修"
+  default_prompt: "使用 $orca-project-coordinator，开启项目协作并推进当前项目的工作。"
+policy:
+  allow_implicit_invocation: true
