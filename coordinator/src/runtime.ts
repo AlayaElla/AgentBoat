@@ -8,14 +8,14 @@ import path from 'node:path'
 import os from 'node:os'
 import { pathToFileURL } from 'node:url'
 import type { AgentSession, Delivery, InstalledAgent, ProjectRef } from './model'
-import { fail, projectKey } from './store'
+import { fail, fingerprint, projectKey } from './store'
 import { readAgents, type AgentsSnapshot } from './agents'
 import type { Project } from './model'
 import type { HostApi } from 'orca/host'
 import { agentFlags, launchReceipt, validAgentId, type AgentLaunch } from '../../workspace/agent-launch.mjs'
 import { inboxLimit, openRunMail, type OrcaQuestion, type VerifiedOrcaQuestion, type OrcaWorkerRecord } from '../scripts/orca-questions.mjs'
 import { workerReport, type WorkerReport } from '../scripts/worker-reports.mjs'
-import { activeUserDataPath, ownerMessages, pluginKey, release } from '../scripts/orca-cli.mjs'
+import { activeUserDataPath, localOrcaRequest, ownerMessages, pluginKey, release } from '../scripts/orca-cli.mjs'
 
 export const readTimeout = 5000
 const execute = promisify(execFile)
@@ -50,6 +50,7 @@ export interface CoordinatorRuntime {
   runBinding(id: string): Promise<{ owner: string | null; generation: number; objective?: string }>
   syncContacts(wanted: LeadContact[], workspaces?: string[]): Promise<ContactRoutes>
   installedAgents(workspace: string, fresh?: boolean): Promise<InstalledAgent[]>
+  projectLeadQuota?(handle: string, runId: string): Promise<ReturnType<typeof projectLeadQuotaReceipt>>
   verifyRun(id: string, caller?: string): Promise<void>
   targets(mode?: 'sample' | 'display'): Promise<TargetInventory>
   identify(handle: string, runId: string, currentRunId?: string): Promise<AgentSession>
@@ -77,6 +78,33 @@ export function targetOnline(inventory: TargetInventory | undefined, handle: str
     unidentified?.some(w => !workspace || w.replace(/^id:/, '') === workspace.replace(/^id:/, '')))) return 'unknown'
   return 'offline'
 }
+
+export function projectLeadQuotaReceipt(result: any, sessionId: string, runId: string) {
+  const page = result?.page, latest = page?.latestTurn, turn = latest?.turn
+  if (result?.ok !== true || page?.sessionId !== sessionId || page.working !== false ||
+    !Array.isArray(page.actionablePromptIds) || page.actionablePromptIds.length || !Array.isArray(page.items) ||
+    typeof latest?.itemId !== 'string' || turn?.state !== 'completed' || turn.outcome !== 'failure' ||
+    !Number.isSafeInteger(turn.completedAt) || turn.completedAt <= 0 || typeof turn.userItemId !== 'string') return
+  // Orca 1.4.277 can retain the Antigravity ACP diagnostic in a turn-scoped status row without a failure kind.
+  if (!page.items.some((row: any) => row?.turnScope?.kind === 'turn' && row.turnScope.turnItemId === latest.itemId &&
+    row.body?.kind === 'status' && (row.body.failure?.kind === 'usageLimitReached' ||
+      !row.body.failure && row.body.tone === 'error' && row.body.text === 'Individual quota reached'))) return
+  const prompt = page.items.find((item: any) => item?.itemId === turn.userItemId && item.body?.kind === 'message' && item.body.role === 'user')?.body
+  const mail = prompt?.from?.orchestration
+  if (prompt?.from?.kind !== 'agent' || mail?.message !== 'mail-notice' || mail.mailbox !== `run:${runId}` || !Array.isArray(mail.messages)) return
+  const messages = mail.messages.filter((message: any) => message?.runId === runId && typeof message.messageId === 'string')
+  if (!messages.length) return
+  const promptText = prompt.blocks?.length === 1 && prompt.blocks[0]?.type === 'text' && prompt.blocks[0].text
+  const sourceBodyHashes: string[] = typeof promptText === 'string' ? messages.flatMap((message: any) => {
+    const span = message.content?.body
+    if (message.from !== `plugin:${pluginKey}` || !Array.isArray(span) || span.length !== 2) return []
+    const [start, end] = span
+    return Number.isSafeInteger(start) && Number.isSafeInteger(end) && start >= 0 && end > start && end <= promptText.length
+      ? [fingerprint(promptText.slice(start, end))] : []
+  }) : []
+  return { completedAt: turn.completedAt as number, sourceBodyHashes }
+}
+
 export class OrcaRuntime implements CoordinatorRuntime {
   constructor(private executable: () => Promise<string>) {}
   async openArtifactPage(workspace: string, file: string) {
@@ -116,6 +144,13 @@ export class OrcaRuntime implements CoordinatorRuntime {
     const reply = JSON.parse(stdout)
     if (!reply.ok) throw new Error(reply.error?.message ?? 'Orca 请求未成功')
     return reply.result
+  }
+  async projectLeadQuota(handle: string, runId: string) {
+    const sessionId = /^orca_session_id:([\w-]+)$/.exec(handle)?.[1]
+    if (!sessionId) return
+    // agent read discards turn identity and structured failures. Read the matching local build's journal.
+    const reply = await localOrcaRequest(await this.executable(), 'agentSession.history', { sessionId, direction: 'tail' }, readTimeout)
+    if (reply.ok) return projectLeadQuotaReceipt(reply.result, sessionId, runId)
   }
   // Display and polling reads may share a recent list. Identity checks and mutations always call Orca directly.
   private lists = new Map<string, { until: number; pending: boolean; result: Promise<any> }>()

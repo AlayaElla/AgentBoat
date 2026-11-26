@@ -34,17 +34,19 @@ const pluginsDir = path.dirname(keyDir);
 const versionHash = /^(?:[0-9a-f]{32}|[0-9a-f]{64})$/;
 const installed = release && versionHash.test(path.basename(versionDir)) && path.basename(keyDir) === pluginKey && path.basename(pluginsDir) === 'plugins';
 export const activeUserDataPath = () => installed ? path.dirname(pluginsDir) : userDataPath();
+export function localOrcaRequest(cli, method, params, timeout = 5000) {
+  cli = realpathSync(cli);
+  const { RuntimeClient } = createRequire(import.meta.url)(path.resolve(path.dirname(cli), '../app.asar.unpacked/out/cli/runtime/client.js'));
+  return new RuntimeClient(activeUserDataPath(), timeout, null, null, cli).call(method, params);
+}
 export async function ownerMessages(caller, cli, messageId) {
   if (!caller?.startsWith('orca_session_id:') || messageId !== undefined && !messageId.startsWith('orca:'))
     throw Error('请从 Orca 聊天查询用户原消息');
   // Public agent read omits journal IDs and the recorded input author.
-  cli = realpathSync(cli);
-  const { RuntimeClient } = createRequire(import.meta.url)(path.resolve(path.dirname(cli), '../app.asar.unpacked/out/cli/runtime/client.js'));
-  const client = new RuntimeClient(activeUserDataPath(), 5000, null, null, cli);
   const sessionId = caller.slice('orca_session_id:'.length);
   const result = messageId === undefined
-    ? await client.call('agentSession.history', { sessionId, direction: 'tail', limit: 60 })
-    : await client.call('agentSession.item', { sessionId, itemId: messageId });
+    ? await localOrcaRequest(cli, 'agentSession.history', { sessionId, direction: 'tail', limit: 60 })
+    : await localOrcaRequest(cli, 'agentSession.item', { sessionId, itemId: messageId });
   const items = messageId === undefined ? result.result?.page?.items : [result.result?.item];
   if (!result.ok || !Array.isArray(items)) throw Error('Orca 未返回聊天记录');
   return items.flatMap(message => {

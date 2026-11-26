@@ -7,7 +7,7 @@ import { fingerprint, fresh, receiveEvent, submitTask } from './store'
 import { refs } from './fixtures'
 import type { AgentSession, ContactRoutes, Delivery, LeadAction, Project, Workspace } from './model'
 import { stopped } from './backup-lead'
-import { mainTargets, type TargetInventory } from './runtime'
+import { mainTargets, projectLeadQuotaReceipt, type TargetInventory } from './runtime'
 
 const now = Date.now(), minute = 60_000
 const primary: AgentSession = { handle: 'orca_session_id:claude_lead', workspace: refs[0].workspace, workspaceName: '项目', path: refs[0].path, title: '主用', online: 'online', agent: 'claude', state: 'done' }
@@ -27,6 +27,7 @@ async function fixture(project: Project, workspace?: Workspace, exports?: string
   } })
   const env = { sessions: [main], inventoryFailed: false, available: true, failLaunch: false, owner: main.handle as string | null, generation: 1, installed: ['claude', 'codex'], spaces: [{ workspace: main.workspace, name: '项目', path: main.path }], launches: [] as { workspace: string; agent: string; options: unknown; prompt: string }[],
     inventory: undefined as (() => TargetInventory) | undefined,
+    quotaHistory: undefined as Parameters<typeof projectLeadQuotaReceipt>[0],
     contactRoute: { dispatch: 'ctx_contact' } as ContactRoutes[string], launchHandle: 'orca_session_id:backup',
     catalogReads: 0, contacts: [] as string[], mailRuns: [] as string[], mailFailed: false, failedDelivery: '', attemptedDelivery: undefined as Delivery | undefined,
     controls: [] as { handle: string; prompt: string }[], deliveries: [] as string[], reports: [] as any[] }
@@ -39,6 +40,7 @@ async function fixture(project: Project, workspace?: Workspace, exports?: string
         return env.inventory?.() ?? { sessions: env.sessions, workspaces: env.spaces }
       },
       runBinding: async id => ({ owner: env.owner, generation: id === 'run_park' ? 1 : env.generation, objective: id === 'run_park' ? 'AgentBoat 备用待命 ' + (await c.store.get(project.ref.id)).backup?.cycle : undefined }),
+      projectLeadQuota: async (handle, runId) => projectLeadQuotaReceipt(env.quotaHistory, handle.slice('orca_session_id:'.length), runId),
       syncContacts: async jobs => { env.contacts = jobs.map(j => j.id); return Object.fromEntries(jobs.map(j => [j.id, env.contactRoute])) },
       installedAgents: async () => env.installed.map(id => ({ id, name: id, default: id === 'codex' })),
       identify: async (handle, run, own) => { assert.equal(run, own); return (env.inventory?.() ?? env).sessions.find(s => s.handle === handle)! },
@@ -459,6 +461,72 @@ test('无任务的历史来源不算积压，主用只对当前 Run 的未处理
       assert.equal((await reboot.c.store.get(p.ref.id)).backup?.phase, 'probing')
     } finally { await reboot.close() }
   } finally { Date.now = realNow; await close() }
+})
+
+test('在线 Antigravity 额度失败从原 Run 一次接管，保留已读但未登记的来源', async () => {
+  const main = { ...primary, agent: 'antigravity', handle: 'orca_session_id:antigravity_lead' }
+  const standby = { ...primary, agent: 'codex', handle: 'orca_session_id:codex_backup' }
+  const p: Project = { ...bound(), mainAgentHandle: main.handle, mainSession: main,
+    leadAgents: { primary: { agent: 'antigravity' }, backup: { agent: 'codex' } },
+    backup: { primary: main.handle, handle: standby.handle, agent: standby.agent, phase: 'standby', cycle: 'standby-cycle',
+      since: now - minute, history: [], generation: 1 } }
+  const sourceId = 'workspace-agent:' + fingerprint('first-request')
+  receiveEvent(p, { id: sourceId, source: 'workspace-agent', sourceId: 'first-request', threadId: sourceId,
+    chatId: '', senderId: 'run_workspace', text: '第一条请求', receivedAt: new Date(now - 500).toISOString() })
+  const delivery = p.deliveries[0]
+  Object.assign(delivery, { state: 'sent', targetRunId: p.runId })
+  submitTask(p, { id: 'old', title: '现有任务', goal: '沿用原任务', phase: 'working',
+    executions: [{ runId: p.runId, taskId: 'task_existing', dispatchId: 'ctx_existing', agent: 'claude' }] })
+  const { env, poll, command, c, close } = await fixture(p, undefined, undefined, main)
+  env.sessions.push(standby)
+  const sessionId = 'antigravity_lead'
+  const mail = { kind: 'message', role: 'user', blocks: [{ type: 'text', text: `Orca mail\n${delivery.body}` }],
+    from: { kind: 'agent', orchestration: { message: 'mail-notice', mailbox: `run:${p.runId}`, messages: [{ messageId: 'msg_first', runId: p.runId,
+      from: 'plugin:alayaella.agentboat', content: { body: [10, 10 + delivery.body.length] } }] } } }
+  const scope = { kind: 'turn', turnItemId: 'latest-turn' }
+  const failure = { kind: 'status', tone: 'error', text: 'Individual quota reached' }
+  const turn = { state: 'completed', outcome: 'failure', completedAt: now, userItemId: 'orca:prompt' }
+  const reply = { ok: true, page: { sessionId, working: false, actionablePromptIds: [],
+    latestTurn: { itemId: scope.turnItemId, turn }, items: [{ itemId: turn.userItemId, body: mail }, { turnScope: scope, body: failure }] } }
+  try {
+    for (const page of [
+      { ...reply.page, latestTurn: { ...reply.page.latestTurn, turn: { ...turn, outcome: 'success' } } },
+      { ...reply.page, items: [reply.page.items[0], { turnScope: scope, body: { ...failure, text: 'Connection lost' } }] },
+      { ...reply.page, items: [reply.page.items[0], { turnScope: scope, body: { kind: 'message', role: 'assistant', text: failure.text } }] },
+      { ...reply.page, items: [reply.page.items[0], { turnScope: { ...scope, turnItemId: 'old-turn' }, body: failure }] }
+    ]) {
+      env.quotaHistory = { ...reply, page }
+      await poll()
+      assert.equal(env.controls.length, 0)
+    }
+    assert.equal(projectLeadQuotaReceipt(reply, sessionId, 'run_other'), undefined)
+    assert.deepEqual(projectLeadQuotaReceipt({ ...reply, page: { ...reply.page,
+      items: [reply.page.items[0], { turnScope: scope, body: { kind: 'status', failure: { kind: 'usageLimitReached' } } }] } }, sessionId, p.runId),
+    { completedAt: now, sourceBodyHashes: [fingerprint(delivery.body)] })
+    env.quotaHistory = reply
+    env.generation = 2
+    await poll()
+    assert.equal(env.controls.length, 0)
+    env.generation = 1
+    env.owner = null
+    await poll(); await poll()
+    assert.deepEqual(env.controls.map(c => c.handle), [standby.handle])
+    const prompt = env.controls[0].prompt
+    assert.ok(prompt.includes(`lead-take ${p.runId} `) && prompt.includes(sourceId) && prompt.includes(' --full') && prompt.includes('ctx_existing'))
+    assert.deepEqual(await command('take'), { useRun: p.runId })
+    env.generation++
+    const receipt = { confirm: true, currentRunId: p.runId, generation: env.generation }
+    assert.deepEqual(await command('take', undefined, receipt), { done: true })
+    assert.deepEqual(await command('take', undefined, receipt), { done: true })
+    const after = await c.store.get(p.ref.id)
+    assert.equal(after.runId, p.runId)
+    assert.equal(after.mainAgentHandle, main.handle)
+    assert.equal(after.backup?.phase, 'active')
+    assert.deepEqual(after.tasks, p.tasks)
+    assert.deepEqual(after.events, p.events)
+    assert.deepEqual(after.deliveries.find(d => d.id === sourceId), delivery)
+    assert.equal(env.launches.length, 0)
+  } finally { await close() }
 })
 
 test('收件箱失败时保留积压探测，确认主用离线后仍接管', async () => {

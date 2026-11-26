@@ -21,7 +21,7 @@ const label = (r: Binding) => 'ref' in r ? r.ref.name : '工作间'
 const available = (r: Binding) => !('ref' in r && r.hidden) && !takeoverActive(r.takeover)
 const chat = (handle?: string) => !!handle?.startsWith('orca_session_id:')
 const unopened = (b?: BackupLead) => !b || b.phase === 'unavailable' || b.phase === 'single'
-type LeadState = Pick<AgentSession, 'online' | 'state'>
+type LeadState = Pick<AgentSession, 'online' | 'state'> & { agent?: string }
 const bothStopped = '主用和备用均停住，请主人核对会话'
 
 function leadState(inventory: TargetInventory | undefined, workspace: string, handle?: string, previous?: TargetInventory): LeadState {
@@ -202,11 +202,11 @@ export class BackupLeads {
       return
     }
     if (w && !workspaceBackupInFlight(b)) return
-    if ('ref' in r && b?.phase === 'standby') {
-      let configured
+    let configured
+    if ('ref' in r && (b?.phase === 'standby' || b?.phase === 'probing')) {
       try { configured = projectLeadAgents(r.leadAgents, session.agent).backup }
       catch { /* Keep an existing backup while its template is unreadable. */ }
-      if (configured !== undefined && configured?.agent !== b.agent) {
+      if (b.phase === 'standby' && configured !== undefined && configured?.agent !== b.agent) {
         await this.updateBinding(r, row => resetBackup(row, session.handle))
         this.changed(id)
         return
@@ -296,13 +296,25 @@ export class BackupLeads {
       const expired = b.phase === 'probing' && b.lastProbe !== undefined && now - b.lastProbe >= probeWait
       const stillWaiting = oldest !== undefined && b.lastProbe !== undefined && oldest <= b.lastProbe
       let reason = stopped(live, since, now)
-      if (primaryInCharge && reason && standby.online === 'online' &&
+      const quotaCandidate = 'ref' in r && primaryInCharge && r.mainAgentHandle === handle && b.primary === handle &&
+        session.agent === 'antigravity' && live.online === 'online' && live.state !== 'working' &&
+        standby.online === 'online' && b.handle !== handle && configured?.agent === b.agent && b.agent !== session.agent
+      let quota = quotaCandidate ? await this.runtime.projectLeadQuota?.(handle, r.runId).catch(() => undefined) : undefined
+      if (quota && quota.completedAt <= (b.confirmedAt ?? 0)) quota = undefined
+      if (quota || primaryInCharge && reason && standby.online === 'online' &&
         (b.phase === 'standby' || live.online === 'offline' || expired && stillWaiting)) {
         const fresh = await this.runtime.targets().catch(() => undefined)
         live = leadState(fresh, workspace, handle, observed)
         standby = leadState(fresh, workspace, b.handle, observed)
         reason = stopped(live, since, now)
       }
+      if (quota && live.online === 'online' && live.state !== 'working' && live.agent === 'antigravity' &&
+        standby.online === 'online' && standby.agent === b.agent) {
+        const run = await this.runtime.runBinding(r.runId).catch(() => undefined)
+        if (!run || !Number.isSafeInteger(run.generation) || run.generation !== b.generation ||
+          (run.owner !== handle && !(run.owner === null && chat(handle)))) quota = undefined
+      } else quota = undefined
+      if (quota) reason = 'Orca 已确认主用本轮达到额度上限'
       const backupReason = stopped(standby, primaryInCharge ? undefined : waitingForStandby, now)
       const uncertain = queue(r).some(d => d.control && awaitingLeadControl(b, d.control) && d.state === 'uncertain')
       const route = b.contact && this.routes[b.contact.id]
@@ -314,19 +326,24 @@ export class BackupLeads {
       const problem = holdingAlert ? bothStopped : route?.error ? '主用联络未就绪：' + route.error
         : reason && backupReason ? bothStopped : uncertain ? '接管通知送达待核对，请查看目标会话' : undefined
       const missing = live.online === 'offline'
-      if (b.phase === 'standby' && !missing && reason && standby.online === 'online') {
+      if (b.phase === 'standby' && !missing && !quota && reason && standby.online === 'online') {
         await this.updateBinding(r, row => {
           const b = row.backup!
           b.phase = 'probing'; b.cycle = randomUUID(); delete b.lastProbe; delete b.problem
           control(row, 'ready', '如能继续处理，请在 10 分钟内确认。')
         })
       } else if (primaryInCharge && reason && standby.online === 'online' &&
-        (missing || expired && stillWaiting)) {
-        const cause = missing ? reason : reason + '，主用探测已超过 10 分钟未确认'
+        (quota || missing || expired && stillWaiting)) {
+        const cause = quota || missing ? reason : reason + '，主用探测已超过 10 分钟未确认'
+        const sourceBodyHashes = quota?.sourceBodyHashes
+        const sources = sourceBodyHashes?.length && 'ref' in r ? r.events.filter(e => e.source === 'workspace-agent' && !e.taskId &&
+          r.deliveries.some(d => d.id === e.id && d.targetRunId === r.runId && sourceBodyHashes.includes(fingerprint(d.body))))
+          .slice(0, 12).map(e => e.id) : []
+        const recovery = sources.length ? `本轮未登记来源：${sources.join('、')}。在完整项目记录中核对原文和已有任务，登记时沿用来源编号。` : ''
         await this.updateBinding(r, row => {
           const b = row.backup!
           b.phase = 'taking'; b.since = now; b.cycle = randomUUID(); delete b.problem
-          control(row, 'take', `${cause}。先用 ${id ? 'read ' + id : 'overview --brief'} 读插件记录，接管后核对原 Run 收件箱。待处理：${pending ? pending.slice(0, 12).map(p => p.title.slice(0, 120)).join('、') || '暂无' : '收件箱待核对'}。进行中的任务和执行者：${context || '暂无已登记任务'}。`)
+          control(row, 'take', `${cause}。先用 ${id ? 'read ' + id + (quota ? ' --full' : '') : 'overview --brief'} 读插件记录，接管后核对原 Run 收件箱。${recovery}待处理：${pending ? pending.slice(0, 12).map(p => p.title.slice(0, 120)).join('、') || '暂无' : '收件箱待核对'}。进行中的任务和执行者：${context || '暂无已登记任务'}。`)
           b.history.push({ at: now, text: `请求 ${b.handle} 接管：${cause}` })
         })
       } else if (expired && live.online === 'online' && pending && !stillWaiting) {
