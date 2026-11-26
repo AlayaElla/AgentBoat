@@ -1,5 +1,6 @@
 import type {} from 'orca/frame'
 import type { ArtifactRef, StreamMethod } from './link-artifacts'
+import { kindFromFilename } from './artifact-kind'
 
 type FileInfo = { name: string; type: string; size: number; key: string; method: StreamMethod }
 
@@ -66,7 +67,8 @@ export async function previewArtifact(label: string, ref: ArtifactRef & { id: st
       if (!raw.length || offset + raw.length > bytes.length) throw Error('成果读取不完整，请重新获取')
       for (let i = 0; i < raw.length; i++) bytes[offset++] = raw.charCodeAt(i)
     }
-    status.textContent = methodLabel(file.method)
+    status.textContent = kindFromFilename(file.name) === 'web'
+      ? '对方共享的是单个网页文件，当前无法直接打开。可保存到本机，或请对方分享网页链接。' : methodLabel(file.method)
     const save = document.createElement('button')
     save.textContent = '保存到本机'
     save.onclick = async () => {

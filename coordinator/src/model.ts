@@ -9,7 +9,7 @@ export interface ProjectRef {
   hostId: string
   workspace: string
 }
-export interface Artifact { id: string; label: string; url: string; version: string; registeredAt?: string; expired?: boolean; expiryReason?: string }
+export interface Artifact { id: string; label: string; url: string; version: string; kind?: import('./artifact-kind').ArtifactKind; registeredAt?: string; expired?: boolean; expiryReason?: string }
 interface UserFeedback { at: string; revision: number; result: string; note: string; source?: string }
 export interface Acceptance {
   id: string; title: string; details: string; artifactIds: string[]; revision: number

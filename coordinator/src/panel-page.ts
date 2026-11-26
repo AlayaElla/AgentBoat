@@ -1,6 +1,7 @@
 import type {} from 'orca/frame'
 import type { ArchivePage, ProjectArtifactRef } from './protocol'
 import { previewArtifact } from './artifact-preview'
+import { artifactKind, artifactKindLabels } from './artifact-kind'
 import { artifactTitle, latestArtifacts } from './artifact-versions.mjs'
 import { actingMain, backupInCharge, blockedRevision, attention, projectSummary, defaultAgent, agentName, compareAgentActivity, groupedAttention, isProjectShared, isRecentAgent, labels, taskState, scopes, statuses, connectionStates, roles, mainStatus, mainAgentStates, waitingForProjectLead, type InstalledAgent } from './model'
 import type { Acceptance, AgentSession, Artifact, Attention, MainTakeover, Overview, Project, ProjectLead, ProjectWorkspace, WorkspaceBinding } from './model'
@@ -763,6 +764,11 @@ function closeArtifactMenu(restoreFocus = false) {
   if (restoreFocus) opener.focus({ preventScroll: true })
 }
 function artifactEntry(entry: HTMLElement, projectId: string, taskId: string, artifact: Artifact, archiveEnd?: number) {
+  const kind = artifactKindLabels[artifactKind(artifact)]
+  const badge = tag(kind, 'artifact-kind')
+  badge.setAttribute('aria-hidden', 'true')
+  entry.insertBefore(badge, entry.querySelector('.chev'))
+  entry.setAttribute('aria-description', [kind, entry.getAttribute('aria-description')].filter(Boolean).join(' · '))
   const ref = current?.ref.id === projectId ? current.ref : all.projects.find(p => p.ref.id === projectId)?.ref
   if (isRemote(projectId) || ref?.hostId !== 'local' || !artifact.url || /^https?:/i.test(artifact.url)) return entry
   entry.title += ' · 右键打开所在文件夹'
@@ -837,7 +843,7 @@ function feedbackCards(projectId: string, tasks: FeedbackTask[], title = '要你
     }), acceptance.map(a => {
       const k = key(t.id, 'acceptance', a.id), draft = choices(projectId)[k], base = acceptanceDraft(t.id, a)
       return keyed(card(row(el('h3', { class: 'h2 any grow' }, a.title), tag(`第 ${a.revision} 版`)), el('p', { class: 'any' }, a.details),
-        t.artifacts.filter(ar => a.artifactIds.includes(ar.id)).map(ar => artifactEntry(button(`打开成果 · ${ar.label}`, () => openArtifact(projectId, t.id, ar), 'sm'), projectId, t.id, ar)),
+        t.artifacts.filter(ar => a.artifactIds.includes(ar.id)).map(ar => artifactEntry(button(`打开成果 · ${artifactTitle(ar)}`, () => openArtifact(projectId, t.id, ar), 'sm'), projectId, t.id, ar)),
         row(...Object.keys(feedbackActions).map(result => resultButton(base, draft, result)),
           draft ? button('撤销', () => removeChoice(projectId, k), 'text sm') : null), noteField(k, draft)), k)
     }), blocked ? keyed(card(callout(t.progress || t.goal || '任务受阻', 'danger'),

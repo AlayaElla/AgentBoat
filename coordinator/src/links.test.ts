@@ -83,6 +83,8 @@ test('delegated feedback applies once in both directions and rechecks sharing on
     assert.equal(shared[0].feedback?.tasks[0].acceptance[0].fingerprint, check.fingerprint)
     assert.equal(shared[0].feedback?.tasks[0].acceptance[0].revision, check.revision)
     assert.deepEqual(shared[0].feedback?.tasks[0].artifacts.map(x => [x.label, x.url]), [['首页预览', 'https://example.com/preview'], ['本机设计稿', '']])
+    assert.deepEqual(shared[0].feedback?.tasks[0].artifacts.map(x => x.kind), [undefined, 'document'])
+    assert.equal(JSON.stringify(outgoing).includes('/private/design.md'), false)
     assert.equal(shared[0].feedback?.tasks[0].artifacts[0].registeredAt, review.artifacts[0].registeredAt)
     a.c.links.stop()
     const offline = (await b.c.links.refresh()).peers[0]

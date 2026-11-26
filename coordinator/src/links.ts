@@ -11,6 +11,7 @@ import { fail, fingerprint, object, revision, strings, text, type FeedbackItem }
 import { LinkMessages, type IncomingMessage, type MessageExchange, type WireMessage } from './link-messages'
 import { LinkArtifacts, artifactRef, streamTimeout, type ArtifactExchange, type ArtifactRef } from './link-artifacts'
 import { ArtifactStream } from './artifact-stream'
+import { artifactKind, knownArtifactKind } from './artifact-kind'
 import { LinkFiles } from './link-files'
 import { setTimeout as delay } from 'node:timers/promises'
 import { validAgentId } from '../../workspace/agent-launch.mjs'
@@ -113,7 +114,11 @@ function delegatedProject(p: Project): DelegatedProject {
     const version = blockedRevision(t)
     if (!decisions.length && !acceptance.length && version === undefined) return []
     const ids = new Set(acceptance.flatMap(a => a.artifactIds))
-    const artifacts = t.artifacts.filter(a => ids.has(a.id) && !a.expired).map(({ id, label, version, url, registeredAt }) => ({ id, label, version, url: /^https?:\/\//i.test(url) ? url : '', ...(registeredAt && { registeredAt }) }))
+    const artifacts = t.artifacts.filter(a => ids.has(a.id) && !a.expired).map(a => {
+      const { id, label, version, registeredAt } = a, url = /^https?:\/\//i.test(a.url) ? a.url : ''
+      const kind = artifactKind(a)
+      return { id, label, version, url, ...(kind !== artifactKind({ label, url }) && { kind }), ...(registeredAt && { registeredAt }) }
+    })
     return [{ id: t.id, title: t.title, phase: t.phase, decisions, acceptance, artifacts,
       ...(version !== undefined && { blockedRevision: version, ...(t.blockedStatus && { blockedStatus: t.blockedStatus }), progress: t.progress.trim() || t.goal }) }]
   }) }
@@ -242,7 +247,8 @@ function receivedFeedback(raw: unknown): DelegatedProject {
         if (url) new URL(url)
         const registeredAt = a.registeredAt === undefined ? undefined : text(a.registeredAt, '成果登记时间', 100)
         if (registeredAt && !Number.isFinite(Date.parse(registeredAt))) fail('对端成果登记时间不正确')
-        return { id: text(a.id, '成果编号', 200), label: text(a.label, '成果名称', 200), version: text(a.version, '成果版本', 200), url, ...(registeredAt && { registeredAt }) }
+        const kind = knownArtifactKind(a.kind)
+        return { id: text(a.id, '成果编号', 200), label: text(a.label, '成果名称', 200), version: text(a.version, '成果版本', 200), url, ...(kind && { kind }), ...(registeredAt && { registeredAt }) }
       }) }
   }) }
 }

@@ -1013,11 +1013,15 @@ export function createCoordinator(api: OrcaWorkerApi, runtime: CoordinatorRuntim
     return { ref, url, file, info }
   }
   orca.panels.handle('project.openArtifact', async input => {
-    const { ref, url, info } = await localArtifact(input, true)
+    const { ref, url, file, info } = await localArtifact(input, true)
     if (!info.isFile()) fail('成果文件不存在或无法访问')
     const target = workspaceId(ref.workspace)
-    // The host opens a tab in the target workspace without showing that workspace.
-    await orca.host.call('editor.open', { workspaceId: target, path: path.relative(ref.path, url).split(path.sep).join('/') }, { signal: AbortSignal.timeout(readTimeout) })
+    if (/^\.html?$/i.test(path.extname(url))) {
+      if (!/^\.html?$/i.test(path.extname(file))) fail('成果实际文件的扩展名不是 HTML')
+      await runtime.openArtifactPage(ref.workspace, file)
+    } else {
+      await orca.host.call('editor.open', { workspaceId: target, path: path.relative(ref.path, url).split(path.sep).join('/') }, { signal: AbortSignal.timeout(readTimeout) })
+    }
     return orca.host.call('workspace.open', { workspaceId: target }, { signal: AbortSignal.timeout(readTimeout) })
   })
   orca.panels.handle('project.openArtifactFolder', async input => {
