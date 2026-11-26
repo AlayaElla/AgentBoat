@@ -124,7 +124,7 @@ syncBuiltinESMExports();`);
     for (const name of readdirSync(next)) {
       const card = readFileSync(path.join(next, name), 'utf8');
       assert.equal(card.split(start).length, 2);
-      assert.match(card, /用 `message` 交给项目主会话/);
+      assert.match(card, /用 `client\.mjs message`.*转给该项目主会话并跟进/);
     }
     assert.equal(readFileSync(claude, 'utf8'), updated);
     assert.equal(readFileSync(agents, 'utf8'), replaced);

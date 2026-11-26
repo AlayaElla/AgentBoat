@@ -4,6 +4,11 @@ import path from 'node:path'
 import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { actingMain, backupInCharge, workspaceBackupInFlight, attention, groupedAttention, labels, projectCounts, type Messaging, type Project, type Workspace } from './model'
 
+export const roleReminder = {
+  workspace: '你是工作间管理员。先读 $agentboat-workspace。已明确归属项目的请求，核对项目 ID、完整路径、repoId 和 hostId 后，用 client.mjs message 将用户原话、目标、参考、约束和验收要求转给项目主会话并跟进。项目资料和小拾检索、方案、设计、执行及派工由项目主会话组织。已有同一待验收或待决定时沿用原项。',
+  project: '绑定成功后，普通项目请求和工作间转话都主动使用 $orca-project-coordinator 开启项目协作，无需触发词。先核对项目和当前 Run，读项目记录并关联原消息，沿用已有任务，按请求拆解并派给实际执行者。核对成果后用 submit 登记待验收。等已有验收或决定时沿用原项，后续任务可用 paused 记录原任务和事项编号，收到执行者问题就回复原问题。新的待决定、独立受阻和待验收成果用 submit 登记。'
+}
+
 type Role = { bot?: boolean; standby?: boolean; role: 'workspace-main'; directory: string; summary?: string } | { standby?: boolean; role: 'project-lead'; projectId: string; runId: string; agent?: string; summary?: string }
 const uuid = /^orca_session_id:[\da-f]{8}(?:-[\da-f]{4}){3}-[\da-f]{12}$/i
 const chat = (value?: string, agent?: string) => /^orca_session_id:(?:claude|codex)_[\w-]+$/.test(value ?? '') ||

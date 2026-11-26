@@ -490,6 +490,7 @@ test('收件箱失败时保留积压探测，确认主用离线后仍接管', as
     assert.equal(reads, 2)
     assert.equal((await c.store.get(p.ref.id)).backup?.phase, 'taking')
     assert.match(env.controls[1].prompt, /lead-take/)
+    assert.match(env.controls[1].prompt, /\$orca-project-coordinator.*核对项目和当前 Run.*按请求拆解并派给实际执行者/)
     assert.match(env.controls[1].prompt, /收件箱待核对/)
     assert.equal(env.controls[1].handle, env.launchHandle)
   } finally { Date.now = realNow; await close() }
