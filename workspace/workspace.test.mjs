@@ -318,7 +318,7 @@ for (const bindOnReceipt of [false, true]) test(`dispatch records its notice whe
   assert.equal(kinds.includes('orchestration send'), false);
   const launch = calls.find(args => args[0] === 'worktree');
   assert.equal(launch[launch.indexOf('--agent') + 1], 'antigravity');
-  assert.match(launch[launch.indexOf('--prompt') + 1], /绑定后送达/);
+  assert.match(launch[launch.indexOf('--prompt') + 1], /核对项目待处理事项.*已有同一验收或决定时，在回报里带上原任务和事项编号.*绑定后送达/);
   assert.deepEqual(f.read().project.tasks.map(task => task.id), ['direct-dispatch-1', 'direct-dispatch-1']);
   assert.deepEqual(f.read().project.messages.map(m => [m.runId, m.requestId]), [['run_main', 'dispatch-1-notice']]);
 });

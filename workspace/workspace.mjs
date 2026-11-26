@@ -337,7 +337,7 @@ export function dispatch(input) {
       id: taskId, title: input.title || name, goal, phase: 'working', progress: '已登记直接派活，尚未确认启动', artifacts: [artifact],
     });
     j.update('launching', { taskId, sourcePath: provenance, sender });
-    const prompt = `项目直接任务：${goal}\n来源：${source}；项目编号：${p.ref.id}；任务编号：${taskId}。只做此任务，保留他人改动，不再派子任务。完成后用 node ${JSON.stringify(promptClientPath())} read ${p.ref.id} 核对项目当前绑定的 runId，再从自己的会话用 orca orchestration send --to run:<runId> 回报成果与验证边界。尚未绑定时先保存回报，等项目主会话绑定后送达。不要改项目或工作间主 Run 的绑定。`;
+    const prompt = `项目直接任务：${goal}\n来源：${source}；项目编号：${p.ref.id}；任务编号：${taskId}。只做此任务，保留他人改动，不再派子任务。完成或需要主人操作时，用 node ${JSON.stringify(promptClientPath())} read ${p.ref.id} 核对项目待处理事项和当前绑定的 runId，再从自己的会话用 orca orchestration send --to run:<runId> 回报成果与验证边界，或告知项目主会话正在等什么。已有同一验收或决定时，在回报里带上原任务和事项编号。尚未绑定时先保存回报，等项目主会话绑定后送达。不要改项目或工作间主 Run 的绑定。`;
     const launched = call(['worktree', 'create', '--repo', `id:${p.ref.repoId}`, '--name', name, '--no-parent',
       '--setup', 'skip', ...agentFlags(launchRole), '--prompt', prompt], p.ref.path);
     j.update('launch-returned', { launched });

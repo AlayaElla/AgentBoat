@@ -114,6 +114,7 @@ test('overdue Run questions remind the project once and clear on a matching repl
     await c.flushMailbox()
     assert.equal(sent.length, 1)
     assert.ok(sent[0].includes(ask.body))
+    assert.match(sent[0], /已有同一验收或决定时，回复原任务和事项编号/)
     await c.updateStatus()
     assert.ok((host.callsOf('statusBar.update').at(-1) as any).text.endsWith('待处理 0'))
     await c.refreshQuestions(); await c.flushMailbox()
@@ -1152,6 +1153,58 @@ test('project transitions notify main once, including new acceptance versions an
   await coordinator.flush('p1')
   assert.equal(sends.length, 4)
   await worker.deactivate()
+})
+
+test('waiting on an existing review or decision adds no action or notice, while independent blockers do', async () => {
+  const host = mockHost({ storage: { workspace: { version: 1, revision: 1, runId: 'run_main', requests: [] },
+    'workspace.messaging': { version: 1, revision: 0, inbox: [], deliveries: [],
+      feishu: { enabled: true, appId: 'fixture', chatIds: ['test-chat'], senderIds: ['test-user'] } } } })
+  const sends: { runId: string; body: string }[] = []
+  const feishu: string[] = []
+  let coordinator!: ReturnType<typeof createCoordinator>
+  const worker = await mountWorker({ default: api => { coordinator = createCoordinator(api, { projects: async () => refs,
+    send: async (runId, { body }) => { sends.push({ runId, body }); return {} } }, {
+    state: () => ({ state: 'connected', message: '' }), sync: async () => {}, stop() {},
+    send: async ({ body }) => { feishu.push(body); return `mock-${feishu.length}` }
+  }) } }, { host })
+  const read = (projectId: string, taskId?: string) => worker.request('project.agent', { operation: 'read', projectId, taskId })
+  const submit = async (projectId: string, task: unknown, requestId: string) => {
+    const { project } = await read(projectId)
+    await worker.request('project.agent', { operation: 'submit', projectId, task, requestId, revision: project!.revision })
+    await coordinator.flush(projectId)
+  }
+  const pending = async (projectId: string) => (await worker.request('workspace.overview')).attention
+    .filter(i => i.projectId === projectId).map(i => [i.kind, i.taskId, i.itemId])
+  try {
+    await submit('p1', deliverable, 'review')
+    await submit('p1', { id: 'integrate', title: '接入首页', goal: '把首页接入应用', phase: 'working' }, 'start')
+    const reviewProgress = '等待原任务 task-1 的验收 page-check（第 1 版）通过后接入。'
+    await submit('p1', { id: 'integrate', phase: 'paused', progress: reviewProgress }, 'wait-review')
+    assert.deepEqual(await pending('p1'), [['review', 'task-1', 'page-check']])
+    const reviewWait = (await read('p1', 'integrate')).task!
+    assert.equal(reviewWait.phase, 'paused'); assert.equal(reviewWait.progress, reviewProgress)
+    assert.equal(reviewWait.blockedRevision, undefined)
+    assert.equal(sends.length, 1); assert.match(sends[0].body, /请用户验收.*首页布局/)
+    assert.equal(feishu.length, 1); assert.match(feishu[0], /首页布局.*第 1 版/)
+
+    await submit('p2', { id: 'choose', title: '选择风格', goal: '确定首页风格', phase: 'working',
+      decisions: [{ id: 'style', question: '首页采用哪种风格？' }] }, 'decision')
+    const decisionProgress = '等待原任务 choose 的决定 style 后制作。'
+    await submit('p2', { id: 'design', title: '制作首页', goal: '制作首页设计', phase: 'paused', progress: decisionProgress }, 'wait-decision')
+    assert.deepEqual(await pending('p2'), [['decision', 'choose', 'style']])
+    const decisionWait = (await read('p2', 'design')).task!
+    assert.equal(decisionWait.phase, 'paused'); assert.equal(decisionWait.progress, decisionProgress)
+    assert.equal(decisionWait.blockedRevision, undefined)
+    assert.equal(sends.length, 2); assert.match(sends[1].body, /请向用户确认.*首页采用哪种风格/)
+    assert.equal(feishu.length, 2); assert.match(feishu[1], /首页采用哪种风格/)
+
+    await submit('p1', { id: 'login', title: '登录发布后台', goal: '打开发布后台', phase: 'blocked', progress: '请在发布电脑登录后台。' }, 'independent')
+    assert.deepEqual(await pending('p1'), [['review', 'task-1', 'page-check'], ['blocked', 'login', 'login']])
+    assert.deepEqual(await pending('p2'), [['decision', 'choose', 'style']])
+    assert.equal(sends.length, 3); assert.match(sends[2].body, /请协调解除受阻.*请在发布电脑登录后台/)
+    assert.equal(feishu.length, 3); assert.match(feishu[2], /请在发布电脑登录后台/)
+    assert.ok(sends.every(s => s.runId === 'run_main'))
+  } finally { coordinator.stop(); await worker.deactivate() }
 })
 
 test('unbound main produces no notifications; restart keeps uncertain main delivery without resend', async () => {

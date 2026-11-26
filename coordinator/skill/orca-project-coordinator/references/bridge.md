@@ -42,6 +42,7 @@
 ```
 
 - 新建任务必填 id、title、goal、phase。更新同一 id 时，省略 title 或 goal 会保留原值。phase 取 working、blocked、paused、ready、completed。
+- `blocked` 用于需要用户另做一次操作的任务，提交后会生成受阻项。提交前用 `read` 核对已有待验收和待决定。仅等待同一个事项的后续任务用 `paused`，例如 `{"id":"integrate-car","phase":"paused","progress":"等待原任务 car-render 的验收 check-render（第 1 版）通过后继续接入。"}`。等待决定时同样写明原任务和决定编号。原任务保持能处理该事项的阶段，独立的用户操作仍可单独提交 `blocked`。
 - 数组按 id 合并，省略的保留。任务、验收和来源的编号保持不变。成果名称写清这是什么，新版本沿用名称、使用新 id，版本号写在 version。用原 id、url 和 version 可更正名称。问题变了用新的决定 id。登记执行者成果时，在对应任务的 executions 保留 Orca Run、任务和派工编号。
 - 验收的 revision、status、history 由插件维护；核对内容或关联成果变了，自动出新版本。
 - 在 acceptance 或 decisions 中用 `{"id":"旧项编号","discarded":true,"reason":"已由新版取代"}` 撤下待验收、需要修改的验收项或待决定项。沿用同一验收编号提交有变化的核对内容或成果，会开启新一版并保留旧版历史。
