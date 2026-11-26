@@ -27,6 +27,7 @@ node('scripts/build.mjs');
 mkdirSync(out);
 for (const [source, destination] of [
   ['LICENSE', 'LICENSE'], ['README.md', 'README.md'],
+  ['coordinator/node_modules/marked/LICENSE.md', 'licenses/marked.md'],
   ['coordinator/plugin/worker.mjs', 'worker.mjs'],
   ...['panel.html', 'panel.css', 'panel-page.ts', 'model.ts', 'task-state.mjs', 'artifact-versions.mjs', 'artifact-preview.ts', 'artifact-kind.ts', 'protocol.ts', 'feedback-drafts.ts', 'assets'].map(name => ['coordinator/plugin/src/' + name, 'src/' + name]),
   ...['client.mjs', 'lead-contact.mjs', 'orca-cli.mjs', 'cli-bridge.mjs', 'main-role-card.mjs', 'worker-reports.mjs', 'orca-questions.mjs'].map(name => ['coordinator/scripts/' + name, 'coordinator/scripts/' + name]),
