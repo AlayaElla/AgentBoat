@@ -34,10 +34,13 @@ const pluginsDir = path.dirname(keyDir);
 const versionHash = /^(?:[0-9a-f]{32}|[0-9a-f]{64})$/;
 const installed = release && versionHash.test(path.basename(versionDir)) && path.basename(keyDir) === pluginKey && path.basename(pluginsDir) === 'plugins';
 export const activeUserDataPath = () => installed ? path.dirname(pluginsDir) : userDataPath();
-export function localOrcaRequest(cli, method, params, timeout = 5000) {
+export function localOrcaClient(cli, timeout = 5000) {
   cli = realpathSync(cli);
   const { RuntimeClient } = createRequire(import.meta.url)(path.resolve(path.dirname(cli), '../app.asar.unpacked/out/cli/runtime/client.js'));
-  return new RuntimeClient(activeUserDataPath(), timeout, null, null, cli).call(method, params);
+  return new RuntimeClient(activeUserDataPath(), timeout, null, null, cli);
+}
+export function localOrcaRequest(cli, method, params, timeout = 5000) {
+  return localOrcaClient(cli, timeout).call(method, params);
 }
 export async function ownerMessages(caller, cli, messageId) {
   if (!caller?.startsWith('orca_session_id:') || messageId !== undefined && !messageId.startsWith('orca:'))
@@ -58,7 +61,7 @@ export async function ownerMessages(caller, cli, messageId) {
     return [{ messageId: message.itemId, text: block.text, receivedAt: new Date(message.observedAt).toISOString() }];
   });
 }
-export const stableRoot = () => path.resolve(activeUserDataPath(), 'agentboat-current');
+export const stableRoot = (profile = activeUserDataPath()) => path.resolve(profile, 'agentboat-current');
 const clientScript = 'coordinator/scripts/client.mjs';
 export const stableClientPath = () => path.join(stableRoot(), clientScript);
 export const clientPath = path.join(versionDir, clientScript);
@@ -70,14 +73,14 @@ export const pluginDataPath = (root = activeUserDataPath()) => path.join(root, '
 export const roleRegistryPath = (...profile) => path.join(pluginDataPath(profile.length ? userDataPath(...profile) : undefined), 'roles.json');
 
 // Orca owns current and prunes old releases. Keep our directory link outside its plugins tree.
-function linkCurrentRelease(repair) {
-  const link = stableRoot(), current = path.join(keyDir, 'current');
+function linkCurrentRelease(repair, key = keyDir, link = stableRoot()) {
+  const current = path.join(key, 'current');
   for (let attempt = 0; attempt < 3; attempt++) {
     let hash;
     try { hash = readFileSync(current, 'utf8').trim(); }
     catch (error) { if (error.code === 'ENOENT') return; throw error; }
     if (!versionHash.test(hash)) throw Error('AgentBoat 当前版本无效，请检查 Orca 插件安装');
-    const target = path.join(keyDir, hash);
+    const target = path.join(key, hash);
     if (!lstatSync(target, { throwIfNoEntry: false })?.isDirectory() ||
         ![clientScript, 'setup.mjs', 'orca-plugin.json'].every(file => existsSync(path.join(target, file))))
       throw Error('AgentBoat 当前版本文件尚未就绪，请稍后重试');
@@ -85,7 +88,7 @@ function linkCurrentRelease(repair) {
     if (entry) {
       const previous = entry.isSymbolicLink() && path.resolve(path.dirname(link), readlinkSync(link));
       if (previous && !path.relative(previous, target)) return link;
-      if (!previous || path.relative(path.dirname(previous), keyDir) || !versionHash.test(path.basename(previous)))
+      if (!previous || path.relative(path.dirname(previous), key) || !versionHash.test(path.basename(previous)))
         throw Error(`固定入口已有其他内容，未覆盖：${link}`);
       if (!repair) throw Error(`固定入口需要更新，请重启 AgentBoat：${link}`);
       try { unlinkSync(link); } catch (error) { if (error.code !== 'ENOENT') throw error; }
@@ -101,6 +104,19 @@ export function installationRoot({ repair = true } = {}) {
   if (!installed) return versionDir;
   const entry = linkCurrentRelease(repair);
   if (!entry) throw Error('找不到 AgentBoat 当前安装版本，请确认插件已启用');
+  return entry;
+}
+
+export function candidateSetupEntry(env, home) {
+  if (!release || installed) return;
+  const profile = path.resolve(userDataPath(process.platform, env, home));
+  const key = path.join(profile, 'plugins', pluginKey), link = stableRoot(profile);
+  const current = path.join(key, 'current'), pointer = lstatSync(current, { throwIfNoEntry: false });
+  if (pointer && (!pointer.isFile() || path.relative(path.join(realpathSync(profile), 'plugins', pluginKey), realpathSync(key))))
+    throw Error('AgentBoat 当前版本入口无效：' + current);
+  const entry = linkCurrentRelease(false, key, link);
+  if (!entry && lstatSync(link, { throwIfNoEntry: false }))
+    throw Error('找不到 AgentBoat 当前安装版本，请确认插件已启用');
   return entry;
 }
 
