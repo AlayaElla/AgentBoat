@@ -468,6 +468,48 @@ try {
     await page.waitForFunction(() => document.querySelectorAll('.home-layer .inbox [data-inbox-row]').length === 3);
   });
   await setup({ inboxBatch: true, delegatedFeedback: true, width: 360 });
+  await test('narrow home inbox aligns status, text and arrows across row types', async () => {
+    const longTitle = '工作间首页导航、项目进度卡片和移动端界面的布局统一方案';
+    await page.evaluate(title => {
+      fixture.live.agents = [];
+      fixture.removedProjects = ['p2'];
+      fixture.links.name = '本机工作间';
+      fixture.links.peers[0].name = '海边工作间';
+      fixture.project.ref.name = 'AgentBoat';
+      fixture.project.tasks.find(t => t.id === 'd1').title = title;
+      fixture.emit();
+    }, longTitle);
+    const remote = rail().getByRole('button', { name: '海边工作间，2 条待处理', exact: true });
+    await remote.click();
+    assert.equal(await remote.getAttribute('aria-expanded'), 'false');
+    await page.evaluate(() => document.fonts.ready.then(() => true));
+    const rows = rail().locator('#inbox-workspace-local .irow-h');
+    const positions = () => rows.evaluateAll(nodes => nodes.map(node => {
+      const box = selector => node.querySelector(selector).getBoundingClientRect();
+      const lead = box('input, .dot'), title = box('.body>.trunc'), subtitle = box('.body>.xs'), arrow = box('.chev');
+      return [lead.x + lead.width / 2, title.x, subtitle.x, arrow.x, lead.y + lead.height / 2 - title.y, arrow.y + arrow.height / 2 - title.y];
+    }));
+    const baseline = await positions();
+    assert.equal(baseline.length, 3);
+    for (const position of baseline) assert.deepEqual(position, baseline[0]);
+    assert.ok(await row(longTitle).locator('.body>.trunc').evaluate(e => e.scrollWidth > e.clientWidth && getComputedStyle(e).textOverflow === 'ellipsis'));
+    if (process.env.PANEL_EVIDENCE_DIR) {
+      await page.mouse.move(1, 1);
+      await rail().screenshot({ path: path.join(process.env.PANEL_EVIDENCE_DIR, 'inbox-layout-360.png'), animations: 'disabled' });
+    }
+    const color = control => control.evaluate(e => getComputedStyle(e.closest('.irow-h')).backgroundColor);
+    await row(longTitle).hover();
+    const hover = await color(row(longTitle));
+    assert.notEqual(hover, 'rgba(0, 0, 0, 0)');
+    await review('页面交付').hover();
+    assert.equal(await color(review('页面交付')), hover);
+    await review('页面交付').check();
+    await dock().getByRole('button', { name: '已选 2 条 · 1 个项目', exact: true }).waitFor();
+    await row('页面交付').click();
+    await rail().getByText('成果 a1', { exact: true }).waitFor();
+    assert.deepEqual(await positions(), baseline);
+  });
+  await setup({ inboxBatch: true, delegatedFeedback: true, width: 360 });
   await test('home inbox groups by workspace ID and keeps hidden entries selectable', async () => {
     const toggle = id => rail().locator(`[aria-controls=inbox-workspace-${id}]`);
     const group = id => rail().locator(`#inbox-workspace-${id}`);
