@@ -323,7 +323,7 @@ export function submitTask(project: Project, raw: unknown): void {
     const previous = task.acceptance.find(x => x.id === aid)
     if (previous?.fingerprint === af) continue
     if (artifactIds.some(id => task.artifacts.find(x => x.id === id)?.expired)) fail('验收项不能关联已过期的成果')
-    const item: Acceptance = { ...previous, id: aid, ...fields, revision: (previous?.revision ?? 0) + 1, status: 'pending', history: previous?.history ?? [], fingerprint: af }
+    const item: Acceptance = { ...previous, id: aid, ...fields, revision: (previous?.revision ?? 0) + 1, status: 'pending', history: previous?.history ?? [], fingerprint: af, submittedAt }
     if (previous) task.acceptance[task.acceptance.indexOf(previous)] = item
     else task.acceptance.push(item)
   }
@@ -356,10 +356,18 @@ export function submitTask(project: Project, raw: unknown): void {
 }
 
 export interface FeedbackItem { taskId: string; kind: 'acceptance' | 'decision' | 'blocked'; itemId: string; itemRevision?: number; reviewTotal?: number; fingerprint?: string; result?: string; answer?: string; note?: string }
-export function feedback(project: Project, raw: unknown, source?: string): void {
-  applyFeedback(project, project.tasks, object(raw).items, source)
+export function feedback(project: Project, raw: unknown, source?: string, event?: SourceEvent): void {
+  const items = object(raw).items
+  if (event && (!Array.isArray(items) || items.some(item => item?.taskId !== event.worker?.projectTaskId ||
+    item.kind !== 'acceptance' || item.result !== 'changes_requested'))) fail('请只代录来源对应任务的明确返修意见')
+  applyFeedback(project, project.tasks, items, source, false, event)
+  if (event) {
+    const task = project.tasks.find(t => t.id === event.worker?.projectTaskId)!
+    event.taskId = task.id
+    task.sourceIds.push(event.id)
+  }
 }
-function applyFeedback(project: Project, tasks: Task[], items: unknown, source?: string, withdrawal = false): void {
+function applyFeedback(project: Project, tasks: Task[], items: unknown, source?: string, withdrawal = false, event?: SourceEvent): void {
   if (!Array.isArray(items) || items.length > 100) fail('反馈条目格式不正确')
   if (!items.length) fail('请至少提交一条反馈')
   const seen = new Set<string>()
@@ -373,7 +381,7 @@ function applyFeedback(project: Project, tasks: Task[], items: unknown, source?:
       const task = tasks.find(x => x.id === input.taskId)
       if (!task) fail('任务不属于当前项目')
       if (!withdrawal && task.phase === 'paused') fail('任务已暂停')
-      const note = typeof input.note === 'string' ? input.note.trim().slice(0, 8000) : ''
+      const note = event?.text ?? (typeof input.note === 'string' ? input.note.trim().slice(0, 8000) : '')
       const discarded = input.result === 'discarded'
       if (input.kind === 'blocked') {
         const current = blockedRevision(task)
@@ -386,6 +394,8 @@ function applyFeedback(project: Project, tasks: Task[], items: unknown, source?:
         const item = task.acceptance.find(x => x.id === input.itemId)
         const withdrawingRework = withdrawal && item?.status === 'changes_requested'
         if (!item || item.revision !== input.itemRevision || (!withdrawal && task.phase !== 'ready') || (item.status !== 'pending' && !withdrawingRework)) fail('验收项已更新或不在待验收状态，请刷新后确认')
+        if (event && !(Date.parse(event.receivedAt) >= Date.parse(item.submittedAt ?? task.submittedAt ?? task.updatedAt)))
+          fail('这条反馈早于当前验收版本，请先核对原版本')
         if (input.reviewTotal !== undefined && input.reviewTotal !== task.acceptance.filter(a => a.status === 'pending').length) fail('待验收项已更新，请刷新后确认')
         if (input.fingerprint !== undefined && input.fingerprint !== item.fingerprint) fail('验收内容已更新')
         if (!['passed', 'changes_requested', 'discarded'].includes(input.result)) fail('验收结论不正确')
@@ -434,8 +444,15 @@ function recordSource(project: Project, event: SourceEvent) {
   return true
 }
 
+export function workerFeedbackNotice(project: Project, event: SourceEvent, id = event.id): import('./model').Delivery {
+  const w = event.worker!
+  return { id, subject: '执行者会话收到用户反馈',
+    body: `[Orca 用户消息，待项目主会话核对]\n项目：${project.ref.id}\n项目任务：${w.projectTaskId}\n派工：${w.runId} / ${w.taskId} / ${w.dispatchId}\n来源编号：${event.id}\n会话及消息：${event.senderId} / ${event.sourceId}\n收到时间：${event.receivedAt}\n\n${event.text}`, state: 'pending' }
+}
+
 export function receiveEvent(project: Project, event: SourceEvent): void {
   if (!recordSource(project, event)) return
+  if (event.worker) { project.deliveries.push(workerFeedbackNotice(project, event)); return }
   project.deliveries.push({ id: event.id, subject: event.taskId ? '主 agent任务补充' : '主 agent项目消息',
     body: `[工作间主 agent 转来]\n项目：${project.ref.id}\n来源编号：${event.id}\n关联任务：${event.taskId ?? '待判断'}\n发送者：${event.senderId}\n${event.text}`, state: 'pending' })
 }

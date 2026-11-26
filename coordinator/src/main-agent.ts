@@ -14,7 +14,7 @@ import { ProjectStore, fail, fingerprint, takeoverActive, text, revision } from 
 const mainSecurityBoundary = 'Run 归属由会话自报；替换授权来自面板一次性凭据。同一系统用户的本机程序可读写插件数据。'
 export const roleReminder = {
   workspace: '提醒：你是工作间管理员，项目里的活交给项目主会话。已有同一待验收或待决定时，沿用原项。',
-  project: '绑定成功后，普通项目请求和工作间转话都主动使用项目协作，无需触发词。先读项目，沿用当前 Run 和已有任务，关联原消息，按需派工。等已有验收或决定时沿用原项，后续任务可用 paused 记录原任务和事项编号，收到执行者问题就回复原问题。新的待决定、独立受阻和待验收成果用 submit 登记。'
+  project: '绑定成功后，普通项目请求和工作间转话都主动使用项目协作，无需触发词。先读项目，沿用当前 Run 和已有任务，关联原消息，按需派工。项目会话或执行者转达的明确返修，核对用户原话、任务、验收编号和原版本后，先用 feedback 代录需要修改，再沿用验收编号交新版。尚未送审的更新原任务范围，独立要求开后续任务。来源或关联不清时先核对。等已有验收或决定时沿用原项，后续任务可用 paused 记录原任务和事项编号，收到执行者问题就回复原问题。新的待决定、独立受阻和待验收成果用 submit 登记。'
 }
 
 export function takeoverView(t?: StoredTakeover): MainTakeover | undefined {

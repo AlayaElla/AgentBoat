@@ -21,7 +21,7 @@ if (historyArgs.length && (historyArgs.length !== 2 || historyArgs[0] !== '--end
 const leadBind = operation === 'project-lead-bind', leadSwitch = operation === 'project-lead-switch';
 const leadActions = ['lead-take', 'lead-ready', 'lead-handoff', 'lead-resume'];
 const leadAction = leadActions.includes(operation);
-const allowed = [...leadActions, 'lead-history', 'projects', 'overview', 'main-read', 'main-bind', 'project-lead', 'project-lead-switch', 'project-lead-bind', 'message', 'read', 'bind', 'submit', 'feedback', 'feishu-reply', 'links-read', 'links-refresh', 'links-invite', 'links-cancel-invite', 'links-join', 'links-configure', 'links-rename', 'links-share', 'links-relate', 'links-revoke', 'links-send', 'hide', 'restore', 'delete', 'main-targets', 'connections', 'connection-read', 'connection-check', 'connection-send', 'connection-reply'];
+const allowed = [...leadActions, 'lead-history', 'projects', 'overview', 'main-read', 'main-bind', 'project-lead', 'project-lead-switch', 'project-lead-bind', 'message', 'read', 'bind', 'submit', 'feedback', 'worker-feedback', 'feishu-reply', 'links-read', 'links-refresh', 'links-invite', 'links-cancel-invite', 'links-join', 'links-configure', 'links-rename', 'links-share', 'links-relate', 'links-revoke', 'links-send', 'hide', 'restore', 'delete', 'main-targets', 'connections', 'connection-read', 'connection-check', 'connection-send', 'connection-reply'];
 if (!internal && !allowed.includes(operation)) throw new Error('用法：node client.mjs projects|overview|main-read|main-targets|connections | connection-read|connection-check <名字> | main-bind|project-lead-switch|project-lead-bind|connection-send|connection-reply|links-send < stdin | read|project-lead <projectId> | bind|submit|message|feedback|feishu-reply|hide|restore|delete <input.json>');
 const caller = process.env.ORCA_AGENT_SESSION_ID ? `orca_session_id:${process.env.ORCA_AGENT_SESSION_ID}` : process.env.ORCA_TERMINAL_HANDLE;
 const profileEnv = release ? { ...process.env, ORCA_USER_DATA_PATH: activeUserDataPath() } : process.env;
@@ -35,7 +35,7 @@ const input = internal ? readInput(0) : history ? { projectId: historyProject, e
   ? { operation, projectId: argument, taskId: readOptions.task }
   : operation === 'project-lead' ? { projectId: argument }
   : operation === 'main-targets' ? null
-  : { ...readInput(operation === 'main-bind' || leadBind || leadSwitch ? 0 : argument), ...(['message', 'feedback', 'feishu-reply', 'project-lead-switch'].includes(operation) ? {} : { operation: operation === 'main-bind' || leadBind ? 'bind' : operation }) };
+  : { ...readInput(operation === 'main-bind' || leadBind || leadSwitch ? 0 : argument), ...(['message', 'feedback', 'worker-feedback', 'feishu-reply', 'project-lead-switch'].includes(operation) ? {} : { operation: operation === 'main-bind' || leadBind ? 'bind' : operation }) };
 if (internal && argument === 'project.lead' && (input.mode !== 'new' || input.startOnly !== true)) throw new Error('此入口仅用于自动启动未绑定的项目主会话');
 if (leadSwitch && !['existing', 'new', 'promote', 'cancel'].includes(input.mode)) throw new Error('请选择 existing、new、promote 或 cancel');
 if (operation === 'main-bind' || leadBind || leadSwitch) {
@@ -53,7 +53,16 @@ if (operation === 'main-bind' || leadBind || leadSwitch) {
   if (argument === '--check') input.checkOnly = true;
 }
 const delegatedFeedback = operation === 'feedback' && Object.hasOwn(input, 'id');
-if (!delegatedFeedback && ['bind', 'submit', 'feedback', 'hide', 'restore', 'delete'].includes(operation)) {
+const ownerFeedback = !delegatedFeedback && operation === 'feedback' && Object.hasOwn(input, 'ownerSource');
+if (ownerFeedback || operation === 'worker-feedback') {
+  if (!caller) throw new Error('请在收到反馈的 Orca 会话中执行此命令');
+  input.caller = caller;
+  if (ownerFeedback) {
+    const current = currentRun();
+    if (!current.ok || !current.result?.run?.id) throw new Error('未确认当前项目主会话的 Run');
+    input.runId = current.result.run.id;
+  }
+} else if (!delegatedFeedback && ['bind', 'submit', 'feedback', 'hide', 'restore', 'delete'].includes(operation)) {
   delete input.caller;
   if (caller) {
     input.caller = caller;
@@ -62,7 +71,7 @@ if (!delegatedFeedback && ['bind', 'submit', 'feedback', 'hide', 'restore', 'del
 }
 if (leadAction && (!caller || !argument || !flag || extra || (operation === 'lead-handoff') !== !!taskId)) throw new Error('请在收到通知的 Orca 会话中执行原命令，交接说明用引号括起');
 const name = internal ? argument : history ? 'lead.history' : leadAction ? 'lead.control' : operation === 'connections' || operation.startsWith('connection-') ? 'workspace.connections' : operation.startsWith('links-') ? 'workspace.links' : operation === 'projects' ? 'projects.list' : operation === 'overview' ? 'workspace.overview'
-  : operation === 'feishu-reply' ? 'workspace.reply' : operation.startsWith('main-') ? 'workspace.agent' : operation === 'message' ? 'workspace.message' : delegatedFeedback ? 'workspace.linkFeedback' : operation === 'feedback' ? 'project.feedback' : operation === 'project-lead' ? 'project.lead' : leadSwitch ? 'workspace.projectLead' : 'project.agent';
+  : operation === 'feishu-reply' ? 'workspace.reply' : operation.startsWith('main-') ? 'workspace.agent' : operation === 'message' ? 'workspace.message' : delegatedFeedback ? 'workspace.linkFeedback' : operation === 'feedback' ? 'project.feedback' : operation === 'worker-feedback' ? 'project.workerFeedback' : operation === 'project-lead' ? 'project.lead' : leadSwitch ? 'workspace.projectLead' : 'project.agent';
 const maintenance = ['hide', 'restore', 'delete'].includes(operation);
 const handler = operation === 'main-targets' ? 'workspace.agent.targets' : maintenance ? operation === 'delete' ? 'project.delete' : 'project.visibility' : name;
 if (maintenance) { delete input.operation; if (operation !== 'delete') input.hidden = operation === 'hide'; }
@@ -196,7 +205,7 @@ try {
         const tasks = project.tasks.map(t => ({ id: t.id, title: t.title, state: taskState(t), updatedAt: t.updatedAt,
           pendingAcceptance: t.acceptance.filter(a => a.status === 'pending').map(a => a.id),
           pendingDecisions: t.decisions.filter(d => d.answer === undefined).map(d => d.id) }));
-        const events = project.events.filter(e => !e.taskId).map(({ id, source, receivedAt, text }) => ({ id, source, receivedAt, text: text.slice(0, 120) }));
+        const events = project.events.filter(e => !e.taskId).map(({ id, source, receivedAt, text, worker }) => ({ id, source, receivedAt, text: text.slice(0, 120), ...(worker && { worker }) }));
         reply.result.result = { project: { ref: { id, name, path }, revision, runId, roles, tasks, events }, lead: view.lead,
           runtimeError: view.runtimeError, hint: `详情用 read ${id} --task <任务>，全量用 --full。` };
       }
@@ -208,8 +217,9 @@ try {
     if (operation === 'feedback' && (project || view.state === 'submitted')) {
       const receipt = reply.result.result;
       receipt.projectId = input.projectId;
-      receipt.items = input.items.map(({ taskId, kind, itemId, result }) => ({
-        taskId, kind, itemId, status: result || (kind === 'decision' ? 'answered' : 'replied')
+      if (ownerFeedback) receipt.requestId = input.requestId;
+      receipt.items = input.items.map(({ taskId, kind, itemId, itemRevision, result }) => ({
+        taskId, kind, itemId, ...(ownerFeedback && { itemRevision }), status: result || (kind === 'decision' ? 'answered' : 'replied')
       }));
     }
   }

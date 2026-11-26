@@ -4,6 +4,8 @@ import type { LeadContact, ContactRoutes } from './model'
 import { execFile, type ExecFileOptions } from 'node:child_process'
 import { promisify } from 'node:util'
 import { existsSync } from 'node:fs'
+import { realpath } from 'node:fs/promises'
+import { createRequire } from 'node:module'
 import path from 'node:path'
 import os from 'node:os'
 import type { AgentSession, Delivery, InstalledAgent, ProjectRef } from './model'
@@ -59,6 +61,7 @@ export interface CoordinatorRuntime {
   removeProject(ref: ProjectRef, host: HostApi<'worker'>): Promise<void>
   agents(projects: Project[], host: HostApi<'worker'>, main?: AgentSession, targets?: Promise<TargetInventory | undefined>): Promise<AgentsSnapshot>
   mail(runId: string, submitted?: (reports: WorkerReport[]) => Promise<Set<string>>): Promise<{ questions: OrcaQuestion[]; reports: WorkerReport[]; waiting?: { at: number; title: string; read?: boolean; report?: WorkerReport }[] }>
+  workerFeedback(caller: string, taskId: string, dispatchId: string, sourceId: string): Promise<{ runId: string; text: string; receivedAt: string }>
   hermesApprovalMode(): Promise<string>
   send(runId: string, delivery: Delivery): Promise<{ requestId?: string }>
 }
@@ -195,6 +198,32 @@ export class OrcaRuntime implements CoordinatorRuntime {
       return !m.read && m.type === 'status' ? [{ at: Date.parse(m.created_at), title: m.subject || '待处理通知' }] : []
     })
     return { ...actionable, waiting }
+  }
+  async workerFeedback(caller: string, taskId: string, dispatchId: string, sourceId: string) {
+    const { dispatch } = await this.call(['orchestration', 'worker-show', '--dispatch', dispatchId], readTimeout)
+    if (dispatch?.id !== dispatchId || dispatch.taskId !== taskId || !/^run_[\w-]+$/.test(dispatch.runId) ||
+      dispatch.status !== 'dispatched' || dispatch.capabilityRevokedAt !== null ||
+      dispatch.hostScope?.kind !== 'local' || !caller.startsWith('orca_session_id:') ||
+      dispatch.processIncarnation !== `structured:${caller.slice('orca_session_id:'.length)}`)
+      fail('当前会话不是这项在途派工的本机执行者')
+    let message
+    try {
+      // worker-read omits typedBy, so use the matching Orca build's local journal reader for this exact message.
+      const cli = await realpath(await this.executable())
+      const { RuntimeClient } = createRequire(import.meta.url)(path.resolve(path.dirname(cli), '../app.asar.unpacked/out/cli/runtime/client.js'))
+      const client = new RuntimeClient(activeUserDataPath(), readTimeout, null, null, cli)
+      const reply = await client.call('agentSession.item', { sessionId: caller.slice('orca_session_id:'.length), itemId: sourceId })
+      message = reply.ok && reply.result?.item
+    } catch { fail('Orca 无法核对原消息来源，请让主人在项目主会话指明反馈') }
+    const body = message?.body, block = body?.blocks?.length === 1 && body.blocks[0], typist = body?.typedBy
+    const dispatchedAt = Date.parse(dispatch.dispatchedAt?.replace(/^(\d{4}-\d\d-\d\d) (\d\d:\d\d:\d\d)$/, '$1T$2Z'))
+    if (message?.itemId !== sourceId || !sourceId.startsWith('orca:') || !(message?.observedAt >= dispatchedAt) ||
+      !Number.isFinite(message.observedAt) ||
+      body?.kind !== 'message' || body.role !== 'user' || body.from !== undefined ||
+      (typist?.by !== 'host' && !(typist?.by === 'device' && typist.own === true)) ||
+      block?.type !== 'text' || typeof block.text !== 'string' || !block.text.trim() || block.text.length > 8000)
+      fail('未在原派工转录中核对到完整的用户原话，请让主人在项目主会话指明反馈')
+    return { runId: dispatch.runId, text: block.text, receivedAt: new Date(message.observedAt).toISOString() }
   }
   private async questionWorkers(runId: string, ids: Set<string>) {
     const workers: OrcaWorkerRecord[] = [], visited = new Set<string>()

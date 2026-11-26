@@ -67,6 +67,13 @@
 - 代处理已开放的对方项目，在顶层加连接编号 `id`，并提供对方的 projectId、revision 和唯一 requestId。成功回执含逐项状态，对方的最新 revision 从同步后的项目报告读取。离线或回执未确认时保留原请求编号核对。
 - 只给项目主 agent 发一条消息，后续由它跟进。
 
+### 会话里的返修意见
+
+- 项目主会话收到明确返修时，`read <projectId> --task <taskId>` 核对原任务、验收编号及原 `itemRevision`。用原版本的 `changes_requested` 先写反馈，留验收编号给返修后的 `submit`。直接收到时在反馈顶层填 `"ownerSource":{"messageId":"本会话可核对的消息编号或时间"}`，条目 `note` 填用户原话。
+- 执行者在自己的在途 Orca 聊天里直接收到用户消息时，用 `orca orchestration worker-read --dispatch <dispatchId> --source transcript --json --full` 找到该条消息的 `id`。调用 `worker-feedback <input.json>`，文件内容为 `{"projectId":"…","projectTaskId":"…","taskId":"Orca Task","dispatchId":"Orca Dispatch","sourceId":"转录中的用户消息 ID"}`。插件核对派工身份、项目任务和 Orca 保存的输入者，从会话原记录读取原话并通知当前项目主会话。当前支持本机 Orca 结构化聊天的完整文本消息。终端转录、来源缺失或任务未关联时，把缺项告知主会话，请用户在那里指明。回执的 `pending` 表示原话已入账，`uncertain` 表示通知结果待核对。重试保持输入原样。
+- 项目主会话收到执行者反馈通知后，按来源编号在 `read <projectId> --full` 核对 `events` 的原话、会话、时间和派工。只代录自己确认的原验收版本，在反馈顶层填 `"ownerSource":{"eventId":"worker-user:…"}`，历史备注会用已保存的原话。来源与验收历史同时写入，旧消息不能覆盖发布于它之后的版本。未送审或独立新要求用 `submit` 更新相应任务，带上 `sourceIds`。
+- 一次代录使用一个稳定的 `requestId`，并提供读取到的项目 `revision`。回执不明时核对原版本历史，用同一文件重试。确认版本冲突后重新核对关联和原验收版本，再用新读取的项目版本提交。有人接管时由当前主会话继续读来源、核对历史和处理反馈。
+
 ## 工作间主 agent
 
 - `main-bind [--check]`（stdin）：`{revision,requestId,runId,token}`，首次绑定可省 token。`--check` 只核实、不生效；通过后重读 `main-read`，用最新 revision 和新的 requestId 正式绑定。绑定成功后，脚本在当前会话目录更新 `CLAUDE.md` 和 `AGENTS.md` 的角色卡。回执有 `roleCardWarning` 时绑定已生效，解决文件问题后用原请求重试。

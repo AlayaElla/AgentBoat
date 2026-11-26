@@ -14,7 +14,7 @@ interface UserFeedback { at: string; revision: number; result: string; note: str
 export interface Acceptance {
   id: string; title: string; details: string; artifactIds: string[]; revision: number
   status: 'pending' | 'passed' | 'changes_requested' | 'discarded'; history: UserFeedback[]
-  fingerprint: string; archivedHistory?: number
+  fingerprint: string; archivedHistory?: number; submittedAt?: string
 }
 interface Decision {
   // An omitted answer is pending. Null records a discard without inventing an answer.
@@ -34,6 +34,7 @@ export interface SourceEvent {
   id: string; source: string; sourceId: string; threadId: string; chatId: string
   senderId: string; text: string; receivedAt: string; taskId?: string
   replyToIds?: string[]
+  worker?: { runId: string; taskId: string; dispatchId: string; projectTaskId: string }
 }
 interface FeedbackTarget {
   projectId: string; taskId: string; kind: 'decision' | 'acceptance'; itemId: string; itemRevision: number; fingerprint: string

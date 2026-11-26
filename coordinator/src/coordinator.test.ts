@@ -1077,6 +1077,88 @@ test('workspace binding validates Runs, revisions, occupied project Runs and req
   await worker.deactivate()
 })
 
+test('chat feedback preserves the reviewed version and forwards worker sources across lead takeover', async () => {
+  const old = 'orca_session_id:old', lead = 'orca_session_id:new', caller = 'orca_session_id:worker'
+  const p = fresh(refs[0]), notices: { run: string; body: string }[] = []
+  const userText = '请把移动端按钮的标题改成「保存更改」，这一版验收要修改。'
+  const unrelated = { ...deliverable.acceptance[0], id: 'unrelated' }
+  p.runId = 'run_old'
+  p.mainAgentHandle = old
+  submitTask(p, { ...deliverable, acceptance: [...deliverable.acceptance, unrelated] })
+  submitTask(p, { ...deliverable, id: 'worker-task', executions: [{ runId: p.runId, taskId: 'task_worker', dispatchId: 'ctx_worker', agent: 'codex' }] })
+  let coordinator!: ReturnType<typeof createCoordinator>, reads = 0, uncertain = true
+  const worker = await mountWorker({ default: api => { coordinator = createCoordinator(api, {
+    projects: async () => refs, runBinding: async id => ({ owner: id === 'run_old' ? old : lead, generation: 1 }),
+    workerFeedback: async (handle, taskId, dispatchId) => {
+      assert.deepEqual([handle, taskId, dispatchId], [caller, 'task_worker', 'ctx_worker'])
+      reads++
+      return { runId: 'run_old', text: userText, receivedAt: new Date().toISOString() }
+    },
+    send: async (run, d) => {
+      notices.push({ run, body: d.body })
+      if (d.id.startsWith('worker-user:') && uncertain) throw Error('unknown receipt')
+      return { requestId: 'receipt' }
+    },
+  }) } }, { host: mockHost({ storage: { 'project:p1': p as any } }) })
+  try {
+    const input = { projectId: 'p1', projectTaskId: 'worker-task', taskId: 'task_worker', dispatchId: 'ctx_worker', sourceId: 'orca:user-message', caller }
+    const item = (taskId: string, itemRevision = 1) => ({ taskId, itemId: 'page-check', kind: 'acceptance' as const, itemRevision,
+      result: 'changes_requested' })
+    const read = () => coordinator.store.get('p1')
+    const direct = { projectId: 'p1', revision: p.revision, requestId: 'direct-message', caller: old, runId: p.runId,
+      ownerSource: { messageId: 'direct-turn-1' }, items: [{ ...item(deliverable.id), note: '这一版标题写错了，请改成「详情」。' }] }
+    await assert.rejects(() => worker.request('project.feedback', { ...direct, caller }), /当前绑定/)
+    await worker.request('project.feedback', direct)
+    await worker.request('project.feedback', direct)
+    assert.deepEqual((await read()).tasks[0].acceptance.map(a => [a.id, a.revision, a.status, a.history.length]), [
+      ['page-check', 1, 'changes_requested', 1], ['unrelated', 1, 'pending', 0],
+    ])
+    assert.match((await read()).tasks[0].acceptance[0].history[0].source!, /direct-turn-1/)
+    await coordinator.flush('p1')
+
+    await assert.rejects(() => worker.request('project.workerFeedback', { ...input, projectTaskId: deliverable.id }), /未唯一关联/)
+    const receipt = await worker.request('project.workerFeedback', input)
+    await coordinator.flush('p1')
+    assert.deepEqual(await worker.request('project.workerFeedback', input), { ...receipt, state: 'uncertain' })
+    assert.equal(reads, 2)
+    assert.equal((await read()).events.length, 1)
+    assert.equal(notices.filter(n => n.body.includes(userText)).length, 1)
+    assert.equal((await read()).tasks[1].acceptance[0].status, 'pending')
+
+    uncertain = false
+    await coordinator.store.mutate('p1', undefined, q => { q.runId = 'run_new'; q.mainAgentHandle = lead })
+    const pending = await worker.request('project.workerFeedback', { ...input, sourceId: 'orca:arrived-after-takeover' })
+    await coordinator.flush('p1')
+    assert.ok(notices.some(n => n.run === 'run_new' && n.body.includes(pending.sourceId) && n.body.includes(userText)))
+    const working = { projectId: 'p1', revision: (await read()).revision, requestId: 'worker-review', caller: lead, runId: 'run_new',
+      ownerSource: { eventId: receipt.sourceId }, items: [item('worker-task')] }
+    await assert.rejects(() => worker.request('project.feedback', { ...working, caller: old, runId: 'run_old' }), /当前绑定/)
+    await worker.request('project.feedback', working)
+    await worker.request('project.feedback', working)
+    const revised = (id: string) => ({ id, phase: 'ready',
+      artifacts: [{ ...deliverable.artifacts[0], id: 'v2', version: 'v2' }],
+      acceptance: [{ ...deliverable.acceptance[0], artifactIds: ['v2'] }] })
+    const submit = async (task: unknown, requestId: string) => worker.request('project.agent', {
+      operation: 'submit', projectId: 'p1', revision: (await read()).revision, requestId, task
+    })
+    // The original source was recorded before the revised acceptance was submitted.
+    await new Promise(resolve => setTimeout(resolve, 5))
+    await submit(revised('worker-task'), 'worker-v2')
+    await submit(revised(deliverable.id), 'direct-v2')
+    await assert.rejects(async () => worker.request('project.feedback', { ...working, revision: (await read()).revision, requestId: 'old-message',
+      ownerSource: { eventId: pending.sourceId }, items: [item('worker-task', 2)] }), /早于当前验收版本/)
+    await submit({ id: 'follow-up', title: '独立新需求', goal: '改另一项', phase: 'working' }, 'follow-up')
+    const saved = await read()
+    assert.deepEqual(saved.tasks.map(t => [t.id, t.acceptance.map(a => [a.id, a.revision, a.status])]), [
+      [deliverable.id, [['page-check', 2, 'pending'], ['unrelated', 1, 'pending']]],
+      ['worker-task', [['page-check', 2, 'pending']]], ['follow-up', []],
+    ])
+    assert.deepEqual(saved.tasks[1].acceptance[0].history.map(h => [h.revision, h.result, h.note, h.source]),
+      [[1, 'changes_requested', userText, receipt.sourceId]])
+    assert.deepEqual(saved.tasks[1].sourceIds, [receipt.sourceId])
+  } finally { coordinator.stop(); await worker.deactivate() }
+})
+
 test('main messages use the existing source queue and retries never duplicate a delivery', async () => {
   const p = fresh(refs[0]); p.runId = 'run_project'
   const host = mockHost({ storage: { 'project:p1': p as any, workspace: { version: 1, revision: 1, runId: 'run_main', requests: [] } } })
