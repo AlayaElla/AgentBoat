@@ -1,0 +1,358 @@
+.artifact-preview{width:min(52rem,94vw);max-height:90vh;overflow:auto;padding:1rem;background:var(--s-card);color:var(--orca-foreground);border:0;border-radius:var(--r-lg);box-shadow:var(--shadow-sm)}
+.artifact-preview::backdrop{background:#0006}
+.artifact-preview h2{display:inline;margin-right:1rem;overflow-wrap:anywhere}
+.artifact-preview img,.artifact-preview canvas{display:block;max-width:100%;height:auto;margin:1rem auto}
+.artifact-preview pre{white-space:pre-wrap;overflow-wrap:anywhere}
+.artifact-preview button{margin:.25rem;padding:.35rem .7rem;color:inherit;background:var(--fill);border:0;border-radius:var(--r-md);cursor:pointer}
+.artifact-preview p:empty{display:none}
+.artifact-menu{position:fixed;z-index:10;display:grid;max-width:calc(100vw - 8px);max-height:calc(100vh - 8px);overflow:auto;padding:4px;border-radius:var(--r-lg);background:var(--orca-popover);color:var(--orca-popover-foreground);box-shadow:0 4px 20px color-mix(in oklab,var(--orca-foreground) 20%,transparent);font:400 14px/20px var(--ab-font)}
+.artifact-menu .btn{justify-content:flex-start;color:inherit;font:inherit}
+.artifact-menu .btn:focus-visible{outline:2px solid var(--orca-ring);outline-offset:-2px}
+:root{--ab-font:"Geist",-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+  --ab-need:#f05100;--ab-need-text:#c53c00;--ab-work:#edb200;--ab-done:#00bb7f;--ab-done-text:#007956;--ab-idle:color-mix(in oklab,#737373 50%,transparent);
+  --r-sm:calc(var(--orca-radius)*.6);--r-md:calc(var(--orca-radius)*.8);--r-lg:var(--orca-radius);--r-xl:calc(var(--orca-radius)*1.4);
+  --shadow-xs:0 1px 2px 0 #0000000d;--shadow-sm:0 1px 3px 0 #0000001a,0 1px 2px -1px #0000001a;
+  --s-block:var(--orca-muted);--s-card:var(--orca-card);
+  --hover:color-mix(in oklab,var(--orca-foreground) 8%,transparent);--fill:color-mix(in oklab,var(--orca-foreground) 6%,transparent);
+  --wire:color-mix(in srgb,var(--orca-foreground) 22%,transparent)}
+html.dark{--ab-need:#fe6e00;--ab-need-text:#ffb96d;--ab-done-text:#5ee9b5;--s-block:var(--orca-card);--s-card:var(--orca-secondary)}
+html.light{color-scheme:light}html.dark{color-scheme:dark}
+/* Geist 是 Orca 界面的默认字体（SIL OFL 1.1），这里内嵌是为了离线也能显示成 Orca 的样子。实现时把字体文件放进插件，用相对路径引用。 */
+@font-face{font-family:Geist;src:url(./assets/Geist.woff2)format("woff2");font-weight:100 900;font-style:normal;font-display:swap}
+
+/* ③ 面板里的样式。数值照 Orca 的组件写；全页没有一条边框线，层次靠底色深浅、Orca 的细阴影和间距。每种部件只有一个样子。 */
+*{box-sizing:border-box}
+body{margin:0}
+.panel{font:400 14px/20px var(--ab-font);letter-spacing:.01em;-webkit-font-smoothing:antialiased;color:var(--orca-foreground);background:var(--orca-background);height:100%}
+.panel button,.panel input,.panel select,.panel textarea{font:inherit;letter-spacing:inherit;color:inherit;margin:0}
+/* 键盘焦点：Orca 的 3px 光圈（ring 色的一半），是外发光，不是边框 */
+.panel :focus-visible{outline:none;box-shadow:0 0 0 3px color-mix(in oklab,var(--orca-ring) 50%,transparent)}
+.stack{display:flex;flex-direction:column;min-width:0}.row{display:flex;align-items:center;min-width:0}
+.g2{gap:8px}.g3{gap:12px}.between{justify-content:space-between}.wrap{flex-wrap:wrap}.start{align-items:flex-start}.grow{flex:1;min-width:0}.none{flex:none}
+.panel .muted{color:var(--orca-muted-foreground)}.xs{font-size:12px;line-height:16px}
+.trunc{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}.any{overflow-wrap:anywhere}
+.i{display:inline-flex;flex:none;width:16px;height:16px}.i svg{width:100%;height:100%;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+
+/* 标题三种：页面标题 16/600、区块标题 14/600（Orca 组件式面板的一、二级标题），小标题 12/600（Orca 仪表盘每一栏的标题） */
+.h1{margin:0;font-size:16px;line-height:24px;font-weight:600}
+.h2{margin:0;font-size:14px;line-height:20px;font-weight:600}
+.sec{display:flex;flex-direction:column;gap:8px;min-width:0}
+.setup-paths{margin:0;padding-inline-start:20px;overflow-wrap:anywhere}
+.sec-h{display:flex;align-items:center;gap:8px;min-height:24px}
+
+/* 按钮：照 Orca 的 Button。主按钮是 default 变体（主色实底）；文字按钮是 ghost；危险操作是 destructive。
+   次要按钮：Orca 的 secondary 是 --orca-secondary 实底，但我们的块和卡片正好也是这个颜色，放上去会看不见，
+   所以用 Orca 的 foreground/8% 半透明底，在哪种底色上都是浅浅的一块。高度是 Orca 的 sm（32）和 xs（24）。都没有边框。 */
+.btn{display:inline-flex;flex:none;align-items:center;justify-content:center;gap:6px;height:32px;padding:0 12px;border:0;border-radius:var(--r-md);background:var(--hover);font-weight:500;white-space:nowrap;cursor:pointer;max-width:100%;transition:background-color .15s}
+.btn:hover{background:color-mix(in oklab,var(--orca-foreground) 13%,transparent)}
+.btn.primary{background:var(--orca-primary);color:var(--orca-primary-foreground)}
+.btn.primary:hover{background:color-mix(in oklab,var(--orca-primary) 90%,transparent)}
+.btn.text{background:transparent}
+.btn.text:hover{background:var(--hover)}
+.btn.danger{background:var(--orca-destructive);color:#fff}
+html.dark .btn.danger{background:color-mix(in oklab,var(--orca-destructive) 60%,transparent)}
+.btn.danger:hover{background:color-mix(in oklab,var(--orca-destructive) 90%,transparent)}
+.btn.sm{height:24px;padding:0 8px;gap:4px;font-size:12px;line-height:16px}
+.btn.icon{width:32px;padding:0}
+.btn[aria-pressed=true]{background:var(--orca-primary);color:var(--orca-primary-foreground)}
+.btn:disabled{opacity:.5;pointer-events:none}
+.btn[aria-busy=true]{opacity:.8}
+.spinner{width:12px;height:12px;flex:none;border:2px solid currentColor;border-right-color:transparent;border-radius:50%;animation:ab-spin .8s linear infinite}
+@keyframes ab-spin{to{transform:rotate(360deg)}}
+@media(prefers-reduced-motion:reduce){.spinner{display:none;animation:none}}
+.link{background:none;border:0;padding:0;text-decoration:underline;text-underline-offset:4px;cursor:pointer;text-align:left}
+.link:disabled{opacity:.5;pointer-events:none}
+
+/* 件数、标签、状态点。颜色全是 Orca 自己的：橙＝agent 在等你（--agent-question），黄＝工作中，绿＝完成和在线，红＝受阻和出错，灰＝空闲和离线。
+   标签的配法照 Orca 仪表盘里的小胶囊：状态色 10% 到 15% 的底加同色的字，没有边。 */
+.pill{flex:none;min-width:18px;height:18px;padding:0 6px;border-radius:999px;background:color-mix(in oklab,var(--ab-need) 15%,transparent);color:var(--ab-need-text);font-size:11px;line-height:18px;font-weight:600;text-align:center;font-variant-numeric:tabular-nums}
+.tag{display:inline-flex;flex:none;align-items:center;padding:2px 8px;border-radius:999px;background:var(--fill);color:var(--orca-muted-foreground);font-size:12px;line-height:16px;font-weight:500;white-space:nowrap}
+.stack>.tag,.panel>.tag{align-self:flex-start}
+.tag.solid{background:var(--orca-primary);color:var(--orca-primary-foreground)}
+.tag.ok{background:color-mix(in oklab,var(--ab-done) 10%,transparent);color:var(--ab-done-text)}
+.tag.need{background:color-mix(in oklab,var(--ab-need) 15%,transparent);color:var(--ab-need-text)}
+.tag.danger{background:color-mix(in oklab,var(--orca-destructive) 10%,transparent);color:var(--orca-destructive)}
+.dot{flex:none;width:8px;height:8px;border-radius:50%;background:var(--ab-idle)}
+.dot.ok{background:var(--ab-done)}.dot.work{background:var(--ab-work)}.dot.need{background:var(--ab-need)}.dot.bad{background:var(--orca-destructive)}
+.st{display:inline-flex;flex:none;width:12px;height:12px;align-items:center;justify-content:center;color:var(--ab-done)}
+.st>.i{width:12px;height:12px}.st>.i svg{stroke-width:3}
+
+/* 列表行：照 Orca 组件式面板的列表行（上下 6 左右 8，圆角 8，悬停变深一点）。等你处理、设置、任务都用它 */
+.list{display:flex;flex-direction:column;list-style:none;margin:0;padding:0}
+.item{display:flex;width:100%;align-items:flex-start;gap:8px;min-width:0;padding:6px 8px;border:0;border-radius:var(--r-md);background:none;text-align:left;cursor:pointer}
+div.item{cursor:default}
+button.item:hover{background:var(--hover)}
+.item>.body{display:flex;flex:1;min-width:0;flex-direction:column;gap:2px}
+.item>.dot{margin-top:6px}.item>.i{margin-top:2px;color:var(--orca-muted-foreground)}.item>.pill,.item>.tag{margin-top:1px}
+
+/* 提示条：一块浅底，没有左边的色条。普通的是灰底；要你处理的是 Orca 的「agent 在等你」那种 6% 的橙底；出错的是 10% 的红底 */
+.callout{display:flex;flex-direction:column;align-items:flex-start;gap:6px;padding:10px 12px;border-radius:var(--r-lg);background:var(--fill)}
+.callout>.t{font-weight:500}
+.callout.need{background:color-mix(in oklab,var(--ab-need) 6%,transparent)}.callout.need>.t{color:var(--ab-need-text)}
+.callout.danger{background:color-mix(in oklab,var(--orca-destructive) 10%,transparent)}.callout.danger>.t{color:var(--orca-destructive)}
+
+/* 表单：输入框照 Orca 仪表盘的搜索框，是一块浅底，没有边框。页签、开关、单选、多选照 Orca 的组件 */
+.field{display:flex;flex-direction:column;gap:6px;min-width:0}.field>.lb{font-weight:500;line-height:1}
+.in{width:100%;min-width:0;border:0;border-radius:var(--r-md);background:var(--fill);padding:6px 12px}
+textarea.in{min-height:64px;padding:8px 12px;resize:vertical;display:block}
+.in::placeholder{color:var(--orca-muted-foreground)}
+.sel{position:relative;display:block;min-width:0}
+.sel>select{appearance:none;height:32px;padding:0 30px 0 12px;cursor:pointer;text-overflow:ellipsis}
+.sel::after{content:"";position:absolute;right:8px;top:8px;width:16px;height:16px;background:var(--orca-muted-foreground);-webkit-mask:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'><path d='m6 9 6 6 6-6'/></svg>") center/16px no-repeat;mask:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'><path d='m6 9 6 6 6-6'/></svg>") center/16px no-repeat;pointer-events:none}
+.tabs{display:flex;height:36px;padding:3px;border-radius:var(--r-lg);background:var(--orca-muted);color:var(--orca-muted-foreground)}
+.tab{flex:1;min-width:0;border:0;border-radius:var(--r-md);background:none;padding:0 6px;font-weight:500;white-space:nowrap;cursor:pointer}
+.tab[aria-selected=true]{background:var(--orca-background);color:var(--orca-foreground)}
+html.dark .tab[aria-selected=true]{background:color-mix(in oklab,var(--orca-input) 60%,transparent)}
+.switch{display:flex;align-items:center;justify-content:space-between;gap:12px;cursor:pointer;font-weight:500}
+.switch>input{appearance:none;flex:none;width:32px;height:18.4px;border:0;border-radius:999px;background:var(--orca-input);position:relative;cursor:pointer}
+.switch>input::after{content:"";position:absolute;top:1.2px;left:1px;width:16px;height:16px;border-radius:50%;background:var(--orca-background);box-shadow:var(--shadow-sm);transition:left .12s}
+.switch>input:checked{background:var(--orca-primary)}.switch>input:checked::after{left:15px}
+html.dark .switch>input::after{background:var(--orca-foreground)}html.dark .switch>input:checked::after{background:var(--orca-primary-foreground)}
+.opt{display:flex;align-items:flex-start;gap:8px;cursor:pointer}
+.opt>input{appearance:none;flex:none;width:16px;height:16px;margin-top:2px;border:0;background:color-mix(in oklab,var(--orca-foreground) 15%,transparent);cursor:pointer;position:relative}
+.opt>input[type=radio]{border-radius:50%}.opt>input[type=checkbox]{border-radius:4px}
+.opt>input:checked{background:var(--orca-primary)}
+.opt:has(input:disabled){opacity:.65}.opt:has(input:disabled),.opt>input:disabled{cursor:default}
+.opt>input[type=radio]:checked::after{content:"";position:absolute;inset:5px;border-radius:50%;background:var(--orca-primary-foreground)}
+.opt>input[type=checkbox]:checked::after{content:"";position:absolute;inset:0;background:var(--orca-primary-foreground);-webkit-mask:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'><path d='M20 6 9 17l-5-5'/></svg>") center/12px no-repeat;mask:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'><path d='M20 6 9 17l-5-5'/></svg>") center/12px no-repeat}
+.kv{display:grid;grid-template-columns:minmax(0,auto) minmax(0,1fr);gap:6px 12px;margin:0}.kv dt{color:var(--orca-muted-foreground)}.kv dd{margin:0;overflow-wrap:anywhere}
+.empty{display:flex;flex-direction:column;align-items:center;gap:8px;padding:32px 16px;text-align:center;color:var(--orca-muted-foreground)}.empty>.i{width:24px;height:24px}
+
+/* 顶栏和底部的提交条。提交条浮在内容上面，用 Orca 弹出层的底色和它的浮层阴影（方向朝上），没有分隔线 */
+.top{display:flex;align-items:center;background:var(--orca-background)}
+.sheet{display:flex;flex-direction:column}
+
+/* 首页只有两块：等你处理、工作间树，之间 20px。宽面板分左右两栏：左边是等你处理，和整页一起滚，没有自己的滚动条；右边是树。 */
+.home{display:flex;flex-direction:column;gap:20px;min-width:0}
+.home.wide{display:grid;grid-template-columns:var(--rail) minmax(0,1fr);align-items:start}
+/* 等你处理：照 Orca 给「agent 在等你」的卡片配的底色（--agent-question 的 6%），不画它那一圈边。全页只有这一块是这个底色。
+   没有事的时候变回普通的块。圆角是 Orca 仪表盘每一栏用的 rounded-xl。 */
+.inbox{display:flex;flex-direction:column;gap:2px;min-width:0;padding:6px;border-radius:var(--r-xl);background:color-mix(in oklab,var(--ab-need) 6%,var(--orca-background))}
+html.dark .inbox{background:color-mix(in oklab,var(--ab-need) 10%,var(--orca-background))}
+.inbox.none,html.dark .inbox.none{background:var(--s-block)}
+.inbox>.sec-h{padding:4px 8px 2px}
+.inbox>.pad{padding:2px 8px 6px}
+.inbox>.more{padding:0 2px}
+/* 工作间：一块底色（块的底色），没有边框。树上一个工作间一行；展开后这块底色往下长，里面是它的内容。
+   树上没有「上级、下级、平级」这些字，关系用连线表示。连线照 Orca 侧栏里父 agent 和子 agent 之间那种线：
+   1px 的竖线加直角的小横线，没有圆角；颜色是 --wire。连线画在行的左边空出来的 16px 里，行和块本身仍然没有边框。
+     实线从上面一行的底边下来、拐进自己这一行      ＝ 上面那个是上级
+     实线从自己这一块的底边下来、拐进下面每一行    ＝ 下面那些是下级
+     虚线从自己这一行出来、拐进同一缩进的行        ＝ 平级
+     不连线、放在最下面                            ＝ 还没标关系 */
+.org{display:flex;flex-direction:column;gap:8px;min-width:0}
+.org-up{position:relative;display:flex;flex-direction:column;gap:4px;min-width:0}
+.org-up>.wsr{position:relative;z-index:1}
+/* 有几个上级时：线从第一个上级的底边一直往下，被后面的上级挡住，只在行和行之间露出来，表示它们都连着 */
+.org-up::before{content:"";position:absolute;left:7px;top:36px;bottom:0;border-left:1px solid var(--wire)}
+.org-in{position:relative;display:flex;flex-direction:column;gap:8px;min-width:0}
+.org-in.l1{margin-left:16px}
+.org-in.up::before{content:"";position:absolute;left:-9px;top:-8px;width:9px;height:26px;border:solid var(--wire);border-width:0 0 1px 1px}
+.org-self{position:relative;display:flex;flex-direction:column;gap:8px;min-width:0}
+.org-self.sib::before{content:"";position:absolute;left:-9px;top:18px;width:9px;border-top:1px dashed var(--wire)}
+.org-self.sib::after{content:"";position:absolute;left:-9px;top:18px;bottom:-8px;border-left:1px dashed var(--wire)}
+.org-kids{display:flex;flex-direction:column;gap:4px;min-width:0;margin-left:16px}
+.org-kids>*{position:relative}
+.org-kids>*::before{content:"";position:absolute;left:-9px;top:-4px;width:9px;height:22px;border:solid var(--wire);border-width:0 0 1px 1px}
+.org-kids>:first-child::before{top:-8px;height:26px}
+.org-kids>:not(:last-child)::after{content:"";position:absolute;left:-9px;top:18px;bottom:0;border-left:1px solid var(--wire)}
+.org-kids>.org-tools::before{border-bottom-width:0}
+.org-side{display:flex;flex-direction:column;gap:4px;min-width:0}
+.org-side>.wsr{position:relative}
+.org-side>.wsr::before{content:"";position:absolute;left:-9px;top:-4px;width:9px;height:22px;border:dashed var(--wire);border-width:0 0 1px 1px}
+.org-side>.wsr:first-child::before{top:0;height:18px}
+.org-side>.wsr:not(:last-child)::after{content:"";position:absolute;left:-9px;top:18px;bottom:0;border-left:1px dashed var(--wire)}
+.org-un{display:flex;flex-direction:column;gap:4px;min-width:0;margin-top:4px}
+.wsr{display:flex;flex-direction:column;min-width:0;border-radius:var(--r-lg);background:var(--s-block)}
+/* 自己的工作间和别人的从颜色上分开：别人的整行是中性的块底色；自己那一行的名字条是 Orca 的主色实底（亮色近黑、暗色浅灰），字是主色上的字色。
+   这是全页除主按钮以外唯一用主色做底的地方。 */
+.wsr.me>.wsr-top{border-radius:var(--r-lg);background:var(--orca-primary);color:var(--orca-primary-foreground)}
+.wsr.me>.wsr-top .wsr-h:hover{background:color-mix(in oklab,var(--orca-primary-foreground) 12%,transparent)}
+.panel .wsr.me>.wsr-top .muted,.wsr.me>.wsr-top .wsr-h>.i{color:color-mix(in oklab,var(--orca-primary-foreground) 70%,transparent)}
+.wsr.me>.wsr-top .tag.solid{background:var(--orca-primary-foreground);color:var(--orca-primary)}
+.wsr.me>.wsr-top .pill{background:color-mix(in oklab,var(--ab-need) 15%,var(--orca-background))}
+.wsr-top{display:flex;align-items:center;min-width:0}
+.wsr-top>.btn{margin-right:6px}
+.wsr-h{display:flex;flex:1;align-items:center;gap:8px;min-width:0;min-height:36px;padding:4px 8px 4px 12px;border:0;border-radius:var(--r-lg);background:none;text-align:left;cursor:pointer}
+.wsr-h:hover{background:var(--hover)}
+.wsr-h>.name{flex:0 1 auto;max-width:60%;font-weight:600}
+.wsr-h>.sum{flex:1 1 0;text-align:right}
+.wsr-h>.i{color:var(--orca-muted-foreground);transition:transform .12s}.wsr-h[aria-expanded=true]>.i{transform:rotate(90deg)}
+.wsr-b{display:flex;flex-direction:column;gap:8px;min-width:0;padding:2px 8px 8px}
+.wsr-b>.row:first-child{padding:0 0 0 4px}
+/* 主 agent：块上面抬起的一条（卡片的底色加 Orca 的细阴影），名字加粗。自己的和对方的是同一个样子。 */
+.lead{display:flex;align-items:center;gap:8px;width:100%;min-width:0;min-height:40px;padding:4px 8px 4px 12px;border:0;border-radius:var(--r-md);background:var(--s-card);box-shadow:var(--shadow-xs);text-align:left}
+button.lead{cursor:pointer}button.lead:hover{background:color-mix(in oklab,var(--s-card) 92%,var(--orca-foreground))}
+.lead>.t{flex:none;font-weight:600}
+.lead>.i{color:var(--orca-muted-foreground)}
+/* 主 agent 管着的东西：整体右移 12px，不画竖线 */
+.under{display:flex;flex-direction:column;gap:8px;min-width:0;padding-left:12px}
+/* 项目卡片：照 Orca 仪表盘的卡片（卡片底色、圆角、内边距 10），不画边，加 Orca 的细阴影。自己的项目和别人开放给你的项目是同一个样子。 */
+.cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(240px,100%),1fr));gap:6px;align-items:start}
+.pcard{display:flex;flex-direction:column;min-width:0;border-radius:var(--r-md);background:var(--s-card);box-shadow:var(--shadow-xs)}
+.pcard-h{display:flex;align-items:center;gap:8px;width:100%;min-width:0;min-height:36px;padding:6px 8px 6px 12px;border:0;border-radius:var(--r-md);background:none;text-align:left;cursor:pointer;list-style:none}
+.pcard-h::-webkit-details-marker{display:none}
+.pcard-h:hover{background:var(--hover)}
+.pcard-h>.name{font-weight:500}
+.pcard-h>.i{color:var(--orca-muted-foreground);transition:transform .12s}.pcard[open]>.pcard-h>.i{transform:rotate(90deg)}
+.pcard-b{display:flex;flex-direction:column;padding:0 6px 6px}
+.pcard-b.pad{gap:8px;padding:2px 12px 12px}
+.card{display:flex;flex-direction:column;gap:8px;min-width:0;padding:12px;border-radius:var(--r-lg);background:var(--s-block)}
+.tasks{display:flex;flex-direction:column;gap:6px;list-style:none;margin:0;padding:0}.tasks>li{display:flex;flex-direction:column;gap:2px}
+/* agent 行：前面是状态（橙点＝在等你，黄点＝在工作，绿对勾＝完成），然后是谁、在做什么、多久了 */
+.panel .arow{display:flex;align-items:center;gap:6px;width:100%;min-width:0;min-height:24px;padding:2px 6px;border:0;border-radius:var(--r-sm);background:none;text-align:left;font-size:12px;line-height:16px}
+/* Agent 页：照 Orca 的智能体仪表盘。每一段是一栏（块的底色，rounded-xl），里面一个 agent 一张卡片（内边距 10，行距 6）；
+   完成的卡片是 Orca 那种 6% 的绿底，在等你的是 6% 的橙底。都不画边。 */
+.acol{display:flex;flex-direction:column;gap:6px;min-width:0;padding:8px;border-radius:var(--r-xl);background:var(--s-block)}
+.acol>.sec-h{padding:0 4px}
+.acol>.sec-h>.h2{font-size:12px;line-height:16px}
+.aitem{display:flex;flex-direction:column;gap:6px;min-width:0;padding:10px;border-radius:var(--r-lg);background:var(--s-card);box-shadow:var(--shadow-xs)}
+.aitem[data-st=done]{background:color-mix(in oklab,var(--ab-done) 6%,var(--s-card))}
+.aitem[data-st=need]{background:color-mix(in oklab,var(--ab-need) 6%,var(--s-card))}
+.panel .aitem>.arow{padding:0;min-height:20px}
+.aitem>.more{display:flex;flex-direction:column;align-items:flex-start;gap:6px;padding-left:18px}
+.cols3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;align-items:start}
+
+html,body{height:100%;overflow:hidden}#panel{height:100%;width:100%}.panel{container-type:inline-size}@container (max-width:619px){.cols3{grid-template-columns:minmax(0,1fr)}}.dot.flag{width:5px;height:5px;margin-left:-5px}.field .lb{line-height:20px}.org-tools{min-width:0}.error{overflow-wrap:anywhere}button{overflow:hidden;text-overflow:ellipsis}.panel[aria-busy=true]{cursor:progress}.inbox .h2{white-space:nowrap}
+
+.card,.callout{overflow-wrap:anywhere}.card>.any,.callout>.any,p.any{white-space:pre-wrap}
+
+.panel{--ab-t-fast:.15s;--ab-ease:cubic-bezier(.4,0,.2,1);--ab-t-open:.2s;--ab-t-close:.18s;--ab-t-page:.18s;--ab-ease-out:cubic-bezier(0,0,.2,1);--ab-shift:16px;
+  display:grid;grid-template-rows:auto minmax(0,1fr) auto;gap:0;padding:0;overflow:hidden;position:relative}
+[hidden]{display:none!important}
+
+/* 减少动效：系统设置了「减少动态效果」时，所有过渡和动画都瞬间完成，只保留状态变化本身 */
+@media(prefers-reduced-motion:reduce){.panel *,.panel *::before,.panel *::after{animation:none!important;transition:none!important}.panel .sk{animation:none}}
+
+/* 顶栏不再跟着内容滚：它在层的外面，换页时不动，只换里面的字 */
+.top{position:static;margin:0;padding:10px 12px;min-height:52px;gap:4px}
+.top>.btn.icon>.i{width:14px;height:14px}
+.top>.btn.back,.pane-top>.btn.back{flex:0 1 auto;min-width:0;max-width:46%;margin:0 4px 0 0;padding:0 8px 0 4px;gap:2px}
+.btn>.t{overflow:hidden;text-overflow:ellipsis;min-width:0}
+.btn.sm.icon{width:24px}
+.btn>.pill{margin-left:4px}
+.btn.spin>.i{animation:ab-spin .8s linear infinite}
+.chev{color:var(--orca-muted-foreground);transition:transform var(--ab-t-fast) var(--ab-ease)}
+[aria-expanded=true]>.chev.turn{transform:rotate(90deg)}
+/* 按下去立刻有反应（现在只有悬停有） */
+button.item:active,.pcard-h:active,.wsr-h:active,.note:active,.fold-h:active{background:color-mix(in oklab,var(--orca-foreground) 13%,transparent)}
+.item[data-navigating],.pcard-h[data-navigating],.wsr-h[data-navigating]{background:var(--hover);cursor:progress}
+
+/* 层：一页一层，每层自己滚动。被盖住的层留在原地（看不见、点不到），返回时原样还在：滚动位置、页签、展开的块、填到一半的字都不用另外保存 */
+.layers{position:relative;min-height:0;overflow:hidden;container-type:size}
+.layer{position:absolute;inset:0;overflow-y:auto;scrollbar-width:thin;display:flex;flex-direction:column;gap:12px;padding:0 12px 16px}
+.layer>*{flex:none}
+.layer.covered{visibility:hidden}
+/* 换页后焦点落在新页的标题上，给读屏用；标题不是能点的东西，不画光圈 */
+.panel [data-heading]:focus-visible{box-shadow:none}
+
+/* 换页：新页淡入加一小段位移，旧页淡出。进一层从右边来，返回从左边来；宽排版的详情栏从下面来 */
+@keyframes ab-in-fwd{from{opacity:0;transform:translateX(var(--ab-shift))}}
+@keyframes ab-in-back{from{opacity:0;transform:translateX(calc(-1*var(--ab-shift)))}}
+@keyframes ab-in-up{from{opacity:0;transform:translateY(8px)}}
+@keyframes ab-fade{from{opacity:0}}
+@keyframes ab-out{to{opacity:0}}
+.in-fwd{animation:ab-in-fwd var(--ab-t-page) var(--ab-ease-out) both}
+.in-back{animation:ab-in-back var(--ab-t-page) var(--ab-ease-out) both}
+.in-up{animation:ab-in-up var(--ab-t-page) var(--ab-ease-out) both}
+.fade{animation:ab-fade var(--ab-t-fast) var(--ab-ease) both}
+.out{animation:ab-out .12s ease-in both;pointer-events:none}
+
+/* 展开和收起：高度从 0 过渡到内容的高度，不用量高度。里面的内容收起后还在，只是看不见、点不到 */
+.xp{display:grid;grid-template-rows:0fr;min-width:0;transition:grid-template-rows var(--ab-t-close) var(--ab-ease-out)}
+.xp.open{grid-template-rows:1fr;transition-duration:var(--ab-t-open)}
+.xp>.xp-in{min-height:0;min-width:0;overflow:hidden;transition:visibility 0s var(--ab-t-close)}
+/* 只在收起时写 hidden，展开时不写 visible：这样整层被盖住（hidden）时，里面展开的块也跟着看不见 */
+.xp:not(.open)>.xp-in{visibility:hidden}
+.xp.open>.xp-in{transition-delay:0s}
+.fold-h{display:flex;align-items:center;gap:6px;width:100%;min-height:28px;padding:0 6px 0 2px;border:0;border-radius:var(--r-md);background:none;font-weight:500;text-align:left;cursor:pointer}
+.fold-h:hover{background:var(--hover)}
+.fold-h>.n{font-weight:400;color:var(--orca-muted-foreground)}
+.fold-b{display:flex;flex-direction:column;gap:8px;padding:6px 0 4px 22px}
+
+/* 等你处理的行。窄排版：点一行，要处理的内容在这一行下面展开。宽排版：点一行，内容在右边的详情栏里打开，这一行变深 */
+.irows{display:flex;flex-direction:column;gap:2px;min-width:0}
+.inbox-groups{--inbox-leading:20px;--inbox-gap:6px;--inbox-inset:8px;display:flex;flex-direction:column;gap:8px;min-width:0}
+.inbox-group>.fold-h{display:grid;grid-template-columns:var(--inbox-leading) minmax(0,1fr) auto;gap:var(--inbox-gap);min-width:0;min-height:32px;padding:0 var(--inbox-inset);font-weight:600;background:var(--fill)}
+.inbox-group>.fold-h:hover{background:var(--hover)}
+.inbox-group>.fold-h>.chev{justify-self:center}
+.inbox-group>.fold-h>.xs{min-width:16px;text-align:center;font-weight:400;font-variant-numeric:tabular-nums}
+.inbox-group .irows{padding-top:2px}
+.irow{display:flex;flex-direction:column;min-width:0;border-radius:var(--r-md);transition:background-color var(--ab-t-fast) var(--ab-ease)}
+.irow.open,.irow.picked{background:color-mix(in oklab,var(--ab-need) 10%,transparent)}
+.irow-h{display:flex;align-items:flex-start;min-width:0}
+.panel .irow-h>input{width:16px;height:16px;flex:none;margin:8px 0 0 8px;accent-color:var(--orca-primary)}
+.irow-h>.btn{margin:6px 6px 0 2px}
+.irow .item{flex:1}
+.inbox .irow .item[aria-expanded=true]{background:none}
+.inbox .irow .item[aria-expanded=true]:hover{background:var(--hover)}
+.irow.picked .item .trunc{font-weight:500}
+.item>.chev{margin-top:2px}
+.item:disabled{cursor:default;opacity:.7}.item:disabled:hover{background:none}
+.inbox-group .irow-h{display:grid;grid-template-columns:var(--inbox-leading) minmax(0,1fr) 16px;gap:0 var(--inbox-gap);padding:0 var(--inbox-inset);border-radius:var(--r-md)}
+.inbox-group .irow-h:has(>.btn){grid-template-columns:var(--inbox-leading) minmax(0,1fr) auto 16px}
+.inbox-group .irow-h:hover{background:var(--hover)}
+.inbox-group .irow-h>.item{display:grid;grid-template-columns:subgrid;grid-area:1/1/2/-1;column-gap:inherit;padding-inline:0}
+.inbox .inbox-group .irow-h>.item:is(:hover,:active){background:none}
+.inbox-group .item>.dot{grid-area:1/1;justify-self:center}
+.inbox-group .item>.body{grid-area:1/2}
+.inbox-group .item>.chev{grid-area:1/-2}
+.panel .inbox-group .irow-h>input{grid-area:1/1;justify-self:center;margin:8px 0 0;z-index:1}
+.inbox-group .irow-h>.btn{grid-area:1/3;margin:4px 0 0;z-index:1}
+.irow-b{display:flex;flex-direction:column;gap:8px;min-width:0;padding:4px 8px 10px}
+.irow-b .card,.pane .inbox .card{background:var(--s-card);box-shadow:var(--shadow-xs)}
+
+/* 首页顶上的提示：一行一条，左边是状态点，右边写着点了去哪。不再是一行居中的字 */
+.notes{display:flex;flex-direction:column;gap:4px;min-width:0}
+.note{display:flex;align-items:center;gap:8px;width:100%;min-width:0;min-height:32px;padding:4px 8px 4px 12px;border:0;border-radius:var(--r-md);background:var(--fill);text-align:left;cursor:pointer;transition:background-color var(--ab-t-fast) var(--ab-ease)}
+.note:hover{background:color-mix(in oklab,var(--orca-foreground) 10%,transparent)}
+.note.danger{background:color-mix(in oklab,var(--orca-destructive) 10%,transparent)}
+.note>.go{display:inline-flex;flex:none;align-items:center;gap:2px;font-size:12px;line-height:16px;color:var(--orca-muted-foreground)}
+
+/* 宽排版：左边永远是等你处理；右边默认是组织，点开任何东西就换成详情栏。详情栏贴在顶栏下面，内容自己滚 */
+.layers{--rail:clamp(240px,33%,340px)}
+.home.wide>.organization[inert]{visibility:hidden}
+.layers.has-pane .notes{width:var(--rail)}
+.pane{position:absolute;inset:0;display:flex;flex-direction:column;min-width:0;background:var(--orca-background)}
+.wide-pane{inset:0 12px 12px calc(var(--rail) + 32px);border-radius:var(--r-xl);background:var(--s-card);box-shadow:var(--shadow-sm)}
+html.dark .wide-pane{box-shadow:none}
+.pane:not(.wide-pane)>.pane-top{display:none}
+.pane.closing{pointer-events:none;background:none;box-shadow:none}
+.pane-top{display:flex;flex:none;align-items:center;gap:4px;min-height:48px;padding:8px 10px}
+.pane-layers{position:relative;flex:1;min-height:0;overflow:hidden;border-radius:0 0 var(--r-xl) var(--r-xl);container-type:inline-size}
+.project-lead{min-height:32px;padding:4px 8px;border-radius:var(--r-md);background:var(--s-block)}
+/* 页签：选中的那一格是一个会滑动的块 */
+.tabs{position:relative}
+.tabs>.ind{position:absolute;top:3px;bottom:3px;left:3px;width:calc((100% - 6px)/var(--n));border-radius:var(--r-md);background:var(--orca-background);transform:translateX(calc(var(--i)*100%));transition:transform var(--ab-t-open) var(--ab-ease)}
+html.dark .tabs>.ind{background:color-mix(in oklab,var(--orca-input) 60%,transparent)}
+.tabs>.tab{position:relative;z-index:1;transition:color var(--ab-t-fast) var(--ab-ease)}
+.tabs>.tab[aria-selected=true],html.dark .tabs>.tab[aria-selected=true]{background:none}
+.tab>.n{margin-left:4px;font-weight:400;font-size:12px;opacity:.7}
+
+/* 底部：待提交条和轻提示。整个面板只有这一条提交栏，不管是在清单上勾的还是在详情里选的，都收在这里 */
+.dock{position:relative;z-index:4;min-width:0}
+.sheet{position:static;margin:0;padding:10px 12px 12px;gap:8px;background:none;box-shadow:none}
+/* 提交条的底和朝上的阴影画在外面那一层上：里面那层收起时要裁掉内容，阴影画在里面会被一起裁掉 */
+.dock>.xp{background:var(--orca-popover);color:var(--orca-popover-foreground);transition-property:grid-template-rows,box-shadow}
+.dock>.xp.open{box-shadow:0 -10px 24px #0000001f}html.dark .dock>.xp.open{box-shadow:0 -10px 24px #00000080}
+.tray-list{display:flex;flex-direction:column;gap:2px;max-height:200px;overflow-y:auto;scrollbar-width:thin}
+.tray-row{display:flex;align-items:center;gap:8px;min-height:28px;min-width:0;font-size:12px;line-height:16px}
+.toasts{position:absolute;left:12px;right:12px;bottom:100%;display:flex;justify-content:center;padding-bottom:8px;pointer-events:none}
+.toast{pointer-events:auto;display:flex;align-items:center;gap:8px;max-width:min(420px,100%);padding:6px 6px 6px 12px;border-radius:var(--r-lg);background:var(--orca-primary);color:var(--orca-primary-foreground);box-shadow:0 10px 24px #0000002e;font-size:13px;line-height:20px;animation:ab-in-up var(--ab-t-open) var(--ab-ease-out) both}
+.toast.danger{background:var(--orca-destructive);color:var(--orca-destructive-foreground)}
+.toast .btn{background:color-mix(in oklab,currentColor 16%,transparent);color:inherit}
+.toast .btn:hover{background:color-mix(in oklab,currentColor 26%,transparent)}
+.initial{padding:0 12px}
+.skeleton{display:grid;gap:8px}
+.sk{height:36px;border-radius:var(--r-md);background:var(--s-block);animation:ab-pulse 2s cubic-bezier(.4,0,.6,1) infinite}
+.sk-1{width:56%;height:24px}
+.sk-2,.sk-3{height:58px}
+@keyframes ab-pulse{50%{opacity:.5}}
+.irow{overflow:clip}
+.irow.submitted{min-height:0;padding:6px 8px;color:var(--ab-done-text)}
+.irow-h>.btn{flex:none}
+.btn.grow{flex:1}
+.tray-toggle{justify-content:flex-start}
+.task-details{align-self:flex-start}
+.task-details>.i{order:1}
+.notes>.note{flex:none}
