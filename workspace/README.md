@@ -11,9 +11,11 @@ node workspace/workspace.mjs templates
 
 首次设置将两份角色 skill 安装到 `~/.agents/skills/`，创建 `~/.claude/skills/` 下的目录链接（Windows 使用 junction），并写入 `~/.gemini/config/skills/` 下的 Antigravity 副本。升级会自动刷新归属当前 Orca 配置的 skill，开启新会话即可加载。首次启用 Antigravity 缺副本或收到 hooks 变化提醒时，到「主 agent」页核对路径并确认修复。入口下的 `setup.mjs` 也可用于命令行设置。 [工作间 skill 全文](skill/agentboat-workspace/SKILL.md)
 
-设置向 `~/.claude/settings.json` 和 `${CODEX_HOME}/hooks.json`（缺省 `~/.codex/hooks.json`）各合并三条 AgentBoat hook。用自定义 Codex 用户目录时，在「工作间 → 设置 → 主 agent → 高级选项」填入完整绝对路径，保存后核对预览。命令行入口读取终端的 `CODEX_HOME`。写入前核对同名 skill、链接和 AgentBoat hooks 的归属，保留其他设置及 hook。已有内容备份到 `~/.agentboat/backups/setup-*`，同目录记录已完成项和被替换的 hook 文件位置。
+设置把 AgentBoat hooks 合并到 `~/.claude/settings.json`、`${CODEX_HOME}/hooks.json`（默认 `~/.codex/hooks.json`）和 Antigravity 的 `~/.gemini/config/hooks.json`。用自定义 Codex 用户目录时，在「工作间 → 设置 → 主 agent → 高级选项」填入完整绝对路径，保存后核对预览。命令行入口读取终端的 `CODEX_HOME`。写入前核对同名 skill、链接和 AgentBoat hooks 的归属，保留其他设置及 hook。已有内容备份到 `~/.agentboat/backups/setup-*`，同目录记录已完成项和被替换的 hook 文件位置。
 
-使用 Codex 时，确认 Codex 会话所在的 PATH 可运行 Node.js 22 或更新版本，再在该环境的 CLI 输入 `/hooks`，核对用户级 `hooks.json` 中指向 `agentboat-current/workspace/harness/hook.mjs` 的 `SessionStart`、`PreToolUse` 和 `Stop`，信任后生效。hooks 按工作间已登记的会话匹配角色。 [Codex hooks 文档](https://learn.chatgpt.com/docs/hooks)
+确认代理所在环境的 PATH 可运行 Node.js 22 或更新版本。使用 Codex 时，在 CLI 输入 `/hooks`，信任 AgentBoat 的 `SessionStart`、`UserPromptSubmit`、`PreToolUse` 和 `Stop`。Antigravity 使用 `agentboat-project-lead` 的 `PreInvocation`。升级后在设置页确认补装，重新打开或恢复已有会话。 [Codex hooks 文档](https://learn.chatgpt.com/docs/hooks) [Antigravity hooks 文档](https://antigravity.google/docs/hooks)
+
+新建主会话和面板接管由插件发开场提示和一次性凭据。绑定后，工作间转话自带项目协作提示。直接发给项目主会话的普通请求由 Codex 和 Antigravity 的 hooks 按已绑定的会话补充角色说明，Codex 在恢复时也通过 `SessionStart` 读取项目摘要。两种路径都用原项目编号和已有 Run 继续。
 
 工作间管理员应逐条运行获准的管理和只读命令。需要 stdin 时可用 Bash 的输入重定向或 PowerShell 的 `Get-Content -Raw … | node …`。项目主会话用 `client.mjs submit` 登记成果，并在对应任务的 `executions` 里保留 Orca Run、任务和派工编号。
 

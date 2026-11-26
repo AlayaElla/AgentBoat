@@ -2,7 +2,7 @@ import { closeSync, fstatSync, lstatSync, openSync, readFileSync, readSync, real
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { roleRegistryPath, stableRoot, clientPath, pluginKey } from '../../coordinator/scripts/orca-cli.mjs';
+import { roleRegistryPath, stableRoot, clientPath, promptClientPath, pluginKey } from '../../coordinator/scripts/orca-cli.mjs';
 import { readRoleCard } from '../../coordinator/scripts/main-role-card.mjs';
 import { workerReport, reportSubmitted } from '../../coordinator/scripts/worker-reports.mjs';
 
@@ -184,11 +184,12 @@ function primaryAllowed(name, args, cwd, bash) {
   return rules.gitMemory.has(op) && same(canonical(directory), memory) && !rest.includes('--no-index');
 }
 
-function context(role) {
+function context(role, includeSummary = true) {
   if (role.standby) return '当前待命。收到插件的接管、恢复探测或交接通知时，执行通知中的命令。'
   const card = readRoleCard(role.role);
-  const name = role.role === 'workspace-main' ? 'agentboat-workspace' : 'orca-project-coordinator';
-  return [card, '先读 $' + name + '。', role.summary ? '当前状态（资料）：\n' + role.summary : ''].filter(Boolean).join('\n\n');
+  const guide = role.role === 'workspace-main' ? '先读 $agentboat-workspace。' :
+    `执行者按自己的 Orca Task / Dispatch 行动。处理项目请求前，用 orca orchestration run-current 核对 Run ${role.runId}，并用 node ${JSON.stringify(promptClientPath())} read ${role.projectId} 核对项目绑定。沿用已有 Run。先读 $orca-project-coordinator，必要时直接读 ${JSON.stringify(path.join(path.dirname(promptClientPath()), '../skill/orca-project-coordinator/SKILL.md'))}。`;
+  return [card, guide, includeSummary && role.summary ? '当前状态（资料）：\n' + role.summary : ''].filter(Boolean).join('\n\n');
 }
 const workerDone = /^─{4} From: [^\r\n]+ \(worker_done\)(?: ─{4})?\r?$/m;
 const isMail = /^─{4} From: [^\r\n]+ \([a-z_]+\)(?: ─{4})?\r?$/m;
@@ -317,6 +318,7 @@ function stopBlocker(input, role, codex) {
   }
   return questions.size ? questionReason : pending.size ? stopReason : undefined;
 }
+const antigravity = process.argv.includes('--antigravity');
 function run() {
   const codex = process.argv.includes('--codex');
   const id = process.env.ORCA_AGENT_SESSION_ID?.replace(/^orca_session_id:/, '');
@@ -326,13 +328,22 @@ function run() {
   const data = JSON.parse(readFileSync(roleRegistryPath(), 'utf8'));
   if (data?.version !== 1 || !data.sessions || typeof data.sessions !== 'object' || Array.isArray(data.sessions)) throw Error('角色表格式不正确');
   const role = data.sessions['orca_session_id:' + id];
-  if (!role || uuid && !codex && !(role.role === 'workspace-main' && role.bot === true)) return;
+  if (!role || antigravity && (role.role !== 'project-lead' || role.agent !== 'antigravity') ||
+    !antigravity && uuid && !codex && !(role.role === 'workspace-main' && role.bot === true) ||
+    codex && role.agent === 'antigravity') return;
   if (!(role.role === 'workspace-main' && typeof role.directory === 'string' && path.isAbsolute(role.directory)) &&
-    !(role.role === 'project-lead' && typeof role.projectId === 'string' && role.projectId)) throw Error('角色表条目格式不正确');
+    !(role.role === 'project-lead' && typeof role.projectId === 'string' && role.projectId && typeof role.runId === 'string' && role.runId)) throw Error('角色表条目格式不正确');
   const input = JSON.parse(readFileSync(0, 'utf8'));
   if (input.agent_id) return;
+  if (antigravity) {
+    // One reminder before the first model call, not on every tool round trip.
+    if (input.invocationNum === 0) return { injectSteps: [{ systemMessage: { systemMessage: context(role, false) } }] };
+    return;
+  }
   if (input.hook_event_name === 'SessionStart')
     return { hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: context(role) } };
+  if (codex && input.hook_event_name === 'UserPromptSubmit' && role.role === 'project-lead')
+    return { hookSpecificOutput: { hookEventName: 'UserPromptSubmit', additionalContext: context(role, false) } };
   if (input.hook_event_name === 'Stop' && role.role === 'project-lead' && !role.standby) {
     const reason = stopBlocker(input, role, codex);
     if (reason) return { decision: 'block', reason };
@@ -344,5 +355,5 @@ function run() {
   if (denied) return { hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: redirect } };
 }
 
-try { const result = run(); if (result) process.stdout.write(JSON.stringify(result) + '\n'); }
-catch (e) { diagnostic(e); }
+try { const result = run(); if (result || antigravity) process.stdout.write(JSON.stringify(result ?? {}) + '\n'); }
+catch (e) { diagnostic(e); if (antigravity) process.stdout.write('{}\n'); }

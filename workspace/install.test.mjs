@@ -226,7 +226,7 @@ test('Node diagnosis and a fresh preview stay read-only', t => {
   t.after(() => rmSync(home, { recursive: true, force: true }));
   const config = options(home, path.join(home, 'custom-codex'));
   const preview = previewSetup(config);
-  assert.equal(preview.paths.length, 8);
+  assert.equal(preview.paths.length, 9);
   assert.ok(preview.paths.includes(path.join(config.env.CODEX_HOME, 'hooks.json')));
   const withoutPath = Object.fromEntries(Object.entries(config.env).filter(([key]) => !['PATH', 'PROGRAMFILES', 'LOCALAPPDATA'].includes(key.toUpperCase())));
   withoutPath.ProgramFiles = path.join(home, 'program-files');
@@ -324,7 +324,7 @@ test('setup serializes callers, preserves a last-minute hook edit and retries fr
   assert.equal(readFileSync(hooks, 'utf8'), personal);
   assert.equal(readFileSync(path.join(backup, '.codex/hooks.json'), 'utf8'), initial);
   const completed = readFileSync(path.join(backup, 'completed.jsonl'), 'utf8').trim().split('\n').map(line => JSON.parse(line));
-  assert.equal(completed.length, 7);
+  assert.equal(completed.length, 8);
   assert.ok(completed.includes(settings));
   const retry = previewSetup(config);
   assert.deepEqual(retry.paths, [hooks]);
@@ -488,13 +488,18 @@ test('installer renders both skills in a moved repository, links Claude and copi
     const originalCodex = JSON.stringify(existing, null, 3);
     writeFileSync(codexFile, originalCodex);
     writeFileSync(config, 'model = "fixture"\n[hooks.state]\n');
+    const agyFile = path.join(home, '.gemini/config/hooks.json');
+    const orcaStatus = { PreInvocation: [{ type: 'command', command: 'orca-status-hook' }] };
+    mkdirSync(path.dirname(agyFile), { recursive: true });
+    const originalAgy = JSON.stringify({ 'orca-status': orcaStatus });
+    writeFileSync(agyFile, originalAgy);
     const originalExec = process.execPath;
     let result;
     try {
       process.execPath = path.join(temp, 'orca-electron.exe');
       result = install(home, undefined, moved.previewSetup, moved.applySetup);
     } finally { process.execPath = originalExec; }
-    assert.equal(result.completed.length, 8);
+    assert.equal(result.completed.length, 9);
     function check(dir) {
       for (const e of readdirSync(dir, { withFileTypes: true })) {
         const file = path.join(dir, e.name);
@@ -529,13 +534,17 @@ test('installer renders both skills in a moved repository, links Claude and copi
     const codex = readFileSync(codexFile, 'utf8'), codexHooks = JSON.parse(codex);
     assert.equal(codexHooks.description, 'original');
     assert.deepEqual(codexHooks.hooks.Interrupt, []);
-    for (const event of ['SessionStart', 'PreToolUse', 'Stop']) {
-      assert.deepEqual(codexHooks.hooks[event].slice(0, -1), existing.hooks[event]);
+    for (const event of ['SessionStart', 'PreToolUse', 'UserPromptSubmit', 'Stop']) {
+      assert.deepEqual(codexHooks.hooks[event].slice(0, -1), existing.hooks[event] ?? []);
       assert.match(codexHooks.hooks[event].at(-1).hooks[0].command, /harness\/hook\.mjs['"] --agentboat-role-harness --codex$/);
     }
+    const agy = JSON.parse(readFileSync(agyFile, 'utf8'));
+    assert.deepEqual(agy['orca-status'], orcaStatus);
+    assert.match(agy['agentboat-project-lead'].PreInvocation[0].command, /harness\/hook\.mjs['"] --agentboat-role-harness --antigravity$/);
     const backups = () => readdirSync(path.dirname(result.backup));
     assert.equal(readFileSync(path.join(result.backup, '.codex/hooks.json'), 'utf8'), originalCodex);
     assert.equal(readFileSync(path.join(result.backup, '.claude/settings.json'), 'utf8'), original);
+    assert.equal(readFileSync(path.join(result.backup, '.gemini/config/hooks.json'), 'utf8'), originalAgy);
     assert.deepEqual(install(home, undefined, moved.previewSetup, moved.applySetup), { completed: [] });
     assert.equal(readFileSync(settingsFile, 'utf8'), updated);
     assert.equal(readFileSync(codexFile, 'utf8'), codex);
