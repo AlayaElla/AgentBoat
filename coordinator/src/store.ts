@@ -353,9 +353,12 @@ export function submitTask(project: Project, raw: unknown): void {
     if (artifactIds?.some(id => !task.artifacts.some(a => a.id === id && !a.expired))) fail('待决定项只能关联本任务未过期的成果')
     if (previous) {
       previous.artifactIds = artifactIds
-      if (changedArtifacts) previous.presentedAt = submittedAt
+      if (changedArtifacts) {
+        previous.presentedAt = submittedAt
+        previous.presentationRevision = project.revision + 1
+      }
     }
-    else task.decisions.push({ id: did, question, options, ...(artifactIds && { artifactIds }), history: [], presentedAt: submittedAt })
+    else task.decisions.push({ id: did, question, options, ...(artifactIds && { artifactIds }), history: [], presentedAt: submittedAt, presentationRevision: project.revision + 1 })
   }
   for (const e of list(input.executions ?? [], '执行记录')) {
     const execution = { runId: text(e.runId, 'Run 编号', 200), taskId: text(e.taskId, 'Orca 任务编号', 200), dispatchId: text(e.dispatchId, '派工编号', 200), agent: text(e.agent, '执行代理', 100) }

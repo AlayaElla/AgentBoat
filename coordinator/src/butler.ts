@@ -37,6 +37,7 @@ export class Butler {
   private server?: http.Server
   private timer?: ReturnType<typeof setInterval>
   private chain: Promise<unknown> = Promise.resolve()
+  private starting?: Promise<void>
   private running?: Promise<void>
   private notifying?: Promise<void>
   private waiters = new Set<() => void>()
@@ -47,8 +48,9 @@ export class Butler {
   private get outboundKey() { return `${this.id}:outbound` }
   private async data(): Promise<Data> {
     const saved = await this.api.storage.get(this.key)
-    const d: Data = saved ? structuredClone(object(saved)) as Data : { version: 1, revision: 0, enabled: false, port: 0, url: '', entries: [] }
-    if (d.version !== 1 || !Number.isSafeInteger(d.revision) || !Array.isArray(d.entries)) fail('A2A 记录不兼容，请保留数据并检查版本')
+    const d: Data = saved == null ? { version: 1, revision: 0, enabled: false, port: 0, url: '', entries: [] } : structuredClone(object(saved)) as Data
+    if (d.version !== 1 || !Number.isSafeInteger(d.revision) || !Array.isArray(d.entries) || typeof d.enabled !== 'boolean' ||
+        !Number.isInteger(d.port) || d.port < 0 || d.port > 65535 || typeof d.url !== 'string') fail('A2A 记录不兼容，请保留数据并检查版本')
     return d
   }
   private mutate<T>(fn: (d: Data) => Promise<T> | T): Promise<T> {
@@ -222,7 +224,11 @@ export class Butler {
     })()
     this.notifying = work.finally(() => { this.notifying = undefined }); return this.notifying
   }
-  async start() {
+  start(): Promise<void> {
+    if (this.timer) return Promise.resolve()
+    return this.starting ??= this.recover().finally(() => { this.starting = undefined })
+  }
+  private async recover() {
     const d = await this.data()
     if (d.entries.some(e => e.notification === 'sending' || e.direction === 'outgoing' && !e.remoteId && e.task.status.state === 'TASK_STATE_WORKING')) await this.mutate(d => {
       for (const e of d.entries) {
@@ -233,7 +239,7 @@ export class Butler {
     await this.listen(); this.timer = setInterval(() => { void this.tick().catch(() => {}) }, 3000); this.timer.unref()
     void this.tick().catch(() => {})
   }
-  stop() { clearInterval(this.timer); this.server?.close(); this.server?.closeAllConnections(); this.server = undefined; this.listening = ''; for (const resolve of this.waiters) resolve() }
+  stop() { clearInterval(this.timer); this.timer = undefined; this.server?.close(); this.server?.closeAllConnections(); this.server = undefined; this.listening = ''; for (const resolve of this.waiters) resolve() }
   private async listen() {
     this.server?.close(); this.server?.closeAllConnections(); this.server = undefined; this.listening = ''; this.error = ''
     const d = await this.data(); if (!d.enabled) return

@@ -34,6 +34,14 @@ export class Connections {
     }
     return b
   }
+  private async a2a(e: Entry) {
+    const b = this.instance(e)
+    if (this.started) {
+      try { await b.start() }
+      finally { if (!this.started) b.stop() }
+    }
+    return b
+  }
   async list(): Promise<Connection[]> {
     const entries = await this.directory()
     return Promise.all(entries.map(async e => (await this.detail(e)).connection))
@@ -43,8 +51,13 @@ export class Connections {
       const m = await this.messaging()
       return { feishu: m, connection: { ...e, enabled: m.feishu.enabled, state: m.feishu.enabled ? m.connection.state : 'off', message: m.connection.message } }
     }
-    const b = await this.instance(e).snapshot()
-    return { a2a: b, connection: { ...e, enabled: b.enabled, state: !b.enabled ? 'off' : b.error ? 'error' : b.connection === '已连接' ? 'connected' : 'unchecked', message: b.error } }
+    try {
+      const b = await (await this.a2a(e)).snapshot()
+      return { a2a: b, connection: { ...e, enabled: b.enabled, state: !b.enabled ? 'off' : b.error ? 'error' : b.connection === '已连接' ? 'connected' : 'unchecked', message: b.error } }
+    } catch (error) {
+      const reason = (error as { code?: string })?.code === 'invalid_request' ? 'A2A 记录不兼容' : '无法读取 A2A 连接状态'
+      return { connection: { ...e, enabled: false, state: 'error', message: `${reason}。请保留原数据，恢复后重新打开连接设置重试。` } }
+    }
   }
   handle(input: ConnectionsInput): Promise<Connection[] | ConnectionDetail> {
     const work = this.chain.then(async () => {
@@ -63,7 +76,7 @@ export class Connections {
         if (input.confirm !== true) fail('请确认删除这个连接的设置、凭据和往来记录')
         if (e.type === 'feishu') await this.deleteFeishu()
         else {
-          const b = this.instance(e), s = await b.snapshot()
+          const b = await this.a2a(e), s = await b.snapshot()
           await b.handle({ operation: 'save', revision: s.revision, enabled: false, port: s.port, url: s.url })
           b.stop(); await this.api.storage.delete(`workspace.a2a:${e.id}`)
           await this.api.secrets.delete(`${e.id}:inbound`); await this.api.secrets.delete(`${e.id}:outbound`); this.instances.delete(e.id)
@@ -74,25 +87,29 @@ export class Connections {
         const name = text(input.name, '名字', 100)
         if (entries.some(x => x.id !== e!.id && x.name === name)) fail('连接名字不能重复')
         if (e.type === 'a2a') {
-          for (const other of entries.filter(x => x.type === 'a2a' && x.id !== e!.id)) {
-            const s = await this.instance(other).snapshot()
-            if (input.port !== 0 && input.enabled && s.enabled && s.port === input.port) fail('监听端口已被另一个外部连接使用')
+          if (input.port !== 0 && input.enabled) for (const other of entries.filter(x => x.type === 'a2a' && x.id !== e!.id)) {
+            const { a2a: s } = await this.detail(other)
+            if (s?.enabled && s.port === input.port) fail('监听端口已被另一个外部连接使用')
           }
-          await this.instance(e).handle({ ...input, operation: 'save', revision: creating ? 0 : input.revision })
+          const b = creating ? this.instance(e) : await this.a2a(e)
+          await b.handle({ ...input, operation: 'save', revision: creating ? 0 : input.revision })
         } else await this.saveFeishu({ ...input, operation: 'save', revision: creating ? (await this.messaging()).revision : input.revision })
         e.name = name
         if (creating) entries.push(e)
         this.entries = entries; await this.save()
-        if (creating && this.started && e.type === 'a2a') await this.instance(e).start()
         this.changed()
       } else if (input.operation !== 'read') {
         if (e.type !== 'a2a') fail('该操作只支持 A2A 连接')
-        await this.instance(e).handle(input as ButlerInput)
+        await (await this.a2a(e)).handle(input as ButlerInput)
       }
       return this.detail(e)
     })
     this.chain = work.catch(() => {}); return work
   }
-  async start() { const entries = await this.directory(); this.started = true; for (const e of entries.filter(e => e.type === 'a2a')) await this.instance(e).start() }
-  stop() { for (const b of this.instances.values()) b.stop() }
+  async start() {
+    const entries = await this.directory()
+    this.started = true
+    for (const e of entries.filter(e => e.type === 'a2a')) await this.a2a(e).catch(() => {})
+  }
+  stop() { this.started = false; for (const b of this.instances.values()) b.stop() }
 }

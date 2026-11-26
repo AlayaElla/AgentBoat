@@ -10,7 +10,7 @@ import { checkedPanels } from './panel-result'
 import type { OrcaWorkerApi } from 'orca/worker'
 import { takeoverActive, waitingForProjectLead, actingMain, workspaceBackupInFlight, type AgentSession, type Project, type ProjectLead, type ProjectRef, type Snapshot, type SourceEvent, type Delivery, type MessagingSnapshot } from './model'
 import type { ProjectLeadRequest } from './protocol'
-import { FeishuSources, notifyFeishu, type MessageTransport } from './feishu'
+import { FeishuSources, notifyFeishu, verifyFeishuDecision, type MessageTransport } from './feishu'
 import { OrcaRuntime, defaultExecutable, readTimeout, targetOnline, type CoordinatorRuntime, type TargetInventory } from './runtime'
 import { ProjectStore, artifactUrl, expireArtifact, fail, feedback, fingerprint, fresh, maxMessageLength, notifyWorkspace, object, overview, resetBackup, retainRecent, receiveEvent, recordSource, submitTask, strings, text, revision, mergeProjects, feishuConfig, verifyTakeover, workerFeedbackNotice } from './store'
 import { WorkspaceLinks } from './links'
@@ -569,7 +569,8 @@ export function createCoordinator(api: OrcaWorkerApi, runtime: CoordinatorRuntim
     const sent = [...all.flatMap(p => p.deliveries), ...m.deliveries].filter(d => d.external?.appId === appId && d.external.chatId === event.chatId)
     // Prefer the immediate quoted message; a thread root may refer to a different reminder.
     const quoted = sent.filter(d => d.external?.messageId && d.external.messageId === event.replyToIds?.[0])
-    const target = quoted.length === 1 ? quoted[0].external?.target : undefined
+    const reminder = quoted.length === 1 ? quoted[0] : undefined
+    const target = reminder?.external?.target
     const value = event.text.trim().replace(/^(?:@_user_\d+\s*)+/, '')
     let reply = ''
     if (target) {
@@ -587,12 +588,14 @@ export function createCoordinator(api: OrcaWorkerApi, runtime: CoordinatorRuntim
           if (!result) fail('请回复「通过」或「修改：具体意见」')
         }
         await store.mutate(p.ref.id, undefined, async p => {
+          if (target.kind === 'decision') verifyFeishuDecision(p, reminder)
           const before = structuredClone(p)
           feedback(p, { items: [{ ...target, answer, result, note: `[飞书 ${event.sourceId} / ${event.senderId} / ${event.receivedAt}]\n${event.text}` }] })
           await notify(before, p)
         }, { id: requestId, input: { target, event } })
         defer(p.ref.id)
-        reply = `已记录${target.kind === 'decision' ? '决定' : result === 'passed' ? '验收通过' : '修改意见'}：${p.ref.name} / ${target.taskId} / ${target.itemId} · 第 ${target.itemRevision} 版`
+        reply = `已记录${target.kind === 'decision' ? '决定' : result === 'passed' ? '验收通过' : '修改意见'}：${p.ref.name} / ${target.taskId} / ${target.itemId}` +
+          (target.kind === 'acceptance' ? ` · 第 ${target.itemRevision} 版` : '')
       } catch (e) { reply = e instanceof Error && (e as any).code === 'invalid_request' ? e.message : '记录未完成，请在 App 中核对后再处理' }
     } else if (quoted.length > 1 || (event.replyToIds?.length && !quoted.length) || /^(通过|验收通过|可以|好了|\d+|修改[：:].*|决定[：:].*)$/.test(value)) {
       reply = '请直接回复对应的待决定或待验收提醒，以确定唯一项目、事项和版本；不确定时请在 App 中查看。'

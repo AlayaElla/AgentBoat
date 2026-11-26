@@ -7,7 +7,9 @@ import { notifyFeishu } from './feishu'
 import { mkdir, mkdtemp, readFile, readdir, realpath, rm, symlink, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
-import { pathToFileURL } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
+import { execFile } from 'node:child_process'
+import { promisify } from 'node:util'
 import type { OrcaWorkerApi } from 'orca/worker'
 import type { CoordinatorRuntime } from './runtime'
 import { assertProjectIdle, OrcaRuntime, revealArtifact } from './runtime'
@@ -15,6 +17,7 @@ import { artifactKind } from './artifact-kind'
 import { attention, groupedAttention, taskState } from './model'
 import { inboxLimit, openRunMail, questionWait, questionMaxAge } from '../scripts/orca-questions.mjs'
 import { escalationWait, projectSubmissions, reportSubmitted, reportWait, workerReport } from '../scripts/worker-reports.mjs'
+import { cliBridge } from '../scripts/cli-bridge.mjs'
 const mainSession = { handle: 'orca_session_id:test-main', title: '测试主会话', workspace: 'id:test', workspaceName: '测试工作区', path: '/test', agent: 'claude', online: 'online' as const }
 
 test('panel results reject invalid nested fields and log the request and path before transport', async () => {
@@ -339,6 +342,72 @@ test('connections isolate multiple A2A configs, tokens and histories', async () 
     assert.deepEqual(host.data().storage['workspace.a2a:butler'], first)
     assert.equal(JSON.stringify(host.data().storage).includes(token), false)
   } finally { c.stop(); await worker.deactivate() }
+})
+
+test('an unreadable A2A connection leaves workspace, CLI and healthy recovery available and can recover in place', async () => {
+  const profile = await mkdtemp(path.join(os.tmpdir(), 'agentboat-connection-recovery-'))
+  const oldProfile = process.env.ORCA_USER_DATA_PATH
+  process.env.ORCA_USER_DATA_PATH = profile
+  const token = 'test-only-a2a-token-12345678901234'
+  const inbound = { id: 'incoming', direction: 'incoming', hash: 'fixture', notification: 'pending', task: { id: 'incoming', contextId: 'fixture',
+    status: { state: 'TASK_STATE_INPUT_REQUIRED', timestamp: '2026-11-26T00:00:00.000Z' }, history: [{ messageId: 'incoming', role: 'ROLE_USER', parts: [{ text: 'saved mock notification' }] }] } }
+  const healthy = { version: 1, revision: 0, enabled: true, port: 0, url: 'http://127.0.0.1:1', entries: [inbound] }
+  const unreadable = { ...healthy, version: 2, entries: [] }
+  const project = fresh(refs[0]); project.runId = 'run_project'
+  project.deliveries.push({ id: 'interrupted', subject: 'interrupted', body: 'interrupted', state: 'sending' })
+  const host = mockHost({ storage: {
+    'workspace': { version: 1, revision: 0, runId: 'run_main', requests: [] }, 'project:p1': project as any,
+    'workspace.connections': { version: 1, entries: [{ id: 'broken', name: 'Broken', type: 'a2a' }, { id: 'healthy', name: 'Healthy', type: 'a2a' }] },
+    'workspace.a2a:broken': unreadable, 'workspace.a2a:healthy': healthy
+  }, secrets: { 'broken:inbound': token, 'healthy:inbound': token } })
+  const sent: string[] = []
+  let unavailable = false
+  let c!: ReturnType<typeof createCoordinator>, bridge!: ReturnType<typeof cliBridge>, storage!: OrcaWorkerApi['storage']
+  const worker = await mountWorker({ default: api => {
+    storage = api.storage
+    bridge = cliBridge(api)
+    const state = { ...storage, get: async (key: string) => {
+      if (unavailable && key === 'workspace.a2a:broken') throw Error('fixture storage read failed')
+      return storage.get(key)
+    } }
+    c = createCoordinator({ ...bridge.api, storage: state }, { projects: async () => refs, send: async (_run, d) => { sent.push(d.body); return {} } })
+  } }, { host })
+  try {
+    await c.start()
+    await bridge.start()
+    const client = fileURLToPath(new URL('../scripts/client.mjs', import.meta.url))
+    const { stdout } = await promisify(execFile)(process.execPath, [client, 'overview'], { timeout: 5000, windowsHide: true })
+    const overview = JSON.parse(stdout).result.result
+    assert.ok(overview.projects.some((p: any) => p.ref.id === 'p1'))
+    assert.deepEqual(overview.connections.map((e: any) => [e.id, e.state]), [['broken', 'error'], ['healthy', 'unchecked']])
+    assert.match(overview.connections[0].message, /A2A 记录不兼容.*恢复后重新打开/)
+    assert.equal((await c.store.get('p1')).deliveries[0].state, 'uncertain')
+    assert.equal(sent.filter(body => body.includes('saved mock notification')).length, 1)
+    const read = (connectionId: string) => worker.request('workspace.connections', { operation: 'read', connectionId, includeApprovalMode: false }) as Promise<import('./connections').ConnectionDetail>
+    const broken = await read('broken')
+    assert.equal(broken.a2a, undefined)
+    assert.ok((await read('healthy')).a2a?.listening)
+    await assert.rejects(() => worker.request('workspace.connections', { operation: 'delete', connectionId: 'broken', confirm: true }), /记录不兼容/)
+    assert.deepEqual(host.data().storage['workspace.a2a:broken'], unreadable)
+    assert.equal(host.data().secrets['broken:inbound'], token)
+    unavailable = true
+    assert.match((await read('broken')).connection.message, /无法读取 A2A 连接状态/)
+    unavailable = false
+    await storage.set('workspace.a2a:broken', { ...healthy, entries: [{ ...inbound, notification: 'sending' }] })
+    const [restored, same] = await Promise.all([read('broken'), read('broken')])
+    assert.ok(restored.a2a?.listening)
+    assert.equal(restored.a2a.listening, same.a2a?.listening)
+    assert.equal(restored.a2a.entries[0].notification, 'uncertain')
+    const card = `${restored.a2a.listening}/.well-known/agent-card.json`
+    assert.equal((await fetch(card)).status, 401)
+    assert.equal((await fetch(card, { headers: { Authorization: `Bearer ${token}` } })).status, 200)
+    assert.equal(sent.filter(body => body.includes('saved mock notification')).length, 1)
+  } finally {
+    bridge.stop(); c.stop(); await worker.deactivate()
+    if (oldProfile === undefined) delete process.env.ORCA_USER_DATA_PATH
+    else process.env.ORCA_USER_DATA_PATH = oldProfile
+    await rm(profile, { recursive: true, force: true })
+  }
 })
 
 test('remove uses exact setup, checks every session and terminal, and fails closed on incomplete inventory', async () => {
@@ -1013,7 +1082,7 @@ test('decision artifact patches preserve the question, existing feedback and rep
     const attached = await read()
     await submit('attach', start.revision, patch)
     assert.equal((await read()).revision, attached.revision)
-    assert.deepEqual(attached.tasks[1].decisions[0], { ...original, artifactIds: [artifact.id], presentedAt: attached.tasks[1].submittedAt })
+    assert.deepEqual(attached.tasks[1].decisions[0], { ...original, artifactIds: [artifact.id], presentedAt: attached.tasks[1].submittedAt, presentationRevision: attached.revision })
     assert.equal(attached.tasks[1].blockedRevision, previous.blockedRevision)
     await assert.rejects(() => worker.request('project.expireArtifact', { projectId: 'p1', taskId: task.id, artifactId: artifact.id, revision: attached.revision }), /待决定项/)
     await submit('legacy', attached.revision, { id: original.id, question: original.question })
@@ -1021,7 +1090,7 @@ test('decision artifact patches preserve the question, existing feedback and rep
     assert.deepEqual(legacy.tasks[1].decisions[0].artifactIds, [artifact.id])
     await submit('clear', legacy.revision, { ...patch, artifactIds: [] })
     const cleared = await read()
-    assert.deepEqual(cleared.tasks[1].decisions[0], { ...original, artifactIds: [], presentedAt: cleared.tasks[1].submittedAt })
+    assert.deepEqual(cleared.tasks[1].decisions[0], { ...original, artifactIds: [], presentedAt: cleared.tasks[1].submittedAt, presentationRevision: cleared.revision })
     await submit('reattach', cleared.revision, patch)
     await worker.request('project.feedback', { projectId: 'p1', items: [{ taskId: task.id, kind: 'decision', itemId: original.id,
       answer: original.options[0], fingerprint: fingerprint([original.question, original.options]), note: '保留选择记录' }] })

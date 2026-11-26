@@ -137,6 +137,68 @@ test('old Feishu reminders cannot pass a discarded review or answer a discarded 
   } finally { await f.worker.deactivate() }
 })
 
+test('Feishu answers only the current decision presentation, including when the original artifacts return', async () => {
+  const f = await fixture(false)
+  const first = deliverable.artifacts[0], second = { ...first, id: 'comparison', version: 'v2' }
+  const task = { id: 'choose', phase: 'working' }
+  const choice = { id: 'style', question: '选哪个？', options: ['浅色', '深色'] }
+  const receipt = async () => (await f.coordinator.store.get('p1')).deliveries.filter(d => d.external?.target?.kind === 'decision').at(-1)!
+  try {
+    await f.submit({ ...task, title: '选择方向', goal: '确认方向', artifacts: [first, second], decisions: [choice] }, 'initial')
+    const bare = await receipt()
+    assert.deepEqual(bare.external?.artifacts, [])
+    await f.submit({ ...task, decisions: [{ id: choice.id, artifactIds: [first.id] }] }, 'attach')
+    await f.ingest(event('before-attachment', '1', bare.external?.messageId))
+    assert.match(f.sends.at(-1)!.body, /回复最新提醒/)
+    const original = await receipt()
+    await f.submit({ ...task, decisions: [{ id: choice.id, artifactIds: [second.id] }] }, 'replace')
+    const replaced = await receipt()
+    assert.deepEqual(replaced.external?.artifacts?.map(a => a.id), [second.id])
+    await f.ingest(event('stale', '2', original.external?.messageId))
+    assert.match(f.sends.at(-1)!.body, /回复最新提醒/)
+    assert.equal((await f.coordinator.store.get('p1')).tasks[0].decisions[0].answer, undefined)
+    await f.submit({ ...task, decisions: [{ id: choice.id, artifactIds: [first.id] }] }, 'restore')
+    const current = await receipt()
+    assert.equal(current.external?.target?.itemId, choice.id)
+    assert.notEqual(current.external?.target?.presentation, original.external?.target?.presentation)
+    assert.deepEqual(current.external?.artifacts?.map(a => a.id), [first.id])
+    await f.ingest(event('old-again', '1', original.external?.messageId))
+    assert.match(f.sends.at(-1)!.body, /回复最新提醒/)
+    const answer = event('current', '2', current.external?.messageId)
+    await Promise.all([f.ingest(answer), f.ingest(answer)])
+    await f.coordinator.store.mutateMessaging(m => { m.inbox.find(x => x.event.id === answer.id)!.state = 'pending' })
+    await f.coordinator.start()
+    const saved = (await f.coordinator.store.get('p1')).tasks[0].decisions[0]
+    assert.equal(saved.answer, '深色')
+    assert.deepEqual(saved.history.map(h => h.result), ['深色'])
+  } finally { f.coordinator.stop(); await f.worker.deactivate() }
+})
+
+test('Feishu accepts a provably current legacy reminder and rejects an unprovable receipt', async () => {
+  const f = await fixture(false)
+  const artifact = deliverable.artifacts[0]
+  try {
+    await f.submit({ id: 'choose', title: '选择方向', goal: '确认方向', phase: 'working', artifacts: [artifact], decisions: [
+      { id: 'proved', question: '可核对？', options: ['是'], artifactIds: [artifact.id] },
+      { id: 'unproved', question: '无法核对？', options: ['否'], artifactIds: [artifact.id] }
+    ] }, 'initial')
+    const reminders = await f.coordinator.store.mutate('p1', undefined, p => {
+      for (const d of p.tasks[0].decisions) delete d.presentationRevision
+      for (const delivery of p.deliveries) {
+        const target = delivery.external?.target
+        if (!target) continue
+        delete target.presentation
+        if (target.itemId === 'proved') delivery.createdAt = Date.parse(p.tasks[0].decisions[0].presentedAt!) + 1
+        else delete delivery.createdAt
+      }
+    })
+    for (const id of ['proved', 'unproved']) await f.ingest(event(id, '1', reminders.deliveries.find(d => d.external?.target?.itemId === id)?.external?.messageId))
+    assert.match(f.sends.at(-1)!.body, /版本无法核对/)
+    const [proved, unproved] = (await f.coordinator.store.get('p1')).tasks[0].decisions
+    assert.deepEqual([proved.answer, proved.history.length, unproved.answer, unproved.history.length], ['是', 1, undefined, 0])
+  } finally { f.coordinator.stop(); await f.worker.deactivate() }
+})
+
 test('unknown, ambiguous and unquoted feedback asks for clarification; unauthorized user and chat cannot write', async () => {
   const f = await fixture(false)
   await f.submit(deliverable, 'review')

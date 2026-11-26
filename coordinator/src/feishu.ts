@@ -4,7 +4,7 @@ import http from 'node:http'
 import https from 'node:https'
 import { lookup } from 'node:dns'
 import { isIP } from 'node:net'
-import type { Project, SourceEvent, ConnectionState, Delivery } from './model'
+import type { Project, SourceEvent, ConnectionState, Delivery, Task } from './model'
 import { artifactUrl, fail, fingerprint, workspaceNotices } from './store'
 
 const imageLimit = 10 * 1024 * 1024
@@ -62,17 +62,45 @@ export interface MessageTransport {
   stop(): void
 }
 
+function decisionPresentation(task: Task, decision: Task['decisions'][number]) {
+  const artifacts = task.artifacts.filter(a => !a.expired && decision.artifactIds?.includes(a.id))
+  const version = fingerprint([decision.presentationRevision, decision.presentedAt, decision.artifactIds ?? [], artifacts.map(a => [a.id, a.label, a.url, a.version])])
+  return { version, artifacts }
+}
+
+function feishuNotices(project: Project) {
+  return workspaceNotices(project).map(n => {
+    const decision = n.key[1] === 'decision' ? n.task.decisions.find(d => d.id === n.key[2]) : undefined
+    const presentation = decision && decisionPresentation(n.task, decision)
+    return { ...n, decision, presentation, key: presentation ? [...n.key, presentation.version] : n.key }
+  })
+}
+
+export function verifyFeishuDecision(project: Project, reminder: Delivery) {
+  const target = reminder.external!.target!
+  const task = project.tasks.find(t => t.id === target.taskId)
+  const decision = task?.decisions.find(d => d.id === target.itemId)
+  if (!task || !decision || decision.answer !== undefined) return // Let feedback report closed or missing items.
+  const current = decisionPresentation(task, decision)
+  const matches = target.presentation !== undefined ? target.presentation === current.version
+    // An earlier package saved the full task artifact snapshot and the notice time, but no presentation fingerprint.
+    : decision.presentationRevision === undefined && (reminder.createdAt ?? 0) > Date.parse(decision.presentedAt ?? task.submittedAt ?? task.updatedAt) &&
+      current.artifacts.every(a => reminder.external?.artifacts?.some(b => a.id === b.id && a.label === b.label && a.url === b.url && a.version === b.version))
+  if (!matches) fail('这条飞书提醒已过期或版本无法核对，请回复最新提醒，或在 App 的「等你处理」中回答当前决定。')
+}
+
 export function notifyFeishu(before: Project, after: Project, config: import('./model').FeishuConfig): void {
   if (!config.enabled || after.hidden) return
-  const prior = new Set(workspaceNotices(before).map(n => fingerprint(n.key)))
-  for (const n of workspaceNotices(after)) {
+  const prior = new Set(feishuNotices(before).map(n => fingerprint(n.key)))
+  for (const n of feishuNotices(after)) {
     if (prior.has(fingerprint(n.key))) continue
     const [, kind, itemId] = n.key
-    const d = kind === 'decision' ? n.task.decisions.find(d => d.id === itemId) : undefined
+    const d = n.decision
     const a = kind === 'review' ? n.task.acceptance.find(a => a.id === itemId) : undefined
     const target = d || a ? { projectId: after.ref.id, taskId: n.task.id, kind: d ? 'decision' as const : 'acceptance' as const,
-      itemId: String(itemId), itemRevision: a?.revision ?? 1, fingerprint: a?.fingerprint ?? fingerprint([d!.question, d!.options]) } : undefined
-    const artifacts = a ? n.task.artifacts.filter(x => a.artifactIds.includes(x.id)) : n.task.artifacts
+      itemId: String(itemId), itemRevision: a?.revision ?? 1, fingerprint: a?.fingerprint ?? fingerprint([d!.question, d!.options]),
+      ...(n.presentation && { presentation: n.presentation.version }) } : undefined
+    const artifacts = n.presentation?.artifacts ?? (a ? n.task.artifacts.filter(x => a.artifactIds.includes(x.id)) : n.task.artifacts)
     const details = d ? `${d.question}\n${d.options.map((o, i) => `${i + 1}. ${o}`).join('\n')}\n回复此提醒：选项编号、完整选项或「决定：你的决定」。`
       : a ? `${a.title} · 第 ${a.revision} 版\n${a.details}\n回复此提醒：「通过」或「修改：具体意见」。` : n.action
     for (const chatId of config.chatIds) {
