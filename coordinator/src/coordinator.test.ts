@@ -467,15 +467,35 @@ test('artifact categories prefer trusted metadata, then recognized filenames', (
 })
 
 test('artifact page asks Orca to display an encoded local file URL in the target worktree', async () => {
-  const file = path.resolve('设计资料 space', '页面 #1.htm'), runtime = new OrcaRuntime(async () => 'unused')
+  const file = path.resolve('设计资料 space', '页面 #1.htm'), url = pathToFileURL(file).href
+  let loads = 0, legacy = 0, requests = 0, missing = false, timeout = false, unavailable = false
+  const runtime = new OrcaRuntime(async () => 'unused', cli => {
+    assert.equal(cli, 'unused')
+    loads++
+    if (unavailable) throw Error('Client missing on this host')
+    return { async call(method: string, params: unknown) {
+      requests++
+      assert.equal(method, 'browser.tabCreate')
+      assert.deepEqual(params, { worktree: 'id:target', url, activate: true, navigation: 'all' })
+      if (timeout) throw Object.assign(Error('Timed out'), { code: 'runtime_timeout' })
+      return { ok: true, result: missing ? {} : { browserPageId: 'browser-tab' } }
+    } }
+  })
   ;(runtime as any).call = async (args: string[]) => {
-    assert.ok(pathToFileURL(file).href.endsWith('/%E8%AE%BE%E8%AE%A1%E8%B5%84%E6%96%99%20space/%E9%A1%B5%E9%9D%A2%20%231.htm'))
-    assert.deepEqual(args, ['tab', 'create', '--worktree', 'id:target', '--url', pathToFileURL(file).href, '--focus'])
+    legacy++
+    assert.deepEqual(args, ['tab', 'create', '--worktree', 'id:target', '--url', url, '--focus'])
     return { browserPageId: 'browser-tab' }
   }
+  assert.ok(url.endsWith('/%E8%AE%BE%E8%AE%A1%E8%B5%84%E6%96%99%20space/%E9%A1%B5%E9%9D%A2%20%231.htm'))
   await runtime.openArtifactPage('id:target', file)
-  ;(runtime as any).call = async () => ({})
-  await assert.rejects(() => runtime.openArtifactPage('id:target', file), /Orca 未打开成果标签/)
+  missing = true
+  await assert.rejects(() => runtime.openArtifactPage('id:target', file), /Orca 未确认成果标签/)
+  timeout = true
+  await assert.rejects(() => runtime.openArtifactPage('id:target', file), /Orca 未确认成果标签/)
+  assert.deepEqual([loads, requests, legacy], [3, 3, 0])
+  unavailable = true
+  await runtime.openArtifactPage('id:target', file)
+  assert.deepEqual([loads, requests, legacy], [4, 3, 1])
 })
 
 test('artifact reveal passes native paths as arguments and accepts Explorer exit code 1', async () => {

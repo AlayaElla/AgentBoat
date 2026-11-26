@@ -34,10 +34,13 @@ const pluginsDir = path.dirname(keyDir);
 const versionHash = /^(?:[0-9a-f]{32}|[0-9a-f]{64})$/;
 const installed = release && versionHash.test(path.basename(versionDir)) && path.basename(keyDir) === pluginKey && path.basename(pluginsDir) === 'plugins';
 export const activeUserDataPath = () => installed ? path.dirname(pluginsDir) : userDataPath();
-export function localOrcaRequest(cli, method, params, timeout = 5000) {
+export function localOrcaClient(cli, timeout = 5000) {
   cli = realpathSync(cli);
   const { RuntimeClient } = createRequire(import.meta.url)(path.resolve(path.dirname(cli), '../app.asar.unpacked/out/cli/runtime/client.js'));
-  return new RuntimeClient(activeUserDataPath(), timeout, null, null, cli).call(method, params);
+  return new RuntimeClient(activeUserDataPath(), timeout, null, null, cli);
+}
+export function localOrcaRequest(cli, method, params, timeout = 5000) {
+  return localOrcaClient(cli, timeout).call(method, params);
 }
 export async function ownerMessages(caller, cli, messageId) {
   if (!caller?.startsWith('orca_session_id:') || messageId !== undefined && !messageId.startsWith('orca:'))

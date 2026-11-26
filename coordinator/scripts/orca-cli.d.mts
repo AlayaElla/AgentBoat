@@ -9,6 +9,9 @@ export function refreshReleaseSetup(codexHome?: string): Promise<string | undefi
 export function pluginVersionLabel(): string;
 export const pluginKey: string;
 export function activeUserDataPath(): string;
+export function localOrcaClient(cli: string, timeout?: number): {
+  call(method: string, params: object, options?: { timeoutMs: number }): Promise<{ ok: boolean; result?: unknown; error?: { message?: string } }>;
+};
 export function localOrcaRequest(cli: string, method: string, params: object, timeout?: number): Promise<{ ok: boolean; result?: unknown }>;
 export function ownerMessages(caller: string, cli: string, messageId?: string): Promise<{ messageId: string; text: string; receivedAt: string }[]>;
 export function pluginDataPath(root?: string): string;

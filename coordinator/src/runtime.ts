@@ -15,7 +15,7 @@ import type { HostApi } from 'orca/host'
 import { agentFlags, launchReceipt, validAgentId, type AgentLaunch } from '../../workspace/agent-launch.mjs'
 import { inboxLimit, openRunMail, type OrcaQuestion, type VerifiedOrcaQuestion, type OrcaWorkerRecord } from '../scripts/orca-questions.mjs'
 import { workerReport, type WorkerReport } from '../scripts/worker-reports.mjs'
-import { activeUserDataPath, localOrcaRequest, ownerMessages, pluginKey, release } from '../scripts/orca-cli.mjs'
+import { activeUserDataPath, localOrcaClient, localOrcaRequest, ownerMessages, pluginKey, release } from '../scripts/orca-cli.mjs'
 
 export const readTimeout = 5000
 const execute = promisify(execFile)
@@ -106,12 +106,29 @@ export function projectLeadQuotaReceipt(result: any, sessionId: string, runId: s
 }
 
 export class OrcaRuntime implements CoordinatorRuntime {
-  constructor(private executable: () => Promise<string>) {}
+  constructor(private executable: () => Promise<string>, private artifactClient = localOrcaClient) {}
   async openArtifactPage(workspace: string, file: string) {
     const url = /^https?:\/\//i.test(file) ? new URL(file) : pathToFileURL(file)
     if (url.protocol === 'file:' && url.hostname) fail('仅可预览本机磁盘上的成果')
-    const { browserPageId } = await this.call(['tab', 'create', '--worktree', workspace, '--url', url.href, '--focus'], readTimeout)
-    if (!browserPageId) fail('Orca 未打开成果标签')
+    let client
+    try { client = this.artifactClient(await this.executable(), readTimeout) }
+    catch { /* The packaged client could not be loaded. No request has been sent. */ }
+    let result
+    try {
+      if (client) {
+        const reply = await client.call('browser.tabCreate', { worktree: workspace, url: url.href, activate: true, navigation: 'all' }, { timeoutMs: readTimeout })
+        if (!reply.ok) fail(reply.error?.message ?? 'Orca 未打开成果标签')
+        result = reply.result as { browserPageId?: string } | undefined
+      } else {
+        result = await this.call(['tab', 'create', '--worktree', workspace, '--url', url.href, '--focus'], readTimeout)
+      }
+    } catch (e) {
+      const error = e as { code?: string; killed?: boolean } | null
+      if (error?.killed || error?.code === 'runtime_timeout' || error?.code === 'runtime_unavailable')
+        fail('Orca 未确认成果标签，请查看当前工作区的标签')
+      throw e
+    }
+    if (!result?.browserPageId) fail('Orca 未确认成果标签，请查看当前工作区的标签')
   }
   async openArtifactFile(workspace: string, file: string) {
     await this.call(['file', 'open', file, '--worktree', workspace, '--focus'], readTimeout)
