@@ -4,9 +4,11 @@ import path from 'node:path'
 import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { actingMain, backupInCharge, workspaceBackupInFlight, attention, groupedAttention, labels, projectCounts, type Messaging, type Project, type Workspace } from './model'
 
-type Role = { bot?: boolean; standby?: boolean; role: 'workspace-main'; directory: string; summary?: string } | { standby?: boolean; role: 'project-lead'; projectId: string; runId: string; summary?: string }
+type Role = { bot?: boolean; standby?: boolean; role: 'workspace-main'; directory: string; summary?: string } | { standby?: boolean; role: 'project-lead'; projectId: string; runId: string; agent?: string; summary?: string }
+const uuid = /^orca_session_id:[\da-f]{8}(?:-[\da-f]{4}){3}-[\da-f]{12}$/i
 const chat = (value?: string, agent?: string) => /^orca_session_id:(?:claude|codex)_[\w-]+$/.test(value ?? '') ||
-  agent === 'codex' && /^orca_session_id:[\da-f]{8}(?:-[\da-f]{4}){3}-[\da-f]{12}$/i.test(value ?? '')
+  agent === 'codex' && uuid.test(value ?? '')
+const projectChat = (value: string, agent?: string) => chat(value, agent) || agent === 'antigravity' && uuid.test(value)
 const line = (value: string) => value.replace(/\s+/g, ' ').slice(0, 200)
 
 export function roleRegistry(file: string, read: () => Promise<{
@@ -39,15 +41,17 @@ export function roleRegistry(file: string, read: () => Promise<{
         if (!p.runId) continue
         const primary = p.mainSession?.handle ?? p.mainAgentHandle, taken = backupInCharge(p.backup)
         const standby = taken ? primary : p.backup?.handle, handle = taken ? p.backup?.handle : primary
-        if (standby && chat(standby, taken ? p.mainSession?.agent : p.backup?.agent) && !sessions[standby]) sessions[standby] = { role: 'project-lead', projectId: p.ref.id, runId: p.runId, standby: true }
-        if (!handle || !chat(handle, taken ? p.backup?.agent : p.mainSession?.agent) || sessions[handle]?.role === 'workspace-main') continue
+        const standbyAgent = taken ? p.mainSession?.agent : p.backup?.agent, agent = taken ? p.backup?.agent : p.mainSession?.agent
+        const role = { role: 'project-lead' as const, projectId: p.ref.id, runId: p.runId }
+        if (standby && projectChat(standby, standbyAgent) && !sessions[standby]) sessions[standby] = { ...role, agent: standbyAgent, standby: true }
+        if (!handle || !projectChat(handle, agent) || sessions[handle]?.role === 'workspace-main') continue
         const active = p.tasks.filter(t => t.phase === 'working'), pending = attention({ ...p, hidden: false }).filter(i => i.kind === 'decision' || i.kind === 'review')
         const summary = [
           `项目 ${line(p.ref.name)}，进行中 ${active.length} 项，待决定 ${pending.filter(i => i.kind === 'decision').length} 项，待验收 ${pending.filter(i => i.kind === 'review').length} 项`,
           ...active.slice(0, 10).map(t => `- 进行中：${line(t.title)}`),
           ...pending.slice(0, 15).map(i => `- ${i.kind === 'decision' ? '待决定' : '待验收'}：${line(i.summary)}`)
         ].join('\n')
-        sessions[handle] = { role: 'project-lead', projectId: p.ref.id, runId: p.runId, summary }
+        sessions[handle] = { ...role, agent, summary }
       }
       const json = JSON.stringify({ version: 1, sessions }) + '\n'
       if (json === await readFile(file, 'utf8').catch(e => { if (e.code !== 'ENOENT') throw e })) return

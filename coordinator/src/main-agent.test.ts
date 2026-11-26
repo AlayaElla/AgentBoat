@@ -70,6 +70,7 @@ test('project lead switches only within its workspace and preserves tasks and qu
     assert.ok(requests[0].prompt.includes('$orca-project-coordinator'))
     assert.ok(requests[0].prompt.includes('project-lead-bind'))
     assert.ok(requests[0].prompt.endsWith(roleReminder.project))
+    assert.match(requests[0].prompt, /普通项目请求和工作间转话.*无需触发词/)
     assert.ok(requests[0].subject?.includes('接管项目主会话'))
     assert.equal(JSON.stringify(first).includes('tokenHash'), false)
     const snapshot = await worker.request('project.read', { projectId: 'p1' })
@@ -107,6 +108,16 @@ test('project lead switches only within its workspace and preserves tasks and qu
     await bind(final.binding.revision, 3, 'run_next')
     await c.flush('p1')
     assert.equal(notices.length, 2)
+    const message = '把这个设置的保存提示补上。'
+    const forwarded = await worker.request('workspace.message', { projectId: 'p1', requestId: 'forwarded', runId: 'run_owner', text: message })
+    const source = forwarded.project!.events.find(e => e.source === 'workspace-agent')!
+    await c.flush('p1')
+    const delivery = notices.at(-1)!
+    assert.equal(delivery.run, 'run_next')
+    assert.ok(delivery.body.includes(`来源编号：${source.id}`))
+    assert.ok(delivery.body.endsWith(`${message}\n\n${roleReminder.project}`))
+    assert.match(delivery.body, /已有验收或决定时沿用原项.*paused.*原任务和事项编号.*回复原问题.*独立受阻.*submit/)
+    assert.equal((await c.store.get('p1')).events.find(e => e.id === source.id)?.text, message)
     sessions = []
     const offline = (await read()).binding.session
     assert.equal(offline?.online, 'offline'); assert.equal(offline?.title, replacement.title)
@@ -235,6 +246,7 @@ test('project roles and new leads use the current workspace catalog and Orca lau
       assert.equal(flag('effort'), undefined)
       assert.equal(flag('surface'), undefined)
       assert.equal(flag('worktree'), projectWorkspaceId)
+      assert.ok(flag('prompt')?.endsWith(roleReminder.project))
       await assert.rejects(() => launch(choice), /已发起/)
       await worker.request('project.lead', { projectId: ref.id, revision: result.binding.revision, mode: 'cancel' })
     }

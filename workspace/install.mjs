@@ -52,11 +52,22 @@ function setupEnvironment(env) {
   return node;
 }
 
-function settingsPlan(file, original, handler, matchers, repository, codex) {
+function settingsPlan(file, original, { handler, matchers, codex, antigravity }, repository) {
   const isObject = value => value && typeof value === 'object' && !Array.isArray(value);
   let settings;
   try { settings = original ? JSON.parse(original.toString('utf8').replace(/^\uFEFF/, '')) : {}; }
   catch { throw Error(file + ' 不是有效的 JSON，请修正后重试'); }
+  if (antigravity) {
+    if (!isObject(settings)) throw Error(file + ' 的 hooks 格式不正确');
+    const key = 'agentboat-project-lead', existing = settings[key];
+    if (Object.hasOwn(settings, key) && (!isObject(existing) || !Array.isArray(existing.PreInvocation) ||
+        existing.PreInvocation.length !== 1 || existing.PreInvocation[0]?.command !== handler.command))
+      throw Error(file + ' 的 ' + key + ' 含有其他 Orca 配置或归属未知的 AgentBoat hook');
+    const desired = { ...existing, PreInvocation: [handler] };
+    if (isDeepStrictEqual(existing, desired)) return { registered: true, desired: original };
+    settings[key] = desired;
+    return { registered: !!existing, desired: Buffer.from(JSON.stringify(settings, null, 2) + '\n') };
+  }
   if (!isObject(settings) || settings.hooks !== undefined && !isObject(settings.hooks)) throw Error(file + ' 的 hooks 格式不正确');
   if (settings.disableAllHooks === true) throw Error(file + ' 已关闭所有 hooks');
   const hooks = settings.hooks ??= {};
@@ -99,9 +110,11 @@ function hookTargets(home, codexHome, repository, node) {
     { file: path.join(home, '.claude', 'settings.json'), archive: '.claude/settings.json',
       handler: { type: 'command', command: node, args: [script, marker], timeout: 5, onFailure: 'continue' },
       matchers: { SessionStart: 'startup|resume|compact|clear', PreToolUse: 'Edit|Write|MultiEdit|NotebookEdit|Bash|PowerShell|Monitor', Stop: '' } },
+    { file: path.join(home, '.gemini/config/hooks.json'), archive: '.gemini/config/hooks.json', antigravity: true,
+      handler: { type: 'command', command: 'node ' + quoted + ' ' + marker + ' --antigravity', timeout: 5 } },
     { file: path.join(codexHome, 'hooks.json'), archive: '.codex/hooks.json', codex: true,
       handler: { type: 'command', command: 'node ' + quoted + ' ' + marker + ' --codex', timeout: 5 },
-      matchers: { SessionStart: 'startup|resume|compact|clear|fork', PreToolUse: 'Bash|apply_patch', Stop: '' } },
+      matchers: { SessionStart: 'startup|resume|compact|clear|fork', UserPromptSubmit: '', PreToolUse: 'Bash|apply_patch', Stop: '' } },
   ];
 }
 
@@ -275,9 +288,9 @@ function setupPlan(home, codexHome, repository, node) {
       throw Error('Claude 位置已有其他内容，未覆盖：' + claudeLink);
     linkPlan.desired = linkPlan.before.value ?? shared.before.location;
   }
-  for (const { file, archive, handler, matchers, codex } of hookTargets(home, codexHome, repository, node)) {
-    const plan = add(file, 'hook', archive);
-    plan.desired = settingsPlan(file, plan.before.value, handler, matchers, repository, codex).desired;
+  for (const target of hookTargets(home, codexHome, repository, node)) {
+    const plan = add(target.file, 'hook', target.archive);
+    plan.desired = settingsPlan(target.file, plan.before.value, target, repository).desired;
   }
   const locations = plans.map(plan => plan.before.location);
   for (const [i, location] of locations.entries()) {
@@ -607,9 +620,9 @@ export function refreshInstalledSkills(entry, home = os.homedir(), codexHome = p
     try { withSetupLock(home, refresh); } catch (error) { console.error('AgentBoat 刷新 skill 失败：' + error.message); }
   }
   const node = standaloneNode(process.env);
-  for (const { file, handler, matchers, codex } of hookTargets(home, codexHome, repository, node)) {
+  for (const target of hookTargets(home, codexHome, repository, node)) {
     try {
-      const before = snapshot(file, 'hook').value, plan = settingsPlan(file, before, handler, matchers, repository, codex);
+      const before = snapshot(target.file, 'hook').value, plan = settingsPlan(target.file, before, target, repository);
       configured ||= plan.registered;
       changed ||= !isDeepStrictEqual(before, plan.desired);
     } catch (error) { changed = true; console.error('AgentBoat 检查 hooks 失败：' + error.message); }

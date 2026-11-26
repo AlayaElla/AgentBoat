@@ -609,7 +609,7 @@ try {
     await layer.getByLabel('Bot 代理').selectOption('claude');
     assert.equal(await layer.getByText(/输入 \/hooks/).count(), 0);
     await layer.getByLabel('Bot 代理').selectOption('codex');
-    await layer.getByText(/写入定义后.*SessionStart、PreToolUse 和 Stop.*Codex 会话所在 PATH 可运行 Node ≥22/).waitFor();
+    await layer.getByText(/写入定义后.*SessionStart、UserPromptSubmit、PreToolUse 和 Stop.*Codex 会话所在 PATH 可运行 Node ≥22/).waitFor();
     await layer.getByLabel('Bot 代理').selectOption('antigravity');
     assert.equal(await page.evaluate(() => fixture.calls.filter(c => ['workspace.agent.switch', 'workspace.setup'].includes(c.name)).length), 0);
     await page.evaluate(() => { fixture.failSetup = true; });
@@ -639,7 +639,7 @@ try {
     });
     await layer.getByText(hookPath, { exact: true }).waitFor();
     await layer.getByRole('button', { name: '确认修复' }).click();
-    await layer.getByText(/Codex hook 定义已写入.*SessionStart、PreToolUse 和 Stop/).waitFor();
+    await layer.getByText(/Codex hook 定义已写入.*SessionStart、UserPromptSubmit、PreToolUse 和 Stop/).waitFor();
     assert.equal(await layer.getByRole('button', { name: '确认修复' }).count(), 0);
     const actions = await page.evaluate(() => fixture.calls.filter(c => ['workspace.agent.switch', 'workspace.setup'].includes(c.name)));
     assert.deepEqual(actions.map(c => c.input.setupConfirmation ?? c.input.confirmation), ['a'.repeat(64), 'a'.repeat(64), 'b'.repeat(64)]);

@@ -1471,7 +1471,7 @@ function mainPage() {
         targets.bots === undefined ? small('无法读取 Orca bot 的可用代理') : null]) : null,
     switching ? pendingLead(w.takeover, () => switchMain({ mode: 'cancel' }), true)
       : leadChoices(w, targets?.sessions, switchMain, false, { confirmation: firstConfirmation, blocked: firstBlocked }),
-    usesCodex && setup?.codexHooks ? callout(`${setup.error || setup.paths.includes(setup.codexHooks) ? '写入定义后，' : 'Codex hook 定义已写入。'}在 Codex CLI 输入 /hooks，信任 SessionStart、PreToolUse 和 Stop 后生效。请确认 Codex 会话所在 PATH 可运行 Node ≥22。 ${setup.codexHooks}`) : null,
+    usesCodex && setup?.codexHooks ? callout(`${setup.error || setup.paths.includes(setup.codexHooks) ? '写入定义后，' : 'Codex hook 定义已写入。'}在 Codex CLI 输入 /hooks，信任 SessionStart、UserPromptSubmit、PreToolUse 和 Stop 后生效。请确认 Codex 会话所在 PATH 可运行 Node ≥22。 ${setup.codexHooks}`) : null,
     fold(active.key + '-binding-' + (w.session?.handle ?? ''), '绑定详情', () => el('dl', { class: 'kv' }, Object.entries({ Run: w.runId || '未绑定', 会话: w.session?.handle || '未知', 目录: w.session?.path || '未知', 绑定时间: w.boundAt || '未知', 授权边界: w.securityBoundary || '未知' }).map(([k, v]) => [el('dt', {}, k), el('dd', {}, v)])), undefined,
       !!(w.bot && w.runId && w.session?.handle && !w.takeover))]
 }

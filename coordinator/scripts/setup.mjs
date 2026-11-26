@@ -20,7 +20,7 @@ async function setup() {
   const result = applySetup(plan.confirmation);
   console.log('AgentBoat 的角色 skill 和 hooks 已就绪。');
   if (result.backup) console.log('备份与执行记录：' + result.backup);
-  console.log('若使用 Codex，请确认 Codex 会话所在 PATH 可运行 Node ≥22，并在 Codex CLI 输入 /hooks，信任 SessionStart、PreToolUse 和 Stop。');
+  console.log('若使用 Codex，请确认 Codex 会话所在 PATH 可运行 Node ≥22，并在 Codex CLI 输入 /hooks，信任 SessionStart、UserPromptSubmit、PreToolUse 和 Stop。');
 }
 await setup().catch(error => {
   console.error(error.message);

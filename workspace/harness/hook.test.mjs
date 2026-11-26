@@ -16,13 +16,15 @@ test('Claude role hooks scope actions by Orca identity and fail open', () => {
     'orca_session_id:10000000-0000-4000-9000-000000000001': { role: 'workspace-main', directory: main, bot: true },
     'orca_session_id:10000000-0000-4000-9000-000000000002': { role: 'workspace-main', directory: main },
     'orca_session_id:claude_workspace': { role: 'workspace-main', directory: main, summary: '工作间待处理 1 组' },
-    'orca_session_id:claude_project': { role: 'project-lead', projectId: 'p1', summary: '待验收 1 项' },
+    'orca_session_id:claude_project': { role: 'project-lead', projectId: 'p1', runId: 'run_fixture', summary: '待验收 1 项' },
     'orca_session_id:codex_workspace': { role: 'workspace-main', directory: main, summary: '工作间待处理 1 组' },
-    'orca_session_id:codex_project': { role: 'project-lead', projectId: 'p1', runId: 'run_fixture', summary: '待验收 1 项' }
+    'orca_session_id:codex_project': { role: 'project-lead', projectId: 'p1', runId: 'run_fixture', summary: '待验收 1 项' },
+    'orca_session_id:10000000-0000-4000-9000-000000000003': { role: 'project-lead', agent: 'antigravity', projectId: 'p1', runId: 'run_fixture' },
+    'orca_session_id:10000000-0000-4000-9000-000000000004': { role: 'project-lead', agent: 'antigravity', projectId: 'p1', runId: 'run_fixture', standby: true }
   };
   const hook = fileURLToPath(new URL('./hook.mjs', import.meta.url));
-  const run = (id, input) => {
-    const p = spawnSync(process.execPath, [hook, ...(id.startsWith('codex_') ? ['--codex'] : [])], { encoding: 'utf8', input: typeof input === 'string' ? input : JSON.stringify({ cwd: main, ...input }),
+  const run = (id, input, flags = id.startsWith('codex_') ? ['--codex'] : []) => {
+    const p = spawnSync(process.execPath, [hook, ...flags], { encoding: 'utf8', input: typeof input === 'string' ? input : JSON.stringify({ cwd: main, ...input }),
       env: { ...env, ORCA_AGENT_SESSION_ID: id }, windowsHide: true });
     assert.equal(p.status, 0, p.stderr);
     return { decision: p.stdout ? JSON.parse(p.stdout) : null, stderr: p.stderr };
@@ -58,6 +60,21 @@ test('Claude role hooks scope actions by Orca identity and fail open', () => {
       assert.match(session('claude_project'), /项目管理员.*等待已有验收或决定的后续任务沿用原事项[\s\S]+待验收 1 项/);
       assert.equal(session('claude_worker'), undefined);
     }
+    const ordinary = '请继续补上这个设置的保存提示';
+    const prompt = { hook_event_name: 'UserPromptSubmit', prompt: ordinary };
+    const codexContext = run('codex_project', prompt).decision.hookSpecificOutput.additionalContext;
+    assert.match(codexContext, /无需触发词[\s\S]+submit[\s\S]+run-current 核对 Run run_fixture[\s\S]+read p1/);
+    assert.match(codexContext, /已有验收或决定的后续任务沿用原事项.*paused.*原任务和事项编号.*回复原问题.*独立受阻.*submit/);
+    assert.equal(run('codex_ordinary', prompt).decision, null);
+    assert.equal(run('codex_project', { ...prompt, agent_id: 'worker' }).decision, null);
+    const resume = run('codex_project', { hook_event_name: 'SessionStart', source: 'resume' }).decision.hookSpecificOutput.additionalContext;
+    assert.match(resume, /沿用已有 Run[\s\S]+待验收 1 项/);
+    const agyContext = (id, invocationNum) => run('10000000-0000-4000-9000-00000000000' + id,
+      { invocationNum, lastUserInput: ordinary }, ['--antigravity']).decision.injectSteps?.[0].systemMessage.systemMessage;
+    assert.equal(agyContext(3, 0), codexContext);
+    assert.equal(agyContext(3, 1), undefined);
+    assert.match(agyContext(4, 0), /当前待命/);
+    assert.equal(agyContext(5, 0), undefined);
     assert.equal(run('claude_workspace', 'bad input').decision, null);
     assert.equal(pre('Write', { file_path: path.join(main, 'new/subfile.txt') }), undefined);
     assert.equal(pre('Edit', { file_path: path.join(home, 'memory/log.md') }), undefined);

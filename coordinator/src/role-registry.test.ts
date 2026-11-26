@@ -10,6 +10,7 @@ test('role registry mirrors active bindings, replaces old roles and drops delete
   const dir = mkdtempSync(path.join(os.tmpdir(), 'agentboat-roles-')), file = path.join(dir, 'roles.json')
   const project = sample().project!
   project.mainAgentHandle = 'orca_session_id:claude_previous'
+  const agy = 'orca_session_id:10000000-0000-4000-9000-000000000003'
   let available = [...refs]
   let main: AgentSession = { handle: 'orca_session_id:claude_main', workspace: 'main', workspaceName: '主会话', path: dir, online: 'online', agent: 'claude', title: '主会话' }
   const host = mockHost({ storage: { 'project:p1': project as any } })
@@ -39,7 +40,17 @@ test('role registry mirrors active bindings, replaces old roles and drops delete
     assert.equal(read()['orca_session_id:claude_previous'], undefined)
     assert.equal(read()['orca_session_id:claude_next'].projectId, 'p1')
     await c.checkBackups(); await c.flush('p1')
-    await c.store.mutate('p1', undefined, p => { p.runId = 'run_codex'; p.mainAgentHandle = 'orca_session_id:codex_next' })
+    await c.store.mutate('p1', undefined, p => {
+      p.mainAgentHandle = agy
+      p.mainSession = { ...main, agent: 'antigravity', handle: agy }
+    })
+    await c.start()
+    assert.equal(read()['orca_session_id:claude_next'], undefined)
+    assert.equal(read()[agy].agent, 'antigravity')
+    assert.equal(read()[agy].runId, 'run_next')
+    assert.equal((await c.store.get('p1')).tasks.length, project.tasks.length)
+    await c.store.mutate('p1', undefined, p => { p.runId = 'run_codex'; p.mainAgentHandle = 'orca_session_id:codex_next'; delete p.mainSession })
+    assert.equal(read()[agy], undefined)
     assert.equal(read()['orca_session_id:claude_next'], undefined)
     assert.equal(read()['orca_session_id:codex_next'].runId, 'run_codex')
     await c.store.mutate('p1', undefined, p => { p.backup = { primary: p.mainAgentHandle!, handle: 'orca_session_id:claude_spare', agent: 'claude', phase: 'active', since: 1, cycle: 'test', history: [] } })
