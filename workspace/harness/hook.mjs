@@ -23,7 +23,7 @@ const rules = {
   ])
 };
 const redirect = '你是工作间管理员。已明确归属项目的请求先核对项目身份，再用 client.mjs message 转达用户原话和要求，由项目主会话安排执行。独立工作间事项按 $agentboat-workspace 办理。';
-const stopReason = '执行者已回报。先核对成果，用 submit 登记完成并直接交付。重要阶段确需主人验收时登记待验收。';
+const stopReason = '执行者已回报。先核对成果。主人明确提出的需求有可核对成果时，用 submit 在原任务登记验收并关联成果，沿用原事项。项目内部步骤按进展或完成记入原任务。';
 const questionReason = '有执行者的问题可能需要主人处理。先用 read 核对待处理事项，用 orca orchestration reply 回复原问题。已有同一验收或决定时沿用原项，在回复里注明原任务和事项编号。确需主人另做操作时，用 submit 登记对应事项。';
 const businessQuestionReason = '有待登记的业务决定。核对项目任务和原问题，用 submit 的 orcaQuestionId 关联这条原问题。收到登记回执后结束等待，主人答复入账后用 reply-decision 回送。';
 const diagnostic = error => console.error('AgentBoat hook：' + (error.code || error.name || '读取失败'));

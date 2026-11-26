@@ -79,7 +79,7 @@ const installedHook = JSON.parse(readFileSync(claude, 'utf8')).hooks.SessionStar
 assert.equal(realpathSync(installedHook.args[0]), realpathSync(path.join(release, 'workspace/harness/hook.mjs')));
 for (const [file, bundled, id, pattern] of [
   [skill, 'workspace/skill/agentboat-workspace/SKILL.md', 'claude_workspace', /client\.mjs message.*转给该项目主会话.*小拾检索.*项目主会话组织/],
-  [projectSkill, 'coordinator/skill/orca-project-coordinator/SKILL.md', 'claude_project', /无需触发词.*派给实际执行者.*小拾检索.*小改动由原执行者自查.*重要阶段待验收/]
+  [projectSkill, 'coordinator/skill/orca-project-coordinator/SKILL.md', 'claude_project', /无需触发词.*派给实际执行者.*小拾检索.*主人明确提出的需求有可核对成果后.*原任务提交验收/]
 ]) {
   const published = readFileSync(path.join(release, bundled), 'utf8');
   const actual = readFileSync(file, 'utf8');

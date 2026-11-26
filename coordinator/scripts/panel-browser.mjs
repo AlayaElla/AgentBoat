@@ -1887,7 +1887,7 @@ try {
     assert.equal(await page.evaluate(() => fixture.calls.find(c => c.name === 'project.openArtifact')?.input.connectionId), 'up');
     const preview = async () => {
       await page.locator('#panel[aria-busy="false"]').waitFor();
-      await rightClickArtifact(remoteFile);
+      await remoteFile.dispatchEvent('contextmenu', { clientX: 32, clientY: 32 });
       await page.getByRole('menuitem', { name: '预览或保存共享文件' }).click();
     };
     const openFile = async (name, type, data) => {

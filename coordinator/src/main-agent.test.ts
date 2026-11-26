@@ -76,7 +76,7 @@ test('project lead switches only within its workspace and preserves tasks and qu
     assert.ok(requests[0].prompt.includes('project-lead-bind'))
     assert.ok(requests[0].prompt.endsWith(roleReminder.project))
     assert.match(requests[0].prompt, /普通项目请求和工作间转话.*无需触发词/)
-    assert.match(requests[0].prompt, /核对项目和当前 Run.*按请求拆解并派给实际执行者.*小改动由原执行者自查.*重要阶段需要主人验收/)
+    assert.match(requests[0].prompt, /核对项目和当前 Run.*按请求拆解并派给实际执行者.*主人明确提出的需求有可核对成果时.*在原任务登记验收/)
     assert.ok(requests[0].subject?.includes('接管项目主会话'))
     assert.equal(JSON.stringify(first).includes('tokenHash'), false)
     const snapshot = await worker.request('project.read', { projectId: 'p1' })
