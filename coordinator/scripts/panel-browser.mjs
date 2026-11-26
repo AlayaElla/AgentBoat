@@ -118,6 +118,15 @@ async function setup(options = {}, hub) {
       }
     }
     const live = { ok: true, at: now, agents: [{ id: 'agent-need', projectId: 'p1', agent: 'codex', role: 'worker', state: 'need', rawState: 'waiting', verified: true, title: '等批准', taskTitle: '页面交付', last: '等待用户批准', since: now - 60000, workspaceId: 'identity:project-workspace', terminalId: 'term-need' }, { id: 'agent-work', projectId: 'p1', agent: 'claude', role: 'session', state: 'work', rawState: 'working', verified: false, title: '正在工作', last: '正在处理', since: now - 20000 }] };
+    if (options.inboxResume) {
+      links.name = 'AlayaBook'; live.agents = [];
+      project.ref.name = 'AgentBoat'; task.title = '附属机器工具服务';
+      task.acceptance.push(acceptance('a4'), acceptance('a5'));
+      project.tasks.find(t => t.id === 't3').title = '飞书接到主 agent';
+      project.tasks.find(t => t.id === 'd1').title = 'DrivingCoach 视觉改版与图集换图流程';
+      project.tasks.push({ ...clone(task), id: 't4', title: '项目内沉淀和共享 skill', acceptance: [acceptance('a6')] });
+      projects[1].tasks[0].title = 'AgentBoat Windows v0.1.46 整包更新';
+    }
     if (options.empty || options.projectUnbound) live.agents = [];
     if (options.twoWaitingAgents) live.agents.push({ id: 'agent-chat', projectId: 'p1', agent: 'claude', role: 'session', state: 'need', title: '等待设计决定', since: now - 120000, workspaceId: 'identity:chat-workspace' });
     const workspace = { revision: 1, runId: options.unbound ? '' : 'run_main', ...(!options.unbound ? { session: { handle: 'main', agent: 'claude', title: '统筹会话', online: 'online' } } : {}) };
@@ -152,7 +161,7 @@ async function setup(options = {}, hub) {
       task.acceptance.push(...Array.from({ length: 10 }, (_, i) => acceptance('long-' + i)));
     }
     const calls = [];
-    window.fixture = { project, projects, links, live, workspace, calls, hostCalls: [], stored, workspaceTarget: { workspaceId: 'identity:project-workspace', multipleConversations: true }, emit: () => events['project.changed']?.({}), race: false, prune: () => { task.acceptance[0].revision++; task.acceptance[0].fingerprint = 'new-version'; project.revision++; } };
+    window.fixture = { project, projects, links, live, workspace, calls, hostCalls: [], stored, workspaceTarget: { workspaceId: 'identity:project-workspace', multipleConversations: true }, emit: () => events['project.changed']?.({}), openWorkspace: switching => events['workspace.open']?.({ switching }), race: false, prune: () => { task.acceptance[0].revision++; task.acceptance[0].fingerprint = 'new-version'; project.revision++; } };
     if (options.firstSetup) window.fixture.setup = {
       paths: ['/fixture/.agents/skills/agentboat-workspace', '/fixture/custom-codex/hooks.json'],
       backupRoot: '/fixture/.agentboat/backups', codexHooks: '/fixture/custom-codex/hooks.json', codexHome: '/fixture/custom-codex', confirmation: 'a'.repeat(64)
@@ -466,6 +475,74 @@ try {
     await rail().getByRole('button', { name: '收起' }).click();
     await rail().getByRole('button', { name: '再看 2 条' }).waitFor();
     await page.waitForFunction(() => document.querySelectorAll('.home-layer .inbox [data-inbox-row]').length === 3);
+  });
+  const resumeOptions = { inboxBatch: true, inboxResume: true };
+  await setup({ ...resumeOptions, width: 1040 });
+  await test('pending acceptance stays open when its workspace panel is shown or remounted', async () => {
+    const title = '附属机器工具服务';
+    const workspace = count => rail().getByRole('button', { name: `AlayaBook，${count} 条待处理`, exact: true });
+    const acceptance = area => area.getByText('成果 a1', { exact: true });
+    const storage = () => page.evaluate(() => fixture.stored);
+    const reads = () => page.evaluate(() => fixture.calls.filter(c => c.name === 'workspace.overview').length);
+    const refreshWith = async operation => {
+      const before = await reads();
+      await operation();
+      await page.waitForFunction(n => fixture.calls.filter(c => c.name === 'workspace.overview').length > n, before);
+    };
+    await openReview(title);
+    await workspace(5).waitFor();
+    await review(title).check();
+    await dock().getByRole('button', { name: '已选 4 条 · 1 个项目', exact: true }).waitFor();
+    await page.waitForFunction(() => Object.keys(fixture.stored['panel.feedbackState']?.p1?.entries ?? {}).length === 4);
+    const drafts = (await storage())['panel.feedbackState'];
+    await refreshWith(() => page.evaluate(() => { setTimeout(() => fixture.emit(), 0); }));
+    await refreshWith(() => page.getByRole('button', { name: '刷新', exact: true }).click());
+    await page.waitForFunction(() => !document.querySelector('.top button.spin'));
+    await page.evaluate(() => { fixture.project.tasks.reverse(); fixture.emit(); });
+    await rail().locator('.irow').nth(1).getByRole('button', { name: '项目内沉淀和共享 skill', exact: true }).waitFor();
+    const stable = async () => {
+      assert.equal(await workspace(5).getAttribute('aria-expanded'), 'true');
+      assert.equal(await row(title).getAttribute('aria-expanded'), 'true');
+      await acceptance(currentLayer()).waitFor();
+      assert.deepEqual((await storage())['panel.feedbackState'], drafts);
+    };
+    await stable();
+    await currentLayer().getByRole('button', { name: '任务详情', exact: true }).click();
+    await currentLayer().getByRole('button', { name: '目标', exact: true }).waitFor();
+    await back();
+    await stable();
+    await setup({ ...resumeOptions, width: 1040, stored: await storage() });
+    await stable();
+    await refreshWith(() => page.evaluate(() => fixture.openWorkspace(false)));
+    const wide = await acceptance(currentLayer()).isVisible();
+    assert.equal(await workspace(5).getAttribute('aria-expanded'), 'true');
+    if (wide && process.env.PANEL_EVIDENCE_DIR) {
+      await page.mouse.move(1, 1);
+      await page.screenshot({ path: path.join(process.env.PANEL_EVIDENCE_DIR, 'inbox-acceptance-stays-open.png'), animations: 'disabled' });
+    }
+    await page.evaluate(() => { fixture.project.tasks[0].acceptance.forEach(a => { a.status = 'passed'; }); fixture.emit(); });
+    await row(title).waitFor({ state: 'hidden' });
+    await workspace(4).waitFor();
+    await acceptance(currentLayer()).waitFor({ state: 'detached' });
+    await page.evaluate(() => fixture.openWorkspace(true));
+    await page.locator('.pane-top').getByRole('heading', { name: '主 agent', exact: true }).waitFor();
+
+    await setup(resumeOptions);
+    await rail().getByRole('button', { name: '再看 2 条', exact: true }).click();
+    await openReview(title);
+    await setup({ ...resumeOptions, stored: await storage() });
+    const narrow = await row(title).getAttribute('aria-expanded') === 'true';
+    if (narrow) await acceptance(rail()).waitFor();
+    assert.equal(await workspace(5).getAttribute('aria-expanded'), 'true');
+    await rail().getByRole('button', { name: '收起', exact: true }).click();
+    if (narrow) await row(title).click();
+    await setup({ ...resumeOptions, stored: await storage() });
+    assert.equal(await row(title).getAttribute('aria-expanded'), 'false');
+    assert.equal(await rail().getByRole('button', { name: '再看 2 条', exact: true }).count(), 1);
+    await workspace(5).click();
+    await setup({ ...resumeOptions, stored: await storage() });
+    assert.equal(await workspace(5).getAttribute('aria-expanded'), 'false');
+    assert.deepEqual({ wideAfterWorkspaceOpen: wide, narrowAfterRemount: narrow }, { wideAfterWorkspaceOpen: true, narrowAfterRemount: true });
   });
   await setup({ inboxBatch: true, delegatedFeedback: true, width: 360 });
   await test('narrow home inbox aligns status, text and arrows across row types', async () => {

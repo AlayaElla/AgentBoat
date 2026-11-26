@@ -78,7 +78,13 @@ const persist = (key: string, value: any) => {
     if (!error.startsWith('草稿保存失败')) { error = `草稿保存失败：${e.message}`; render() }
   })
 }
-const remember = () => persist('panel.home', { at: Date.now(), pages: stack.map(f => f.page), opened, tabs: tabsOf, more, collapsedInboxGroups: [...collapsedInboxGroups] })
+const remember = () => persist('panel.home', {
+  at: Date.now(), pages: stack.map(f => f.page), opened, tabs: tabsOf, more, collapsedInboxGroups: [...collapsedInboxGroups],
+  inlineInbox: [...expandedRows].flatMap(id => {
+    const p = id.startsWith(homeFrame.key + '[') ? inlineRows.get(id)?.page : undefined
+    return p?.kind === 'task' ? [p] : []
+  })
+})
 document.addEventListener('visibilitychange', () => { if (document.hidden && all) remember() })
 const key = (t: string, k: string, id: string) => JSON.stringify([t, k, id])
 const choices = (id: string) => drafts[id] ?? {}
@@ -611,11 +617,16 @@ function rowPage(r: InboxRow): Page {
 function openInbox(r: InboxRow, scope: string, keyboard = false) {
   if (wideInbox && scope === homeFrame.key) { void go(rowPage(r), false, keyboard); return }
   const k = scope + r.id
-  if (expandedRows.delete(k)) { if (k === lastInline) lastInline = ''; render(); return }
+  if (expandedRows.delete(k)) {
+    if (k === lastInline) lastInline = ''
+    if (scope === homeFrame.key) remember()
+    render(); return
+  }
   expandedRows.add(k)
   if (scope === homeFrame.key) lastInline = k
   const f = inlineRows.get(k) ?? frameFor(rowPage(r))
   inlineRows.set(k, f)
+  if (scope === homeFrame.key) remember()
   if (active.page.projectId && active.page.projectId === r.projectId && active.data) f.data = active.data
   else { f.data = undefined; f.error = undefined; void loadPage(f).then(render) }
   render()
@@ -1628,7 +1639,7 @@ document.addEventListener('keydown', e => {
   if (e.key === 'Escape' && artifactMenu) closeArtifactMenu(true)
   else if (trayOpen) { trayOpen = false; render() }
   else if (active !== homeFrame) back()
-  else if (e.key === 'Escape' && expandedRows.size && !wideInbox) { expandedRows.clear(); render() }
+  else if (e.key === 'Escape' && expandedRows.size && !wideInbox) { expandedRows.clear(); lastInline = ''; remember(); render() }
   else return
   e.preventDefault()
 })
@@ -1654,10 +1665,19 @@ async function start() {
     if (saved?.at && Date.now() - saved.at < 30 * 60_000) {
       opened = saved.opened ?? opened; Object.assign(tabsOf, saved.tabs); more = !!saved.more
       stack.push(...saved.pages.slice(1).filter((p: Page) => p.kind !== 'question').map((p: Page) => frameFor(p))); useFrame(stack.at(-1)!)
+      if (Array.isArray(saved.inlineInbox)) for (const p of saved.inlineInbox as Page[]) {
+        if (p?.kind !== 'task' || typeof p.inboxRow !== 'string') continue
+        lastInline = homeFrame.key + p.inboxRow
+        expandedRows.add(lastInline)
+        inlineRows.set(lastInline, frameFor(p))
+      }
     }
     orca.plugin.on('panel.draftsChanged', () => { if (!busy && !pendingEdits) void readSheets().then(render).catch(e => { error = e.message; render() }) })
     orca.plugin.on('project.changed', () => { if (!(busy && busyAction.startsWith('提交'))) void refresh() })
-    orca.plugin.on('workspace.open', e => { void go({ kind: e.switching ? 'main' : 'home' }, true).then(() => refresh()) })
+    orca.plugin.on('workspace.open', e => {
+      if (!e.switching && stack.some(f => f.page.inboxRow)) { void refresh(); return }
+      void go({ kind: e.switching ? 'main' : 'home' }, true).then(() => refresh())
+    })
     if (opening?.switching) {
       const f = frameFor({ kind: 'main' }); stack = [homeFrame, f]; useFrame(f)
       await orca.storage.set('workspace.navigation', { switching: false })
