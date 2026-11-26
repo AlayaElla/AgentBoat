@@ -12,7 +12,7 @@ import type { ArtifactProgress } from './link-artifacts'
 import { WorkspaceLinks, endpoint, invitationHost, report } from './links'
 import { roleReminder } from './main-agent'
 import { refs, sample } from './fixtures'
-import { fingerprint, fresh, type FeedbackItem } from './store'
+import { fingerprint, fresh, submitTask, type FeedbackItem } from './store'
 import type { LiveAgent } from './model'
 import { testCoordinator as createCoordinator, testFiles } from './test-runtime'
 
@@ -78,6 +78,7 @@ test('delegated feedback applies once in both directions and rechecks sharing on
     const shared = (await b.worker.request('workspace.overview')).links!.peers[0].report!.projects
     assert.deepEqual(shared.map(p => p.id), ['p1'])
     assert.deepEqual(shared[0].feedback?.tasks[1].decisions[0].options, d.options)
+    assert.equal(Object.hasOwn(shared[0].feedback!.tasks[1].decisions[0], 'artifactIds'), false)
     assert.equal(shared[0].feedback?.tasks[1].blockedRevision, decision.blockedRevision)
     assert.ok(!Object.hasOwn(shared[0].feedback!.tasks[1], 'blockedStatus'))
     assert.equal(shared[0].feedback?.tasks[1].progress, decision.goal)
@@ -292,8 +293,9 @@ test('peer artifacts use authenticated loopback in both directions, cache comple
     const p = side.projects[0], task = p.tasks[0]
     p.ref.path = dir
     const artifact = { id: 'local', label: '设计图', version: 'v1', url: file, expired: false }
-    task.artifacts.push(artifact); task.acceptance[0].artifactIds.push('local')
-    return artifact
+    submitTask(p, { id: task.id, phase: task.phase, artifacts: [artifact, { ...artifact, id: 'unshared' }],
+      decisions: [{ id: 'design', question: '选哪套设计？', options: ['甲', '乙'], artifactIds: [artifact.id] }] })
+    return p.tasks[0].artifacts.find(a => a.id === artifact.id)!
   }
   const local = add(a), remote = add(b)
   try {
@@ -302,6 +304,10 @@ test('peer artifacts use authenticated loopback in both directions, cache comple
     const { id } = (await b.links.join((await a.links.invite()).invitation!.code)).peers[0]
     const share = async (s: typeof a, projectIds: string[]) => s.links.share({ revision: (await s.links.snapshot()).revision, id, scope: 'details', projectIds, delegateFeedback: true })
     await share(a, ['p1']); await share(b, ['p1'])
+    const task = (await b.links.refresh()).peers[0].report!.projects[0].feedback!.tasks[0]
+    assert.deepEqual(task.decisions[0].artifactIds, ['local'])
+    assert.deepEqual(task.artifacts.find(a => a.id === 'local'), { id: 'local', label: '设计图', version: 'v1', url: '', kind: 'document', registeredAt: local.registeredAt })
+    assert.equal(task.artifacts.some(a => a.id === 'unshared'), false)
     // A previous listener returns 404 for the new route. Keep exercising resumable chunks.
     const stream = (a.links as any).stream
     const serve = stream.serve.bind(stream)
@@ -361,9 +367,14 @@ test('peer artifacts use authenticated loopback in both directions, cache comple
     remote.expired = false
     assert.equal((await b.links.snapshot(true)).peers[0].recentMessages?.length, 0)
     await assert.rejects(() => b.links.openArtifact(id, { ...ref, taskId: 'task-2' }), /没有登记/)
+    await assert.rejects(() => b.links.openArtifact(id, { ...ref, artifactId: 'unshared' }), /未关联开放/)
+    const decision = a.projects[0].tasks[0].decisions[0]
+    decision.answer = '甲'; await assert.rejects(get, /未关联开放/); delete decision.answer
     local.expired = true; await assert.rejects(get, /过期/)
     local.expired = false; await share(a, []); await assert.rejects(get, /未开放/)
     await share(a, ['p1'])
+    await a.links.share({ id, revision: (await a.links.snapshot()).revision, scope: 'details', projectIds: ['p1'], delegateFeedback: false })
+    await assert.rejects(get, /未开放/); await share(a, ['p1'])
     a.projects[0].hidden = true; await assert.rejects(get, /未开放/); a.projects[0].hidden = false
     const outside = path.join(root, 'elsewhere.txt')
     await writeFile(outside, 'test')

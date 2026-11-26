@@ -20,7 +20,7 @@ type Scope = 'none' | 'summary' | 'details'
 const catalogPollMin = 2_000, catalogPollMax = 8_000
 export interface Sharing { scope: Scope; allProjects: boolean; projectIds: string[]; delegateFeedback?: boolean }
 export type FeedbackTask = Pick<Task, 'id' | 'title' | 'phase' | 'blockedRevision' | 'blockedStatus'> & {
-  decisions: Pick<Task['decisions'][number], 'id' | 'question' | 'options' | 'answer'>[]
+  decisions: Omit<Task['decisions'][number], 'history' | 'archivedHistory'>[]
   acceptance: Omit<Task['acceptance'][number], 'history'>[]
   artifacts: Task['artifacts']
   goal?: string; progress?: string
@@ -109,11 +109,12 @@ const canDelegate = (p: Sharing) => p.scope === 'details' && p.delegateFeedback 
 function delegatedProject(p: Project): DelegatedProject {
   return { revision: p.revision, tasks: p.tasks.flatMap(t => {
     if (t.phase === 'paused') return []
-    const decisions = t.decisions.filter(d => d.answer === undefined).map(({ id, question, options }) => ({ id, question, options }))
+    const decisions = t.decisions.filter(d => d.answer === undefined).map(({ id, question, options, artifactIds }) =>
+      ({ id, question, options, ...(artifactIds && { artifactIds: artifactIds.filter(id => t.artifacts.some(a => a.id === id && !a.expired)) }) }))
     const acceptance = t.phase === 'ready' ? t.acceptance.filter(a => a.status === 'pending').map(({ id, title, details, artifactIds, revision, status, fingerprint }) => ({ id, title, details, artifactIds, revision, status, fingerprint })) : []
     const version = blockedRevision(t)
     if (!decisions.length && !acceptance.length && version === undefined) return []
-    const ids = new Set(acceptance.flatMap(a => a.artifactIds))
+    const ids = new Set([...acceptance, ...decisions].flatMap(a => a.artifactIds ?? []))
     const artifacts = t.artifacts.filter(a => ids.has(a.id) && !a.expired).map(a => {
       const { id, label, version, registeredAt } = a, url = /^https?:\/\//i.test(a.url) ? a.url : ''
       const kind = artifactKind(a)
@@ -236,7 +237,8 @@ function receivedFeedback(raw: unknown): DelegatedProject {
     if (t.blockedRevision !== undefined && (t.phase !== 'blocked' || t.blockedStatus !== undefined && t.blockedStatus !== 'replied')) fail('对端受阻项格式不正确')
     return { id: text(t.id, '任务编号', 200), title: text(t.title, '任务名称', 200), phase: t.phase,
       ...(t.blockedRevision !== undefined && { blockedRevision: revision(t.blockedRevision), ...(t.blockedStatus && { blockedStatus: t.blockedStatus }), progress: text(t.progress, '受阻说明', 16000) }),
-      decisions: list(t.decisions, 100).map(d => ({ id: text(d.id, '决定编号', 200), question: text(d.question, '问题', 4000), options: strings(d.options, '选项', 10).map(x => text(x, '选项', 200)) })),
+      decisions: list(t.decisions, 100).map(d => ({ id: text(d.id, '决定编号', 200), question: text(d.question, '问题', 4000), options: strings(d.options, '选项', 10).map(x => text(x, '选项', 200)),
+        ...(d.artifactIds !== undefined && { artifactIds: strings(d.artifactIds, '关联成果') }) })),
       acceptance: list(t.acceptance, 100).map(a => {
         if (t.phase !== 'ready' || a.status !== 'pending' || typeof a.fingerprint !== 'string' || !/^[0-9a-f]{64}$/.test(a.fingerprint)) fail('对端验收格式不正确')
         return { id: text(a.id, '验收编号', 200), title: text(a.title, '验收标题', 200), details: text(a.details, '验收步骤', 8000), artifactIds: strings(a.artifactIds, '成果编号'), revision: revision(a.revision), fingerprint: a.fingerprint, status: 'pending' }

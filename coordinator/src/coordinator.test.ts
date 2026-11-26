@@ -936,6 +936,53 @@ test('expiring an artifact with no reason keeps a resolved blocker quiet', () =>
   assert.deepEqual(p.deliveries, [])
 })
 
+test('decision artifact patches preserve the question, existing feedback and replay identity', async () => {
+  const p = sample().project!, [, task] = p.tasks, original = task.decisions[0]
+  const artifact = { ...deliverable.artifacts[0], id: 'comparison' }
+  submitTask(p, { id: task.id, phase: task.phase, artifacts: [artifact] })
+  const host = mockHost({ storage: { 'project:p1': p as any } })
+  let c!: ReturnType<typeof createCoordinator>
+  const worker = await mountWorker({ default: api => { c = createCoordinator(api, { projects: async () => refs }) } }, { host })
+  const read = () => c.store.get('p1')
+  const patch = { id: original.id, artifactIds: [artifact.id] }
+  const submit = (requestId: string, rev: number, decision: object, artifacts?: object[]) => worker.request('project.agent', {
+    projectId: 'p1', operation: 'submit', revision: rev, requestId, runId: p.runId,
+    task: { id: task.id, phase: task.phase, decisions: [decision], ...(artifacts && { artifacts }) }
+  })
+  try {
+    const start = await read(), previous = start.tasks[1]
+    assert.equal(previous.decisions[0].artifactIds, undefined)
+    await assert.rejects(() => submit('foreign', start.revision, { ...patch, artifactIds: ['page-v1'] }), /本任务未过期/)
+    await assert.rejects(() => submit('options', start.revision, { ...patch, options: ['另一个'] }), /新选项/)
+    await assert.rejects(() => submit('expire-together', start.revision, patch, [{ id: artifact.id, expired: true }]), /待决定项/)
+    assert.deepEqual(await read(), start)
+    await submit('attach', start.revision, patch)
+    const attached = await read()
+    await submit('attach', start.revision, patch)
+    assert.equal((await read()).revision, attached.revision)
+    assert.deepEqual(attached.tasks[1].decisions[0], { ...original, artifactIds: [artifact.id] })
+    assert.equal(attached.tasks[1].blockedRevision, previous.blockedRevision)
+    await assert.rejects(() => worker.request('project.expireArtifact', { projectId: 'p1', taskId: task.id, artifactId: artifact.id, revision: attached.revision }), /待决定项/)
+    await submit('legacy', attached.revision, { id: original.id, question: original.question })
+    const legacy = await read()
+    assert.deepEqual(legacy.tasks[1].decisions[0].artifactIds, [artifact.id])
+    await submit('clear', legacy.revision, { ...patch, artifactIds: [] })
+    const cleared = await read()
+    assert.deepEqual(cleared.tasks[1].decisions[0], { ...original, artifactIds: [] })
+    await submit('reattach', cleared.revision, patch)
+    await worker.request('project.feedback', { projectId: 'p1', items: [{ taskId: task.id, kind: 'decision', itemId: original.id,
+      answer: original.options[0], fingerprint: fingerprint([original.question, original.options]), note: '保留选择记录' }] })
+    const answered = await read(), resolved = answered.tasks[1].decisions[0]
+    assert.equal(resolved.answer, original.options[0]); assert.equal(resolved.history[0].note, '保留选择记录')
+    await assert.rejects(() => submit('change-answered', answered.revision, { ...patch, artifactIds: [] }), /只能更新待决定项/)
+    await submit('expire-answered', answered.revision, patch, [{ id: artifact.id, expired: true }])
+    const saved = await read()
+    assert.deepEqual(saved.tasks[1].decisions[0], resolved)
+    assert.equal(saved.tasks[1].artifacts[0].expired, true)
+    await assert.rejects(() => submit('expired-link', saved.revision, { id: 'new', question: '新问题？', artifactIds: [artifact.id] }), /本任务未过期/)
+  } finally { c.stop(); await worker.deactivate() }
+})
+
 test('task updates preserve omitted titles and goals and validate supplied values', () => {
   const p = fresh(refs[0]), update = { id: deliverable.id, phase: 'working' }
   assert.throws(() => submitTask(p, update), /任务标题/)
