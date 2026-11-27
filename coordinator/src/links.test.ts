@@ -104,15 +104,25 @@ test('delegated feedback applies once in both directions and rechecks sharing on
     assert.equal((await a.c.store.get('p1')).tasks[0].acceptance[0].status, 'pending')
     const contents = Buffer.from('两个工作间间的验收附件')
     const file = { id: randomUUID(), name: '反馈.txt', size: contents.length, sha256: createHash('sha256').update(contents).digest('hex') }
+    const decisionFile = { ...file, id: randomUUID(), name: '决定反馈.txt' }
     const remoteTarget = { projectId: JSON.stringify([id, 'p1']), taskId: review.id, itemId: check.id, itemRevision: check.revision, fingerprint: check.fingerprint }
+    const decisionTarget = { ...remoteTarget, kind: 'decision' as const, taskId: decision.id, itemId: d.id, itemRevision: 1,
+      presentationRevision: d.presentationRevision, fingerprint: items[1].fingerprint! }
     assert.equal(shared[0].feedback!.attachmentFeedback, true)
+    assert.equal(shared[0].feedback!.decisionAttachments, true)
+    assert.equal(shared[0].feedback!.tasks[1].decisions[0].presentationRevision, d.presentationRevision)
     await b.worker.request('panel.feedbackFile', { ...remoteTarget, file, offset: 0, data: contents.toString('base64') })
-    const attached = { ...request, items: [{ ...items[0], attachments: [file] }, ...items.slice(1)] }
+    await b.worker.request('panel.feedbackFile', { ...decisionTarget, file: decisionFile, offset: 0, data: contents.toString('base64') })
+    const attached = { ...request, items: [{ ...items[0], attachments: [file] },
+      { ...items[1], itemRevision: 1, presentationRevision: d.presentationRevision, attachments: [decisionFile] }, items[2]] }
     assert.match((await send(b, { ...attached, projectId: 'p2' })).reason!, /不支持验收附件/)
     const currentRemote = (b.c.links as any).incoming.get(id).report.projects.find((pr: { id: string }) => pr.id === 'p1').feedback
     delete currentRemote.attachmentFeedback
     assert.match((await send(b, attached)).reason!, /不支持验收附件/)
     currentRemote.attachmentFeedback = true
+    delete currentRemote.decisionAttachments
+    assert.match((await send(b, attached)).reason!, /不支持决定附件/)
+    currentRemote.decisionAttachments = true
     assert.match((await send(b, { ...attached, items: [{ ...items[0], attachments: [{ ...file, size: 96 * 1024 + 1 }] }] })).reason!, /96 KiB/)
     assert.equal((await a.c.store.get('p1')).tasks[0].acceptance[0].status, 'pending')
     const receiver = a.c.links as any, receive = receiver.receiveFeedback.bind(receiver)
@@ -120,7 +130,7 @@ test('delegated feedback applies once in both directions and rechecks sharing on
     receiver.receiveFeedback = (peer: unknown, exchange: any) => {
       if (exchange?.attachmentRequest) {
         assert.equal(exchange.request, undefined)
-        assert.deepEqual(exchange.attachmentRequest, { request: attached, data: { [file.id]: contents.toString('base64') } })
+        assert.deepEqual(exchange.attachmentRequest, { request: attached, data: { [file.id]: contents.toString('base64'), [decisionFile.id]: contents.toString('base64') } })
         attachedPackets++
       }
       return receive(peer, exchange)
@@ -148,6 +158,8 @@ test('delegated feedback applies once in both directions and rechecks sharing on
     assert.deepEqual(savedCheck.history[0].attachments, [file])
     const receivedFile = { projectId: 'p1', taskId: review.id, itemId: check.id, itemRevision: check.revision, attachmentId: file.id }
     assert.equal(await a.worker.request('project.feedbackFile', { ...receivedFile, offset: 0 }), contents.toString('base64'))
+    assert.equal(await a.worker.request('project.feedbackFile', { projectId: 'p1', taskId: decision.id, kind: 'decision',
+      itemId: d.id, itemRevision: 1, attachmentId: decisionFile.id, offset: 0 }), contents.toString('base64'))
     await assert.rejects(() => b.worker.request('project.feedbackFile', receivedFile), /不属于指定/)
     assert.equal((await a.c.store.get('p1')).tasks[1].decisions[0].history[0].source, '主人在工作间 乙工作间 提交')
     const replies = (await a.c.store.get('p1')).events
@@ -168,7 +180,7 @@ test('delegated feedback applies once in both directions and rechecks sharing on
       const deadline = Date.now() + 3000
       while (!await condition()) { assert.ok(Date.now() < deadline, 'timed out waiting for link update'); await delay(10) }
     }
-    await until(() => listener.waiters.has(id))
+    await until(() => listener.waiters.has(id) && !dialer.syncing.has(id))
     let watcherReports = 0
     const dialerSync = dialer.sync.bind(dialer)
     dialer.sync = (peerId: string, signal?: AbortSignal, feedbackOnly?: boolean) => {

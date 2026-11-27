@@ -13,7 +13,7 @@ import { LinkArtifacts, artifactRef, streamTimeout, type ArtifactExchange, type 
 import { ArtifactStream } from './artifact-stream'
 import { artifactKind, knownArtifactKind } from './artifact-kind'
 import { LinkFiles } from './link-files'
-import { delegatedFeedbackFilesUnavailable } from './feedback-drafts'
+import { feedbackFileUnavailable } from './feedback-drafts'
 import { setTimeout as delay } from 'node:timers/promises'
 import { validAgentId } from '../../workspace/agent-launch.mjs'
 
@@ -26,7 +26,7 @@ export type FeedbackTask = Pick<Task, 'id' | 'title' | 'phase' | 'blockedRevisio
   artifacts: Task['artifacts']
   goal?: string; progress?: string
 }
-type DelegatedProject = { revision: number; tasks: FeedbackTask[]; attachmentFeedback?: true }
+type DelegatedProject = { revision: number; tasks: FeedbackTask[]; attachmentFeedback?: true; decisionAttachments?: true }
 export interface DelegatedFeedback { projectId: string; revision: number; requestId: string; items: FeedbackItem[] }
 export type FeedbackReply = { requestId: string; state: 'submitted' | 'rejected' | 'uncertain'; fingerprint?: string; reason?: string }
 type AttachmentData = Record<string, string>
@@ -109,10 +109,11 @@ const publicAgent = (value: string) => knownAgent(value) ? value : ''
 const canDelegate = (p: Sharing) => p.scope === 'details' && p.delegateFeedback === true
 
 function delegatedProject(p: Project): DelegatedProject {
-  return { revision: p.revision, attachmentFeedback: true, tasks: p.tasks.flatMap(t => {
+  return { revision: p.revision, attachmentFeedback: true, decisionAttachments: true, tasks: p.tasks.flatMap(t => {
     if (t.phase === 'paused') return []
-    const decisions = t.decisions.filter(d => d.answer === undefined).map(({ id, question, options, artifactIds }) =>
-      ({ id, question, options, ...(artifactIds && { artifactIds: artifactIds.filter(id => t.artifacts.some(a => a.id === id && !a.expired)) }) }))
+    const decisions = t.decisions.filter(d => d.answer === undefined).map(({ id, question, options, artifactIds, presentationRevision }) =>
+      ({ id, question, options, ...(presentationRevision !== undefined && { presentationRevision }),
+        ...(artifactIds && { artifactIds: artifactIds.filter(id => t.artifacts.some(a => a.id === id && !a.expired)) }) }))
     const acceptance = t.phase === 'ready' ? t.acceptance.filter(a => a.status === 'pending').map(({ id, title, details, artifactIds, revision, status, fingerprint }) => ({ id, title, details, artifactIds, revision, status, fingerprint })) : []
     const version = blockedRevision(t)
     if (!decisions.length && !acceptance.length && version === undefined) return []
@@ -234,12 +235,14 @@ function received(raw: unknown, peer: Peer): SharedReport {
 function receivedFeedback(raw: unknown): DelegatedProject {
   const r = object(raw)
   const list = (value: unknown, max: number) => Array.isArray(value) && value.length <= max ? value.map(object) : fail('对端待处理列表格式不正确')
-  return { revision: revision(r.revision), ...(r.attachmentFeedback === true && { attachmentFeedback: true }), tasks: list(r.tasks, 1000).map(t => {
+  return { revision: revision(r.revision), ...(r.attachmentFeedback === true && { attachmentFeedback: true }),
+    ...(r.decisionAttachments === true && { decisionAttachments: true }), tasks: list(r.tasks, 1000).map(t => {
     if (!['working', 'ready', 'completed', 'blocked'].includes(t.phase)) fail('对端待处理任务状态不正确')
     if (t.blockedRevision !== undefined && (t.phase !== 'blocked' || t.blockedStatus !== undefined && t.blockedStatus !== 'replied')) fail('对端受阻项格式不正确')
     return { id: text(t.id, '任务编号', 200), title: text(t.title, '任务名称', 200), phase: t.phase,
       ...(t.blockedRevision !== undefined && { blockedRevision: revision(t.blockedRevision), ...(t.blockedStatus && { blockedStatus: t.blockedStatus }), progress: text(t.progress, '受阻说明', 16000) }),
       decisions: list(t.decisions, 100).map(d => ({ id: text(d.id, '决定编号', 200), question: text(d.question, '问题', 4000), options: strings(d.options, '选项', 10).map(x => text(x, '选项', 200)),
+        ...(d.presentationRevision !== undefined && { presentationRevision: revision(d.presentationRevision) }),
         ...(d.artifactIds !== undefined && { artifactIds: strings(d.artifactIds, '关联成果') }) })),
       acceptance: list(t.acceptance, 100).map(a => {
         if (t.phase !== 'ready' || a.status !== 'pending' || typeof a.fingerprint !== 'string' || !/^[0-9a-f]{64}$/.test(a.fingerprint)) fail('对端验收格式不正确')
@@ -629,7 +632,7 @@ export class WorkspaceLinks {
   async submitFeedback(connectionId: string, input: unknown, loadAttachments?: (request: DelegatedFeedback) => Promise<AttachmentData>): Promise<FeedbackReply> {
     const request = feedbackRequest(input)
     const reject = (reason: string): FeedbackReply => ({ requestId: request.requestId, state: 'rejected', reason })
-    const hasAttachments = request.items.some(item => item?.attachments !== undefined)
+    const attached = request.items.filter(item => item?.attachments !== undefined)
     const { endpoint, result } = await this.serial(async () => {
       const p = (await this.data()).peers.find(p => p.id === connectionId && p.state === 'active')
       if (!p) fail('连接已断开')
@@ -638,11 +641,16 @@ export class WorkspaceLinks {
       const incoming = this.incoming.get(p.id)
       if (!incoming || incoming.offline || Date.now() - Date.parse(incoming.receivedAt) >= 35_000) fail('对方离线，暂不能提交')
       let attachmentData: AttachmentData | undefined
-      if (hasAttachments) {
-        if (!loadAttachments || !incoming.report.projects.find(pr => pr.id === request.projectId)?.feedback?.attachmentFeedback)
-          return { result: Promise.resolve(reject(delegatedFeedbackFilesUnavailable)) }
+      if (attached.length) {
+        const visible = incoming.report.projects.find(pr => pr.id === request.projectId)?.feedback
+        for (const item of attached) {
+          if (item.kind !== 'acceptance' && item.kind !== 'decision') return { result: Promise.resolve(reject('附件只能随决定或验收反馈提交')) }
+          const reason = feedbackFileUnavailable(visible, item.kind)
+          if (reason) return { result: Promise.resolve(reject(reason)) }
+        }
+        if (!loadAttachments) return { result: Promise.resolve(reject('请从工作间面板提交附件')) }
         try { attachmentData = await loadAttachments(request) }
-        catch (e) { return { result: Promise.resolve(reject(e instanceof Error ? e.message : '验收附件无法读取')) } }
+        catch (e) { return { result: Promise.resolve(reject(e instanceof Error ? e.message : '附件无法读取')) } }
       }
       if (Buffer.byteLength(JSON.stringify(attachmentData ? { attachmentRequest: { request, data: attachmentData } } : { request })) > LIMIT - 16_000)
         return { result: Promise.resolve(reject('反馈和附件内容过大，请减少本次提交内容')) }
@@ -677,7 +685,7 @@ export class WorkspaceLinks {
     try {
       if (!canDelegate(p) || !this.applyFeedback) fail('对方未允许代为处理')
       if (attached && (exchange.request !== undefined || attached.data === undefined || !request.items.some(item => item?.attachments !== undefined)))
-        fail('对方未传来完整的验收附件')
+        fail('对方未传来完整的反馈附件')
       const fingerprint = await this.applyFeedback(p, request, attached?.data)
       if (!fingerprint) throw Error('没有写入凭证')
       return { requestId, state: 'submitted', fingerprint } as const

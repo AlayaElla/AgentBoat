@@ -65,11 +65,13 @@ syncBuiltinESMExports();`);
     assert.deepEqual(projectLead('project-lead-bind', bindInput), { ok:true, handler:'project.agent', input:{
       ...bindInput, operation:'bind', caller:'orca_session_id:project-chat', currentRunId:'run_self' } });
     const attachmentId = '24778cb9-0028-4bbd-b12a-90dce6316d51';
-    const locate = JSON.parse(execFileSync(process.execPath,
-      ['--import', pathToFileURL(fixture).href, 'scripts/client.mjs', 'feedback-file', 'p1', 'task-1', 'page-check', '2', attachmentId],
+    const locate = (...args) => JSON.parse(execFileSync(process.execPath,
+      ['--import', pathToFileURL(fixture).href, 'scripts/client.mjs', 'feedback-file', 'p1', 'task-1', 'page-check', '2', attachmentId, ...args],
       { encoding:'utf8', windowsHide:true, env:{ ...process.env, ORCA_AGENT_SESSION_ID:'project-chat' } }));
-    assert.deepEqual(locate, { ok:true, handler:'project.locateFeedbackFile', input:{ projectId:'p1', taskId:'task-1', itemId:'page-check',
-      itemRevision:2, attachmentId, caller:'orca_session_id:project-chat', runId:'run_self' } });
+    const lookup = { ok:true, handler:'project.locateFeedbackFile', input:{ projectId:'p1', taskId:'task-1', itemId:'page-check',
+      itemRevision:2, attachmentId, caller:'orca_session_id:project-chat', runId:'run_self' } };
+    assert.deepEqual(locate(), lookup);
+    assert.deepEqual(locate('--decision'), { ...lookup, input: { ...lookup.input, kind: 'decision' } });
   } finally { rmSync(dir, {recursive:true,force:true}); }
 });
 
@@ -81,11 +83,14 @@ import assert from 'node:assert/strict';
 import { syncBuiltinESMExports } from 'node:module';
 const runId = 'run_fixture', id = 'msg_question', from = 'dispatch:ctx_fixture';
 const answer = '方案乙', note = '保留原反馈。';
+const attachment = { id: '24778cb9-0028-4bbd-b12a-90dce6316d51', name: '补充.txt' };
+const withAttachment = process.env.TEST_REPLY === 'attachments';
 cp.execFileSync = (_exe, args, options) => {
   assert.equal(args.includes('--from'), false);
   if (args[1] === 'run-current') return JSON.stringify({ok:true,result:{run:{id:runId,consumer_generation:2}}});
   assert.deepEqual(args, ['orchestration', 'reply', '--run', runId, '--id', id, '--body-file', '-', '--environment', 'local', '--json', '--full']);
-  assert.equal(options.input, answer + '\\n\\n备注\\n' + note);
+  assert.equal(options.input, answer + '\\n\\n备注\\n' + note + (withAttachment ?
+    '\\n\\n附件 · 决定 direction · 第 1 版\\n- 补充.txt（' + attachment.id + '）\\n如需查看，请在原任务记录中打开，或请项目主会话核对。' : ''));
   if (process.env.TEST_REPLY === 'conflict') throw Object.assign(Error('已有答复'), {stdout: JSON.stringify({error:{code:'answer_conflict',message:'已有不同答复'}})});
   return JSON.stringify({ok:true,result:{duplicate:process.env.TEST_REPLY === 'replay',message:{ id:'msg_answer',thread_id:id,run_id:runId,from_handle:'run:'+runId,to_handle:from,body:options.input }}});
 };
@@ -94,7 +99,7 @@ const reply = (handler, input) => {
   assert.deepEqual(input,{operation:'read',projectId:'p1',taskId:'work'});
   const expectedRun = process.env.TEST_REPLY === 'elsewhere' ? 'run_old' : runId;
   return {ok:true,result:{result:{project:{runId},lead:{session:{handle:'orca_session_id:new-lead'}},task:{decisions:[{
-    id:'direction',answer,history:[{note}],orcaQuestions:[{id,from,runId:expectedRun}]
+    id:'direction',answer,history:[{note,revision:1,...(withAttachment && { attachments: [attachment] })}],orcaQuestions:[{id,from,runId:expectedRun}]
   }]}}}};
 };
 syncBuiltinESMExports();`);
@@ -103,6 +108,7 @@ syncBuiltinESMExports();`);
   try {
     const receipt = JSON.parse(call());
     assert.deepEqual(receipt.result.replies, [{ questionId:'msg_question', replyId:'msg_answer', duplicate:false }]);
+    assert.deepEqual(JSON.parse(call('attachments')).result.replies, receipt.result.replies);
     assert.deepEqual(JSON.parse(call('replay')).result.replies, [{ questionId:'msg_question', replyId:'msg_answer', duplicate:true }]);
     assert.throws(() => call('conflict'), e => JSON.parse(e.stdout).result.replies[0].code === 'answer_conflict');
     assert.throws(() => call('elsewhere'), e => JSON.parse(e.stdout).result.replies[0].runId === 'run_old');

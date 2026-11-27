@@ -66,21 +66,21 @@ export function wireFiles(raw: unknown): LinkFile[] | undefined {
 export function feedbackAttachment(raw: unknown): FeedbackAttachment {
   const value = object(raw), { id, name, size, sha256 } = value
   if (typeof id !== 'string' || !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(id) ||
-      typeof name !== 'string' || !name.trim() || name.length > 240 || /[/\\\u0000-\u001f\u007f]/.test(name)) fail('验收附件名称或编号不正确')
+      typeof name !== 'string' || !name.trim() || name.length > 240 || /[/\\\u0000-\u001f\u007f]/.test(name)) fail('附件名称或编号不正确')
   wireFiles([value])
   return { id, name, size, sha256 }
 }
 
 export function feedbackBytes(data: unknown, limit: number) {
-  if (typeof data !== 'string' || data.length > Math.ceil(limit / 3) * 4) fail('验收附件数据超过大小限制')
+  if (typeof data !== 'string' || data.length > Math.ceil(limit / 3) * 4) fail('附件数据超过大小限制')
   const bytes = Buffer.from(data, 'base64')
-  if (bytes.length > limit || bytes.toString('base64') !== data) fail('验收附件数据不完整')
+  if (bytes.length > limit || bytes.toString('base64') !== data) fail('附件数据不完整')
   return bytes
 }
 
 function checkFeedbackBytes(file: FeedbackAttachment, bytes: Buffer) {
   if (bytes.length !== file.size || createHash('sha256').update(bytes).digest('hex') !== file.sha256)
-    fail(`附件「${file.name}」不完整，请重新添加`)
+    fail(`附件「${file.name}」不完整，请重新附上文件`)
 }
 
 export function wireChunk(raw: unknown, limit = fileChunkBytes): FileChunk | undefined {
@@ -196,19 +196,21 @@ export class LinkFiles {
   }
 
   private feedbackKey(target: FeedbackTarget, file: FeedbackAttachment) {
-    return fingerprint([target.projectId, target.taskId, target.itemId, target.itemRevision, file.id, file.sha256, file.size])
+    const key = [target.projectId, target.taskId, target.itemId, target.itemRevision, file.id, file.sha256, file.size]
+    // Existing acceptance files use the original key.
+    return fingerprint(target.kind === 'decision' ? [...key, target.kind, target.presentationRevision ?? null] : key)
   }
 
   async uploadFeedbackPart(target: FeedbackTarget, file: FeedbackAttachment, offset: number, data: string) {
     const bytes = feedbackBytes(data, feedbackPartBytes), end = offset + bytes.length
-    if (!Number.isSafeInteger(offset) || offset < 0 || end > file.size || !bytes.length && file.size !== 0) fail('验收附件分块不正确')
+    if (!Number.isSafeInteger(offset) || offset < 0 || end > file.size || !bytes.length && file.size !== 0) fail('附件分块不正确')
     const folder = await this.folder('feedback-drafts'), dest = path.join(folder, this.feedbackKey(target, file))
     const flags = offset === 0 ? 'wx' : constants.O_WRONLY | constants.O_APPEND | (constants.O_NOFOLLOW || 0)
-    if (offset && !(await stat(dest))?.isFile()) fail('找不到上传中的附件，请重新添加')
+    if (offset && !(await stat(dest))?.isFile()) fail('找不到上传中的附件，请重新附上文件')
     const output = await open(dest, flags, 0o600)
     try {
       const info = await output.stat()
-      if (!info.isFile() || info.size !== offset) fail('验收附件分块位置不一致，请重新添加')
+      if (!info.isFile() || info.size !== offset) fail('附件分块位置不一致，请重新附上文件')
       await output.writeFile(bytes)
       if (end === file.size) await output.sync()
     } finally { await output.close() }
@@ -222,7 +224,7 @@ export class LinkFiles {
 
   async stagedFeedback(target: FeedbackTarget, file: FeedbackAttachment) {
     const folder = await this.existingFolder('feedback-drafts'), location = folder && path.join(folder, this.feedbackKey(target, file))
-    if (!location || !(await stat(location))?.isFile()) fail(`附件「${file.name}」已找不到，请重新添加`)
+    if (!location || !(await stat(location))?.isFile()) fail(`附件「${file.name}」已找不到，请重新附上文件`)
     const root = await realpath(folder!)
     const bytes = await readContainedArtifact(root, path.join(root, path.basename(location)), file.size)
     checkFeedbackBytes(file, bytes)
@@ -247,7 +249,7 @@ export class LinkFiles {
       checkFeedbackBytes(file, await readContainedArtifact(root, dest, file.size))
       return { path: dest, name }
     }
-    if (!Number.isSafeInteger(offset) || offset < 0 || offset >= file.size) fail('验收附件读取位置不正确')
+    if (!Number.isSafeInteger(offset) || offset < 0 || offset >= file.size) fail('附件读取位置不正确')
     const { input, size } = await openContained(root, dest, true)
     try {
       if (size !== file.size) fail(`附件「${file.name}」不完整，请检查工作间备份`)

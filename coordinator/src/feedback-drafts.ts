@@ -3,10 +3,13 @@ import type { FeedbackItem } from './store'
 import type { DelegatedFeedback } from './links'
 
 export type FeedbackAttachment = { id: string; name: string; size: number; sha256: string }
-export type FeedbackTarget = { projectId: string; taskId: string; itemId: string; itemRevision: number }
+export type FeedbackTarget = { projectId: string; taskId: string; itemId: string; itemRevision: number; kind?: 'acceptance' | 'decision'; presentationRevision?: number }
 export const feedbackFileCount = 10, feedbackFileBytes = 25 * 1024 ** 2, feedbackBatchBytes = 100 * 1024 ** 2
 export const feedbackPartBytes = 48_000, delegatedFeedbackFileBytes = 96 * 1024
-export const delegatedFeedbackFilesUnavailable = '对方工作间暂不支持验收附件，请在项目所在工作间添加'
+export function feedbackFileUnavailable(report: { attachmentFeedback?: true; decisionAttachments?: true } | undefined, kind: FeedbackTarget['kind']) {
+  if (kind === 'decision') return report?.decisionAttachments ? '' : '对方工作间暂不支持决定附件，请在项目所在工作间处理'
+  return report?.attachmentFeedback ? '' : '对方工作间暂不支持验收附件，请在项目所在工作间处理'
+}
 
 export type Draft = FeedbackItem & { signature: string; title: string }
 export type InboxRow = { id: string; title: string; projectId?: string; taskId?: string; kind: Attention['kind'] | 'agent'; count?: number; replied?: boolean; agent?: LiveAgent }

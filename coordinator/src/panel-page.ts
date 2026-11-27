@@ -11,7 +11,7 @@ import type { AgentActivity, AgentsSnapshot, MainAgentActivity } from './model'
 import type { DelegatedFeedback, FeedbackTask, LinksSnapshot, SharedReport, Sharing } from './links'
 
 type Page = { kind: string; projectId?: string; id?: string; pid?: string; inboxRow?: string; end?: number }
-import { applyDelta, delegatedFeedbackFileBytes, delegatedFeedbackFilesUnavailable, emptySheet, feedbackBatchBytes, feedbackFailure, feedbackFileBytes, feedbackFileCount, feedbackPartBytes, versionOf, type Attempt, type Delta, type Draft, type FeedbackAttachment, type FeedbackTarget, type InboxRow, type Sheets } from './feedback-drafts'
+import { applyDelta, delegatedFeedbackFileBytes, emptySheet, feedbackBatchBytes, feedbackFailure, feedbackFileBytes, feedbackFileCount, feedbackFileUnavailable, feedbackPartBytes, versionOf, type Attempt, type Delta, type Draft, type FeedbackAttachment, type FeedbackTarget, type InboxRow, type Sheets } from './feedback-drafts'
 const root = document.getElementById('panel')!
 const req = (name: string, input?: any, timeoutMs?: number): Promise<any> => input === undefined
   ? orca.plugin.request(name as any)
@@ -304,7 +304,7 @@ async function loadPage(f = active, taskReads?: Map<string, Promise<FeedbackTask
       p.kind === 'archive' || (p.kind === 'task' && p.end !== undefined) ? req('project.archive', { projectId: p.projectId, end: p.end }) : undefined
     ])
     const shown = p.kind === 'task' && !p.inboxRow ? (archive?.tasks ?? snapshot?.project?.tasks)?.find((t: Project['tasks'][number]) => t.id === p.id) : undefined
-    const historyTask = shown?.acceptance.some((a: Acceptance) => a.archivedHistory)
+    const historyTask = shown && [...shown.acceptance, ...shown.decisions].some(item => item.archivedHistory)
       ? await req('project.task', { projectId: p.projectId, taskId: p.id, history: true }) : undefined
     if (request !== f.load) return
     if (sessions) f.form['工作区'] = sessions.agentWorkspace
@@ -446,7 +446,8 @@ function validDraft(task: FeedbackTask | undefined, draft: Draft) {
     return task.phase === 'ready' && item?.status === 'pending' && item.revision === draft.itemRevision && item.fingerprint === draft.fingerprint
   }
   const item = task.decisions.find(d => d.id === draft.itemId)
-  return !!item && item.answer === undefined && JSON.stringify([item.question, item.options]) === draft.signature
+  return !!item && item.answer === undefined && JSON.stringify([item.question, item.options]) === draft.signature &&
+    (!draft.attachments?.length || item.presentationRevision === draft.presentationRevision)
 }
 const pendingAcceptances = (task?: FeedbackTask) => task?.phase === 'ready' ? task.acceptance.filter(a => a.status === 'pending') : []
 function validFeedbackDrafts(tasks: FeedbackTask[], entries: Draft[]) {
@@ -463,8 +464,10 @@ async function digest(value: string | ArrayBuffer) {
 }
 function feedbackItems(drafts: Draft[]): Promise<FeedbackItem[]> {
   return Promise.all(drafts.map(async d => ({
-    taskId: d.taskId, kind: d.kind, itemId: d.itemId, itemRevision: d.itemRevision, reviewTotal: d.reviewTotal, result: d.result, note: d.note, answer: d.answer,
-    fingerprint: d.kind === 'decision' ? await digest(d.signature) : d.fingerprint, attachments: d.attachments
+    taskId: d.taskId, kind: d.kind, itemId: d.itemId, itemRevision: d.kind === 'decision' && !d.attachments?.length ? undefined : d.itemRevision,
+    reviewTotal: d.reviewTotal, result: d.result, note: d.note, answer: d.answer,
+    fingerprint: d.kind === 'decision' ? await digest(d.signature) : d.fingerprint, attachments: d.attachments,
+    ...(d.attachments?.length && d.kind === 'decision' && d.presentationRevision !== undefined && { presentationRevision: d.presentationRevision })
   })))
 }
 function choose(projectId: string, ...items: Draft[]) {
@@ -876,36 +879,44 @@ function previewFeedbackFile(target: FeedbackTarget, file: FeedbackAttachment) {
     (_key, offset) => req('project.feedbackFile', { ...input, offset }))
 }
 async function addFeedbackFiles(projectId: string, k: string, draft: Draft, files: File[]) {
-  if (!files.length || busy) return
+  if (!files.length || draft.kind === 'blocked') return
+  if (busy) { error = '正在处理反馈，请稍后再附上文件'; render(); return }
   clickedAction = ''
   await act(async () => {
-    const remote = isRemote(projectId), attempt = feedbackRequests[projectId]
+    const remote = isRemote(projectId), attempt = feedbackRequests[projectId], decision = draft.kind === 'decision'
     if (attempt?.input && !attempt.rejected) throw Error('上次提交还没确认，请先重试核对')
+    const same = (current?: Draft): current is Draft => !!current && current.signature === draft.signature && (decision
+      ? !current.attachments?.length || current.presentationRevision === draft.presentationRevision : current.itemRevision === draft.itemRevision)
     const current = choices(projectId)[k]
-    if (!current || current.itemRevision !== draft.itemRevision || current.fingerprint !== draft.fingerprint)
-      throw Error('草稿或验收版本已更新，请重新添加附件')
-    if ((current.attachments?.length ?? 0) + files.length > feedbackFileCount) throw Error('每项验收最多添加 10 个附件')
-    if (remote && !remoteFeedback(projectId)?.attachmentFeedback) throw Error(delegatedFeedbackFilesUnavailable)
-    const existing = Object.values(choices(projectId)).flatMap(d => d.attachments ?? []).reduce((sum, f) => sum + f.size, 0)
-    const total = existing + files.reduce((sum, file) => sum + file.size, 0)
-    if (remote && total > delegatedFeedbackFileBytes) throw Error('跨工作间附件总计最多 96 KiB')
-    if (total > feedbackBatchBytes) throw Error('本次反馈的附件总计最多 100 MiB')
+    if (!same(current)) throw Error('草稿已更新，请重新附上文件')
+    const unavailable = remote && feedbackFileUnavailable(remoteFeedback(projectId), decision ? 'decision' : 'acceptance')
+    if (unavailable) throw Error(unavailable)
+    let total = Object.values(choices(projectId)).flatMap(d => d.attachments ?? []).reduce((sum, f) => sum + f.size, 0)
     for (const f of files) if (f.size > feedbackFileBytes) throw Error(`「${f.name}」超过 25 MiB`)
-    const staged: FeedbackAttachment[] = [], target = { projectId, taskId: draft.taskId, itemId: draft.itemId,
-      itemRevision: draft.itemRevision, fingerprint: draft.fingerprint }
+    const staged: FeedbackAttachment[] = [], selected = current.attachments ?? []
+    const target = { projectId, taskId: draft.taskId, itemId: draft.itemId, itemRevision: decision ? 1 : draft.itemRevision,
+      fingerprint: decision ? await digest(draft.signature) : draft.fingerprint,
+      ...(decision && { kind: 'decision', presentationRevision: draft.presentationRevision }) }
     try {
       for (const f of files) {
         const bytes = await f.arrayBuffer()
         const file = { id: crypto.randomUUID(), name: f.name, size: f.size, sha256: await digest(bytes) }
+        if ([...selected, ...staged].some(other => other.name === file.name && other.sha256 === file.sha256)) continue
+        if (selected.length + staged.length >= feedbackFileCount) throw Error('每项反馈最多附上 10 个文件')
+        total += file.size
+        if (remote && total > delegatedFeedbackFileBytes) throw Error('跨工作间附件总计最多 96 KiB')
+        if (total > feedbackBatchBytes) throw Error('本次反馈的附件总计最多 100 MiB')
         staged.push(file)
         for (let offset = 0; offset < Math.max(file.size, 1); offset += feedbackPartBytes) {
           const part = new Uint8Array(bytes, offset, Math.min(feedbackPartBytes, file.size - offset))
           await req('panel.feedbackFile', { ...target, file, offset, data: btoa(String.fromCharCode(...part)) })
         }
       }
+      if (!staged.length) return
       const latest = choices(projectId)[k]
-      if (!latest || latest.itemRevision !== draft.itemRevision || latest.fingerprint !== draft.fingerprint) throw Error('草稿或验收版本已更新，请重新添加附件')
-      choose(projectId, { ...latest, attachments: [...(latest.attachments ?? []), ...staged] })
+      if (!same(latest)) throw Error('草稿已更新，请重新附上文件')
+      choose(projectId, { ...latest, ...(decision && { itemRevision: 1, presentationRevision: draft.presentationRevision, fingerprint: target.fingerprint }),
+        attachments: [...(latest.attachments ?? []), ...staged] })
       await edits
       if (draftFailure) throw Error(draftFailure)
     } catch (e) {
@@ -921,7 +932,8 @@ function feedbackCards(projectId: string, tasks: FeedbackTask[], title = '要你
   }
   function resultButton(base: Draft, draft: Draft | undefined, result: string) {
     const b = button(feedbackActions[result], () => {
-      choose(projectId, { ...base, result, note: draft?.result === result ? draft.note : '', attachments: draft?.attachments }); render()
+      choose(projectId, { ...base, result, note: draft?.result === result ? draft.note : '', attachments: draft?.attachments,
+        fingerprint: base.fingerprint ?? draft?.fingerprint }); render()
     }, 'sm')
     b.setAttribute('aria-pressed', String(draft?.result === result))
     return b
@@ -931,35 +943,29 @@ function feedbackCards(projectId: string, tasks: FeedbackTask[], title = '要你
     const label = draft.result && Object.hasOwn(feedbackNoteLabels, draft.result) ? feedbackNoteLabels[draft.result]
       : draft.kind === 'decision' && draft.answer !== undefined ? '补充说明（选填）' : undefined
     if (!label) return null
-    const field = input(`${label} ${k}`, draft.note ?? '', 'textarea', note => { choose(projectId, { ...draft, note }); render() }, undefined, {}, true)
-    if (draft.kind !== 'acceptance') return field
-    const available = !isRemote(projectId) || !!remoteFeedback(projectId)?.attachmentFeedback
+    return input(`${label} ${k}`, draft.note ?? '', 'textarea', note => { choose(projectId, { ...draft, note }); render() }, undefined, {}, true)
+  }
+  function fileFields(k: string, draft: Draft | undefined, ...fields: (HTMLElement | null)[]) {
+    if (!draft || draft.kind === 'blocked') return fields
+    const unavailable = isRemote(projectId) && feedbackFileUnavailable(remoteFeedback(projectId), draft.kind)
     const add = (files: FileList) => void addFeedbackFiles(projectId, k, draft, Array.from(files))
-    field.onpaste = e => {
-      if (!e.clipboardData?.files.length) return
-      e.preventDefault(); add(e.clipboardData.files)
-    }
     const files = draft.attachments ?? []
     return el('div', {
       class: 'feedback-files', 'data-key': 'feedback-files',
+      onpaste: (e: ClipboardEvent) => {
+        if (!e.clipboardData?.files.length) return
+        e.preventDefault(); add(e.clipboardData.files)
+      },
       ondragover: (e: DragEvent) => { if (e.dataTransfer?.types.includes('Files')) e.preventDefault() },
       ondrop: (e: DragEvent) => { if (e.dataTransfer?.files.length) { e.preventDefault(); add(e.dataTransfer.files) } }
-    }, field, files.map(file => {
+    }, fields, files.map(file => {
       const remove = button('移除', () => {
         const next = files.filter(f => f.id !== file.id)
         choose(projectId, { ...draft, attachments: next.length ? next : undefined }); render()
       }, 'text sm')
       remove.setAttribute('aria-label', `移除 ${file.name}`)
       return el('div', { class: 'row g2 feedback-file', 'data-key': file.id }, el('span', { class: 'grow any' }, file.name), remove)
-    }), available ? el('div', { class: 'row g2' },
-      el('button', { type: 'button', class: 'btn sm', disabled: busy || files.length >= feedbackFileCount, onclick: (e: MouseEvent) => {
-        ((e.currentTarget as HTMLElement).nextElementSibling as HTMLInputElement).click()
-      } }, '添加附件'),
-      el('input', { type: 'file', hidden: '', multiple: '', onchange: (e: Event) => {
-        const picker = e.currentTarget as HTMLInputElement
-        if (picker.files) add(picker.files)
-        picker.value = ''
-      } })) : small(delegatedFeedbackFilesUnavailable))
+    }), small(unavailable || '拖入或粘贴附件'))
   }
   return tasks.map(t => {
     const acceptance = !only || only === 'review' ? pendingAcceptances(t) : []
@@ -972,25 +978,31 @@ function feedbackCards(projectId: string, tasks: FeedbackTask[], title = '要你
     return section(title, acceptance.length > 1 ? button(`这 ${acceptance.length} 项全部通过`, () => {
       choosePasses(projectId, acceptance.map(a => ({ ...acceptanceDraft(t.id, a), result: 'passed', reviewTotal: acceptance.length }))); render()
     }, 'sm') : null, decisions.map(d => {
-      const k = key(t.id, 'decision', d.id), draft = choices(projectId)[k]
-      const base: Draft = { taskId: t.id, kind: 'decision', itemId: d.id, title: d.question, signature: JSON.stringify([d.question, d.options]) }
+      const k = key(t.id, 'decision', d.id), saved = choices(projectId)[k]
+      const draft = saved && validDraft(t, saved) ? { ...saved, presentationRevision: d.presentationRevision } : undefined
+      const base: Draft = { taskId: t.id, kind: 'decision', itemId: d.id, itemRevision: 1, title: d.question,
+        signature: JSON.stringify([d.question, d.options]), presentationRevision: d.presentationRevision }
       const field = `决定 ${k}`
+      const answer = (value: string) => {
+        choose(projectId, { ...base, answer: value, note: draft?.answer === undefined ? '' : draft.note ?? '',
+          attachments: draft?.attachments, fingerprint: draft?.fingerprint }); render()
+      }
       // Controls can also be mounted in an inline row of the same task.
       const group = `${active.key}-${projectId}-${k}-${only ?? 'full'}`
       return keyed(card(el('h3', { class: 'h2 any' }, d.question), artifactButtons(t, d.artifactIds),
-        [...d.options, '其他'].map(option => check(option, option === '其他' ? draft?.answer !== undefined && !d.options.includes(draft.answer) : draft?.answer === option, () => {
-          choose(projectId, { ...base, answer: option === '其他' ? '' : option, note: draft?.answer === undefined ? '' : draft.note ?? '' }); render()
-        }, { type: 'radio', name: group, value: option })),
-        draft?.answer !== undefined && !d.options.includes(draft.answer) ? input(field, draft.answer, 'textarea', value => {
-          choose(projectId, { ...base, answer: value, note: draft.note ?? '' }); render()
-        }, undefined, {}, true) : null, row(resultButton(base, draft, 'discarded'), draft ? button('撤销', () => removeChoice(projectId, k), 'text sm') : null), noteField(k, draft)), k)
+        [...d.options, '其他'].map(option => check(option, option === '其他' ? draft?.answer !== undefined && !d.options.includes(draft.answer) : draft?.answer === option,
+          () => answer(option === '其他' ? '' : option), { type: 'radio', name: group, value: option })),
+        fileFields(k, draft, draft?.answer !== undefined && !d.options.includes(draft.answer)
+          ? input(field, draft.answer, 'textarea', answer, undefined, {}, true) : null, noteField(k, draft)),
+        row(resultButton(base, draft, 'discarded'), saved ? button('撤销', () => removeChoice(projectId, k), 'text sm') : null),
+        saved && !draft ? small('决定已更新，请核对草稿') : null), k)
     }), acceptance.map(a => {
       const k = key(t.id, 'acceptance', a.id), saved = choices(projectId)[k], base = acceptanceDraft(t.id, a)
       const draft = saved?.itemRevision === a.revision && saved.fingerprint === a.fingerprint ? saved : undefined
       return keyed(card(row(el('h3', { class: 'h2 any grow' }, a.title), tag(`第 ${a.revision} 版`)), el('p', { class: 'any' }, a.details),
         artifactButtons(t, a.artifactIds),
         row(...Object.keys(feedbackActions).map(result => resultButton(base, draft, result)),
-          saved ? button('撤销', () => removeChoice(projectId, k), 'text sm') : null), noteField(k, draft),
+          saved ? button('撤销', () => removeChoice(projectId, k), 'text sm') : null), fileFields(k, draft, noteField(k, draft)),
         saved && !draft ? small(`草稿属于第 ${saved.itemRevision} 版`) : null), k)
     }), blocked ? keyed(card(callout(t.progress || t.goal || '任务受阻', 'danger'),
       draft?.result === 'discarded' ? noteField(k, draft) : input(`受阻备注 ${k}`, draft?.note ?? '', 'textarea', note => {
@@ -1244,18 +1256,21 @@ function projectPage() {
     })
     const workers = projectAgents(p.ref.id).filter(a => a.taskId === t.id && a.state !== 'done')
     const messages = archive ? [] : p.events.filter(e => t.sourceIds.includes(e.id) || e.taskId === t.id)
-    const historyRow = (title: string, h: Acceptance['history'][number], result: string, noteLabel?: string, itemId?: string) => {
+    const historyRow = (title: string, h: Acceptance['history'][number], result: string, item: Pick<FeedbackTarget, 'itemId' | 'kind'>, noteLabel?: string) => {
       const summary = small([title, result, h.source, h.at && new Date(h.at).toLocaleString(), !noteLabel && h.note].filter(Boolean).join(' · '))
       const note = noteLabel && h.note ? el('p', { class: 'any' }, `${noteLabel}：${h.note}`) : null
-      const files = itemId && h.attachments?.length ? row(h.attachments.map(f => button(f.name, () =>
-        previewFeedbackFile({ projectId: p.ref.id, taskId: t.id, itemId, itemRevision: h.revision }, f), 'sm'))) : null
+      const files = h.attachments?.length ? row(h.attachments.map(f => button(f.name, () =>
+        previewFeedbackFile({ projectId: p.ref.id, taskId: t.id, ...item, itemRevision: h.revision }, f), 'sm'))) : null
       return note || files ? el('div', {}, summary, note, files) : summary
     }
-    const records = [...t.decisions.flatMap(d => d.history.map(h => historyRow(d.question, h, d.answer === null ? '已丢弃' : h.result))),
-      ...t.acceptance.flatMap(a => {
-        const older = a.archivedHistory && active.data?.historyTask?.acceptance.find(item => item.id === a.id)?.history.slice(0, a.archivedHistory)
-        return [...(older || []), ...a.history].map(h => historyRow(`${a.title} · 第 ${h.revision} 版`, h, acceptanceStatuses[h.result], h.result === 'passed' ? '通过留言' : undefined, a.id))
-      })]
+    const history = (kind: 'acceptance' | 'decisions', item: { id: string; history: Acceptance['history']; archivedHistory?: number }) => {
+      const older = item.archivedHistory && active.data?.historyTask?.[kind].find(row => row.id === item.id)?.history.slice(0, item.archivedHistory)
+      return [...(older || []), ...item.history]
+    }
+    const records = [...t.decisions.flatMap(d => history('decisions', d).map(h => historyRow(d.question, h,
+      d.answer === null ? '已丢弃' : h.result, { itemId: d.id, kind: 'decision' }))),
+    ...t.acceptance.flatMap(a => history('acceptance', a).map(h => historyRow(`${a.title} · 第 ${h.revision} 版`, h,
+      acceptanceStatuses[h.result], { itemId: a.id }, h.result === 'passed' ? '通过留言' : undefined)))]
     return [row(tag(labels[taskState(t)]), small(`${p.ref.name} · ${relative(t.updatedAt)}更新`)),
       archive ? null : feedbackCards(p.ref.id, [t]),
       section('进展', el('p', { class: 'any' }, t.progress), archive ? null : [small('现在谁在做'),

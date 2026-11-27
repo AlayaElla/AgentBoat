@@ -384,7 +384,7 @@ export function submitTask(project: Project, raw: unknown): void {
   else project.tasks.push(task)
 }
 
-export interface FeedbackItem { taskId: string; kind: 'acceptance' | 'decision' | 'blocked'; itemId: string; itemRevision?: number; reviewTotal?: number; fingerprint?: string; result?: string; answer?: string; note?: string; attachments?: FeedbackAttachment[] }
+export interface FeedbackItem { taskId: string; kind: 'acceptance' | 'decision' | 'blocked'; itemId: string; itemRevision?: number; presentationRevision?: number; reviewTotal?: number; fingerprint?: string; result?: string; answer?: string; note?: string; attachments?: FeedbackAttachment[] }
 export function feedback(project: Project, raw: unknown, source?: string, event?: SourceEvent): void {
   const items = object(raw).items
   const sourceTask = event?.worker?.projectTaskId ?? event?.ownerDecision?.taskId
@@ -412,7 +412,7 @@ function applyFeedback(project: Project, tasks: Task[], items: unknown, source?:
       const task = tasks.find(x => x.id === input.taskId)
       if (!task) fail('任务不属于当前项目')
       if (!withdrawal && task.phase === 'paused') fail('任务已暂停')
-      if (input.attachments !== undefined && input.kind !== 'acceptance') fail('附件只能随验收反馈提交')
+      if (input.attachments !== undefined && input.kind !== 'acceptance' && input.kind !== 'decision') fail('附件只能随决定或验收反馈提交')
       const note = event?.text ?? (typeof input.note === 'string' ? input.note.trim().slice(0, 8000) : '')
       const discarded = input.result === 'discarded'
       if (input.kind === 'blocked') {
@@ -437,11 +437,13 @@ function applyFeedback(project: Project, tasks: Task[], items: unknown, source?:
       if (input.kind !== 'decision') fail('反馈类型不正确')
       const item = task.decisions.find(x => x.id === input.itemId)
       if (!item || item.answer !== undefined) fail('问题已回答、已丢弃或不存在，请刷新')
-      if (input.fingerprint !== undefined && input.fingerprint !== fingerprint([item.question, item.options])) fail('问题内容已更新')
+      if ((input.fingerprint !== undefined || input.attachments !== undefined) && input.fingerprint !== fingerprint([item.question, item.options])) fail('问题内容已更新')
       if (input.itemRevision !== undefined && input.itemRevision !== 1) fail('决定版本已更新，请刷新后确认')
+      if (input.attachments !== undefined && (input.itemRevision !== 1 || input.presentationRevision !== item.presentationRevision)) fail('决定呈现已更新，请核对后重新附上文件')
       if (discarded && input.answer !== undefined) fail('丢弃的决定不能同时填写答案')
       if (input.result && !discarded) fail('决定结论不正确')
-      return { task, item, note, discarded, result: discarded ? 'discarded' : text(input.answer, '决定', 8000), subject: '决定已提交', title: item.question, revision: 1 }
+      return { task, item, note, discarded, result: discarded ? 'discarded' : text(input.answer, '决定', 8000), subject: '决定已提交', title: item.question,
+        revision: 1, attachments: input.attachments as FeedbackAttachment[] | undefined, presentationRevision: item.presentationRevision }
     } catch (e) { return fail(`第 ${index + 1} 条（${input.taskId || '?'} / ${input.itemId || '?'}）：${e instanceof Error ? e.message : '反馈不正确'}`) }
   })
   const at = new Date().toISOString()
@@ -458,7 +460,8 @@ function applyFeedback(project: Project, tasks: Task[], items: unknown, source?:
     if ('status' in v.item) v.item.status = v.result as Acceptance['status']
     else v.item.answer = v.discarded ? null : v.result
     const actor = source ?? (v.discarded ? '主人' : undefined)
-    v.item.history.push({ at, revision: v.revision, result: v.result, note: v.note, ...(actor ? { source: actor } : {}), ...(v.attachments?.length && { attachments: v.attachments }) })
+    v.item.history.push({ at, revision: v.revision, result: v.result, note: v.note, ...(actor ? { source: actor } : {}),
+      ...(v.attachments?.length && { attachments: v.attachments, ...(v.presentationRevision !== undefined && { presentationRevision: v.presentationRevision }) }) })
   }
   const reported = withdrawal ? validated.filter(v => v.item && 'orcaQuestions' in v.item) : validated
   if (!reported.length) return
@@ -467,8 +470,9 @@ function applyFeedback(project: Project, tasks: Task[], items: unknown, source?:
     const note = v.item && 'status' in v.item && v.result === 'passed' && v.note ? `通过留言：${v.note}` : v.note
     const questions = v.item && 'orcaQuestions' in v.item && v.item.orcaQuestions?.map(q => `- ${q.runId} / ${q.id} / ${q.from}`).join('\n')
     const followUp = questions ? `\n决定 ${v.item!.id} 的原 Orca 问题\n${questions}\n由项目主会话用 reply-decision 回送已保存的结论与补充说明。` : ''
-    const attachments = v.attachments?.length ? `\n\n验收 ${v.item!.id} · 第 ${v.revision} 版的附件（任务详情 → 记录）\n` + v.attachments.map(f => `- ${f.name}（${f.id}）`).join('\n') +
-      `\n项目主会话也可通过 AgentBoat 稳定入口调用 feedback-file ${[project.ref.id, v.task.id, v.item!.id, v.revision].map(value => JSON.stringify(value)).join(' ')} <附件编号> 获取文件位置。` : ''
+    const decision = v.item && 'question' in v.item
+    const attachments = v.attachments?.length ? `\n\n${decision ? '决定' : '验收'} ${v.item!.id} · 第 ${v.revision} 版的附件（任务详情 → 记录）\n` + v.attachments.map(f => `- ${f.name}（${f.id}）`).join('\n') +
+      `\n项目主会话也可通过 AgentBoat 稳定入口调用 feedback-file ${[project.ref.id, v.task.id, v.item!.id, v.revision].map(value => JSON.stringify(value)).join(' ')} <附件编号>${decision ? ' --decision' : ''} 获取文件位置。` : ''
     return `[项目 ${project.ref.id} / 任务 ${v.task.id}]\n${v.task.title}\n${v.title}\n${result}${note}${attachments}${followUp}`
   }).join('\n\n')
   project.deliveries.push({ id: randomUUID(), subject: `${withdrawal ? '决定撤下' : '用户反馈'} · ${reported.length} 条`, body: source ? `${source}\n\n${body}` : body, state: 'pending' })

@@ -290,12 +290,21 @@ test('feedback returns the committed snapshot without waiting for delivery or se
   } finally {release();await coordinator.flush('p1');coordinator.stop();await worker.deactivate()}
 })
 
-test('acceptance attachments survive retry and restart under the original project, task and version', async () => {
+test('decision and acceptance attachments survive retry and restart under the original item version', async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'agentboat-feedback-files-'))
   const p = { ...fresh(refs[0]), runId: 'run_project', mainAgentHandle: mainSession.handle }
   submitTask(p, deliverable)
   feedback(p, { items: [{ taskId: deliverable.id, kind: 'acceptance', itemId: 'page-check', itemRevision: 1, result: 'passed', note: '第一版文字留言' }] })
-  submitTask(p, { ...deliverable, artifacts: [], acceptance: [{ ...deliverable.acceptance[0], details: '第二版核对步骤' }] })
+  submitTask(p, { ...deliverable, artifacts: [], acceptance: [{ ...deliverable.acceptance[0], details: '第二版核对步骤' }],
+    decisions: [{ id: 'page-check', question: '采用哪个方案？', options: ['甲', '乙'] }] })
+  const decision = p.tasks[0].decisions[0]
+  decision.orcaQuestions = [{ id: 'msg_question', runId: p.runId, from: 'dispatch:original' }]
+  const legacyBytes = Buffer.from('第一版文件')
+  const legacy = { id: randomUUID(), name: '原验收.txt', size: legacyBytes.length, sha256: createHash('sha256').update(legacyBytes).digest('hex') }
+  const legacyFolder = path.join(dir, 'feedback', fingerprint(['p1', deliverable.id, 'page-check', 1, legacy.id, legacy.sha256, legacy.size]))
+  await mkdir(legacyFolder, { recursive: true })
+  await writeFile(path.join(legacyFolder, legacy.name), legacyBytes)
+  p.tasks[0].acceptance[0].history[0].attachments = [legacy]
   p.deliveries = []
   const host = mockHost({ storage: { 'project:p1': p as any, 'project:p2': fresh(refs[1]) as any } })
   const sent: [string, string][] = []
@@ -307,6 +316,8 @@ test('acceptance attachments survive retry and restart under the original projec
   let worker = await open()
   const a = p.tasks[0].acceptance[0]
   const target = { projectId: 'p1', taskId: p.tasks[0].id, itemId: a.id, itemRevision: a.revision, fingerprint: a.fingerprint }
+  const decisionTarget = { ...target, kind: 'decision' as const, itemRevision: 1, presentationRevision: decision.presentationRevision!,
+    fingerprint: fingerprint([decision.question, decision.options]) }
   const contents = [Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a82kAAAAASUVORK5CYII=', 'base64'),
     Buffer.from('普通文件内容'.repeat(4000)), Buffer.from('移除的文件')]
   const files = contents.map((bytes, i) => ({ id: randomUUID(), name: ['截图.png', '修改记录.txt', '待移除.txt'][i], size: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex') }))
@@ -337,10 +348,35 @@ test('acceptance attachments survive retry and restart under the original projec
     assert.equal(sent[0][0], 'run_project')
     assert.match(sent[0][1], /截图\.png[\s\S]*修改记录\.txt[\s\S]*feedback-file/)
     await edit(2, null)
+    const { presentationRevision, projectId, ...decisionItem } = decisionTarget
+    const staged = { ...decisionTarget, file: files[0], offset: 0, data: contents[0].toString('base64') }
+    await assert.rejects(() => worker.request('panel.feedbackFile', { ...staged, presentationRevision: presentationRevision + 1 }), /决定已更新/)
+    await assert.rejects(() => worker.request('panel.feedbackFile', { ...staged, fingerprint: 'stale' }), /决定已更新/)
+    await worker.request('panel.feedbackFile', staged)
+    for (let offset = 0; offset < files[1].size; offset += feedbackPartBytes)
+      await worker.request('panel.feedbackFile', { ...decisionTarget, file: files[1], offset, data: contents[1].subarray(offset, offset + feedbackPartBytes).toString('base64') })
+    const current = await c.store.get('p1')
+    const reply = { ...decisionItem, presentationRevision, answer: '组合方案', note: draft.note, attachments: files.slice(0, 2) }
+    const send = (item: typeof reply, requestId: string) => worker.request('project.feedback', { projectId, requestId, revision: current.revision, items: [item] })
+    await assert.rejects(() => send({ ...reply, presentationRevision: presentationRevision + 1 }, 'stale-presentation'), /决定呈现已更新/)
+    await assert.rejects(() => send({ ...reply, fingerprint: 'stale' }, 'stale-decision'), /问题内容已更新/)
+    const written = await send(reply, 'decision-with-files')
+    assert.equal((await send(reply, 'decision-with-files')).project!.tasks[0].decisions[0].answer, '组合方案')
+    assert.deepEqual(written.project!.tasks[0].decisions[0].history[0].attachments, files.slice(0, 2))
+    await c.flush('p1')
+    assert.equal(sent.length, 2)
+    assert.equal(sent[1][0], 'run_project')
+    assert.match(sent[1][1], /决定 page-check.*附件[\s\S]*--decision[\s\S]*msg_question[\s\S]*reply-decision/)
     c.stop(); await worker.deactivate(); worker = await open()
-    const saved = (await worker.request('project.task', { projectId: 'p1', taskId: target.taskId }))!.acceptance[0].history
+    const task = (await worker.request('project.task', { projectId: 'p1', taskId: target.taskId }))!
+    const saved = task.acceptance[0].history
     assert.deepEqual(saved.map(h => [h.revision, h.note]), [[1, '第一版文字留言'], [2, draft.note]])
     assert.deepEqual(saved[1].attachments, files.slice(0, 2))
+    assert.equal(task.decisions[0].history[0].presentationRevision, presentationRevision)
+    assert.deepEqual(task.decisions[0].history[0].attachments, files.slice(0, 2))
+    const legacyTarget = { projectId, taskId: target.taskId, itemId: target.itemId, itemRevision: 1, attachmentId: legacy.id }
+    assert.equal(await worker.request('project.feedbackFile', { ...legacyTarget, offset: 0 }), legacyBytes.toString('base64'))
+    await assert.rejects(() => worker.request('project.feedbackFile', { ...legacyTarget, kind: 'decision' }), /不属于指定/)
     assert.ok(!JSON.stringify(await c.store.get('p1')).includes(contents[0].toString('base64')))
     for (const [i, file] of files.slice(0, 2).entries()) {
       const ref = { projectId: 'p1', taskId: target.taskId, itemId: target.itemId, itemRevision: 2, attachmentId: file.id }
@@ -355,6 +391,9 @@ test('acceptance attachments survive retry and restart under the original projec
       for (let offset = 0; offset < file.size; offset += feedbackPartBytes)
         parts.push(Buffer.from(await worker.request('project.feedbackFile', { ...ref, offset }) as string, 'base64'))
       assert.deepEqual(Buffer.concat(parts), contents[i])
+      const decisionRef = { ...ref, kind: 'decision' as const, itemRevision: 1 }
+      await assert.rejects(() => worker.request('project.locateFeedbackFile', { ...locate, ...decisionRef, caller: 'orca_session_id:unrelated' }), /当前绑定的项目主会话/)
+      assert.deepEqual(await readFile((await worker.request('project.locateFeedbackFile', { ...locate, ...decisionRef })).path), contents[i])
     }
   } finally { await c.flush('p1'); c.stop(); await worker.deactivate(); await rm(dir, { recursive: true, force: true }) }
 })

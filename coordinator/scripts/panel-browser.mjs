@@ -76,6 +76,8 @@ async function setup(options = {}, hub) {
       decisions: [{ id: 'd', question: '采用哪个版本？', answer: '第一版', history: [] }] };
     if (options.archive) project.archive = { taskCount: 1, end: 50 };
     if (options.projectUnbound) { project.runId = ''; project.tasks = []; }
+    if (options.feedbackDecisions) project.tasks.push({ ...clone(task), id: 'd1', title: '设计决定', phase: 'working', acceptance: [],
+      decisions: [{ id: 'direction', question: '采用哪个方案？', options: ['方案甲', '方案乙'], presentationRevision: 2, history: [] }] });
     if (options.inboxBatch) {
       const other = clone(project);
       Object.assign(other.ref, { id: 'p2', name: '移动项目' });
@@ -213,7 +215,8 @@ async function setup(options = {}, hub) {
         return { saved: true };
       }
       if (name === 'project.feedbackFile') {
-        const file = project.tasks.find(t => t.id === input.taskId)?.acceptance.find(a => a.id === input.itemId)?.history
+        const task = project.tasks.find(t => t.id === input.taskId);
+        const file = (input.kind === 'decision' ? task?.decisions : task?.acceptance)?.find(a => a.id === input.itemId)?.history
           .find(h => h.revision === input.itemRevision)?.attachments?.find(f => f.id === input.attachmentId);
         if (input.projectId !== project.ref.id || !file || !Object.hasOwn(feedbackFiles, file.id)) throw Error('附件不属于本次反馈');
         return input.offset === undefined ? { ...file, type: file.name.endsWith('.png') ? 'image/png' : 'text/plain' } : feedbackFiles[file.id][input.offset];
@@ -340,7 +343,8 @@ async function setup(options = {}, hub) {
           if (i.kind === 'blocked') { a.blockedStatus = i.result === 'discarded' ? 'discarded' : 'replied'; continue; }
           if (i.kind === 'acceptance') a.status = i.result;
           else a.answer = i.result === 'discarded' ? null : i.answer;
-          a.history.push({ result:i.result ?? i.answer, revision:i.itemRevision ?? 1, note:i.note, source:'主人', at:new Date().toISOString(), ...(i.attachments && { attachments: i.attachments }) });
+          a.history.push({ result:i.result ?? i.answer, revision:i.itemRevision ?? 1, note:i.note, source:'主人', at:new Date().toISOString(),
+            ...(i.attachments && { attachments: i.attachments }), ...(i.presentationRevision !== undefined && { presentationRevision: i.presentationRevision }) });
         }
         target.deliveries.push({ id: 'summary', subject: '用户反馈', body: '', state: 'pending' }); target.revision++;
         target.requests.push({ id: input.requestId, fingerprint: await digest(input) });
@@ -463,56 +467,83 @@ const rightClickArtifact = async entry => {
   await entry.click({ button: 'right' });
 };
 try {
-  await setup({ width: 360 });
-  await test('acceptance note accepts pasted and selected files, removes a drop, and reopens the original history', async () => {
+  await setup({ width: 360, feedbackDecisions: true });
+  await test('decision and acceptance share drop and paste, retain one draft each, and reopen scoped history', async () => {
     const image = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a82kAAAAASUVORK5CYII=';
-    const payload = Buffer.from('文本附件内容');
+    const payload = Buffer.from('文本附件内容').toString('base64');
     const note = '请对照截图和修改记录';
+    const transfer = (field, type, name, data, mimeType = 'text/plain') => field.evaluate((textarea, { type, name, data, mimeType }) => {
+      const dt = new DataTransfer();
+      dt.items.add(new File([Uint8Array.from(atob(data), c => c.charCodeAt(0))], name, { type: mimeType }));
+      const options = { bubbles: true, cancelable: true };
+      textarea.dispatchEvent(type === 'paste' ? new ClipboardEvent('paste', { ...options, clipboardData: dt }) : new DragEvent('drop', { ...options, dataTransfer: dt }));
+    }, { type, name, data, mimeType });
     const body = await openReview();
+    const reviewCard = body.locator('.card').filter({ has: page.getByRole('heading', { name: '成果 a1', exact: true }) });
     await body.getByRole('button', { name: '需要修改', exact: true }).first().click();
     const field = body.getByRole('textbox', { name: '修改意见' });
     await field.fill(note);
-    await field.evaluate((textarea, image) => {
-      const data = new DataTransfer();
-      data.items.add(new File([Uint8Array.from(atob(image), c => c.charCodeAt(0))], '截图.png', { type: 'image/png' }));
-      textarea.dispatchEvent(new ClipboardEvent('paste', { clipboardData: data, bubbles: true, cancelable: true }));
-    }, image);
-    await body.getByText('截图.png', { exact: true }).waitFor();
-    const add = body.getByRole('button', { name: '添加附件', exact: true });
-    await add.focus();
-    const chooser = page.waitForEvent('filechooser');
-    await add.press('Enter');
-    await (await chooser).setFiles({ name: '修改记录.txt', mimeType: 'text/plain', buffer: payload });
-    await body.getByText('修改记录.txt', { exact: true }).waitFor();
-    await field.evaluate(textarea => {
-      const dataTransfer = new DataTransfer();
-      dataTransfer.items.add(new File(['delete this'], '待移除.txt', { type: 'text/plain' }));
-      textarea.dispatchEvent(new DragEvent('drop', { dataTransfer, bubbles: true, cancelable: true }));
-    });
-    const remove = body.getByRole('button', { name: '移除 待移除.txt' });
+    await transfer(field, 'paste', '验收截图.png', image, 'image/png');
+    await reviewCard.getByText('验收截图.png', { exact: true }).waitFor();
+    await reviewCard.getByRole('button', { name: '通过', exact: true }).click();
+    const passNote = reviewCard.getByRole('textbox', { name: '通过留言（选填）' });
+    await transfer(passNote, 'drop', '验收记录.txt', payload);
+    await reviewCard.getByText('验收记录.txt', { exact: true }).waitFor();
+    await reviewCard.getByRole('button', { name: '需要修改', exact: true }).click();
+    await field.fill(note);
+
+    await row('设计决定').click();
+    const decision = () => rail().locator('.card').filter({ has: page.getByRole('heading', { name: '采用哪个方案？' }) });
+    await decision().getByRole('radio', { name: '方案甲' }).check();
+    const supplement = decision().getByRole('textbox', { name: '补充说明（选填）' });
+    assert.ok(await supplement.evaluate(textarea => {
+      const clipboardData = new DataTransfer();
+      clipboardData.setData('text/plain', '这段文字正常粘贴');
+      return textarea.dispatchEvent(new ClipboardEvent('paste', { clipboardData, bubbles: true, cancelable: true }));
+    }));
+    await supplement.fill('这段文字正常粘贴');
+    await transfer(supplement, 'paste', '决定截图.png', image, 'image/png');
+    await decision().getByText('决定截图.png', { exact: true }).waitFor();
+    await decision().getByRole('radio', { name: '其他' }).check();
+    const custom = decision().getByRole('textbox', { name: '你的决定' });
+    await custom.fill('采用组合方案');
+    await transfer(custom, 'drop', '决定记录.txt', payload);
+    await decision().getByText('决定记录.txt', { exact: true }).waitFor();
+    await transfer(custom, 'paste', '决定截图.png', image, 'image/png');
+    await dock().locator('button:enabled').filter({ hasText: '提交 2 条' }).waitFor();
+    await transfer(supplement, 'drop', '待移除.txt', payload);
+    await decision().getByText('待移除.txt', { exact: true }).waitFor();
+    assert.equal(await decision().getByText('决定截图.png', { exact: true }).count(), 1);
+    assert.equal(await page.evaluate(() => fixture.calls.filter(c => c.name === 'panel.feedbackFile' && c.input.file.name === '决定截图.png').length), 1);
+    assert.equal(await page.getByRole('button', { name: '添加附件' }).count(), 0);
+    assert.equal(await page.locator('input[type=file]').count(), 0);
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+    await page.waitForFunction(() => Object.values(fixture.stored['panel.feedbackState'].p1.entries).find(row => row.kind === 'decision').attachments.length === 3);
+    const draft = await page.evaluate(() => ({ stored: fixture.stored, feedbackFiles: fixture.feedbackFiles }));
+    await setup({ ...draft, width: 360, feedbackDecisions: true });
+    await decision().getByText('决定记录.txt', { exact: true }).waitFor();
+    assert.equal(await decision().getByRole('textbox', { name: '你的决定' }).inputValue(), '采用组合方案');
+    assert.equal(await decision().getByRole('textbox', { name: '补充说明（选填）' }).inputValue(), '这段文字正常粘贴');
+    const remove = decision().getByRole('button', { name: '移除 待移除.txt' });
     await remove.focus();
     await remove.press('Enter');
-    assert.equal(await body.getByText('待移除.txt', { exact: true }).count(), 0);
-    assert.equal(await field.inputValue(), note);
-    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
-    await page.waitForFunction(() => Object.values(fixture.stored['panel.feedbackState'].p1.entries)[0].attachments.length === 2);
-    const draft = await page.evaluate(() => ({ stored: fixture.stored, feedbackFiles: fixture.feedbackFiles }));
-    await setup({ ...draft, width: 360 });
-    await rail().getByText('修改记录.txt', { exact: true }).waitFor();
-    await rail().getByText('截图.png', { exact: true }).waitFor();
+    assert.equal(await decision().getByText('待移除.txt', { exact: true }).count(), 0);
     assert.equal(await rail().getByRole('textbox', { name: '修改意见' }).inputValue(), note);
-    if (process.env.PANEL_EVIDENCE_DIR) await page.screenshot({ path: path.join(process.env.PANEL_EVIDENCE_DIR, 'acceptance-attachments-draft-360.png'), animations: 'disabled' });
+    if (process.env.PANEL_EVIDENCE_DIR) await decision().screenshot({ path: path.join(process.env.PANEL_EVIDENCE_DIR, 'decision-feedback-360.png'), animations: 'disabled' });
 
-    await dock().getByRole('button', { name: '提交 1 条', exact: true }).click();
-    await page.getByRole('status').filter({ hasText: '已提交 1 条' }).waitFor();
+    await dock().getByRole('button', { name: '提交 2 条', exact: true }).click();
+    await page.getByRole('status').filter({ hasText: '已提交 2 条' }).waitFor();
     const { submission, persisted } = await page.evaluate(() => ({ submission: fixture.calls.find(c => c.name === 'project.feedback').input,
       persisted: { feedbackProject: fixture.project, feedbackFiles: fixture.feedbackFiles } }));
-    const item = submission.items[0];
+    const item = submission.items.find(i => i.kind === 'acceptance');
     assert.deepEqual([submission.projectId, item.taskId, item.itemId, item.itemRevision, item.note], ['p1', 't1', 'a1', 1, note]);
-    assert.deepEqual(item.attachments.map(f => f.name), ['截图.png', '修改记录.txt']);
-    assert.equal(persisted.feedbackFiles[item.attachments[0].id][0], image);
-    assert.equal(persisted.feedbackFiles[item.attachments[1].id][0], payload.toString('base64'));
+    assert.deepEqual(item.attachments.map(f => f.name), ['验收截图.png', '验收记录.txt']);
     assert.deepEqual(persisted.feedbackProject.tasks[0].acceptance[0].history[0].attachments, item.attachments);
+    const reply = submission.items.find(i => i.kind === 'decision');
+    assert.deepEqual([reply.taskId, reply.itemId, reply.itemRevision, reply.presentationRevision, reply.answer, reply.note],
+      ['d1', 'direction', 1, 2, '采用组合方案', '这段文字正常粘贴']);
+    assert.deepEqual(reply.attachments.map(f => f.name), ['决定截图.png', '决定记录.txt']);
+    for (const i of [item, reply]) assert.deepEqual(i.attachments.map(f => persisted.feedbackFiles[f.id][0]), [image, payload]);
 
     await setup({ ...persisted, width: 360 });
     await project();
@@ -520,17 +551,22 @@ try {
     await currentLayer().getByRole('button', { name: '页面交付', exact: true }).click();
     await currentLayer().getByRole('button', { name: /^记录/ }).click();
     await currentLayer().getByText(/成果 a1.*第 1 版.*需要修改.*请对照截图和修改记录/).waitFor();
-    await currentLayer().getByRole('button', { name: '截图.png', exact: true }).click();
-    const img = page.getByRole('dialog', { name: '截图.png' }).getByRole('img');
-    await img.waitFor();
+    await currentLayer().getByRole('button', { name: '验收截图.png', exact: true }).click();
     await page.waitForFunction(() => document.querySelector('dialog img')?.naturalWidth === 1);
     await page.getByRole('button', { name: '关闭', exact: true }).click();
-    await currentLayer().getByRole('button', { name: '修改记录.txt', exact: true }).click();
-    const dialog = page.getByRole('dialog', { name: '修改记录.txt' });
-    await dialog.getByText(payload.toString()).waitFor();
+    await back();
+    await currentLayer().getByRole('button', { name: '设计决定', exact: true }).click();
+    await currentLayer().getByRole('button', { name: /^记录/ }).click();
+    await currentLayer().getByText(/采用哪个方案.*采用组合方案.*这段文字正常粘贴/).waitFor();
+    await currentLayer().getByRole('button', { name: '决定截图.png', exact: true }).click();
+    await page.waitForFunction(() => document.querySelector('dialog img')?.naturalWidth === 1);
+    await page.getByRole('button', { name: '关闭', exact: true }).click();
+    await currentLayer().getByRole('button', { name: '决定记录.txt', exact: true }).click();
+    const dialog = page.getByRole('dialog', { name: '决定记录.txt' });
+    await dialog.getByText('文本附件内容').waitFor();
     await dialog.getByRole('button', { name: '保存到本机' }).click();
     await dialog.getByRole('status').filter({ hasText: '已保存' }).waitFor();
-    assert.deepEqual(await page.evaluate(() => fixture.calls.find(c => c.name === 'files.saveAs').input), { suggestedName: '修改记录.txt', data: payload.toString() });
+    assert.deepEqual(await page.evaluate(() => fixture.calls.find(c => c.name === 'files.saveAs').input), { suggestedName: '决定记录.txt', data: '文本附件内容' });
   });
   if (!process.env.PANEL_ATTACHMENTS_ONLY) {
   await setup({ inboxBatch: true, width: 400 });

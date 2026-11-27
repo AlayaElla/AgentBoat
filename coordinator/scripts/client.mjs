@@ -12,8 +12,9 @@ if (sourceList && argument) throw new Error('用法：owner-messages');
 const replyDecision = operation === 'reply-decision';
 if (replyDecision && (!argument || !flag || !taskId || extra)) throw new Error('用法：reply-decision <项目编号> <任务编号> <决定编号>');
 const feedbackFile = operation === 'feedback-file';
-if (feedbackFile && (process.argv.length !== 8 || !/^[1-9]\d*$/.test(extra ?? '')))
-  throw new Error('用法：feedback-file <项目编号> <任务编号> <验收编号> <验收版本> <附件编号>');
+const decisionFile = feedbackFile && process.argv.length === 9 && process.argv[8] === '--decision';
+if (feedbackFile && (process.argv.length !== 8 && !decisionFile || !/^[1-9]\d*$/.test(extra ?? '')))
+  throw new Error('用法：feedback-file <项目编号> <任务编号> <事项编号> <版本> <附件编号> [--decision]');
 // Internal callers pass handler data on stdin. The workspace hook excludes option-prefixed commands.
 const internal = operation === '--workspace-request' && ['project.settings', 'project.lead', 'workspace.message', 'workspace.connections'].includes(argument) && !flag;
 const brief = operation === 'overview' && argument === '--brief';
@@ -41,7 +42,7 @@ function readInput(file) {
 const input = internal ? readInput(0) : history ? { projectId: historyProject, end: historyArgs.length ? Number(historyArgs[1]) : undefined } : leadAction ? { runId: argument, action: operation.slice(5), caller, token: flag, ...(taskId ? { note: taskId } : {}) } : operation === 'connections' ? { operation: 'read' } : operation.startsWith('connection-') ? { ...(['connection-read','connection-check'].includes(operation) ? { name: argument } : readInput(0)), operation: operation.slice(11) } : operation.startsWith('links-') ? { ...(['links-join', 'links-configure', 'links-rename', 'links-share', 'links-relate', 'links-revoke', 'links-send'].includes(operation) ? readInput(0) : {}), operation: operation.slice(6) } : ['projects', 'overview'].includes(operation) ? null : operation === 'main-read' ? { operation: 'read' } : operation === 'read'
   ? { operation, projectId: argument, taskId: readOptions.task }
   : replyDecision ? { operation: 'read', projectId: argument, taskId: flag }
-  : feedbackFile ? { projectId: argument, taskId: flag, itemId: taskId, itemRevision: Number(extra), attachmentId: process.argv[7] }
+  : feedbackFile ? { projectId: argument, taskId: flag, itemId: taskId, itemRevision: Number(extra), attachmentId: process.argv[7], ...(decisionFile && { kind: 'decision' }) }
   : operation === 'project-lead' ? { projectId: argument }
   : operation === 'main-targets' || sourceList ? null
   : { ...readInput(operation === 'main-bind' || leadBind || leadSwitch ? 0 : argument), ...(['message', 'feedback', 'worker-feedback', 'feishu-reply', 'project-lead-switch'].includes(operation) ? {} : { operation: operation === 'main-bind' || leadBind ? 'bind' : operation }) };
@@ -133,7 +134,9 @@ try {
       throw new Error('请在当前项目主会话的 Run 中回送决定');
     if (decision?.answer === undefined || !decision.orcaQuestions?.length) throw new Error('没有可回送的已入账决定');
     const feedback = decision.history.at(-1), note = feedback?.note;
-    const body = (decision.answer === null ? '此决定已撤下，请结束等待并与项目主会话核对。' : decision.answer) + (note ? `\n\n备注\n${note}` : '');
+    const files = feedback?.attachments?.length ? `\n\n附件 · 决定 ${taskId} · 第 ${feedback.revision} 版\n` +
+      feedback.attachments.map(f => `- ${f.name}（${f.id}）`).join('\n') + '\n如需查看，请在原任务记录中打开，或请项目主会话核对。' : '';
+    const body = (decision.answer === null ? '此决定已撤下，请结束等待并与项目主会话核对。' : decision.answer) + (note ? `\n\n备注\n${note}` : '') + files;
     const replies = decision.orcaQuestions.map(q => {
       if (q.runId !== run.id) return { questionId: q.id, runId: q.runId, error: '原问题在其他 Run，请由该 Run 当前协调者核对并回复' };
       try {

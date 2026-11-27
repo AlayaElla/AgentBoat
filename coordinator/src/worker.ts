@@ -22,7 +22,7 @@ import { applySetup, previewSetup, validateCodexHome } from '../../workspace/ins
 import { projectAgentLaunch, projectLeadAgents, projectTemplate, templateLeadPreferences, type ProjectLeadAgents } from '../../workspace/agent-launch.mjs'
 import { promptClientPath, refreshReleaseSetup, pluginVersionLabel, release, roleRegistryPath } from '../scripts/orca-cli.mjs'
 import { cliBridge } from '../scripts/cli-bridge.mjs'
-import { applyDelta, delegatedFeedbackFileBytes, delegatedFeedbackFilesUnavailable, feedbackBatchBytes, feedbackFileCount, type FeedbackAttachment, type FeedbackTarget, type Sheets } from './feedback-drafts'
+import { applyDelta, delegatedFeedbackFileBytes, feedbackFileUnavailable, feedbackBatchBytes, feedbackFileCount, type FeedbackAttachment, type FeedbackTarget, type Sheets } from './feedback-drafts'
 import { projectDeliveryBody, roleRegistry, type roleReminder } from './role-registry'
 import { escalationWait } from '../scripts/worker-reports.mjs'
 import { businessQuestion, questionSourceId } from '../scripts/orca-questions.mjs'
@@ -61,7 +61,8 @@ export function createCoordinator(api: OrcaWorkerApi, runtime: CoordinatorRuntim
       await orca.storage.set('panel.feedbackState', sheets as any)
       orca.panels.post('panel.draftsChanged', {})
       await Promise.allSettled(replaced.flatMap(({ old, value }) => old.attachments!.filter(file =>
-        old.itemRevision !== value?.itemRevision || !value?.attachments?.some(other => other.id === file.id && other.sha256 === file.sha256 && other.size === file.size)).map(async file =>
+        old.itemRevision !== value?.itemRevision || old.presentationRevision !== value?.presentationRevision ||
+        !value?.attachments?.some(other => other.id === file.id && other.sha256 === file.sha256 && other.size === file.size)).map(async file =>
         linkFiles.discardFeedbackPart(feedbackTarget(old, change.projectId), feedbackAttachment(file)))))
     }
     return sheets
@@ -941,8 +942,11 @@ export function createCoordinator(api: OrcaWorkerApi, runtime: CoordinatorRuntim
     changed(id); deferBackupCheck()
     return snapshot(id)
   })
-  function feedbackTarget(input: { projectId?: unknown; taskId: unknown; itemId: unknown; itemRevision?: unknown }, projectId = text(input.projectId, '项目编号', 200)): FeedbackTarget {
-    return { projectId, taskId: text(input.taskId, '任务编号', 200), itemId: text(input.itemId, '验收编号', 200), itemRevision: revision(input.itemRevision) }
+  function feedbackTarget(input: { projectId?: unknown; taskId: unknown; itemId: unknown; itemRevision?: unknown; kind?: unknown; presentationRevision?: unknown }, projectId = text(input.projectId, '项目编号', 200)): FeedbackTarget {
+    const { kind, presentationRevision } = input
+    if (kind !== undefined && kind !== 'acceptance' && kind !== 'decision') fail('请选择决定或验收事项')
+    return { projectId, taskId: text(input.taskId, '任务编号', 200), itemId: text(input.itemId, '事项编号', 200), itemRevision: revision(input.itemRevision),
+      ...(kind === 'decision' && { kind, ...(presentationRevision !== undefined && { presentationRevision: revision(presentationRevision) }) }) }
   }
   function feedbackItemFiles(items: unknown, projectId: string, limit: number) {
     const files: { target: FeedbackTarget; file: FeedbackAttachment }[] = []
@@ -950,8 +954,8 @@ export function createCoordinator(api: OrcaWorkerApi, runtime: CoordinatorRuntim
     let size = 0
     if (Array.isArray(items)) for (const item of items) {
       if (item?.attachments === undefined) continue
-      if (item.kind !== 'acceptance' || typeof item.fingerprint !== 'string' || !Array.isArray(item.attachments) ||
-          !item.attachments.length || item.attachments.length > feedbackFileCount) fail('每项验收可添加 1 到 10 个附件')
+      if ((item.kind !== 'acceptance' && item.kind !== 'decision') || typeof item.fingerprint !== 'string') fail('请提供附件对应的决定或验收事项及内容指纹')
+      if (!Array.isArray(item.attachments) || !item.attachments.length || item.attachments.length > feedbackFileCount) fail('每项反馈可附上 1 到 10 个文件')
       const target = feedbackTarget(item, projectId)
       for (const raw of item.attachments) {
         const file = feedbackAttachment(raw)
@@ -966,11 +970,12 @@ export function createCoordinator(api: OrcaWorkerApi, runtime: CoordinatorRuntim
   }
 
   orca.panels.handle('panel.feedbackFile', (input, context) => saveDrafts(async () => {
-    if (context.panel.id === 'orca-cli') fail('请在工作间面板添加验收附件')
+    if (context.panel.id === 'orca-cli') fail('请在工作间面板附上文件')
     const target = feedbackTarget(input), file = feedbackAttachment(input.file)
     if (input.data === null) {
-      const saved = (await readDrafts())[target.projectId]?.entries[JSON.stringify([target.taskId, 'acceptance', target.itemId])]
-      if (saved?.itemRevision !== target.itemRevision || !saved.attachments?.some(f => f.id === file.id))
+      const saved = (await readDrafts())[target.projectId]?.entries[JSON.stringify([target.taskId, target.kind ?? 'acceptance', target.itemId])]
+      if (saved?.itemRevision !== target.itemRevision || saved.presentationRevision !== target.presentationRevision ||
+          !saved.attachments?.some(f => f.id === file.id && f.sha256 === file.sha256 && f.size === file.size))
         await linkFiles.discardFeedbackPart(target, file)
       return { saved: true as const }
     }
@@ -980,7 +985,7 @@ export function createCoordinator(api: OrcaWorkerApi, runtime: CoordinatorRuntim
         const [peerId, id] = JSON.parse(target.projectId)
         const peer = (await links.snapshot(true)).peers.find(p => p.id === peerId && p.status === 'connected')
         const feedback = peer?.report?.projects.find(p => p.id === id)?.feedback
-        if (!feedback?.attachmentFeedback) fail(delegatedFeedbackFilesUnavailable)
+        if (!feedback || feedbackFileUnavailable(feedback, target.kind)) fail(feedbackFileUnavailable(undefined, target.kind))
         if (file.size > delegatedFeedbackFileBytes) fail('跨工作间附件总计最多 96 KiB')
         tasks = feedback.tasks
       } else {
@@ -988,9 +993,17 @@ export function createCoordinator(api: OrcaWorkerApi, runtime: CoordinatorRuntim
         if (p.hidden || p.ref.hostId !== 'local') fail('请选择可见的本机项目')
         tasks = p.tasks
       }
-      const a = tasks.find(t => t.id === target.taskId && t.phase === 'ready')?.acceptance.find(a => a.id === target.itemId)
-      if (a?.status !== 'pending' || a.revision !== target.itemRevision || a.fingerprint !== input.fingerprint)
-        fail('验收项已更新，请刷新后重新添加附件')
+      const task = tasks.find(t => t.id === target.taskId)
+      if (target.kind === 'decision') {
+        const d = task?.decisions.find(d => d.id === target.itemId)
+        if (!d || task?.phase === 'paused' || d.answer !== undefined || target.itemRevision !== 1 ||
+            d.presentationRevision !== target.presentationRevision || fingerprint([d.question, d.options]) !== input.fingerprint)
+          fail('决定已更新，请刷新后重新附上文件')
+      } else {
+        const a = task?.phase === 'ready' && task.acceptance.find(a => a.id === target.itemId)
+        if (!a || a.status !== 'pending' || a.revision !== target.itemRevision || a.fingerprint !== input.fingerprint)
+          fail('验收项已更新，请刷新后重新附上文件')
+      }
     }
     await linkFiles.uploadFeedbackPart(target, file, input.offset, input.data)
     return { saved: true as const }
@@ -1035,10 +1048,10 @@ export function createCoordinator(api: OrcaWorkerApi, runtime: CoordinatorRuntim
         }
       }
       const files = feedbackItemFiles(recorded.items, p.ref.id, remote ? delegatedFeedbackFileBytes : feedbackBatchBytes)
-      if (files.length && (fromCli || owner || !request || expected === undefined || p.ref.hostId !== 'local')) fail('请在当前验收的留言中添加附件')
+      if (files.length && (fromCli || owner || !request || expected === undefined || p.ref.hostId !== 'local')) fail('请在当前决定或验收的反馈中附上文件')
       const wire = remote?.attachmentData === undefined ? undefined : object(remote.attachmentData)
       if (remote && (Object.keys(wire ?? {}).length !== files.length || files.some(f => !Object.hasOwn(wire ?? {}, f.file.id))))
-        fail('对方未传来完整的验收附件')
+        fail('对方未传来完整的反馈附件')
       if (files.length) recorded = { ...recorded, items: recorded.items.map((item: Record<string, any>) =>
         item.attachments === undefined ? item : { ...item, attachments: item.attachments.map(feedbackAttachment) }) }
       feedback(p, recorded, source, event)
@@ -1223,11 +1236,13 @@ export function createCoordinator(api: OrcaWorkerApi, runtime: CoordinatorRuntim
       authorize(p)
     }
     const id = text(input.attachmentId, '附件编号', 36)
-    const find = (task?: Project['tasks'][number]) => task?.acceptance.find(a => a.id === target.itemId)?.history
-      .filter(h => h.revision === target.itemRevision).flatMap(h => h.attachments ?? []).find(file => file.id === id)
+    const find = (task?: Project['tasks'][number]) => (target.kind === 'decision' ? task?.decisions : task?.acceptance)
+      ?.find(item => item.id === target.itemId)?.history.find(h => h.revision === target.itemRevision &&
+        (target.presentationRevision === undefined || h.presentationRevision === target.presentationRevision) && h.attachments?.some(file => file.id === id))
     const record = find(p.tasks.find(t => t.id === target.taskId)) ?? (p.archive && find(await store.archive.task(p, target.taskId)))
-    if (!record) fail('这份附件不属于指定项目、任务和验收版本')
-    return { target, file: feedbackAttachment(record) }
+    if (!record) fail('这份附件不属于指定项目、任务和事项版本')
+    if (target.kind === 'decision') target.presentationRevision = record.presentationRevision
+    return { target, file: feedbackAttachment(record.attachments!.find(file => file.id === id)) }
   }
   orca.panels.handle('project.feedbackFile', async (input, context) => {
     if (context.panel.id === 'orca-cli') fail('项目主会话请使用 feedback-file')
