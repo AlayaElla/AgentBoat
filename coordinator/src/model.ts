@@ -195,7 +195,8 @@ export function attention(project: Project): Attention[] {
 export function taskAttention(projectId: string, task: Task): Attention[] {
   const base = { projectId, taskId: task.id, title: task.title }
   const items: Attention[] = task.decisions.filter(d => task.phase !== 'paused' && d.answer === undefined).map(d => ({ ...base, kind: 'decision',
-    itemId: d.id, summary: d.question, signature: JSON.stringify([d.question, d.options]), presentationRevision: d.presentationRevision }))
+    itemId: d.id, summary: d.question, signature: JSON.stringify([d.question, d.options]),
+    ...(d.presentationRevision !== undefined && { presentationRevision: d.presentationRevision }) }))
   items.push(...task.acceptance.filter(a => a.status === 'pending' && task.phase === 'ready').map(a => ({ ...base, kind: 'review' as const, itemId: a.id, summary: a.title, itemRevision: a.revision, fingerprint: a.fingerprint })))
   items.push(...task.acceptance.filter(a => a.status === 'changes_requested').map(a => ({ ...base, kind: 'rework' as const, itemId: a.id, summary: a.history.at(-1)?.note || a.title })))
   const version = blockedRevision(task)

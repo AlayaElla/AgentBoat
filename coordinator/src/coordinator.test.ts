@@ -1365,7 +1365,13 @@ test('restart preserves an in-flight notification without resending', async () =
 test('overview reads registered projects with closed workspaces without writing and includes their queues and executions', async () => {
   const p = fresh(refs[0]); p.runId = 'run_project'
   submitTask(p, { ...deliverable, executions: [{ runId: 'run_job', taskId: 'orca-task', dispatchId: 'dispatch', agent: 'codex' }] })
-  submitTask(p, { id: 'blocked', title: '依赖受阻', goal: '修复依赖', phase: 'blocked', decisions: [{ id: 'ask', question: '选择方案？' }] })
+  submitTask(p, { id: 'blocked', title: '依赖受阻', goal: '修复依赖', phase: 'blocked', decisions: [
+    { id: 'ask', question: '选择方案？' }, { id: 'legacy', question: '沿用原方案？', options: ['沿用'] },
+  ] })
+  const blocked = p.tasks.find(t => t.id === 'blocked')!
+  const legacy = blocked.decisions.find(d => d.id === 'legacy')!
+  delete legacy.presentationRevision
+  delete legacy.presentedAt
   submitTask(p, { ...deliverable, id: 'rework' })
   feedback(p, { items: [{ taskId: 'rework', kind: 'acceptance', itemId: 'page-check', itemRevision: 1, result: 'changes_requested', note: '调整标题' }] })
   const host = mockHost({ storage: { 'project:p1': p as any, workspace: { version: 1, revision: 0, runId: p.runId, requests: [] } } })
@@ -1377,13 +1383,23 @@ test('overview reads registered projects with closed workspaces without writing 
   assert.equal(catalogReads, 1)
   assert.deepEqual(all.workspace.projectNames, [p.ref.name])
   assert.equal(all.workspace.revision, 0); assert.equal(all.workspace.runId, p.runId)
-  assert.deepEqual(all.attention.map(a => a.kind).sort(), ['blocked', 'decision', 'review', 'rework'])
+  assert.deepEqual(all.attention.map(a => a.kind).sort(), ['blocked', 'decision', 'decision', 'review', 'rework'])
+  const decisions = all.attention.filter(a => a.kind === 'decision')
+  assert.deepEqual(decisions.map(d => [d.itemId, Object.hasOwn(d, 'presentationRevision'), d.presentationRevision]), [
+    ['ask', true, blocked.decisions[0].presentationRevision], ['legacy', false, undefined],
+  ])
+  assert.equal(decisions.find(d => d.itemId === 'legacy')?.signature, JSON.stringify([legacy.question, legacy.options]))
   assert.equal(all.projects.length, 2)
   assert.equal(all.projects[0].counts.review, 1)
   assert.equal(all.projects[0].agents[0].dispatchId, 'dispatch')
   assert.equal(all.projects[0].agents[0].projectTaskId, 'task-1')
   assert.deepEqual((await worker.request('project.agent', { operation: 'read', projectId: 'p1' })).project, p)
   assert.deepEqual({ ...host.data().storage, 'workspace.connections': undefined }, { ...before, 'workspace.connections': undefined })
+  const answered = await worker.request('project.feedback', { projectId: 'p1', revision: p.revision, requestId: 'legacy-decision-reply',
+    items: [{ taskId: blocked.id, kind: 'decision', itemId: legacy.id, answer: '沿用', fingerprint: fingerprint([legacy.question, legacy.options]) }] })
+  const decision = answered.project!.tasks.find(t => t.id === blocked.id)!.decisions.find(d => d.id === legacy.id)!
+  assert.equal(decision.answer, '沿用')
+  assert.equal(Object.hasOwn(decision, 'presentationRevision'), false)
   await worker.deactivate()
 })
 
