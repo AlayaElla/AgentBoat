@@ -10,7 +10,7 @@ export interface ProjectRef {
   workspace: string
 }
 export interface Artifact { id: string; label: string; url: string; version: string; kind?: import('./artifact-kind').ArtifactKind; registeredAt?: string; expired?: boolean; expiryReason?: string }
-interface UserFeedback { at: string; revision: number; result: string; note: string; source?: string; attachments?: import('./feedback-drafts').FeedbackAttachment[] }
+interface UserFeedback { at: string; revision: number; result: string; note: string; source?: string; attachments?: import('./feedback-drafts').FeedbackAttachment[]; presentationRevision?: number }
 export interface Acceptance {
   id: string; title: string; details: string; artifactIds: string[]; revision: number
   status: 'pending' | 'passed' | 'changes_requested' | 'discarded'; history: UserFeedback[]
