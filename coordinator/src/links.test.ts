@@ -5,6 +5,7 @@ import path from 'node:path'
 import os from 'node:os'
 import { setTimeout as delay } from 'node:timers/promises'
 import { test as timedTest } from 'node:test'
+import { createHash, randomUUID } from 'node:crypto'
 import { mkdtemp, mkdir, readFile, rm, writeFile, truncate, symlink } from 'node:fs/promises'
 import { artifactChunkBytes, fileChunkBytes, maxLinkFileBytes } from './link-files'
 import type { OrcaWorkerApi } from 'orca/worker'
@@ -101,25 +102,53 @@ test('delegated feedback applies once in both directions and rechecks sharing on
     for (const projectId of ['hidden', 'p2']) assert.match((await send(b, { ...request, projectId })).reason!, /未开放或已隐藏/)
     assert.match((await send(b, { ...request, items: [items[0], { ...items[1], fingerprint: 'stale' }] })).reason!, /问题内容已更新/)
     assert.equal((await a.c.store.get('p1')).tasks[0].acceptance[0].status, 'pending')
+    const contents = Buffer.from('两个工作间间的验收附件')
+    const file = { id: randomUUID(), name: '反馈.txt', size: contents.length, sha256: createHash('sha256').update(contents).digest('hex') }
+    const remoteTarget = { projectId: JSON.stringify([id, 'p1']), taskId: review.id, itemId: check.id, itemRevision: check.revision, fingerprint: check.fingerprint }
+    assert.equal(shared[0].feedback!.attachmentFeedback, true)
+    await b.worker.request('panel.feedbackFile', { ...remoteTarget, file, offset: 0, data: contents.toString('base64') })
+    const attached = { ...request, items: [{ ...items[0], attachments: [file] }, ...items.slice(1)] }
+    assert.match((await send(b, { ...attached, projectId: 'p2' })).reason!, /不支持验收附件/)
+    const currentRemote = (b.c.links as any).incoming.get(id).report.projects.find((pr: { id: string }) => pr.id === 'p1').feedback
+    delete currentRemote.attachmentFeedback
+    assert.match((await send(b, attached)).reason!, /不支持验收附件/)
+    currentRemote.attachmentFeedback = true
+    assert.match((await send(b, { ...attached, items: [{ ...items[0], attachments: [{ ...file, size: 96 * 1024 + 1 }] }] })).reason!, /96 KiB/)
+    assert.equal((await a.c.store.get('p1')).tasks[0].acceptance[0].status, 'pending')
+    const receiver = a.c.links as any, receive = receiver.receiveFeedback.bind(receiver)
+    let attachedPackets = 0
+    receiver.receiveFeedback = (peer: unknown, exchange: any) => {
+      if (exchange?.attachmentRequest) {
+        assert.equal(exchange.request, undefined)
+        assert.deepEqual(exchange.attachmentRequest, { request: attached, data: { [file.id]: contents.toString('base64') } })
+        attachedPackets++
+      }
+      return receive(peer, exchange)
+    }
     const mutate = a.c.store.mutate.bind(a.c.store)
     a.c.store.mutate = async (...args) => {
       const saved = await mutate(...args)
       a.c.store.mutate = mutate
       throw Error(`lost receipt for revision ${saved.revision}`)
     }
-    assert.equal((await send(b)).state, 'uncertain')
+    assert.equal((await send(b, attached)).state, 'uncertain')
     assert.equal((await a.c.store.get('p1')).tasks[0].acceptance[0].status, 'passed')
     const updated = (await b.c.links.refresh()).peers[0].report!.projects[0].feedback!.tasks[0]
     assert.equal(updated.blockedStatus, 'replied')
     const joinerStarted = performance.now()
-    const receipt = await send(b)
-    assert.deepEqual(receipt, { state:'submitted', requestId: request.requestId, fingerprint: fingerprint(request) })
+    const receipt = await send(b, attached)
+    assert.deepEqual(receipt, { state:'submitted', requestId: request.requestId, fingerprint: fingerprint(attached) })
     const joinerMs = performance.now() - joinerStarted
-    assert.equal((await send(b)).state, 'submitted')
+    assert.equal((await send(b, attached)).state, 'submitted')
     await a.c.flush('p1')
     const savedCheck = (await a.c.store.get('p1')).tasks[0].acceptance[0]
     assert.equal(savedCheck.status, 'passed')
+    assert.equal(attachedPackets, 3)
     assert.deepEqual(savedCheck.history.map(h => [h.result, h.revision, h.note]), [['passed', 1, note]])
+    assert.deepEqual(savedCheck.history[0].attachments, [file])
+    const receivedFile = { projectId: 'p1', taskId: review.id, itemId: check.id, itemRevision: check.revision, attachmentId: file.id }
+    assert.equal(await a.worker.request('project.feedbackFile', { ...receivedFile, offset: 0 }), contents.toString('base64'))
+    await assert.rejects(() => b.worker.request('project.feedbackFile', receivedFile), /不属于指定/)
     assert.equal((await a.c.store.get('p1')).tasks[1].decisions[0].history[0].source, '主人在工作间 乙工作间 提交')
     const replies = (await a.c.store.get('p1')).events
     assert.deepEqual(replies.map(e => [e.text, e.taskId, e.senderId]), [['已经做好了', decision.id, '主人在工作间 乙工作间 提交']])

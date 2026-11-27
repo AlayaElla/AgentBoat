@@ -13,6 +13,7 @@ import { LinkArtifacts, artifactRef, streamTimeout, type ArtifactExchange, type 
 import { ArtifactStream } from './artifact-stream'
 import { artifactKind, knownArtifactKind } from './artifact-kind'
 import { LinkFiles } from './link-files'
+import { delegatedFeedbackFilesUnavailable } from './feedback-drafts'
 import { setTimeout as delay } from 'node:timers/promises'
 import { validAgentId } from '../../workspace/agent-launch.mjs'
 
@@ -25,10 +26,11 @@ export type FeedbackTask = Pick<Task, 'id' | 'title' | 'phase' | 'blockedRevisio
   artifacts: Task['artifacts']
   goal?: string; progress?: string
 }
-type DelegatedProject = { revision: number; tasks: FeedbackTask[] }
+type DelegatedProject = { revision: number; tasks: FeedbackTask[]; attachmentFeedback?: true }
 export interface DelegatedFeedback { projectId: string; revision: number; requestId: string; items: FeedbackItem[] }
 export type FeedbackReply = { requestId: string; state: 'submitted' | 'rejected' | 'uncertain'; fingerprint?: string; reason?: string }
-type FeedbackExchange = { request?: DelegatedFeedback; reply?: FeedbackReply }
+type AttachmentData = Record<string, string>
+type FeedbackExchange = { request?: DelegatedFeedback; reply?: FeedbackReply; attachmentRequest?: { request: DelegatedFeedback; data: AttachmentData } }
 export interface SharedReport {
   workspaceId: string; name: string; scope: Scope; updatedAt: string
   mainAgent?: MainAgentActivity | null
@@ -107,7 +109,7 @@ const publicAgent = (value: string) => knownAgent(value) ? value : ''
 const canDelegate = (p: Sharing) => p.scope === 'details' && p.delegateFeedback === true
 
 function delegatedProject(p: Project): DelegatedProject {
-  return { revision: p.revision, tasks: p.tasks.flatMap(t => {
+  return { revision: p.revision, attachmentFeedback: true, tasks: p.tasks.flatMap(t => {
     if (t.phase === 'paused') return []
     const decisions = t.decisions.filter(d => d.answer === undefined).map(({ id, question, options, artifactIds }) =>
       ({ id, question, options, ...(artifactIds && { artifactIds: artifactIds.filter(id => t.artifacts.some(a => a.id === id && !a.expired)) }) }))
@@ -232,7 +234,7 @@ function received(raw: unknown, peer: Peer): SharedReport {
 function receivedFeedback(raw: unknown): DelegatedProject {
   const r = object(raw)
   const list = (value: unknown, max: number) => Array.isArray(value) && value.length <= max ? value.map(object) : fail('对端待处理列表格式不正确')
-  return { revision: revision(r.revision), tasks: list(r.tasks, 1000).map(t => {
+  return { revision: revision(r.revision), ...(r.attachmentFeedback === true && { attachmentFeedback: true }), tasks: list(r.tasks, 1000).map(t => {
     if (!['working', 'ready', 'completed', 'blocked'].includes(t.phase)) fail('对端待处理任务状态不正确')
     if (t.blockedRevision !== undefined && (t.phase !== 'blocked' || t.blockedStatus !== undefined && t.blockedStatus !== 'replied')) fail('对端受阻项格式不正确')
     return { id: text(t.id, '任务编号', 200), title: text(t.title, '任务名称', 200), phase: t.phase,
@@ -262,7 +264,7 @@ function feedbackRequest(raw: unknown): DelegatedFeedback {
 }
 function syncPacket(report: SharedReport | undefined, pending: WireMessage[], receipts: Receipts, feedback: FeedbackExchange, id?: string, version?: string) {
   const exchange: MessageExchange = { messages: [], ...receipts }
-  const packet = { id, version, artifact: undefined as ArtifactExchange | undefined, report, exchange, feedback: feedback.request || feedback.reply ? feedback : undefined }
+  const packet = { id, version, artifact: undefined as ArtifactExchange | undefined, report, exchange, feedback: feedback.request || feedback.reply || feedback.attachmentRequest ? feedback : undefined }
   const fits = () => Buffer.byteLength(JSON.stringify(packet)) <= LIMIT
   if (packet.feedback && !fits()) packet.report = undefined
   for (const m of pending) {
@@ -335,13 +337,13 @@ export class WorkspaceLinks {
   private invitation?: { token: string; expires: number }
   private reportOrder = 0
   private incoming = new Map<string, { report: SharedReport; receivedAt: string; order: number; offline?: boolean }>()
-  private feedbackPending = new Map<string, { request: DelegatedFeedback; sent: boolean; finish: (result: FeedbackReply) => void }>()
+  private feedbackPending = new Map<string, { request: DelegatedFeedback; attachmentData?: AttachmentData; sent: boolean; finish: (result: FeedbackReply) => void }>()
   private feedbackReplies = new Map<string, FeedbackReply>()
   private chain: Promise<unknown> = Promise.resolve()
   private syncing = new Map<string, Promise<string | undefined>>()
   private listening = ''
   private error = ''
-  constructor(private orca: Pick<OrcaWorkerApi, 'storage' | 'secrets'> & Partial<Pick<OrcaWorkerApi, 'log' | 'panels'>>, private projects: () => Promise<Project[]>, private changed: () => void, private chooseHost = invitationHost, private enqueue?: (peer: Peer, messages: IncomingMessage[]) => Promise<void>, private activity?: () => Promise<LocalActivity>, files = new LinkFiles(), private checkCatalog?: () => Promise<unknown>, private applyFeedback?: (peer: Peer, input: DelegatedFeedback) => Promise<string | undefined>) {
+  constructor(private orca: Pick<OrcaWorkerApi, 'storage' | 'secrets'> & Partial<Pick<OrcaWorkerApi, 'log' | 'panels'>>, private projects: () => Promise<Project[]>, private changed: () => void, private chooseHost = invitationHost, private enqueue?: (peer: Peer, messages: IncomingMessage[]) => Promise<void>, private activity?: () => Promise<LocalActivity>, files = new LinkFiles(), private checkCatalog?: () => Promise<unknown>, private applyFeedback?: (peer: Peer, input: DelegatedFeedback, attachmentData?: unknown) => Promise<string | undefined>) {
     this.messages = new LinkMessages(files)
     this.artifacts = new LinkArtifacts(files, line => orca.log?.(line), progress => orca.panels?.post('workspace.artifactProgress', progress))
     this.stream = new ArtifactStream(this.artifacts, connect, async (peerId, ref) => {
@@ -624,9 +626,10 @@ export class WorkspaceLinks {
     if (/^https?:/i.test(artifact.url)) fail(reasonText('web'))
     return { root: project.ref.path, file: artifact.url, version: artifact.version }
   }
-  async submitFeedback(connectionId: string, input: unknown): Promise<FeedbackReply> {
+  async submitFeedback(connectionId: string, input: unknown, loadAttachments?: (request: DelegatedFeedback) => Promise<AttachmentData>): Promise<FeedbackReply> {
     const request = feedbackRequest(input)
-    if (Buffer.byteLength(JSON.stringify(request)) > LIMIT - 16_000) return { requestId: request.requestId, state: 'rejected', reason: '反馈内容过长，请减少本次提交内容' }
+    const reject = (reason: string): FeedbackReply => ({ requestId: request.requestId, state: 'rejected', reason })
+    const hasAttachments = request.items.some(item => item?.attachments !== undefined)
     const { endpoint, result } = await this.serial(async () => {
       const p = (await this.data()).peers.find(p => p.id === connectionId && p.state === 'active')
       if (!p) fail('连接已断开')
@@ -634,12 +637,21 @@ export class WorkspaceLinks {
       // A reconnect can carry the original request even if its item is now finished.
       const incoming = this.incoming.get(p.id)
       if (!incoming || incoming.offline || Date.now() - Date.parse(incoming.receivedAt) >= 35_000) fail('对方离线，暂不能提交')
+      let attachmentData: AttachmentData | undefined
+      if (hasAttachments) {
+        if (!loadAttachments || !incoming.report.projects.find(pr => pr.id === request.projectId)?.feedback?.attachmentFeedback)
+          return { result: Promise.resolve(reject(delegatedFeedbackFilesUnavailable)) }
+        try { attachmentData = await loadAttachments(request) }
+        catch (e) { return { result: Promise.resolve(reject(e instanceof Error ? e.message : '验收附件无法读取')) } }
+      }
+      if (Buffer.byteLength(JSON.stringify(attachmentData ? { attachmentRequest: { request, data: attachmentData } } : { request })) > LIMIT - 16_000)
+        return { result: Promise.resolve(reject('反馈和附件内容过大，请减少本次提交内容')) }
       const offline: FeedbackReply = { requestId: request.requestId, state: 'uncertain', reason: '连接超时或断开，请重试核对' }
       const result = new Promise<FeedbackReply>(resolve => {
         const finish = (result: FeedbackReply) => { clearTimeout(timer); this.feedbackPending.delete(p.id); resolve(result) }
         // Allow a 10s fallback refresh and two 5s sync legs on a reverse connection.
         const timer = setTimeout(() => finish(offline), 20_000)
-        this.feedbackPending.set(p.id, { request, sent: false, finish })
+        this.feedbackPending.set(p.id, { request, attachmentData, sent: false, finish })
       })
       this.wake(p.id, false)
       return { endpoint: p.endpoint, result }
@@ -658,12 +670,15 @@ export class WorkspaceLinks {
         else pending.finish({ requestId: r.requestId, state: r.state, ...(r.state === 'submitted' ? { fingerprint: r.fingerprint } : {}), ...(typeof r.reason === 'string' ? { reason: r.reason.slice(0, 1000) } : {}) })
       }
     }
-    if (exchange.request === undefined) return
-    const request = feedbackRequest(exchange.request)
+    if (exchange.request === undefined && exchange.attachmentRequest === undefined) return
+    const attached = exchange.attachmentRequest === undefined ? undefined : object(exchange.attachmentRequest)
+    const request = feedbackRequest(attached ? attached.request : exchange.request)
     const requestId = request.requestId
     try {
       if (!canDelegate(p) || !this.applyFeedback) fail('对方未允许代为处理')
-      const fingerprint = await this.applyFeedback(p, request)
+      if (attached && (exchange.request !== undefined || attached.data === undefined || !request.items.some(item => item?.attachments !== undefined)))
+        fail('对方未传来完整的验收附件')
+      const fingerprint = await this.applyFeedback(p, request, attached?.data)
       if (!fingerprint) throw Error('没有写入凭证')
       return { requestId, state: 'submitted', fingerprint } as const
     } catch (e) {
@@ -808,8 +823,11 @@ export class WorkspaceLinks {
   private async packet(p: Peer, outgoing: SharedReport | undefined, receipts: Receipts, version?: string, reply?: FeedbackReply, feedbackOnly = false) {
     const sending = this.unsentFeedback(p.id)
     const artifact = feedbackOnly ? undefined : await this.artifacts.packet(p.id, ref => this.artifactSource(p, ref))
+    // Older receivers only process request. They must never record the text from an attachment request.
+    const feedback = sending?.attachmentData ? { attachmentRequest: { request: sending.request, data: sending.attachmentData }, reply }
+      : { request: sending?.request, reply }
     const packet = { ...syncPacket(outgoing, feedbackOnly ? [] : await this.messages.pending(p.id), receipts,
-      { request: sending?.request, reply }, version === undefined ? p.id : undefined, version), ...(feedbackOnly && { feedbackOnly: true }) }
+      feedback, version === undefined ? p.id : undefined, version), ...(feedbackOnly && { feedbackOnly: true }) }
     const m = packet.exchange.messages.find(m => m.files)
     if (m) {
       const chunk = await this.messages.chunk(p.id, m)

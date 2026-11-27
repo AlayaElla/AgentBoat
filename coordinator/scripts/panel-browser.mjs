@@ -67,7 +67,7 @@ async function setup(options = {}, hub) {
     };
     const acceptance = id => ({ id, title: '成果 ' + id, details: '核对布局和内容', artifactIds: [], revision: 1, status: 'pending', history: [], fingerprint: 'version-1-' + id });
     const task = { id: 't1', title: '页面交付', goal: '完成页面', progress: '已交付', phase: 'ready', executions: [], artifacts: [], acceptance: [acceptance('a1'), acceptance('a2')], decisions: [], updatedAt: new Date().toISOString(), sourceIds: [] };
-    const project = { version: 1, ref: { id: 'p1', name: '示例项目', hostId: 'local', repoId: 'repo', workspace: 'id:repo', path: '/example' }, revision: 2, runId: 'run_project', roles: { design: 'claude', code: 'codex', review: 'codex' }, tasks: [task], events: [], deliveries: [], requests: [] };
+    const project = options.feedbackProject ?? { version: 1, ref: { id: 'p1', name: '示例项目', hostId: 'local', repoId: 'repo', workspace: 'id:repo', path: '/example' }, revision: 2, runId: 'run_project', roles: { design: 'claude', code: 'codex', review: 'codex' }, tasks: [task], events: [], deliveries: [], requests: [] };
     const projects = options.empty ? [] : [project];
     if (options.empty) project.tasks = [];
     const archivedTask = { ...task, title: '归档任务', progress: '旧版页面已验收', phase: 'completed',
@@ -161,7 +161,9 @@ async function setup(options = {}, hub) {
       task.acceptance.push(...Array.from({ length: 10 }, (_, i) => acceptance('long-' + i)));
     }
     const calls = [];
+    const feedbackFiles = options.feedbackFiles ?? {};
     window.fixture = { project, projects, links, live, workspace, calls, hostCalls: [], stored, workspaceTarget: { workspaceId: 'identity:project-workspace', multipleConversations: true }, emit: () => events['project.changed']?.({}), openWorkspace: switching => events['workspace.open']?.({ switching }), race: false, prune: () => { task.acceptance[0].revision++; task.acceptance[0].fingerprint = 'new-version'; project.revision++; } };
+    window.fixture.feedbackFiles = feedbackFiles;
     if (options.firstSetup) window.fixture.setup = {
       paths: ['/fixture/.agents/skills/agentboat-workspace', '/fixture/custom-codex/hooks.json'],
       backupRoot: '/fixture/.agentboat/backups', codexHooks: '/fixture/custom-codex/hooks.json', codexHome: '/fixture/custom-codex', confirmation: 'a'.repeat(64)
@@ -200,6 +202,21 @@ async function setup(options = {}, hub) {
           globalThis.fixtureDraftModel.applyDelta(sheets, input.change); stored['panel.feedbackState'] = sheets;
         }
         return clone(sheets);
+      }
+      if (name === 'panel.feedbackFile') {
+        const { file, data, offset } = input;
+        if (data === null) delete feedbackFiles[file.id];
+        else {
+          feedbackFiles[file.id] ??= {};
+          feedbackFiles[file.id][offset] = data;
+        }
+        return { saved: true };
+      }
+      if (name === 'project.feedbackFile') {
+        const file = project.tasks.find(t => t.id === input.taskId)?.acceptance.find(a => a.id === input.itemId)?.history
+          .find(h => h.revision === input.itemRevision)?.attachments?.find(f => f.id === input.attachmentId);
+        if (input.projectId !== project.ref.id || !file || !Object.hasOwn(feedbackFiles, file.id)) throw Error('附件不属于本次反馈');
+        return input.offset === undefined ? { ...file, type: file.name.endsWith('.png') ? 'image/png' : 'text/plain' } : feedbackFiles[file.id][input.offset];
       }
       if (name === 'workspace.overview' && window.fixture.delayOverview) await new Promise(resolve => { window.fixture.finishOverview = resolve; });
       if (name === 'workspace.overview' && window.fixture.overviewFailures > 0) {
@@ -323,7 +340,7 @@ async function setup(options = {}, hub) {
           if (i.kind === 'blocked') { a.blockedStatus = i.result === 'discarded' ? 'discarded' : 'replied'; continue; }
           if (i.kind === 'acceptance') a.status = i.result;
           else a.answer = i.result === 'discarded' ? null : i.answer;
-          a.history.push({ result:i.result ?? i.answer, revision:i.itemRevision ?? 1, note:i.note, source:'主人', at:new Date().toISOString() });
+          a.history.push({ result:i.result ?? i.answer, revision:i.itemRevision ?? 1, note:i.note, source:'主人', at:new Date().toISOString(), ...(i.attachments && { attachments: i.attachments }) });
         }
         target.deliveries.push({ id: 'summary', subject: '用户反馈', body: '', state: 'pending' }); target.revision++;
         target.requests.push({ id: input.requestId, fingerprint: await digest(input) });
@@ -446,6 +463,76 @@ const rightClickArtifact = async entry => {
   await entry.click({ button: 'right' });
 };
 try {
+  await setup({ width: 360 });
+  await test('acceptance note accepts pasted and selected files, removes a drop, and reopens the original history', async () => {
+    const image = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a82kAAAAASUVORK5CYII=';
+    const payload = Buffer.from('文本附件内容');
+    const note = '请对照截图和修改记录';
+    const body = await openReview();
+    await body.getByRole('button', { name: '需要修改', exact: true }).first().click();
+    const field = body.getByRole('textbox', { name: '修改意见' });
+    await field.fill(note);
+    await field.evaluate((textarea, image) => {
+      const data = new DataTransfer();
+      data.items.add(new File([Uint8Array.from(atob(image), c => c.charCodeAt(0))], '截图.png', { type: 'image/png' }));
+      textarea.dispatchEvent(new ClipboardEvent('paste', { clipboardData: data, bubbles: true, cancelable: true }));
+    }, image);
+    await body.getByText('截图.png', { exact: true }).waitFor();
+    const add = body.getByRole('button', { name: '添加附件', exact: true });
+    await add.focus();
+    const chooser = page.waitForEvent('filechooser');
+    await add.press('Enter');
+    await (await chooser).setFiles({ name: '修改记录.txt', mimeType: 'text/plain', buffer: payload });
+    await body.getByText('修改记录.txt', { exact: true }).waitFor();
+    await field.evaluate(textarea => {
+      const dataTransfer = new DataTransfer();
+      dataTransfer.items.add(new File(['delete this'], '待移除.txt', { type: 'text/plain' }));
+      textarea.dispatchEvent(new DragEvent('drop', { dataTransfer, bubbles: true, cancelable: true }));
+    });
+    const remove = body.getByRole('button', { name: '移除 待移除.txt' });
+    await remove.focus();
+    await remove.press('Enter');
+    assert.equal(await body.getByText('待移除.txt', { exact: true }).count(), 0);
+    assert.equal(await field.inputValue(), note);
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+    await page.waitForFunction(() => Object.values(fixture.stored['panel.feedbackState'].p1.entries)[0].attachments.length === 2);
+    const draft = await page.evaluate(() => ({ stored: fixture.stored, feedbackFiles: fixture.feedbackFiles }));
+    await setup({ ...draft, width: 360 });
+    await rail().getByText('修改记录.txt', { exact: true }).waitFor();
+    await rail().getByText('截图.png', { exact: true }).waitFor();
+    assert.equal(await rail().getByRole('textbox', { name: '修改意见' }).inputValue(), note);
+    if (process.env.PANEL_EVIDENCE_DIR) await page.screenshot({ path: path.join(process.env.PANEL_EVIDENCE_DIR, 'acceptance-attachments-draft-360.png'), animations: 'disabled' });
+
+    await dock().getByRole('button', { name: '提交 1 条', exact: true }).click();
+    await page.getByRole('status').filter({ hasText: '已提交 1 条' }).waitFor();
+    const { submission, persisted } = await page.evaluate(() => ({ submission: fixture.calls.find(c => c.name === 'project.feedback').input,
+      persisted: { feedbackProject: fixture.project, feedbackFiles: fixture.feedbackFiles } }));
+    const item = submission.items[0];
+    assert.deepEqual([submission.projectId, item.taskId, item.itemId, item.itemRevision, item.note], ['p1', 't1', 'a1', 1, note]);
+    assert.deepEqual(item.attachments.map(f => f.name), ['截图.png', '修改记录.txt']);
+    assert.equal(persisted.feedbackFiles[item.attachments[0].id][0], image);
+    assert.equal(persisted.feedbackFiles[item.attachments[1].id][0], payload.toString('base64'));
+    assert.deepEqual(persisted.feedbackProject.tasks[0].acceptance[0].history[0].attachments, item.attachments);
+
+    await setup({ ...persisted, width: 360 });
+    await project();
+    await currentLayer().getByRole('tab', { name: '任务', exact: true }).click();
+    await currentLayer().getByRole('button', { name: '页面交付', exact: true }).click();
+    await currentLayer().getByRole('button', { name: /^记录/ }).click();
+    await currentLayer().getByText(/成果 a1.*第 1 版.*需要修改.*请对照截图和修改记录/).waitFor();
+    await currentLayer().getByRole('button', { name: '截图.png', exact: true }).click();
+    const img = page.getByRole('dialog', { name: '截图.png' }).getByRole('img');
+    await img.waitFor();
+    await page.waitForFunction(() => document.querySelector('dialog img')?.naturalWidth === 1);
+    await page.getByRole('button', { name: '关闭', exact: true }).click();
+    await currentLayer().getByRole('button', { name: '修改记录.txt', exact: true }).click();
+    const dialog = page.getByRole('dialog', { name: '修改记录.txt' });
+    await dialog.getByText(payload.toString()).waitFor();
+    await dialog.getByRole('button', { name: '保存到本机' }).click();
+    await dialog.getByRole('status').filter({ hasText: '已保存' }).waitFor();
+    assert.deepEqual(await page.evaluate(() => fixture.calls.find(c => c.name === 'files.saveAs').input), { suggestedName: '修改记录.txt', data: payload.toString() });
+  });
+  if (!process.env.PANEL_ATTACHMENTS_ONLY) {
   await setup({ inboxBatch: true, width: 400 });
   await test('background overview retries silently, retains content on failure and clears the notice after recovery', async () => {
     const failReads = (count, name) => page.evaluate(([count, name]) => {
@@ -2389,6 +2476,7 @@ try {
         }
       });
     }
+  }
   }
   assert.deepEqual(errors, []);
   assert.deepEqual(external, []);

@@ -15,14 +15,14 @@ import { OrcaRuntime, defaultExecutable, readTimeout, targetOnline, type Coordin
 import { ProjectStore, artifactUrl, expireArtifact, fail, feedback, fingerprint, fresh, maxMessageLength, notifyWorkspace, object, overview, resetBackup, retainRecent, receiveEvent, recordSource, submitTask, strings, text, revision, mergeProjects, feishuConfig, verifyTakeover, workerFeedbackNotice } from './store'
 import { WorkspaceLinks } from './links'
 import { fileErrorText, incomingHash, linkMessageHistory } from './link-messages'
-import { LinkFiles } from './link-files'
+import { feedbackAttachment, feedbackBytes, fileType, LinkFiles } from './link-files'
 import { groupedAttention, isProjectShared, type OwnerQuestion } from './model'
 import { mainAgent, switchLead, takeoverView, recoverTakeover, type WorkspaceSetup } from './main-agent'
 import { applySetup, previewSetup, validateCodexHome } from '../../workspace/install.mjs'
 import { projectAgentLaunch, projectLeadAgents, projectTemplate, templateLeadPreferences, type ProjectLeadAgents } from '../../workspace/agent-launch.mjs'
 import { promptClientPath, refreshReleaseSetup, pluginVersionLabel, release, roleRegistryPath } from '../scripts/orca-cli.mjs'
 import { cliBridge } from '../scripts/cli-bridge.mjs'
-import { applyDelta, type Sheets } from './feedback-drafts'
+import { applyDelta, delegatedFeedbackFileBytes, delegatedFeedbackFilesUnavailable, feedbackBatchBytes, feedbackFileCount, type FeedbackAttachment, type FeedbackTarget, type Sheets } from './feedback-drafts'
 import { projectDeliveryBody, roleRegistry, type roleReminder } from './role-registry'
 import { escalationWait } from '../scripts/worker-reports.mjs'
 import { businessQuestion, questionSourceId } from '../scripts/orca-questions.mjs'
@@ -33,7 +33,7 @@ import { artifactMarkdownPage, isMarkdownArtifact } from './artifact-markdown'
 const activityInterval = 60_000
 const activityDebounce = 150
 
-export function createCoordinator(api: OrcaWorkerApi, runtime: CoordinatorRuntime, transport?: MessageTransport, exportDirectory?: string, linkFiles?: LinkFiles, roleFile?: string, setup?: WorkspaceSetup) {
+export function createCoordinator(api: OrcaWorkerApi, runtime: CoordinatorRuntime, transport?: MessageTransport, exportDirectory?: string, linkFiles = new LinkFiles(), roleFile?: string, setup?: WorkspaceSetup) {
   const orca = { ...api, panels: checkedPanels(api) }
   const refreshRoles: (() => Promise<void>) | undefined = roleFile ? roleRegistry(roleFile, async () => {
     const [workspace, projects, mailbox] = await Promise.all([store.workspace(), store.all(), store.messaging().catch(() => undefined)])
@@ -42,19 +42,30 @@ export function createCoordinator(api: OrcaWorkerApi, runtime: CoordinatorRuntim
   }) : undefined
   const store: ProjectStore = new ProjectStore(orca.storage, exportDirectory, refreshRoles)
   let draftWrites = Promise.resolve()
-  orca.panels.handle('panel.feedbackState', ({ change }) => {
-    const operation = draftWrites.then(async () => {
-      const sheets = (await orca.storage.get('panel.feedbackState') ?? {}) as unknown as Sheets
-      if (change) {
-        applyDelta(sheets, change)
-        await orca.storage.set('panel.feedbackState', sheets as any)
-        orca.panels.post('panel.draftsChanged', {})
-      }
-      return sheets
-    })
+  const readDrafts = async () => (await orca.storage.get('panel.feedbackState') ?? {}) as unknown as Sheets
+  function saveDrafts<T>(work: () => Promise<T>) {
+    const operation = draftWrites.then(work)
     draftWrites = operation.then(() => {}, () => {})
     return operation
-  })
+  }
+  orca.panels.handle('panel.feedbackState', ({ change }) => saveDrafts(async () => {
+    const sheets = await readDrafts()
+    if (change) {
+      const previous = { ...sheets[change.projectId]?.entries }
+      applyDelta(sheets, change)
+      const replaced = change.items.flatMap(({ key, value }) => {
+        const old = previous?.[key]
+        if (value?.attachments !== undefined) feedbackItemFiles([value], change.projectId, feedbackBatchBytes)
+        return Array.isArray(old?.attachments) && value !== undefined ? [{ old, value }] : []
+      })
+      await orca.storage.set('panel.feedbackState', sheets as any)
+      orca.panels.post('panel.draftsChanged', {})
+      await Promise.allSettled(replaced.flatMap(({ old, value }) => old.attachments!.filter(file =>
+        old.itemRevision !== value?.itemRevision || !value?.attachments?.some(other => other.id === file.id && other.sha256 === file.sha256 && other.size === file.size)).map(async file =>
+        linkFiles.discardFeedbackPart(feedbackTarget(old, change.projectId), feedbackAttachment(file)))))
+    }
+    return sheets
+  }))
   let catalog: ProjectRef[] | undefined
   let catalogUnavailable = false
   let readingCatalog: Promise<{ refs?: ProjectRef[]; error?: string }> | undefined
@@ -284,13 +295,13 @@ export function createCoordinator(api: OrcaWorkerApi, runtime: CoordinatorRuntim
   }, async () => {
     const sample = await refreshAgents()
     return { workspace: await main.read(sample), live: sample }
-  }, linkFiles, readCatalog, async (peer, input) => {
+  }, linkFiles, readCatalog, async (peer, input, attachmentData) => {
     const { list, error } = await availableProjectRecords()
     if (error) fail(error)
     const ref = list.find(p => p.ref.id === input.projectId)
     if (!ref || !isProjectShared(ref, peer)) fail('项目未开放或已隐藏')
     const source = `主人在工作间 ${peer.name.replace(/\s+/g, ' ')} 提交`
-    const project = await recordFeedback(input, revision(input.revision), { source, connectionId: peer.id, authorize: p => {
+    const project = await recordFeedback(input, revision(input.revision), { source, connectionId: peer.id, attachmentData, authorize: p => {
       if (!isProjectShared(p, peer)) fail('项目未开放或已隐藏')
     } })
     return project.requests.find(r => r.id === `link-feedback:${fingerprint([peer.id, input.requestId])}`)?.fingerprint
@@ -317,7 +328,13 @@ export function createCoordinator(api: OrcaWorkerApi, runtime: CoordinatorRuntim
   })
   orca.panels.handle('workspace.linkArtifact', input => links.openArtifact(text(input.id, '连接编号', 64), input))
   orca.panels.handle('workspace.readLinkArtifact', input => links.readArtifact(text(input.id, '连接编号', 64), input.key, input.offset))
-  orca.panels.handle('workspace.linkFeedback', input => links.submitFeedback(text(input.id, '连接编号', 64), input))
+  orca.panels.handle('workspace.linkFeedback', (input, context) => {
+    const peer = text(input.id, '连接编号', 64)
+    return links.submitFeedback(peer, input, context.panel.id === 'orca-cli' ? undefined : async request => {
+      const files = feedbackItemFiles(request.items, JSON.stringify([peer, request.projectId]), delegatedFeedbackFileBytes)
+      return Object.fromEntries(await Promise.all(files.map(async ({ target, file }) => [file.id, (await linkFiles.stagedFeedback(target, file)).toString('base64')])))
+    })
+  })
   const secret = (id: string) => orca.secrets.get(`feishu:${id}`)
   const sources = transport ?? new FeishuSources(ingest, () => changed())
   const mailbox = '@workspace'
@@ -841,7 +858,8 @@ export function createCoordinator(api: OrcaWorkerApi, runtime: CoordinatorRuntim
     const id = text(input.projectId, '项目编号', 200), taskId = text(input.taskId, '任务编号', 200)
     await requireProject(id)
     const project = await store.get(id)
-    return project.hidden ? null : project.tasks.find(t => t.id === taskId) ?? null
+    if (project.hidden) return null
+    return (input.history === true ? await store.archive.task(project, taskId) : project.tasks.find(t => t.id === taskId)) ?? null
   })
   orca.panels.handle('lead.history', async input => {
     const owner = input.projectId === undefined ? await store.workspace() : await ensure(text(input.projectId, '项目编号', 200))
@@ -923,7 +941,62 @@ export function createCoordinator(api: OrcaWorkerApi, runtime: CoordinatorRuntim
     changed(id); deferBackupCheck()
     return snapshot(id)
   })
-  async function recordFeedback(input: Record<string, any>, expected: number | undefined, remote?: { source: string; connectionId: string; authorize: (p: Project) => void }, fromCli = false) {
+  function feedbackTarget(input: { projectId?: unknown; taskId: unknown; itemId: unknown; itemRevision?: unknown }, projectId = text(input.projectId, '项目编号', 200)): FeedbackTarget {
+    return { projectId, taskId: text(input.taskId, '任务编号', 200), itemId: text(input.itemId, '验收编号', 200), itemRevision: revision(input.itemRevision) }
+  }
+  function feedbackItemFiles(items: unknown, projectId: string, limit: number) {
+    const files: { target: FeedbackTarget; file: FeedbackAttachment }[] = []
+    const ids = new Set<string>()
+    let size = 0
+    if (Array.isArray(items)) for (const item of items) {
+      if (item?.attachments === undefined) continue
+      if (item.kind !== 'acceptance' || typeof item.fingerprint !== 'string' || !Array.isArray(item.attachments) ||
+          !item.attachments.length || item.attachments.length > feedbackFileCount) fail('每项验收可添加 1 到 10 个附件')
+      const target = feedbackTarget(item, projectId)
+      for (const raw of item.attachments) {
+        const file = feedbackAttachment(raw)
+        if (ids.has(file.id)) fail('同一次提交不能重复使用附件编号')
+        ids.add(file.id)
+        size += file.size
+        if (size > limit) fail(`本次反馈的附件总计最多 ${limit === delegatedFeedbackFileBytes ? '96 KiB（跨工作间）' : '100 MiB'}`)
+        files.push({ target, file })
+      }
+    }
+    return files
+  }
+
+  orca.panels.handle('panel.feedbackFile', (input, context) => saveDrafts(async () => {
+    if (context.panel.id === 'orca-cli') fail('请在工作间面板添加验收附件')
+    const target = feedbackTarget(input), file = feedbackAttachment(input.file)
+    if (input.data === null) {
+      const saved = (await readDrafts())[target.projectId]?.entries[JSON.stringify([target.taskId, 'acceptance', target.itemId])]
+      if (saved?.itemRevision !== target.itemRevision || !saved.attachments?.some(f => f.id === file.id))
+        await linkFiles.discardFeedbackPart(target, file)
+      return { saved: true as const }
+    }
+    if (input.offset === 0) {
+      let tasks: Awaited<ReturnType<typeof ensure>>['tasks'] | import('./links').FeedbackTask[]
+      if (target.projectId.startsWith('[')) {
+        const [peerId, id] = JSON.parse(target.projectId)
+        const peer = (await links.snapshot(true)).peers.find(p => p.id === peerId && p.status === 'connected')
+        const feedback = peer?.report?.projects.find(p => p.id === id)?.feedback
+        if (!feedback?.attachmentFeedback) fail(delegatedFeedbackFilesUnavailable)
+        if (file.size > delegatedFeedbackFileBytes) fail('跨工作间附件总计最多 96 KiB')
+        tasks = feedback.tasks
+      } else {
+        const p = await ensure(target.projectId)
+        if (p.hidden || p.ref.hostId !== 'local') fail('请选择可见的本机项目')
+        tasks = p.tasks
+      }
+      const a = tasks.find(t => t.id === target.taskId && t.phase === 'ready')?.acceptance.find(a => a.id === target.itemId)
+      if (a?.status !== 'pending' || a.revision !== target.itemRevision || a.fingerprint !== input.fingerprint)
+        fail('验收项已更新，请刷新后重新添加附件')
+    }
+    await linkFiles.uploadFeedbackPart(target, file, input.offset, input.data)
+    return { saved: true as const }
+  }))
+
+  async function recordFeedback(input: Record<string, any>, expected: number | undefined, remote?: { source: string; connectionId: string; attachmentData?: unknown; authorize: (p: Project) => void }, fromCli = false) {
     const request = input.requestId ? text(input.requestId, '请求编号', 200) : undefined
     const owner = !remote && input.ownerSource !== undefined ? object(input.ownerSource) : undefined
     const leadRun = owner ? text(input.runId, 'Run 编号', 200) : undefined
@@ -961,7 +1034,18 @@ export function createCoordinator(api: OrcaWorkerApi, runtime: CoordinatorRuntim
           source = `项目主会话 ${caller} / 用户消息 ${message}`
         }
       }
+      const files = feedbackItemFiles(recorded.items, p.ref.id, remote ? delegatedFeedbackFileBytes : feedbackBatchBytes)
+      if (files.length && (fromCli || owner || !request || expected === undefined || p.ref.hostId !== 'local')) fail('请在当前验收的留言中添加附件')
+      const wire = remote?.attachmentData === undefined ? undefined : object(remote.attachmentData)
+      if (remote && (Object.keys(wire ?? {}).length !== files.length || files.some(f => !Object.hasOwn(wire ?? {}, f.file.id))))
+        fail('对方未传来完整的验收附件')
+      if (files.length) recorded = { ...recorded, items: recorded.items.map((item: Record<string, any>) =>
+        item.attachments === undefined ? item : { ...item, attachments: item.attachments.map(feedbackAttachment) }) }
       feedback(p, recorded, source, event)
+      for (const { target, file } of files) {
+        const bytes = wire ? feedbackBytes(wire[file.id], file.size) : await linkFiles.stagedFeedback(target, file)
+        await linkFiles.saveFeedback(target, file, bytes)
+      }
       if (before) {
         rememberProjectCaller(p, input)
         await notify(before, p)
@@ -1131,6 +1215,32 @@ export function createCoordinator(api: OrcaWorkerApi, runtime: CoordinatorRuntim
     if (!a) fail('请选择本项目的本机成果')
     return { ref, url: artifactUrl(a.url, ref.path) }
   }
+  async function registeredFeedbackFile(input: FeedbackTarget & { attachmentId: string }, caller?: { runId: string; caller: string }) {
+    const target = feedbackTarget(input), p = await ensure(target.projectId)
+    if (p.hidden || p.ref.hostId !== 'local') fail('请选择可见的本机项目')
+    if (caller) {
+      const authorize = await projectLeadAuthorization(text(caller.runId, 'Run 编号', 200), text(caller.caller, '项目主会话', 500))
+      authorize(p)
+    }
+    const id = text(input.attachmentId, '附件编号', 36)
+    const find = (task?: Project['tasks'][number]) => task?.acceptance.find(a => a.id === target.itemId)?.history
+      .filter(h => h.revision === target.itemRevision).flatMap(h => h.attachments ?? []).find(file => file.id === id)
+    const record = find(p.tasks.find(t => t.id === target.taskId)) ?? (p.archive && find(await store.archive.task(p, target.taskId)))
+    if (!record) fail('这份附件不属于指定项目、任务和验收版本')
+    return { target, file: feedbackAttachment(record) }
+  }
+  orca.panels.handle('project.feedbackFile', async (input, context) => {
+    if (context.panel.id === 'orca-cli') fail('项目主会话请使用 feedback-file')
+    const { target, file } = await registeredFeedbackFile(input)
+    const result = await linkFiles.feedbackFile(target, file, input.offset)
+    return 'data' in result ? result.data! : { ...file, name: result.name, type: fileType(result.name) }
+  })
+  orca.panels.handle('project.locateFeedbackFile', async input => {
+    const { target, file } = await registeredFeedbackFile(input, input)
+    const result = await linkFiles.feedbackFile(target, file)
+    if (!result.path) fail('附件无法读取')
+    return { name: file.name, path: result.path }
+  })
   async function localArtifact(ref: ProjectRef, url: string) {
     if (/^https?:/i.test(url)) fail('请选择本项目的本机成果')
     const [root, file] = await Promise.all([realpath(ref.path), realpath(url)]).catch(() => fail('成果文件不存在或无法访问'))

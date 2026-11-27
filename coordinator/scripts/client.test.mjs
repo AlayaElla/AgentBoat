@@ -64,6 +64,12 @@ syncBuiltinESMExports();`);
     const bindInput = { projectId:'p1', revision:3, requestId:'project-bind', runId:'run_self', token:'test-only' };
     assert.deepEqual(projectLead('project-lead-bind', bindInput), { ok:true, handler:'project.agent', input:{
       ...bindInput, operation:'bind', caller:'orca_session_id:project-chat', currentRunId:'run_self' } });
+    const attachmentId = '24778cb9-0028-4bbd-b12a-90dce6316d51';
+    const locate = JSON.parse(execFileSync(process.execPath,
+      ['--import', pathToFileURL(fixture).href, 'scripts/client.mjs', 'feedback-file', 'p1', 'task-1', 'page-check', '2', attachmentId],
+      { encoding:'utf8', windowsHide:true, env:{ ...process.env, ORCA_AGENT_SESSION_ID:'project-chat' } }));
+    assert.deepEqual(locate, { ok:true, handler:'project.locateFeedbackFile', input:{ projectId:'p1', taskId:'task-1', itemId:'page-check',
+      itemRevision:2, attachmentId, caller:'orca_session_id:project-chat', runId:'run_self' } });
   } finally { rmSync(dir, {recursive:true,force:true}); }
 });
 

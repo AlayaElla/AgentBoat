@@ -2,7 +2,7 @@ import type {} from 'orca/frame'
 import type { ArtifactRef, StreamMethod } from './link-artifacts'
 import { kindFromFilename } from './artifact-kind'
 
-type FileInfo = { name: string; type: string; size: number; key: string; method: StreamMethod }
+type FileInfo = { name: string; type: string; size: number; key: string; method?: StreamMethod }
 
 async function showPdf(bytes: Uint8Array, body: HTMLElement, dialog: HTMLDialogElement) {
   const base = new URL('./assets/pdf/', document.baseURI)
@@ -40,25 +40,25 @@ async function showPdf(bytes: Uint8Array, body: HTMLElement, dialog: HTMLDialogE
   await draw()
 }
 
-export async function previewArtifact(label: string, ref: ArtifactRef & { id: string }, getFile: () => Promise<FileInfo>, read: (key: string, offset: number) => Promise<string>) {
+export async function previewArtifact(label: string, ref: (ArtifactRef & { id: string }) | undefined, getFile: () => Promise<FileInfo>, read: (key: string, offset: number) => Promise<string>) {
   const dialog = document.createElement('dialog'), body = document.createElement('div')
   dialog.className = 'artifact-preview'
   dialog.setAttribute('aria-label', label)
   const title = document.createElement('h2'), close = document.createElement('button')
   title.textContent = label; close.textContent = '关闭'; close.onclick = () => dialog.close()
   const status = document.createElement('p')
-  status.setAttribute('role', 'status'); status.textContent = '正在从对方取文件…'
+  status.setAttribute('role', 'status'); status.textContent = ref ? '正在从对方取文件…' : '正在读取附件…'
   dialog.append(title, close, body, status)
   dialog.addEventListener('keydown', e => { if (e.key === 'Escape') e.stopPropagation() })
   dialog.addEventListener('close', () => dialog.remove(), { once: true })
   document.body.append(dialog); dialog.showModal()
   const methodLabel = (method: StreamMethod) => method === 'direct' ? '整文件直传' : '分块传输'
-  const progress = orca.plugin.on('workspace.artifactProgress', p => {
+  const progress = ref && orca.plugin.on('workspace.artifactProgress', p => {
     if (p.id === ref.id && p.projectId === ref.projectId && p.taskId === ref.taskId && p.artifactId === ref.artifactId)
       status.textContent = !p.size ? methodLabel(p.method) : `${methodLabel(p.method)} ${(p.received / 1e6).toFixed(1)}/${(p.size / 1e6).toFixed(1)} MB`
   })
   try {
-    const file = await getFile().finally(() => progress.dispose())
+    const file = await getFile().finally(() => progress?.dispose())
     if (!dialog.open) return
     const bytes = new Uint8Array(file.size)
     for (let offset = 0; offset < bytes.length;) {
@@ -67,8 +67,8 @@ export async function previewArtifact(label: string, ref: ArtifactRef & { id: st
       if (!raw.length || offset + raw.length > bytes.length) throw Error('成果读取不完整，请重新获取')
       for (let i = 0; i < raw.length; i++) bytes[offset++] = raw.charCodeAt(i)
     }
-    status.textContent = kindFromFilename(file.name) === 'web'
-      ? '对方共享的是单个网页文件，当前无法直接打开。可保存到本机，或请对方分享网页链接。' : methodLabel(file.method)
+    status.textContent = !ref ? '' : kindFromFilename(file.name) === 'web'
+      ? '对方共享的是单个网页文件，当前无法直接打开。可保存到本机，或请对方分享网页链接。' : file.method ? methodLabel(file.method) : ''
     const save = document.createElement('button')
     save.textContent = '保存到本机'
     save.onclick = async () => {

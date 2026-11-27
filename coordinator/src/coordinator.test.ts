@@ -10,10 +10,13 @@ import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
+import { createHash, randomUUID } from 'node:crypto'
 import type { OrcaWorkerApi } from 'orca/worker'
 import type { CoordinatorRuntime } from './runtime'
 import { assertProjectIdle, OrcaRuntime, revealArtifact } from './runtime'
 import { artifactKind } from './artifact-kind'
+import { LinkFiles } from './link-files'
+import { feedbackPartBytes } from './feedback-drafts'
 import { attention, groupedAttention, taskState } from './model'
 import { inboxLimit, openRunMail, questionWait, questionMaxAge } from '../scripts/orca-questions.mjs'
 import { escalationWait, projectSubmissions, reportSubmitted, reportWait, workerReport } from '../scripts/worker-reports.mjs'
@@ -285,6 +288,75 @@ test('feedback returns the committed snapshot without waiting for delivery or se
     assert.deepEqual(sends.map(s => s.run), ['run_fake'])
     assert.ok(sends[0].body.includes(`[项目 p1 / 任务 task-1]\n项目首页\n首页布局 · 第 1 版\n验收通过：passed\n通过留言：${note}`))
   } finally {release();await coordinator.flush('p1');coordinator.stop();await worker.deactivate()}
+})
+
+test('acceptance attachments survive retry and restart under the original project, task and version', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'agentboat-feedback-files-'))
+  const p = { ...fresh(refs[0]), runId: 'run_project', mainAgentHandle: mainSession.handle }
+  submitTask(p, deliverable)
+  feedback(p, { items: [{ taskId: deliverable.id, kind: 'acceptance', itemId: 'page-check', itemRevision: 1, result: 'passed', note: '第一版文字留言' }] })
+  submitTask(p, { ...deliverable, artifacts: [], acceptance: [{ ...deliverable.acceptance[0], details: '第二版核对步骤' }] })
+  p.deliveries = []
+  const host = mockHost({ storage: { 'project:p1': p as any, 'project:p2': fresh(refs[1]) as any } })
+  const sent: [string, string][] = []
+  let c!: ReturnType<typeof createCoordinator>
+  const open = () => mountWorker({ default: api => { c = createCoordinator(api, { projects: async () => refs,
+    runBinding: async () => ({ owner: mainSession.handle, generation: 1 }),
+    send: async (run, d) => { sent.push([run, d.body]); return { requestId: 'fixture-delivery' } }
+  }, undefined, path.join(dir, 'exports'), new LinkFiles(dir)) } }, { host })
+  let worker = await open()
+  const a = p.tasks[0].acceptance[0]
+  const target = { projectId: 'p1', taskId: p.tasks[0].id, itemId: a.id, itemRevision: a.revision, fingerprint: a.fingerprint }
+  const contents = [Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a82kAAAAASUVORK5CYII=', 'base64'),
+    Buffer.from('普通文件内容'.repeat(4000)), Buffer.from('移除的文件')]
+  const files = contents.map((bytes, i) => ({ id: randomUUID(), name: ['截图.png', '修改记录.txt', '待移除.txt'][i], size: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex') }))
+  const draft = { ...target, kind: 'acceptance' as const, result: 'changes_requested', note: '请对照截图和修改记录', title: a.title, signature: a.fingerprint }
+  const key = JSON.stringify([target.taskId, 'acceptance', target.itemId])
+  const edit = (version: number, value: (typeof draft & { attachments: typeof files }) | null) => worker.request('panel.feedbackState',
+    { change: { projectId: target.projectId, items: [{ key, version, value }] } })
+  const submit = (attachments: typeof files, requestId: string, changes = {}) => worker.request('project.feedback', {
+    projectId: target.projectId, revision: p.revision, requestId, items: [{ taskId: target.taskId, kind: draft.kind,
+      itemId: target.itemId, itemRevision: target.itemRevision, fingerprint: a.fingerprint, result: draft.result, note: draft.note, attachments, ...changes }] })
+  try {
+    await assert.rejects(() => worker.request('panel.feedbackFile', { ...target, itemRevision: 1, file: files[0], offset: 0, data: contents[0].toString('base64') }), /验收项已更新/)
+    await assert.rejects(() => worker.request('panel.feedbackFile', { ...target, file: { ...files[0], path: 'C:/private.txt', name: '../private.txt' } as any,
+      offset: 0, data: '' }), /附件名称或编号/)
+    for (const [i, file] of files.entries()) for (let offset = 0; offset < file.size; offset += feedbackPartBytes)
+      await worker.request('panel.feedbackFile', { ...target, file, offset, data: contents[i].subarray(offset, offset + feedbackPartBytes).toString('base64') })
+    await edit(0, { ...draft, attachments: files })
+    await edit(1, { ...draft, attachments: files.slice(0, 2) })
+    await assert.rejects(() => submit(files, 'incomplete'), /待移除\.txt.*找不到/)
+    await assert.rejects(() => submit(files.slice(0, 2), 'stale', { itemRevision: 1 }), /验收项已更新/)
+    assert.equal((await c.store.get('p1')).tasks[0].acceptance[0].history.length, 1)
+    assert.deepEqual(sent, [])
+    const [first, replay] = await Promise.all([submit(files.slice(0, 2), 'same-request'), submit(files.slice(0, 2), 'same-request')])
+    assert.deepEqual(first.project!.tasks[0].acceptance[0].history, replay.project!.tasks[0].acceptance[0].history)
+    await assert.rejects(() => submit(files.slice(0, 1), 'same-request'), /相同|同一个请求编号/)
+    await c.flush('p1')
+    assert.equal(sent.length, 1)
+    assert.equal(sent[0][0], 'run_project')
+    assert.match(sent[0][1], /截图\.png[\s\S]*修改记录\.txt[\s\S]*feedback-file/)
+    await edit(2, null)
+    c.stop(); await worker.deactivate(); worker = await open()
+    const saved = (await worker.request('project.task', { projectId: 'p1', taskId: target.taskId }))!.acceptance[0].history
+    assert.deepEqual(saved.map(h => [h.revision, h.note]), [[1, '第一版文字留言'], [2, draft.note]])
+    assert.deepEqual(saved[1].attachments, files.slice(0, 2))
+    assert.ok(!JSON.stringify(await c.store.get('p1')).includes(contents[0].toString('base64')))
+    for (const [i, file] of files.slice(0, 2).entries()) {
+      const ref = { projectId: 'p1', taskId: target.taskId, itemId: target.itemId, itemRevision: 2, attachmentId: file.id }
+      const locate = { ...ref, runId: 'run_project', caller: mainSession.handle }
+      await assert.rejects(() => worker.request('project.locateFeedbackFile', { ...locate, caller: 'orca_session_id:unrelated' }), /当前绑定的项目主会话/)
+      await assert.rejects(() => worker.request('project.feedbackFile', { ...ref, itemRevision: 1 }), /不属于指定/)
+      await assert.rejects(() => worker.request('project.feedbackFile', { ...ref, projectId: 'p2' }), /不属于指定/)
+      assert.deepEqual(await readFile((await worker.request('project.locateFeedbackFile', locate)).path), contents[i])
+      const type = i ? 'text/plain' : 'image/png'
+      assert.deepEqual(await worker.request('project.feedbackFile', ref), { ...file, type })
+      const parts = []
+      for (let offset = 0; offset < file.size; offset += feedbackPartBytes)
+        parts.push(Buffer.from(await worker.request('project.feedbackFile', { ...ref, offset }) as string, 'base64'))
+      assert.deepEqual(Buffer.concat(parts), contents[i])
+    }
+  } finally { await c.flush('p1'); c.stop(); await worker.deactivate(); await rm(dir, { recursive: true, force: true }) }
 })
 
 test('independent panel edits merge; stale removals cannot erase a newer choice after reopening', async () => {
