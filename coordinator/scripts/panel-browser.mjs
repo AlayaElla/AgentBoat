@@ -152,9 +152,10 @@ async function setup(options = {}, hub) {
     const attention = () => registered().flatMap(p => p.tasks.flatMap(t => {
       const base = { projectId: p.ref.id, taskId: t.id, title: t.title };
       return [
-        ...(t.phase === 'blocked' && t.blockedStatus !== 'discarded' ? [{ ...base, kind:'blocked', itemId:t.id, summary:t.progress, replied:t.blockedStatus === 'replied' }] : []),
-        ...t.decisions.filter(d => d.answer === undefined).map(d => ({ ...base, kind: 'decision', itemId: d.id, summary: d.question })),
-        ...t.acceptance.filter(a => t.phase === 'ready' && a.status === 'pending').map(a => ({ ...base, kind: 'review', itemId: a.id, summary: a.title, itemRevision: a.revision, fingerprint: a.fingerprint }))
+        ...t.decisions.filter(d => t.phase !== 'paused' && d.answer === undefined).map(d => ({ ...base, kind: 'decision', itemId: d.id, summary: d.question, signature: JSON.stringify([d.question, d.options]), presentationRevision: d.presentationRevision })),
+        ...t.acceptance.filter(a => t.phase === 'ready' && a.status === 'pending').map(a => ({ ...base, kind: 'review', itemId: a.id, summary: a.title, itemRevision: a.revision, fingerprint: a.fingerprint })),
+        ...t.acceptance.filter(a => a.status === 'changes_requested').map(a => ({ ...base, kind: 'rework', itemId: a.id, summary: a.history.at(-1)?.note || a.title })),
+        ...(t.phase === 'blocked' && t.blockedStatus !== 'discarded' ? [{ ...base, kind:'blocked', itemId:t.id, summary:t.progress, itemRevision: t.blockedRevision ?? 0, replied:t.blockedStatus === 'replied' }] : []),
       ];
     }));
     if (options.longInbox) {
@@ -213,6 +214,11 @@ async function setup(options = {}, hub) {
           feedbackFiles[file.id][offset] = data;
         }
         return { saved: true };
+      }
+      if (name === 'panel.feedbackDraftFile') {
+        const file = stored['panel.feedbackState'][input.projectId]?.entries?.[input.key]?.attachments?.find(f => f.id === input.attachmentId);
+        if (!file || !Object.hasOwn(feedbackFiles, file.id)) throw Error('这份附件不属于指定草稿');
+        return input.offset === undefined ? { ...file, type: 'text/plain' } : feedbackFiles[file.id][input.offset];
       }
       if (name === 'project.feedbackFile') {
         const task = project.tasks.find(t => t.id === input.taskId);
@@ -326,17 +332,18 @@ async function setup(options = {}, hub) {
         return { opened: true, multipleConversations: window.fixture.workspaceTarget.multipleConversations };
       }
       if (name === 'project.feedback') {
+        const rejected = message => Object.assign(Error(message), { code: 'invalid_request' });
         if (window.fixture.delayFeedback === true || window.fixture.delayFeedback === input.projectId) { window.fixture.delayFeedback = false; await new Promise(r => { window.fixture.finishFeedback = r; }); }
-        if (window.fixture.race) { window.fixture.race = false; window.fixture.prune(); throw Error('成果已更新'); }
+        if (window.fixture.race) { window.fixture.race = false; window.fixture.prune(); throw rejected('成果已更新'); }
         if (window.fixture.failFeedback === true || window.fixture.failFeedback === input.projectId) { window.fixture.failFeedback = false; throw Error('回执连接中断'); }
         const target = projects.find(p => p.ref.id === input.projectId);
-        if (!target || input.revision !== undefined && target.revision !== input.revision) throw Error('项目已更新');
+        if (!target || input.revision !== undefined && target.revision !== input.revision) throw rejected('项目已更新');
         if (window.fixture.noWrite) return clone({project:target});
         const updates = input.items.map(i => {
           const t = target.tasks.find(t => t.id === i.taskId);
           if (i.kind === 'blocked' && t.blockedRevision === i.itemRevision) return [i, t];
           const a = i.kind === 'acceptance' ? t?.acceptance.find(a => a.id === i.itemId) : t?.decisions.find(d => d.id === i.itemId);
-          if (!a || i.kind === 'acceptance' && (t.phase !== 'ready' || (i.reviewTotal !== undefined && i.reviewTotal !== t.acceptance.filter(a => a.status === 'pending').length) || a.status !== 'pending' || a.revision !== i.itemRevision || a.fingerprint !== i.fingerprint)) throw Error('stale');
+          if (!a || i.kind === 'acceptance' && (t.phase !== 'ready' || (i.reviewTotal !== undefined && i.reviewTotal !== t.acceptance.filter(a => a.status === 'pending').length) || a.status !== 'pending' || a.revision !== i.itemRevision || a.fingerprint !== i.fingerprint)) throw rejected('stale');
           return [i, a];
         });
         for (const [i, a] of updates) {
@@ -434,6 +441,8 @@ async function setup(options = {}, hub) {
 }
 const rail = () => page.locator('.home-layer .inbox');
 const dock = () => page.getByRole('region', { name: '待提交', exact: true });
+const savedFeedback = () => page.locator('.dock [data-sheet]');
+const retrySubmission = () => savedFeedback().getByRole('button', { name: '核对提交', exact: true });
 const row = title => rail().getByRole('button', { name: title, exact: true });
 const review = title => rail().getByRole('checkbox', { name: new RegExp('选择验收 · ' + title) });
 const currentLayer = () => page.locator('.pane-layers > .layer:not([inert])');
@@ -467,6 +476,135 @@ const rightClickArtifact = async entry => {
   await entry.click({ button: 'right' });
 };
 try {
+  await setup({ inboxBatch: true, width: 1040 });
+  await test('stale feedback from another task is retained while one acceptance submits', async () => {
+    const body = await openReview();
+    await body.getByRole('button', { name: '需要修改', exact: true }).first().click();
+    const field = body.getByRole('textbox', { name: '修改意见' });
+    await field.fill('旧版测试草稿');
+    await field.evaluate(textarea => {
+      const data = new DataTransfer();
+      data.items.add(new File(['旧版测试附件'], '旧版.txt', { type: 'text/plain' }));
+      textarea.dispatchEvent(new ClipboardEvent('paste', { bubbles: true, cancelable: true, clipboardData: data }));
+    });
+    const readDraft = () => page.evaluate(() => Object.values(fixture.stored['panel.feedbackState'].p1.entries).find(d => d.itemId === 'a1'));
+    await page.waitForFunction(() => Object.values(fixture.stored['panel.feedbackState'].p1.entries).some(d => d.attachments?.length));
+    const old = await readDraft();
+    const files = () => page.evaluate(() => fixture.feedbackFiles);
+    const staged = await files();
+    await page.evaluate(() => {
+      fixture.project.tasks[0].acceptance[0].status = 'changes_requested';
+      fixture.project.revision++;
+      fixture.emit();
+    });
+    await currentLayer().getByRole('heading', { name: '成果 a1', exact: true }).waitFor({ state: 'hidden' });
+    await review('动效交付').check();
+    const submit = dock().getByRole('button', { name: /^提交 \d+ 条$/ });
+    const label = await submit.innerText();
+    await submit.click();
+    await page.locator('.dock .toast').waitFor();
+    const sent = await page.evaluate(() => fixture.calls.filter(c => c.name === 'project.feedback').map(c => c.input.items.map(i => i.itemId)));
+    assert.deepEqual({ label, sent }, { label: '提交 1 条', sent: [['a3']] });
+    await page.getByRole('status').filter({ hasText: '已提交 1 条' }).waitFor();
+    assert.deepEqual(await readDraft(), old);
+    assert.deepEqual(await files(), staged);
+    await savedFeedback().getByRole('button', { name: '1 条保留草稿' }).click();
+    await savedFeedback().getByText('已失效 · 成果 a1 · 示例项目 · 第 1 版', { exact: true }).click();
+    assert.equal(await savedFeedback().getByText('旧版测试草稿', { exact: true }).isVisible(), true);
+    await savedFeedback().getByRole('button', { name: '旧版.txt', exact: true }).click();
+    const preview = page.getByRole('dialog', { name: '旧版.txt' });
+    await preview.getByText('旧版测试附件', { exact: true }).waitFor();
+    await preview.getByRole('button', { name: '关闭', exact: true }).click();
+
+    // A navigation read can observe the new version before a change event reaches the panel.
+    await page.evaluate(() => {
+      Object.assign(fixture.project.tasks[0].acceptance[0], { status: 'pending', revision: 2, fingerprint: 'version-2-a1' });
+      fixture.project.revision++;
+    });
+    await home();
+    const latest = await openReview();
+    const card = latest.locator('.card').filter({ has: page.getByRole('heading', { name: '成果 a1', exact: true }) });
+    await card.getByText('第 2 版', { exact: true }).waitFor();
+    await card.getByRole('button', { name: '需要修改', exact: true }).click();
+    assert.equal(await card.getByRole('textbox', { name: '修改意见' }).inputValue(), '');
+    assert.equal(await card.getByText('旧版.txt', { exact: true }).count(), 0);
+    await dock().getByRole('button', { name: '清空' }).click();
+    assert.deepEqual(await readDraft(), { ...old, superseded: true });
+    assert.deepEqual(await files(), staged);
+    await savedFeedback().getByRole('button', { name: '1 条保留草稿' }).click();
+    await savedFeedback().getByRole('button', { name: '移除 成果 a1 · 示例项目 · 第 1 版' }).click();
+    await page.waitForFunction(() => Object.keys(fixture.stored['panel.feedbackState'].p1.entries).length === 0);
+  });
+  const oldKey = JSON.stringify(['retired', 'acceptance', 'old']);
+  const oldDraft = { taskId: 'retired', kind: 'acceptance', itemId: 'old', itemRevision: 1, title: '旧验收',
+    signature: 'old-v1', fingerprint: 'old-v1', result: 'changes_requested', note: '隔离测试草稿',
+    attachments: [{ id: '42d954c8-e51c-4da3-be73-5d6d883230f5', name: '旧草稿附件.txt', size: 3, sha256: 'a'.repeat(64) }] };
+  const oldSheet = () => ({ entries: { [oldKey]: oldDraft }, versions: { [oldKey]: 1 }, floor: 0 });
+  const oldFiles = { [oldDraft.attachments[0].id]: { 0: 'b2xk' } };
+  const rejected = { signature: 'old', input: { projectId: 'p1', requestId: 'old-rejected', revision: 1, items: [oldDraft] }, rejected: true, reason: '项目已更新' };
+  await setup({ width: 1040, inboxBatch: true, feedbackFiles: oldFiles,
+    stored: { 'panel.feedbackState': { p1: { ...oldSheet(), attempt: rejected } } } });
+  await test('a rejected stale batch does not block explicit same-project and cross-project selections', async () => {
+    await review('页面交付').check();
+    await review('移动端交付').check();
+    await dock().getByRole('button', { name: '提交 3 条' }).click();
+    await page.getByRole('status').filter({ hasText: '已提交 3 条' }).waitFor();
+    const sent = await page.evaluate(() => fixture.calls.filter(c => c.name === 'project.feedback').map(c => c.input));
+    assert.deepEqual(sent.map(r => [r.projectId, r.items.map(i => i.itemId)]).sort(), [['p1', ['a1', 'a2']], ['p2', ['b1']]]);
+    assert.ok(sent.every(r => r.requestId !== rejected.input.requestId));
+    assert.deepEqual(await page.evaluate(() => fixture.stored['panel.feedbackState'].p1.entries), oldSheet().entries);
+    assert.deepEqual(await page.evaluate(() => fixture.feedbackFiles), oldFiles);
+  });
+  const peerId = JSON.stringify(['up', 'p1']);
+  await setup({ width: 360, delegatedFeedback: true, feedbackFiles: oldFiles, stored: { 'panel.feedbackState': { [peerId]: oldSheet() } } });
+  await test('a completed peer report preserves an uncertain original batch and its unrelated stale draft until proof', async () => {
+    const sheet = () => page.evaluate(peerId => fixture.stored['panel.feedbackState'][peerId], peerId);
+    const writes = () => page.evaluate(() => fixture.calls.filter(c => c.name === 'workspace.linkFeedback').map(c => c.input));
+    const state = await page.evaluate(() => {
+      const peer = fixture.links.peers[0];
+      fixture.originalReport = peer.report;
+      peer.report = { ...peer.report, feedbackTruncated: true, projects: peer.report.projects.map(({ feedback, ...project }) => project) };
+      fixture.emit();
+      return peer.report.projects[0].name;
+    });
+    await savedFeedback().getByRole('button', { name: '1 条保留草稿' }).click();
+    await savedFeedback().getByText(new RegExp('待同步 · 旧验收 · ' + state)).waitFor();
+    assert.equal(await dock().count(), 0);
+    await page.evaluate(() => {
+      fixture.links.peers[0].report = fixture.originalReport;
+      fixture.linkTimeout = true;
+      fixture.emit();
+    });
+    await savedFeedback().getByText(/已失效 · 旧验收/).waitFor();
+    await review('对方页面交付').check();
+    await dock().getByRole('button', { name: '提交 1 条' }).click();
+    await page.waitForFunction(peerId => fixture.stored['panel.feedbackState'][peerId]?.attempt?.autoChecked, peerId);
+    const original = await sheet();
+    const originalRequest = { id: 'up', ...original.attempt.input };
+    assert.deepEqual(await writes(), [originalRequest, originalRequest]);
+    await page.evaluate(() => {
+      const feedback = fixture.links.peers[0].report.projects[0].feedback;
+      feedback.tasks = [];
+      feedback.revision++;
+      fixture.emit();
+    });
+    await row('对方设计决定').waitFor({ state: 'hidden' });
+    await retrySubmission().click();
+    await page.waitForFunction(peerId => fixture.stored['panel.feedbackState'][peerId]?.attempt?.reason === '连接超时' &&
+      fixture.calls.filter(c => c.name === 'workspace.linkFeedback').length === 3, peerId);
+    assert.deepEqual(await writes(), Array(3).fill(originalRequest));
+    assert.deepEqual((await sheet()).entries, original.entries);
+    assert.equal((await sheet()).attempt.signature, original.attempt.signature);
+    assert.deepEqual(await page.evaluate(() => fixture.feedbackFiles), oldFiles);
+    await page.evaluate(id => { fixture.linkTimeout = false; fixture.lostLinkFeedback = id; }, original.attempt.input.requestId);
+    await retrySubmission().click();
+    await page.getByRole('status').filter({ hasText: '已提交 1 条' }).waitFor();
+    assert.deepEqual(await writes(), Array(4).fill(originalRequest));
+    assert.equal((await sheet()).attempt, undefined);
+    assert.deepEqual((await sheet()).entries, oldSheet().entries);
+    assert.deepEqual(await page.evaluate(() => fixture.feedbackFiles), oldFiles);
+  });
+  if (!process.env.PANEL_STALE_FEEDBACK_ONLY) {
   await setup({ width: 360, feedbackDecisions: true });
   await test('decision and acceptance share drop and paste, retain one draft each, and reopen scoped history', async () => {
     const image = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a82kAAAAASUVORK5CYII=';
@@ -822,7 +960,7 @@ try {
     await setup({stored});
     await page.getByRole('alert').filter({hasText:'缺少匹配的写入凭证'}).waitFor();
     await page.evaluate(id=>fixture.project.requests.push({id,fingerprint:'different'}),original.requestId);
-    await dock().getByRole('button',{name:'提交 2 条'}).click();
+    await retrySubmission().click();
     await page.waitForFunction(()=>fixture.stored['panel.feedbackState'].p1.attempt.rejected===true);
     assert.equal(await review('页面交付').isChecked(),true);
     assert.equal(await page.evaluate(()=>fixture.calls.filter(c=>c.name==='project.feedback').length),0);
@@ -877,7 +1015,7 @@ try {
     assert.ok(Date.now()-start<1800);
     const calls=await page.evaluate(()=>fixture.calls);assert.equal(calls.filter(c=>c.name==='project.read').length,0);
     assert.deepEqual(calls.filter(c=>c.name==='project.feedback').map(c=>c.input.items.length).sort((a,b)=>b-a),[9,1]);
-    await dock().getByRole('button',{name:'提交 9 条'}).waitFor();
+    await retrySubmission().waitFor();
     assert.equal(await page.evaluate(()=>fixture.calls.some(c=>c.name==='workspace.overview')),false);
   });
   await setup({width:1040});
@@ -1136,7 +1274,7 @@ try {
   });
   for (const change of ['revision', 'withdrawn', 'added', 'race']) {
     await setup({ inboxBatch: true, width: 1040 });
-    await test(`one ${change} project keeps its entire batch while the other submits`, async () => {
+    await test(`${change} during submission retains the refused drafts while the other project submits`, async () => {
       await rail().getByRole('button', { name: '全选验收' }).click();
       await page.evaluate(change => {
         const t = fixture.project.tasks[0];
@@ -1148,7 +1286,9 @@ try {
       await dock().getByRole('button', { name: '提交 4 条' }).click();
       const alert = page.getByRole('alert').filter({ hasText: '未确认提交' });
       await alert.waitFor();
-      await dock().getByRole('button', { name: '已选 3 条 · 1 个项目' }).waitFor();
+      const count = change === 'withdrawn' || change === 'added' ? 1 : 2;
+      await dock().getByRole('button', { name: `提交 ${count} 条` }).waitFor();
+      assert.equal(await page.evaluate(() => Object.keys(fixture.stored['panel.feedbackState'].p1.entries).length), 3);
       const projects = await page.evaluate(() => fixture.calls.filter(c => c.name === 'project.feedback').map(c => c.input.projectId).sort());
       assert.deepEqual(projects, ['p1', 'p2']);
       if (change === 'race') { await page.waitForTimeout(3300); assert.equal(await alert.isVisible(), true); }
@@ -1162,8 +1302,8 @@ try {
     await submit.click();
     await page.getByRole('alert').filter({ hasText: '缺少匹配的写入凭证' }).waitFor();
     await page.evaluate(() => { fixture.noWrite = false; fixture.delayOverview = true; });
-    await submit.click();
-    await dock().waitFor({ state: 'hidden' });
+    await retrySubmission().click();
+    await savedFeedback().waitFor({ state: 'hidden' });
     await rail().locator('.irow.submitted').waitFor({ state: 'detached' });
     assert.equal(await review('页面交付').count(), 0);
     const ids = await page.evaluate(() => fixture.calls.filter(c => c.name === 'project.feedback').map(c => c.input.requestId));
@@ -1177,8 +1317,8 @@ try {
     await page.getByRole('alert').filter({ hasText: '回执丢失' }).waitFor();
     const first = await page.evaluate(() => fixture.calls.find(c => c.name === 'project.feedback').input.requestId);
     assert.equal(await page.evaluate(() => fixture.stored['panel.feedbackState'].p1.attempt.input.requestId), first);
-    await dock().getByRole('button', { name: '提交 2 条' }).click();
-    await dock().waitFor({ state: 'hidden' });
+    await retrySubmission().click();
+    await savedFeedback().waitFor({ state: 'hidden' });
     assert.equal(await page.evaluate(() => fixture.calls.filter(c => c.name === 'project.feedback').length), 1);
   });
   await setup({ width: 1040 });
@@ -1229,7 +1369,7 @@ try {
     assert.equal(await field.inputValue(), note);
     assert.equal(await pass.getAttribute('aria-pressed'), 'true');
     if (evidence) await page.screenshot({ path: path.join(evidence, 'acceptance-pass-note-retry.png'), animations: 'disabled' });
-    await submit.click();
+    await retrySubmission().click();
     await page.getByRole('status').filter({ hasText: '已提交 1 条' }).waitFor();
     await currentLayer().getByRole('button', { name: /^记录/ }).click();
     await currentLayer().getByText(/核对 Orca 更新建议.*第 1 版.*已通过/).waitFor();
@@ -2109,7 +2249,8 @@ try {
     await currentLayer().getByText('「工作间 up」离线，暂不能提交', { exact: true }).first().waitFor();
     assert.deepEqual(await tabs().allTextContents(), ['待处理3']);
     assert.equal(await check.isDisabled(), true);
-    assert.equal(await dock().getByRole('button', { name: '提交 2 条' }).isDisabled(), true);
+    assert.equal(await dock().count(), 0);
+    await savedFeedback().getByRole('button', { name: '2 条保留草稿' }).waitFor();
     await shot('offline');
     await page.evaluate(() => {
       const peer = fixture.links.peers[0]; peer.report = fixture.connectedReport; delete peer.offlineFeedback;
@@ -2165,8 +2306,8 @@ try {
       const peer = fixture.links.peers[0]; fixture.remoteReport = peer.report;
       peer.offlineFeedback = peer.report.projects; delete peer.report; peer.status = 'offline'; fixture.emit();
     });
-    await dock().getByText('「工作间 up」离线，暂不能提交').waitFor();
-    assert.equal(await dock().getByRole('button', { name: '提交 5 条' }).isEnabled(), false);
+    await dock().getByRole('button', { name: '已选 2 条 · 3 条保留草稿' }).waitFor();
+    assert.equal(await dock().getByRole('button', { name: '提交 2 条' }).isEnabled(), true);
     assert.equal(await row('对方页面交付').isVisible(), true);
     await page.evaluate(() => {
       const peer = fixture.links.peers[0]; peer.report = fixture.remoteReport; delete peer.offlineFeedback; peer.status = 'connected'; fixture.emit();
@@ -2248,21 +2389,23 @@ try {
     delete sheet.attempt.autoChecked; // Reopen with a persisted timeout still due for its first check.
     uncertainStorage = stored;
     await setup({ width: 1040, delegatedFeedback: true, stored, offlinePeer: true });
-    await dock().getByText('「工作间 up」离线，暂不能提交').waitFor();
+    await savedFeedback().getByText('「工作间 up」离线，暂不能提交').waitFor();
     assert.equal(await page.getByRole('alert').count(), 0);
     assert.equal(await page.evaluate(() => fixture.calls.filter(c => c.name === 'workspace.linkFeedback').length), 0);
   });
-  await test('a newer complete report settles the original items without sending', async () => {
+  await test('a newer complete report requires proof for the original items', async () => {
     await page.evaluate(() => {
       const peer = fixture.links.peers[0];
       peer.report = { projects: peer.offlineFeedback };
       const feedback = peer.report.projects[0].feedback;
       feedback.revision = 30;
       feedback.tasks = feedback.tasks.filter(t => t.id !== 't1');
+      fixture.lostLinkFeedback = fixture.stored['panel.feedbackState']['["up","p1"]'].attempt.input.requestId;
       peer.status = 'connected'; fixture.emit();
     });
-    await page.getByRole('status').filter({ hasText: '对方已处理' }).waitFor();
-    assert.equal(await page.evaluate(() => fixture.calls.filter(c => c.name === 'workspace.linkFeedback').length), 0);
+    await page.getByRole('status').filter({ hasText: '已提交 1 条' }).waitFor();
+    const writes = await page.evaluate(() => fixture.calls.filter(c => c.name === 'workspace.linkFeedback').map(c => c.input));
+    assert.deepEqual(writes, [{ id: 'up', ...uncertainStorage['panel.feedbackState']['["up","p1"]'].attempt.input }]);
     assert.equal(await page.evaluate(() => fixture.stored['panel.feedbackState']['["up","p1"]'].attempt), undefined);
   });
   await setup({ width: 1040, delegatedFeedback: true, stored: uncertainStorage, rejectLinkFeedback: true });
@@ -2279,7 +2422,7 @@ try {
     await first.waitForFunction(() => !!fixture.finishLinkReply);
     page = undefined;
     await setup({ delegatedFeedback: true }, hub);
-    assert.equal(await dock().getByRole('button', { name: '提交 1 条' }).isDisabled(), true);
+    assert.equal(await retrySubmission().isDisabled(), true);
     assert.equal(await page.evaluate(() => fixture.calls.filter(c => c.name === 'workspace.linkFeedback').length), 0);
     await first.evaluate(() => fixture.finishLinkReply());
     await first.getByRole('alert').filter({ hasText: '项目已更新' }).waitFor();
@@ -2512,6 +2655,7 @@ try {
         }
       });
     }
+  }
   }
   }
   assert.deepEqual(errors, []);

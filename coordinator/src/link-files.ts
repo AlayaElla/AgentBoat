@@ -241,10 +241,11 @@ export class LinkFiles {
     } finally { await rm(temporary, { force: true }) }
   }
 
-  async feedbackFile(target: FeedbackTarget, file: FeedbackAttachment, offset?: number) {
-    const folder = await this.existingFolder('feedback', this.feedbackKey(target, file)), name = safeNames([file.name])[0]
+  async feedbackFile(target: FeedbackTarget, file: FeedbackAttachment, offset?: number, staged = false) {
+    const key = this.feedbackKey(target, file), name = safeNames([file.name])[0]
+    const folder = staged ? await this.existingFolder('feedback-drafts') : await this.existingFolder('feedback', key)
     if (!folder) fail(`附件「${file.name}」已找不到，请检查工作间备份`)
-    const root = await realpath(folder), dest = path.join(root, name)
+    const root = await realpath(folder), dest = path.join(root, staged ? key : name)
     if (offset === undefined) {
       checkFeedbackBytes(file, await readContainedArtifact(root, dest, file.size))
       return { path: dest, name }

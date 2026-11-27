@@ -11,9 +11,9 @@ export function feedbackFileUnavailable(report: { attachmentFeedback?: true; dec
   return report?.attachmentFeedback ? '' : '对方工作间暂不支持验收附件，请在项目所在工作间处理'
 }
 
-export type Draft = FeedbackItem & { signature: string; title: string }
+export type Draft = FeedbackItem & { signature: string; title: string; superseded?: true }
 export type InboxRow = { id: string; title: string; projectId?: string; taskId?: string; kind: Attention['kind'] | 'agent'; count?: number; replied?: boolean; agent?: LiveAgent }
-export type Attempt = { signature: string; input?: DelegatedFeedback; rows?: InboxRow[]; reason?: string; rejected?: boolean; checkingUntil?: number; autoChecked?: boolean }
+export type Attempt = { signature: string; input?: DelegatedFeedback; keys?: string[]; rows?: InboxRow[]; reason?: string; rejected?: boolean; checkingUntil?: number; autoChecked?: boolean }
 export const feedbackFailure = (a?: Attempt) => a?.reason && JSON.stringify([a.input?.requestId ?? a.signature, !!a.rejected, a.rejected ? a.reason : ''])
 type Sheet = { entries: Record<string, Draft>; attempt?: Attempt; dismissed?: string; versions: Record<string, number>; floor: number }
 export type Sheets = Record<string, Sheet>

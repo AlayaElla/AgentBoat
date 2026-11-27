@@ -322,7 +322,7 @@ test('decision and acceptance attachments survive retry and restart under the or
     Buffer.from('普通文件内容'.repeat(4000)), Buffer.from('移除的文件')]
   const files = contents.map((bytes, i) => ({ id: randomUUID(), name: ['截图.png', '修改记录.txt', '待移除.txt'][i], size: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex') }))
   const draft = { ...target, kind: 'acceptance' as const, result: 'changes_requested', note: '请对照截图和修改记录', title: a.title, signature: a.fingerprint }
-  const key = JSON.stringify([target.taskId, 'acceptance', target.itemId])
+  const key = JSON.stringify([target.taskId, 'acceptance', target.itemId, randomUUID()])
   const edit = (version: number, value: (typeof draft & { attachments: typeof files }) | null) => worker.request('panel.feedbackState',
     { change: { projectId: target.projectId, items: [{ key, version, value }] } })
   const submit = (attachments: typeof files, requestId: string, changes = {}) => worker.request('project.feedback', {
@@ -336,6 +336,12 @@ test('decision and acceptance attachments survive retry and restart under the or
       await worker.request('panel.feedbackFile', { ...target, file, offset, data: contents[i].subarray(offset, offset + feedbackPartBytes).toString('base64') })
     await edit(0, { ...draft, attachments: files })
     await edit(1, { ...draft, attachments: files.slice(0, 2) })
+    // A cleanup from another editor must preserve a file referenced by the saved draft key.
+    await worker.request('panel.feedbackFile', { ...target, file: files[1], offset: 0, data: null })
+    const draftFile = { projectId: 'p1', key, attachmentId: files[1].id }
+    assert.deepEqual(await worker.request('panel.feedbackDraftFile', draftFile), { ...files[1], type: 'text/plain' })
+    assert.equal(await worker.request('panel.feedbackDraftFile', { ...draftFile, offset: feedbackPartBytes }), contents[1].subarray(feedbackPartBytes).toString('base64'))
+    await assert.rejects(() => worker.request('panel.feedbackDraftFile', { ...draftFile, projectId: 'p2' }), /不属于指定草稿/)
     await assert.rejects(() => submit(files, 'incomplete'), /待移除\.txt.*找不到/)
     await assert.rejects(() => submit(files.slice(0, 2), 'stale', { itemRevision: 1 }), /验收项已更新/)
     assert.equal((await c.store.get('p1')).tasks[0].acceptance[0].history.length, 1)
@@ -348,6 +354,7 @@ test('decision and acceptance attachments survive retry and restart under the or
     assert.equal(sent[0][0], 'run_project')
     assert.match(sent[0][1], /截图\.png[\s\S]*修改记录\.txt[\s\S]*feedback-file/)
     await edit(2, null)
+    await assert.rejects(() => worker.request('panel.feedbackDraftFile', draftFile), /不属于指定草稿/)
     const { presentationRevision, projectId, ...decisionItem } = decisionTarget
     const staged = { ...decisionTarget, file: files[0], offset: 0, data: contents[0].toString('base64') }
     await assert.rejects(() => worker.request('panel.feedbackFile', { ...staged, presentationRevision: presentationRevision + 1 }), /决定已更新/)

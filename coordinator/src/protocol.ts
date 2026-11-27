@@ -14,6 +14,7 @@ declare module 'orca' {
   interface PluginRequests {
     'panel.feedbackState': { input: { change?: import('./feedback-drafts').Delta }; output: import('./feedback-drafts').Sheets }
     'panel.feedbackFile': { input: FeedbackTarget & { file: FeedbackAttachment; offset: number; data: string | null; fingerprint: string }; output: { saved: true } }
+    'panel.feedbackDraftFile': { input: { projectId: string; key: string; attachmentId: string; offset?: number }; output: string | (FeedbackAttachment & { type: string }) }
     'project.feedbackFile': { input: FeedbackTarget & { attachmentId: string; offset?: number }; output: string | (FeedbackAttachment & { type: string }) }
     'project.locateFeedbackFile': { input: FeedbackTarget & { attachmentId: string; runId: string; caller: string }; output: { name: string; path: string } }
     'workspace.hermesApprovalMode': { output: string }

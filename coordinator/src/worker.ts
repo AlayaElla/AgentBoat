@@ -973,9 +973,11 @@ export function createCoordinator(api: OrcaWorkerApi, runtime: CoordinatorRuntim
     if (context.panel.id === 'orca-cli') fail('请在工作间面板附上文件')
     const target = feedbackTarget(input), file = feedbackAttachment(input.file)
     if (input.data === null) {
-      const saved = (await readDrafts())[target.projectId]?.entries[JSON.stringify([target.taskId, target.kind ?? 'acceptance', target.itemId])]
-      if (saved?.itemRevision !== target.itemRevision || saved.presentationRevision !== target.presentationRevision ||
-          !saved.attachments?.some(f => f.id === file.id && f.sha256 === file.sha256 && f.size === file.size))
+      const saved = Object.values((await readDrafts())[target.projectId]?.entries ?? {}).some(draft =>
+        draft.taskId === target.taskId && draft.kind === (target.kind ?? 'acceptance') && draft.itemId === target.itemId &&
+        draft.itemRevision === target.itemRevision && draft.presentationRevision === target.presentationRevision &&
+        draft.attachments?.some(f => f.id === file.id && f.sha256 === file.sha256 && f.size === file.size))
+      if (!saved)
         await linkFiles.discardFeedbackPart(target, file)
       return { saved: true as const }
     }
@@ -1249,6 +1251,16 @@ export function createCoordinator(api: OrcaWorkerApi, runtime: CoordinatorRuntim
     const { target, file } = await registeredFeedbackFile(input)
     const result = await linkFiles.feedbackFile(target, file, input.offset)
     return 'data' in result ? result.data! : { ...file, name: result.name, type: fileType(result.name) }
+  })
+  orca.panels.handle('panel.feedbackDraftFile', async (input, context) => {
+    if (context.panel.id === 'orca-cli') fail('请在工作间面板查看草稿附件')
+    const id = text(input.projectId, '项目编号', 200), key = text(input.key, '草稿编号', 1000), attachmentId = text(input.attachmentId, '附件编号', 36)
+    const sheets = await readDrafts(), sheet = Object.hasOwn(sheets, id) ? sheets[id] : undefined
+    const draft = sheet && Object.hasOwn(sheet.entries, key) ? sheet.entries[key] : undefined
+    const file = draft?.attachments?.find(file => file.id === attachmentId)
+    if (!draft || !file) fail('这份附件不属于指定草稿')
+    const attachment = feedbackAttachment(file), result = await linkFiles.feedbackFile(feedbackTarget(draft, id), attachment, input.offset, true)
+    return 'data' in result ? result.data! : { ...attachment, name: result.name, type: fileType(result.name) }
   })
   orca.panels.handle('project.locateFeedbackFile', async input => {
     const { target, file } = await registeredFeedbackFile(input, input)

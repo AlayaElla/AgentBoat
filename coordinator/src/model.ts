@@ -164,7 +164,9 @@ type TaskState = ReturnType<typeof taskState>
 export type Attention = {
   projectId: string; taskId: string
   itemId: string; title: string; summary: string
-} & ({ kind: 'review'; itemRevision: number; fingerprint: string } | { kind: 'decision' | 'blocked' | 'rework'; replied?: boolean })
+} & ({ kind: 'review'; itemRevision: number; fingerprint: string } |
+  { kind: 'decision'; signature: string; presentationRevision?: number } |
+  { kind: 'blocked'; itemRevision: number; replied?: boolean } | { kind: 'rework' })
 export interface OwnerQuestion { id: string; projectId: string; runId: string; from: string; title: string; body: string; at: number; report?: import('../scripts/worker-reports.mjs').WorkerReport }
 export interface Overview {
   versionLabel?: string
@@ -188,15 +190,17 @@ export function blockedRevision(task: Pick<Task, 'phase' | 'blockedStatus' | 'bl
 }
 
 export function attention(project: Project): Attention[] {
-  if (project.hidden) return []
-  return project.tasks.flatMap(task => {
-    const base = { projectId: project.ref.id, taskId: task.id, title: task.title }
-    const items: Attention[] = task.decisions.filter(d => d.answer === undefined).map(d => ({ ...base, kind: 'decision', itemId: d.id, summary: d.question }))
-    items.push(...task.acceptance.filter(a => a.status === 'pending' && task.phase === 'ready').map(a => ({ ...base, kind: 'review' as const, itemId: a.id, summary: a.title, itemRevision: a.revision, fingerprint: a.fingerprint })))
-    items.push(...task.acceptance.filter(a => a.status === 'changes_requested').map(a => ({ ...base, kind: 'rework' as const, itemId: a.id, summary: a.history.at(-1)?.note || a.title })))
-    if (blockedRevision(task) !== undefined) items.push({ ...base, kind: 'blocked', replied: task.blockedStatus === 'replied', itemId: task.id, summary: task.progress || task.goal })
-    return items.map(item => ({ ...item, summary: item.summary.replace(/\s+/g, ' ').slice(0, 300) }))
-  })
+  return project.hidden ? [] : project.tasks.flatMap(task => taskAttention(project.ref.id, task))
+}
+export function taskAttention(projectId: string, task: Task): Attention[] {
+  const base = { projectId, taskId: task.id, title: task.title }
+  const items: Attention[] = task.decisions.filter(d => task.phase !== 'paused' && d.answer === undefined).map(d => ({ ...base, kind: 'decision',
+    itemId: d.id, summary: d.question, signature: JSON.stringify([d.question, d.options]), presentationRevision: d.presentationRevision }))
+  items.push(...task.acceptance.filter(a => a.status === 'pending' && task.phase === 'ready').map(a => ({ ...base, kind: 'review' as const, itemId: a.id, summary: a.title, itemRevision: a.revision, fingerprint: a.fingerprint })))
+  items.push(...task.acceptance.filter(a => a.status === 'changes_requested').map(a => ({ ...base, kind: 'rework' as const, itemId: a.id, summary: a.history.at(-1)?.note || a.title })))
+  const version = blockedRevision(task)
+  if (version !== undefined) items.push({ ...base, kind: 'blocked', itemRevision: version, replied: task.blockedStatus === 'replied', itemId: task.id, summary: task.progress || task.goal })
+  return items.map(item => ({ ...item, summary: item.summary.replace(/\s+/g, ' ').slice(0, 300) }))
 }
 export function projectCounts(p: Project) {
   const counts: Overview['projects'][number]['counts'] = { working: 0, decision: 0, review: 0, rework: 0, completed: 0, blocked: 0, paused: 0 }
