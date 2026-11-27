@@ -605,6 +605,96 @@ try {
     assert.deepEqual(await page.evaluate(() => fixture.feedbackFiles), oldFiles);
   });
   if (!process.env.PANEL_STALE_FEEDBACK_ONLY) {
+  await setup({ width: 1040, inboxBatch: true });
+  await test('dock locates the missing acceptance field within a task and across projects', async () => {
+    const card = title => currentLayer().locator('.card').filter({ has: page.getByRole('heading', { name: title, exact: true }) });
+    const needsChanges = title => card(title).getByRole('button', { name: '需要修改', exact: true }).click();
+    const note = title => card(title).getByRole('textbox', { name: '修改意见' });
+    const fillMissing = () => dock().getByRole('button', { name: '去填写', exact: true }).click();
+    const focusMissing = () => note('成果 a2').and(page.locator(':focus')).waitFor();
+    await openReview();
+    await needsChanges('成果 a2');
+    await note('成果 a2').fill(' \n ');
+    const payload = '第二项验收附件';
+    await note('成果 a2').evaluate((editor, payload) => {
+      const clipboardData = new DataTransfer();
+      clipboardData.items.add(new File([payload], '验收说明.txt', { type: 'text/plain' }));
+      editor.dispatchEvent(new ClipboardEvent('paste', { clipboardData, bubbles: true, cancelable: true }));
+    }, payload);
+    await card('成果 a2').getByText('验收说明.txt', { exact: true }).waitFor();
+    await needsChanges('成果 a1');
+    await note('成果 a1').fill('第一项的修改意见');
+    await dock().getByRole('status').getByText('成果 a2 · 缺修改意见', { exact: true }).waitFor();
+    const submit = dock().getByRole('button', { name: /^提交 \d+ 条$/ });
+    assert.equal(await submit.isDisabled(), true);
+    await submit.evaluate(button => button.dispatchEvent(new MouseEvent('click', { bubbles: true })));
+    assert.equal(await page.evaluate(() => fixture.calls.some(c => c.name === 'project.feedback')), false);
+    if (process.env.PANEL_EVIDENCE_DIR) await page.screenshot({ path: path.join(process.env.PANEL_EVIDENCE_DIR, 'missing-acceptance-1040.png'), animations: 'disabled' });
+    await fillMissing();
+    await focusMissing();
+
+    await openReview('移动端交付');
+    await card('成果 b1').getByRole('button', { name: '通过', exact: true }).click();
+    assert.equal(await card('成果 b1').getByRole('textbox', { name: '通过留言（选填）' }).inputValue(), '');
+    await fillMissing();
+    await focusMissing();
+    await note('成果 a2').fill('第二项的修改意见');
+    await card('成果 a2').getByText('验收说明.txt', { exact: true }).waitFor();
+    assert.equal(await submit.isEnabled(), true);
+    await submit.click();
+    await page.getByRole('status').getByText('已提交 3 条', { exact: true }).waitFor();
+    await page.locator('.wide-pane').waitFor({ state: 'hidden' });
+    const { calls, files } = await page.evaluate(() => ({
+      calls: fixture.calls.filter(c => c.name === 'project.feedback').map(c => c.input),
+      files: fixture.feedbackFiles,
+    }));
+    const selected = calls.flatMap(c => c.items.map(i => [c.projectId, i.itemId, i.result, i.note ?? ''])).sort((a, b) => a[1].localeCompare(b[1]));
+    assert.deepEqual(selected, [
+      ['p1', 'a1', 'changes_requested', '第一项的修改意见'],
+      ['p1', 'a2', 'changes_requested', '第二项的修改意见'],
+      ['p2', 'b1', 'passed', ''],
+    ]);
+    const attachment = calls.find(c => c.projectId === 'p1').items.find(i => i.itemId === 'a2').attachments[0];
+    assert.equal(attachment.name, '验收说明.txt');
+    assert.equal(files[attachment.id][0], Buffer.from(payload).toString('base64'));
+  });
+  await setup({ width: 360, inboxBatch: true, blocked: true });
+  await test('narrow dock lists missing fields and reopens the existing inbox editors', async () => {
+    const fillMissing = () => dock().getByRole('button', { name: '去填写', exact: true }).click();
+    await rail().getByRole('button', { name: /^再看 / }).click();
+    await row('设计决定').click();
+    await rail().getByRole('radio', { name: '其他', exact: true }).check();
+    const answer = rail().getByRole('textbox', { name: '你的决定', exact: true });
+    await answer.fill(' \n ');
+    await row('等待补建').click();
+    await rail().getByRole('textbox', { name: '受阻备注', exact: true }).fill('   ');
+    await dock().getByRole('button', { name: '已选 2 条 · 1 个项目', exact: true }).click();
+    await dock().getByText('选择方案 · 缺你的决定 · 示例项目', { exact: true }).waitFor();
+    await dock().getByText('等待补建 · 缺受阻备注 · 示例项目', { exact: true }).waitFor();
+    await row('设计决定').click();
+    await rail().getByRole('button', { name: /^我的工作间，/ }).click();
+    await fillMissing();
+    await answer.and(page.locator(':focus')).waitFor();
+    assert.equal(await page.locator('.pane').count(), 0);
+    if (process.env.PANEL_EVIDENCE_DIR) await page.screenshot({ path: path.join(process.env.PANEL_EVIDENCE_DIR, 'missing-decision-360.png'), animations: 'disabled' });
+    await rail().getByRole('radio', { name: '方案一', exact: true }).check();
+    assert.equal(await rail().getByRole('textbox', { name: '补充说明（选填）', exact: true }).inputValue(), '');
+    await dock().getByRole('status').getByText('等待补建 · 缺受阻备注', { exact: true }).waitFor();
+
+    await project();
+    await currentLayer().getByRole('tab', { name: '任务', exact: true }).click();
+    await fillMissing();
+    assert.equal(await currentLayer().getByRole('tab', { name: '待处理', exact: true }).getAttribute('aria-selected'), 'true');
+    const blocked = currentLayer().getByRole('textbox', { name: '受阻备注', exact: true });
+    await blocked.and(page.locator(':focus')).waitFor();
+    await blocked.fill('补建完成');
+    await dock().getByRole('button', { name: '提交 2 条', exact: true }).click();
+    await page.getByRole('status').getByText('已提交 2 条', { exact: true }).waitFor();
+    const items = await page.evaluate(() => fixture.calls.find(c => c.name === 'project.feedback').input.items);
+    assert.deepEqual(items.map(i => [i.kind, i.answer ?? '', i.note ?? '']), [
+      ['decision', '方案一', ''], ['blocked', '', '补建完成'],
+    ]);
+  });
   await setup({ width: 360, feedbackDecisions: true });
   await test('decision and acceptance share drop and paste, retain one draft each, and reopen scoped history', async () => {
     const image = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a82kAAAAASUVORK5CYII=';

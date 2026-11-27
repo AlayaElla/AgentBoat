@@ -222,7 +222,7 @@ function input(label: string, initial: any = '', type = 'text', change?: (value:
   if (!feedback && !(name in fields)) fields[name] = initial
   const e = el(type === 'textarea' ? 'textarea' : 'input', { class: 'in', type: type === 'textarea' ? undefined : type, value: feedback ? initial : fields[name], placeholder, 'data-focus': name, maxlength: type === 'password' ? 4096 : 8000,
     oninput: (e: Event) => { const value = (e.target as HTMLInputElement).value; if (!feedback) { fields[name] = value; if (fields === active.form) markDirty() } change?.(value) } })
-  const caption = label.startsWith('决定 ') ? '你的决定' : feedback ? label.split(' ')[0] : label
+  const caption = feedback ? label.split(' ')[0] : label
   return el('label', { class: 'field' }, el('span', { class: 'lb' }, caption), e)
 }
 function select(label: string, options: Record<string, string>, initial: string, change?: (v: string) => void, placeholder?: string) {
@@ -671,10 +671,10 @@ function selectReview(r: InboxRow, checked: boolean) {
 function rowPage(r: InboxRow): Page {
   return r.kind === 'agent' ? { kind: 'agents', inboxRow: r.id } : { kind: 'task', projectId: r.projectId, id: r.taskId, inboxRow: r.id }
 }
-function openInbox(r: InboxRow, scope: string, keyboard = false) {
-  if (wideInbox && scope === homeFrame.key) { void go(rowPage(r), false, keyboard); return }
+function openInbox(r: InboxRow, scope: string, keyboard = false, reveal = false) {
+  if (wideInbox && scope === homeFrame.key) return go(rowPage(r), reveal, keyboard)
   const k = scope + r.id
-  if (expandedRows.delete(k)) {
+  if (!reveal && expandedRows.delete(k)) {
     if (k === lastInline) lastInline = ''
     if (scope === homeFrame.key) remember()
     render(); return
@@ -684,10 +684,12 @@ function openInbox(r: InboxRow, scope: string, keyboard = false) {
   const f = inlineRows.get(k) ?? frameFor(rowPage(r))
   inlineRows.set(k, f)
   if (scope === homeFrame.key) remember()
-  if (active.page.projectId && active.page.projectId === r.projectId && active.data) f.data = active.data
-  else { f.data = undefined; f.error = undefined; void loadPage(f).then(render) }
+  let ready
+  if (active.page.projectId && active.page.projectId === r.projectId && active.data) { f.data = active.data; f.error = undefined }
+  else if (!reveal || !f.data || f.error) { f.data = undefined; f.error = undefined; ready = loadPage(f).then(render) }
   render()
-  requestAnimationFrame(() => root.querySelector<HTMLElement>(`[data-expansion="${CSS.escape(k)}"]`)?.scrollIntoView({ block: 'nearest', behavior: 'instant' }))
+  if (!reveal) requestAnimationFrame(() => root.querySelector<HTMLElement>(`[data-expansion="${CSS.escape(k)}"]`)?.scrollIntoView({ block: 'nearest', behavior: 'instant' }))
+  return ready
 }
 function expansion(open: boolean, content: any, id?: string) {
   return el('div', { class: open ? 'xp open' : 'xp', 'data-key': 'expansion', 'data-expansion': id },
@@ -758,11 +760,12 @@ function renderInboxRow(r: DisplayRow, scope: string) {
 function inboxList(rows: DisplayRow[], scope: string) {
   return el('div', { class: 'irows', 'data-animate': 'row' }, rows.map(r => renderInboxRow(r, scope)))
 }
+const inboxGroupId = (peerId?: string) => peerId ? 'peer-' + peerId : 'local'
 function inboxGroups(entries: DisplayRow[]) {
   const groups = new Map<string, { name: string; count: number; previewCount: number; rows: DisplayRow[] }>()
   entries.forEach((r, i) => {
     const [peerId] = r.projectId && isRemote(r.projectId) ? JSON.parse(r.projectId) as [string, string] : []
-    const id = peerId ? 'peer-' + peerId : 'local'
+    const id = inboxGroupId(peerId)
     let group = groups.get(id)
     if (!group) {
       const name = peerId ? peers().find(p => p.id === peerId)?.name ?? '已断开的工作间' : all.links?.name ?? '我的工作间'
@@ -921,6 +924,7 @@ function artifactEntry(entry: HTMLElement, projectId: string, taskId: string, ar
 }
 const feedbackActions: Record<string, string> = { passed: '通过', changes_requested: '需要修改', discarded: '丢弃' }
 const feedbackNoteLabels: Record<string, string> = { passed: '通过留言（选填）', changes_requested: '修改意见', discarded: '丢弃原因（选填）' }
+const decisionAnswerLabel = '你的决定', blockedNoteLabel = '受阻备注'
 const acceptanceStatuses: Record<string, string> = { pending: '待验收', passed: '已通过', changes_requested: '需要修改', discarded: '已丢弃' }
 function previewFeedbackFile(target: FeedbackTarget, file: FeedbackAttachment) {
   const input = { ...target, attachmentId: file.id }
@@ -1026,13 +1030,12 @@ function feedbackCards(projectId: string, tasks: FeedbackTask[], title = '要你
     const base: Draft = { taskId: t.id, kind: 'blocked', itemId: t.id, itemRevision: version, title: t.title, signature: String(version) }
     const currentChoice = (base: Draft) => matchingChoice(entries, base, saved => validDraft(t, saved, remote))
     const [k, draft] = currentChoice(base) ?? [draftIdentity(base), undefined]
-    return section(title, acceptance.length > 1 ? button(`这 ${acceptance.length} 项全部通过`, () => {
+    const cards = section(title, acceptance.length > 1 ? button(`这 ${acceptance.length} 项全部通过`, () => {
       choosePasses(projectId, acceptance.map(a => ({ ...acceptanceDraft(t.id, a), result: 'passed', reviewTotal: acceptance.length }))); render()
     }, 'sm') : null, decisions.map(d => {
       const base: Draft = { taskId: t.id, kind: 'decision', itemId: d.id, itemRevision: 1, title: d.question,
         signature: JSON.stringify([d.question, d.options]), presentationRevision: d.presentationRevision }
       const [k, draft] = currentChoice(base) ?? [draftIdentity(base), undefined]
-      const field = `决定 ${k}`
       const answer = (value: string) => {
         choose(projectId, { ...base, answer: value, note: draft?.answer === undefined ? '' : draft.note ?? '',
           attachments: draft?.attachments, fingerprint: draft?.fingerprint }); render()
@@ -1043,7 +1046,7 @@ function feedbackCards(projectId: string, tasks: FeedbackTask[], title = '要你
         [...d.options, '其他'].map(option => check(option, option === '其他' ? draft?.answer !== undefined && !d.options.includes(draft.answer) : draft?.answer === option,
           () => answer(option === '其他' ? '' : option), { type: 'radio', name: group, value: option })),
         fileFields(k, draft, draft?.answer !== undefined && !d.options.includes(draft.answer)
-          ? input(field, draft.answer, 'textarea', answer, undefined, {}, true) : null, noteField(k, draft)),
+          ? input(`${decisionAnswerLabel} ${k}`, draft.answer, 'textarea', answer, undefined, {}, true) : null, noteField(k, draft)),
         row(resultButton(base, draft, 'discarded'), draft ? button('撤销', () => removeChoice(projectId, k), 'text sm') : null)), k)
     }), acceptance.map(a => {
       const base = acceptanceDraft(t.id, a)
@@ -1053,12 +1056,51 @@ function feedbackCards(projectId: string, tasks: FeedbackTask[], title = '要你
         row(...Object.keys(feedbackActions).map(result => resultButton(base, draft, result)),
           draft ? button('撤销', () => removeChoice(projectId, k), 'text sm') : null), fileFields(k, draft, noteField(k, draft))), k)
     }), blocked ? keyed(card(callout(t.progress || t.goal || '任务受阻', 'danger'),
-      draft?.result === 'discarded' ? noteField(k, draft) : input(`受阻备注 ${k}`, draft?.note ?? '', 'textarea', note => {
+      draft?.result === 'discarded' ? noteField(k, draft) : input(`${blockedNoteLabel} ${k}`, draft?.note ?? '', 'textarea', note => {
         choose(projectId, { ...base, note }); render()
       }, undefined, {}, true), row(resultButton(base, draft, 'discarded'), draft ? button('撤销', () => removeChoice(projectId, k), 'text sm') : null)), k) : null)
+    cards.dataset.feedbackProject = projectId
+    return cards
   })
 }
-const invalidDraft = (d: Draft) => d.result === 'discarded' ? false : d.kind === 'decision' ? !d.answer?.trim() : (d.kind === 'blocked' || d.result === 'changes_requested') && !d.note?.trim()
+function missingFeedbackField(d: Draft) {
+  if (d.result === 'discarded') return
+  if (d.kind === 'decision') return d.answer?.trim() ? undefined : decisionAnswerLabel
+  if (d.note?.trim()) return
+  if (d.kind === 'blocked') return blockedNoteLabel
+  if (d.result === 'changes_requested') return feedbackNoteLabels.changes_requested
+}
+async function revealFeedbackField(projectId: string, id: string, draft: Draft, field: string) {
+  const findEditor = () => root.querySelector<HTMLElement>(
+    `[data-feedback-project="${CSS.escape(projectId)}"] [data-focus="${CSS.escape(`${field} ${id}`)}"]:not([inert] *)`)
+  trayOpen = false; render()
+  if (!findEditor()) {
+    const row = inboxRows(projectId).find(row => matchesRow(draft, row))
+    if (!row) return
+    const shownProject = page.kind === 'project' ? page.projectId : page.kind === 'peer-project' ? remoteKey(page.id!, page.pid!) : undefined
+    let ready
+    if (shownProject === projectId) {
+      if (tabOf(projectId) !== 'inbox') { tabsOf[projectId] = 'inbox'; remember() }
+      ready = openInbox(row, active.key, false, true)
+    } else if (page.inboxRow === row.id) {
+      ready = loadPage().then(render)
+    } else if (active === homeFrame || wideInbox) {
+      collapsedInboxGroups.delete(inboxGroupId(isRemote(projectId) ? remoteSource(projectId).peer?.id : undefined))
+      ready = openInbox(row, homeFrame.key, false, true)
+    } else {
+      ready = go(rowPage(row))
+    }
+    const navigation = nav
+    await ready
+    if (nav !== navigation) return
+  }
+  const editor = findEditor()
+  if (!editor) return
+  editor.focus({ preventScroll: true })
+  const expansions = Array.from(root.querySelectorAll('.xp.open')).filter(expansion => expansion.contains(editor))
+  await Promise.allSettled(expansions.flatMap(expansion => expansion.getAnimations().map(animation => animation.finished)))
+  if (document.activeElement === editor) editor.closest('label')?.scrollIntoView({ block: 'center', behavior: 'instant' })
+}
 function previewDraftFile(projectId: string, key: string, file: FeedbackAttachment) {
   const input = { projectId, key, attachmentId: file.id }
   return previewArtifact(file.name, undefined, async () => ({ ...await req('panel.feedbackDraftFile', input), key: file.id }),
@@ -1070,12 +1112,11 @@ const feedbackSelection = () => Object.keys(drafts).flatMap(id => {
 })
 function dock() {
   const groups = feedbackSelection(), selected = new Set(groups.flatMap(g => g.items.map(([, d]) => d)))
-  const items = groups.flatMap(({ id: projectId, items }) => items.map(([id, d]) => ({ projectId, id, d })))
+  const items = groups.flatMap(({ id: projectId, items }) => items.map(([id, d]) => ({ projectId, id, d, field: missingFeedbackField(d) })))
   const saved = Object.entries(drafts).flatMap(([projectId, group]) => Object.entries(group).flatMap(([id, d]) => selected.has(d) ? [] : [{ projectId, id, d }]))
   const attempts = Object.keys(feedbackRequests).filter(id => openAttempt(id))
-  const count = items.length, incomplete = items.filter(({ d }) => invalidDraft(d)).length
-  const selectionLabel = incomplete ? `有 ${incomplete} 条还没写内容` : `已选 ${count} 条`
-  const label = [count && selectionLabel, saved.length ? `${saved.length} 条保留草稿` : count && !incomplete && `${groups.length} 个项目`].filter(Boolean).join(' · ')
+  const count = items.length, missing = items.filter(({ field }) => field), firstMissing = missing[0], firstField = firstMissing?.field
+  const label = [count && `已选 ${count} 条`, saved.length ? `${saved.length} 条保留草稿` : count && `${groups.length} 个项目`].filter(Boolean).join(' · ')
   const failures = Object.entries(feedbackRequests).filter(([id, record]) => record.reason && feedbackFailure(record) !== sheets[id].dismissed && Object.keys(choices(id)).length)
   const savedError = failures.map(([id, record]) => '「' + inboxProjectName(id) + '」未确认提交：' + record.reason).join('。')
   const message = [error, !busy && savedError, !error && notice].filter(Boolean).join('。')
@@ -1096,8 +1137,8 @@ function dock() {
       button('', closeToast, 'text sm icon', false, '关闭提示', 'close')) : overviewIssue ? el('div', { class: 'toast', role: 'status' },
         el('span', { class: 'grow any' }, overviewIssue), button('重试', () => refresh(true), 'sm')) : null),
     expansion(count > 0 || saved.length > 0 || attempts.length > 0, el('section', { class: 'sheet', 'aria-label': count ? '待提交' : '反馈草稿', 'data-sheet': '' },
-      expansion(trayOpen && !!label, el('div', { class: 'tray-list' }, items.map(({ projectId, id, d }) => keyed(el('div', { class: 'tray-row' },
-        tag(d.result ? feedbackActions[d.result] : d.kind === 'blocked' ? '受阻答复' : '决定'), el('span', { class: 'grow any' }, `${d.title} · ${inboxProjectName(projectId)}`), invalidDraft(d) ? small('还没写内容') : null,
+      expansion(trayOpen && !!label, el('div', { class: 'tray-list' }, items.map(({ projectId, id, d, field }) => keyed(el('div', { class: 'tray-row' },
+        tag(d.result ? feedbackActions[d.result] : d.kind === 'blocked' ? '受阻答复' : '决定'), el('span', { class: 'grow any' }, [d.title, field && `缺${field}`, inboxProjectName(projectId)].filter(Boolean).join(' · ')),
         button('', () => removeChoice(projectId, id), 'text icon sm', false, `移除 ${d.title}`, 'close')), projectId + id)), saved.map(({ projectId, id, d }) => {
         const attempt = openAttempt(projectId), state = feedbackDraftState(projectId, d)
         const status = attempt && (!attempt.keys || attempt.keys.includes(id)) ? '待核对' : state === 'unavailable' ? '待同步' : '已失效'
@@ -1115,9 +1156,12 @@ function dock() {
         return keyed(el('div', { class: 'row g2' }, el('span', { class: 'grow any' }, unavailable || `${inboxProjectName(id)} · ${checking ? '正在核对' : '待核对'}`),
           button('核对提交', () => retryFeedback(id, attempt), 'sm', checking || !!unavailable)), id)
       }),
+      firstField ? el('div', { class: 'row g2', 'data-key': 'missing-feedback' },
+        el('span', { class: 'grow any', role: 'status' }, trayOpen ? `${missing.length} 条待填写` : `${firstMissing.d.title} · 缺${firstField}`),
+        button('去填写', () => revealFeedbackField(firstMissing.projectId, firstMissing.id, firstMissing.d, firstField))) : null,
       label ? el('div', { class: 'row g2' }, el('button', { class: 'btn text grow trunc tray-toggle', type: 'button', disabled: busy, title: label, 'aria-expanded': String(trayOpen), onclick: () => { trayOpen = !trayOpen; render() } }, label),
         count ? button('清空', () => { for (const { id, items } of groups) editChoices(id, items.map(([key]) => [key, null])); trayOpen = false; render() }, 'sm') : null,
-        count ? button(`提交 ${count} 条`, submitFeedback, 'primary', !!incomplete) : null) : null)))
+        count ? button(`提交 ${count} 条`, submitFeedback, 'primary', !!firstMissing) : null) : null)))
 }
 function updateFeedbackOverview(project: Project) {
   all.projects = all.projects.map(p => p.ref.id === project.ref.id ? projectSummary(project) : p)
@@ -1245,7 +1289,7 @@ async function retryFeedback(id: string, attempt: Attempt) {
 }
 async function submitFeedback() {
   const groups = feedbackSelection()
-  if (!groups.length || groups.some(({ items }) => items.some(([, d]) => invalidDraft(d)))) return
+  if (!groups.length || groups.some(({ items }) => items.some(([, d]) => missingFeedbackField(d)))) return
   const origin = active
   await act(async () => {
     await edits
