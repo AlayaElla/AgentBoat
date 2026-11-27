@@ -11,6 +11,9 @@ const sourceList = operation === 'owner-messages';
 if (sourceList && argument) throw new Error('用法：owner-messages');
 const replyDecision = operation === 'reply-decision';
 if (replyDecision && (!argument || !flag || !taskId || extra)) throw new Error('用法：reply-decision <项目编号> <任务编号> <决定编号>');
+const feedbackFile = operation === 'feedback-file';
+if (feedbackFile && (process.argv.length !== 8 || !/^[1-9]\d*$/.test(extra ?? '')))
+  throw new Error('用法：feedback-file <项目编号> <任务编号> <验收编号> <验收版本> <附件编号>');
 // Internal callers pass handler data on stdin. The workspace hook excludes option-prefixed commands.
 const internal = operation === '--workspace-request' && ['project.settings', 'project.lead', 'workspace.message', 'workspace.connections'].includes(argument) && !flag;
 const brief = operation === 'overview' && argument === '--brief';
@@ -25,7 +28,7 @@ if (historyArgs.length && (historyArgs.length !== 2 || historyArgs[0] !== '--end
 const leadBind = operation === 'project-lead-bind', leadSwitch = operation === 'project-lead-switch';
 const leadActions = ['lead-take', 'lead-ready', 'lead-handoff', 'lead-resume'];
 const leadAction = leadActions.includes(operation);
-const allowed = [...leadActions, 'lead-history', 'projects', 'overview', 'main-read', 'main-bind', 'project-lead', 'project-lead-switch', 'project-lead-bind', 'message', 'read', 'bind', 'submit', 'feedback', 'reply-decision', 'owner-messages', 'worker-feedback', 'feishu-reply', 'links-read', 'links-refresh', 'links-invite', 'links-cancel-invite', 'links-join', 'links-configure', 'links-rename', 'links-share', 'links-relate', 'links-revoke', 'links-send', 'hide', 'restore', 'delete', 'main-targets', 'connections', 'connection-read', 'connection-check', 'connection-send', 'connection-reply'];
+const allowed = [...leadActions, 'lead-history', 'projects', 'overview', 'main-read', 'main-bind', 'project-lead', 'project-lead-switch', 'project-lead-bind', 'message', 'read', 'bind', 'submit', 'feedback', 'feedback-file', 'reply-decision', 'owner-messages', 'worker-feedback', 'feishu-reply', 'links-read', 'links-refresh', 'links-invite', 'links-cancel-invite', 'links-join', 'links-configure', 'links-rename', 'links-share', 'links-relate', 'links-revoke', 'links-send', 'hide', 'restore', 'delete', 'main-targets', 'connections', 'connection-read', 'connection-check', 'connection-send', 'connection-reply'];
 if (!internal && !allowed.includes(operation)) throw new Error('用法：node client.mjs projects|overview|main-read|main-targets|connections | connection-read|connection-check <名字> | main-bind|project-lead-switch|project-lead-bind|connection-send|connection-reply|links-send < stdin | read|project-lead <projectId> | bind|submit|message|feedback|feishu-reply|hide|restore|delete <input.json>');
 const caller = process.env.ORCA_AGENT_SESSION_ID ? `orca_session_id:${process.env.ORCA_AGENT_SESSION_ID}` : process.env.ORCA_TERMINAL_HANDLE;
 const profileEnv = release ? { ...process.env, ORCA_USER_DATA_PATH: activeUserDataPath() } : process.env;
@@ -38,6 +41,7 @@ function readInput(file) {
 const input = internal ? readInput(0) : history ? { projectId: historyProject, end: historyArgs.length ? Number(historyArgs[1]) : undefined } : leadAction ? { runId: argument, action: operation.slice(5), caller, token: flag, ...(taskId ? { note: taskId } : {}) } : operation === 'connections' ? { operation: 'read' } : operation.startsWith('connection-') ? { ...(['connection-read','connection-check'].includes(operation) ? { name: argument } : readInput(0)), operation: operation.slice(11) } : operation.startsWith('links-') ? { ...(['links-join', 'links-configure', 'links-rename', 'links-share', 'links-relate', 'links-revoke', 'links-send'].includes(operation) ? readInput(0) : {}), operation: operation.slice(6) } : ['projects', 'overview'].includes(operation) ? null : operation === 'main-read' ? { operation: 'read' } : operation === 'read'
   ? { operation, projectId: argument, taskId: readOptions.task }
   : replyDecision ? { operation: 'read', projectId: argument, taskId: flag }
+  : feedbackFile ? { projectId: argument, taskId: flag, itemId: taskId, itemRevision: Number(extra), attachmentId: process.argv[7] }
   : operation === 'project-lead' ? { projectId: argument }
   : operation === 'main-targets' || sourceList ? null
   : { ...readInput(operation === 'main-bind' || leadBind || leadSwitch ? 0 : argument), ...(['message', 'feedback', 'worker-feedback', 'feishu-reply', 'project-lead-switch'].includes(operation) ? {} : { operation: operation === 'main-bind' || leadBind ? 'bind' : operation }) };
@@ -61,10 +65,10 @@ const delegatedFeedback = operation === 'feedback' && Object.hasOwn(input, 'id')
 const ownerFeedback = !delegatedFeedback && operation === 'feedback' && Object.hasOwn(input, 'ownerSource');
 const ownerRelay = operation === 'message' && Object.hasOwn(input, 'ownerDecision');
 const workerQuestion = operation === 'submit' && Array.isArray(input.task?.decisions) && input.task.decisions.some(d => d?.orcaQuestionId !== undefined);
-if (ownerFeedback || ownerRelay || workerQuestion || operation === 'worker-feedback') {
+if (ownerFeedback || ownerRelay || workerQuestion || feedbackFile || operation === 'worker-feedback') {
   if (!caller) throw new Error('请在收到反馈的 Orca 会话中执行此命令');
   input.caller = caller;
-  if (ownerFeedback || ownerRelay || workerQuestion) {
+  if (ownerFeedback || ownerRelay || workerQuestion || feedbackFile) {
     const current = currentRun();
     if (!current.ok || !current.result?.run?.id) throw new Error('未确认当前主会话的 Run');
     input.runId = current.result.run.id;
@@ -78,7 +82,7 @@ if (ownerFeedback || ownerRelay || workerQuestion || operation === 'worker-feedb
 }
 if (leadAction && (!caller || !argument || !flag || extra || (operation === 'lead-handoff') !== !!taskId)) throw new Error('请在收到通知的 Orca 会话中执行原命令，交接说明用引号括起');
 const name = internal ? argument : history ? 'lead.history' : leadAction ? 'lead.control' : operation === 'connections' || operation.startsWith('connection-') ? 'workspace.connections' : operation.startsWith('links-') ? 'workspace.links' : operation === 'projects' ? 'projects.list' : operation === 'overview' ? 'workspace.overview'
-  : operation === 'feishu-reply' ? 'workspace.reply' : operation.startsWith('main-') ? 'workspace.agent' : operation === 'message' ? 'workspace.message' : delegatedFeedback ? 'workspace.linkFeedback' : operation === 'feedback' ? 'project.feedback' : operation === 'worker-feedback' ? 'project.workerFeedback' : operation === 'project-lead' ? 'project.lead' : leadSwitch ? 'workspace.projectLead' : 'project.agent';
+  : operation === 'feishu-reply' ? 'workspace.reply' : operation.startsWith('main-') ? 'workspace.agent' : operation === 'message' ? 'workspace.message' : delegatedFeedback ? 'workspace.linkFeedback' : operation === 'feedback' ? 'project.feedback' : feedbackFile ? 'project.locateFeedbackFile' : operation === 'worker-feedback' ? 'project.workerFeedback' : operation === 'project-lead' ? 'project.lead' : leadSwitch ? 'workspace.projectLead' : 'project.agent';
 const maintenance = ['hide', 'restore', 'delete'].includes(operation);
 const handler = operation === 'main-targets' ? 'workspace.agent.targets' : maintenance ? operation === 'delete' ? 'project.delete' : 'project.visibility' : name;
 if (maintenance) { delete input.operation; if (operation !== 'delete') input.hidden = operation === 'hide'; }

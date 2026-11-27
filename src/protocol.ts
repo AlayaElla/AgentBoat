@@ -1,5 +1,6 @@
 import type { Snapshot, Project, ProjectRef, Overview, WorkspaceBinding, MessagingSnapshot, LeadSwitch, ProjectLead } from './model'
 import type { DelegatedFeedback, FeedbackReply, LinksSnapshot, Sharing } from './links'
+import type { FeedbackAttachment, FeedbackTarget } from './feedback-drafts'
 export type ProjectLeadSwitch = Omit<LeadSwitch, 'mode'> & { mode: Exclude<LeadSwitch['mode'], 'bot'> | 'promote' }
 export type ProjectLeadRequest = ProjectLeadSwitch & { startOnly?: boolean; template?: string; goal?: string; introduction?: string }
 export type SetupPreview = { paths: string[]; backupRoot: string; codexHooks: string; codexHome?: string; confirmation?: string; error?: string }
@@ -12,6 +13,9 @@ export type ProjectArtifactRef = import('./link-artifacts').ArtifactRef & { arch
 declare module 'orca' {
   interface PluginRequests {
     'panel.feedbackState': { input: { change?: import('./feedback-drafts').Delta }; output: import('./feedback-drafts').Sheets }
+    'panel.feedbackFile': { input: FeedbackTarget & { file: FeedbackAttachment; offset: number; data: string | null; fingerprint: string }; output: { saved: true } }
+    'project.feedbackFile': { input: FeedbackTarget & { attachmentId: string; offset?: number }; output: string | (FeedbackAttachment & { type: string }) }
+    'project.locateFeedbackFile': { input: FeedbackTarget & { attachmentId: string; runId: string; caller: string }; output: { name: string; path: string } }
     'workspace.hermesApprovalMode': { output: string }
     'workspace.connections': { input: import('./connections').ConnectionsInput; output: import('./connections').Connection[] | import('./connections').ConnectionDetail }
     'workspace.agents': { input: { refresh?: boolean }; output: import('./model').AgentsSnapshot }
@@ -37,7 +41,7 @@ declare module 'orca' {
     'workspace.message': { input: { projectId: string; revision?: number; requestId: string; runId: string; text: string; caller?: string; ownerDecision?: NonNullable<import('./model').SourceEvent['ownerDecision']> }; output: Snapshot & { queued?: string } }
     'projects.list': { output: { projects: ProjectRef[]; error?: string } }
     'project.read': { input: { projectId: string }; output: Snapshot }
-    'project.task': { input: { projectId: string; taskId: string }; output: Project['tasks'][number] | null }
+    'project.task': { input: { projectId: string; taskId: string; history?: true }; output: Project['tasks'][number] | null }
     'project.archive': { input: { projectId: string; end?: number }; output: ArchivePage }
     'project.lead': { input: { projectId: string } | (ProjectLeadRequest & { projectId: string }); output: ProjectLead }
     'project.openMain': { input: { projectId: string }; output: { opened: boolean; multipleConversations?: boolean } }
