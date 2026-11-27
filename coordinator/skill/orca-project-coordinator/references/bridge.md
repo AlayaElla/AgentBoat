@@ -43,8 +43,9 @@
 
 - 新建任务必填 id、title、goal、phase。更新同一 id 时，省略 title 或 goal 会保留原值。phase 取 working、blocked、paused、ready、completed。
 - `blocked` 用于需要用户另做一次操作的任务，提交后会生成受阻项。提交前用 `read` 核对已有待验收和待决定。仅等待同一个事项的后续任务用 `paused`，例如 `{"id":"integrate-car","phase":"paused","progress":"等待原任务 car-render 的验收 check-render（第 1 版）通过后继续接入。"}`。等待决定时同样写明原任务和决定编号。原任务保持能处理该事项的阶段，独立的用户操作仍可单独提交 `blocked`。
-- 数组按 id 合并，省略的保留。任务、验收和来源的编号保持不变。成果名称写清这是什么，新版本沿用名称、使用新 id，版本号写在 version。用原 id、url 和 version 可更正名称。问题变了用新的决定 id。登记执行者成果时，在对应任务的 executions 保留 Orca Run、任务和派工编号。
-- 验收的 revision、status、history 由插件维护；核对内容或关联成果变了，自动出新版本。
+- 任务中的 `artifacts`、`acceptance` 等按条目 id 合并，省略的条目保留。任务、验收和来源的编号保持不变。成果名称写清这是什么，新版本沿用名称、使用新 id，版本号写在 version。用原 id、url 和 version 可更正名称。问题变了用新的决定 id。登记执行者成果时，在对应任务的 executions 保留 Orca Run、任务和派工编号。
+- 验收逐项显式填写本轮需打开核对的完整 `artifactIds`。同一验收编号更新时，这个数组整体替换原关联，「等你处理」按这份清单展示。比如在 `artifacts` 登记 `delivery-v2` 后，用 `{"id":"check-layout","title":"首页布局","details":"核对窄窗口中的主按钮","artifactIds":["delivery-v2"]}` 更新原验收。确需一起复核的既有成果可列入同一数组。提交后用 `read <projectId> --task <taskId>` 核对当前版本和清单。
+- 核对内容或关联成果变化会开启新一版。验收的 `revision`、`status`、`history` 由插件维护。此前用户结论在任务详情的「记录」中可查。此前已登记的成果仍可从任务详情的「成果」或 `read <projectId> --task <taskId> --full` 找到。
 - 决定的 `artifactIds` 选填，只能填写本任务已登记且未过期的成果编号。关联成果会在决定选项旁提供打开入口。给既有待决定项补关联时，保留任务阶段，`decisions` 只需提交 `{"id":"原决定编号","artifactIds":["成果编号"]}`。省略 `artifactIds` 保留原关联，传 `[]` 清除关联。问题、选项和答复方式沿用原记录。对方工作间需开放此项目的任务详情并允许代为处理，才能从同步的决定卡打开成果。
 - 在 acceptance 或 decisions 中用 `{"id":"旧项编号","discarded":true,"reason":"已由新版取代"}` 撤下待验收、需要修改的验收项或待决定项。沿用同一验收编号提交有变化的核对内容或成果，会开启新一版并保留旧版历史。
 - 在 artifacts 中用 `{"id":"成果编号","expired":true,"reason":"已失效"}` 标为过期，原因选填。先撤下或处理引用它的待验收项，或更新、撤下、处理引用它的待决定项。可在同一次提交里更新或撤下。过期成果仅在任务详情和完整读取中保留。
