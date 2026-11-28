@@ -1,12 +1,12 @@
 import assert from 'node:assert/strict';
-import { execFile } from 'node:child_process';
+import { execFile, execFileSync } from 'node:child_process';
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
-import { pluginVersionLabel, pluginKey } from './orca-cli.mjs';
+import { executable, pluginVersionLabel, pluginKey } from './orca-cli.mjs';
 
 const repo = fileURLToPath(new URL('../../', import.meta.url));
 const client = 'coordinator/scripts/client.mjs';
@@ -208,6 +208,108 @@ test('repository client sends stdin once to the release bridge in its profile', 
   } finally { bridge.stop(); }
   await assert.rejects(run(args, input), /未取得回执/);
   assert.equal(calls, 1);
+});
+
+test('feedback attachment notices run the active candidate client or the aligned installed entry', async t => {
+  const { temp, profile, stable, run, version } = fixture(t);
+  const oldProfile = process.env.ORCA_USER_DATA_PATH;
+  process.env.ORCA_USER_DATA_PATH = profile;
+  t.after(() => { if (oldProfile === undefined) delete process.env.ORCA_USER_DATA_PATH; else process.env.ORCA_USER_DATA_PATH = oldProfile; });
+  const kind = process.platform === 'win32' ? 'junction' : 'dir';
+  const previous = version('a'), oldClient = path.join(previous, client);
+  const candidate = path.join(temp, "Candidate's approved folder");
+  cpSync(previous, candidate, { recursive: true });
+  symlinkSync(previous, stable, kind);
+  // Restore the two parser differences from before feedback-file was introduced.
+  writeFileSync(oldClient, readFileSync(oldClient, 'utf8').replace("const feedbackFile = operation === 'feedback-file';", 'const feedbackFile = false;').replace(", 'feedback-file',", ','));
+  await assert.rejects(run([path.join(stable, client), 'feedback-file']), /用法：node client\.mjs projects/);
+
+  const { build } = await import('esbuild');
+  const orca = realpathSync(path.isAbsolute(executable) ? executable : execFileSync('which', [executable], { encoding: 'utf8' }).trim());
+  const sdk = path.resolve(path.dirname(orca), '../app.asar.unpacked/resources/plugins/declarative');
+  const workerFile = path.join(candidate, 'worker.mjs');
+  await build({ bundle: true, platform: 'node', format: 'esm', target: 'node22', outfile: workerFile,
+    alias: { 'orca/testing': path.join(sdk, 'orca-testing.mjs'), orca: path.join(sdk, 'orca-runtime.mjs') },
+    banner: { js: "import { createRequire as __testRequire } from 'node:module'; import { fileURLToPath as __testFile } from 'node:url'; import __testPath from 'node:path'; const require = __testRequire(import.meta.url); const __filename = __testFile(import.meta.url); const __dirname = __testPath.dirname(__filename);" },
+    stdin: { resolveDir: path.join(repo, 'coordinator'), contents: `
+import { createHash } from 'node:crypto';
+import { mockHost, mountWorker } from 'orca/testing';
+import { fresh, submitTask } from './src/store';
+import { LinkFiles } from './src/link-files';
+import { testCoordinator } from './src/test-runtime';
+import { refs, deliverable } from './src/fixtures';
+import { cliBridge } from './scripts/cli-bridge.mjs';
+export async function withFeedback(dir, check) {
+  const project = { ...fresh(refs[0]), runId: 'run_project', mainAgentHandle: 'orca_session_id:fixture-main' };
+  submitTask(project, deliverable);
+  const { id: itemId, revision: itemRevision, fingerprint } = project.tasks[0].acceptance[0];
+  const bytes = Buffer.from('feedback attachment');
+  const file = { id: '24778cb9-0028-4bbd-b12a-90dce6316d51', name: 'feedback.txt', size: bytes.length,
+    sha256: createHash('sha256').update(bytes).digest('hex') };
+  const target = { projectId: project.ref.id, taskId: deliverable.id, itemId, itemRevision, fingerprint };
+  let c, bridge, notice;
+  const worker = await mountWorker({ default: api => {
+    bridge = cliBridge(api);
+    c = testCoordinator(bridge.api, { projects: async () => refs, runBinding: async () => ({ owner: project.mainAgentHandle }),
+      send: async (_run, delivery) => { notice = delivery.body; return {}; } }, undefined, undefined, new LinkFiles(dir));
+  } }, { host: mockHost({ storage: { ['project:' + project.ref.id]: project } }) });
+  try {
+    await bridge.start();
+    await worker.request('panel.feedbackFile', { ...target, file, offset: 0, data: bytes.toString('base64') });
+    await worker.request('project.feedback', { projectId: target.projectId, revision: project.revision, requestId: 'fixture',
+      items: [{ ...target, kind: 'acceptance', result: 'passed', attachments: [file] }] });
+    await c.flush(project.ref.id);
+    await check(notice, bytes);
+  } finally { bridge.stop(); c.stop(); await worker.deactivate(); }
+}
+` } });
+
+  const preload = path.join(temp, 'fixture-orca.mjs');
+  writeFileSync(preload, `import cp from 'node:child_process';
+import assert from 'node:assert/strict';
+import { syncBuiltinESMExports } from 'node:module';
+cp.execFileSync = (_exe, args, options) => {
+  assert.deepEqual(args, ['orchestration', 'run-current', '--environment', 'local', '--json', '--full']);
+  assert.equal(options.env.ORCA_USER_DATA_PATH, ${JSON.stringify(profile)});
+  return JSON.stringify({ ok: true, result: { run: { id: 'run_project' } } });
+};
+syncBuiltinESMExports();`);
+  const shell = process.platform === 'win32' ? 'powershell.exe' : 'sh';
+  const call = (command, caller) => promisify(execFile)(shell,
+    process.platform === 'win32' ? ['-NoProfile', '-NonInteractive', '-Command', `${command}; exit $LASTEXITCODE`] : ['-c', command],
+    { env: { ...process.env, NODE_OPTIONS: `--import=${pathToFileURL(preload).href}`, ORCA_AGENT_SESSION_ID: caller }, windowsHide: true, timeout: 8000 });
+  const followNotice = (entry, rejectOther = false) => async (body, bytes) => {
+    assert.doesNotMatch(body, /稳定入口调用/);
+    const command = body.split('\n').find(line => line.startsWith('node '));
+    assert.ok(command.includes(entry.replaceAll('\\', '/').replaceAll("'", process.platform === 'win32' ? "''" : "'\\''")));
+    const { result } = JSON.parse((await call(command, 'fixture-main')).stdout);
+    assert.deepEqual(readFileSync(result.result.path), bytes);
+    if (rejectOther) await assert.rejects(call(command, 'unrelated'), /当前绑定的项目主会话/);
+  };
+  await (await import(pathToFileURL(workerFile))).withFeedback(path.join(temp, 'candidate-files'), async (body, bytes) => {
+    const { result } = JSON.parse((await run([path.join(stable, client), 'projects'])).stdout);
+    assert.ok(result.result.projects.some(p => p.id === 'p1'));
+    await followNotice(path.join(candidate, client), true)(body, bytes);
+  });
+  assert.equal(realpathSync(stable), previous);
+
+  const official = version('b');
+  cpSync(workerFile, path.join(official, 'worker.mjs'));
+  const cliUrl = pathToFileURL(path.join(official, 'coordinator/scripts/orca-cli.mjs')).href;
+  await run(['--input-type=module', '-e', `import { refreshReleaseSetup } from ${JSON.stringify(cliUrl)}; await refreshReleaseSetup()`]);
+  assert.equal(realpathSync(stable), official);
+  await (await import(pathToFileURL(path.join(official, 'worker.mjs')))).withFeedback(path.join(temp, 'official-files'), followNotice(path.join(stable, client)));
+
+  const foreign = path.join(temp, 'foreign');
+  mkdirSync(path.join(foreign, path.dirname(client)), { recursive: true });
+  const sentinel = path.join(foreign, 'executed');
+  writeFileSync(path.join(foreign, client), `import { writeFileSync } from 'node:fs'; writeFileSync(${JSON.stringify(sentinel)}, 'unexpected');`);
+  unlinkSync(stable);
+  symlinkSync(foreign, stable, kind);
+  const entry = await import(cliUrl);
+  assert.equal(entry.feedbackClientPath(), path.join(official, client));
+  assert.equal(realpathSync(stable), foreign);
+  assert.equal(existsSync(sentinel), false);
 });
 
 test('release evidence copies the installed version and compares snapshots in its profile', async t => {

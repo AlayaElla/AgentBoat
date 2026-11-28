@@ -446,7 +446,7 @@ test('decision and acceptance attachments survive retry and restart under the or
     await c.flush('p1')
     assert.equal(sent.length, 1)
     assert.equal(sent[0][0], 'run_project')
-    assert.match(sent[0][1], /截图\.png[\s\S]*修改记录\.txt[\s\S]*feedback-file/)
+    assert.match(sent[0][1], /验收 page-check.*附件[\s\S]*截图\.png[\s\S]*修改记录\.txt/)
     await edit(2, null)
     await assert.rejects(() => worker.request('panel.feedbackDraftFile', draftFile), /不属于指定草稿/)
     const { presentationRevision, projectId, ...decisionItem } = decisionTarget
@@ -467,7 +467,7 @@ test('decision and acceptance attachments survive retry and restart under the or
     await c.flush('p1')
     assert.equal(sent.length, 2)
     assert.equal(sent[1][0], 'run_project')
-    assert.match(sent[1][1], /决定 page-check.*附件[\s\S]*--decision[\s\S]*msg_question[\s\S]*reply-decision/)
+    assert.match(sent[1][1], /决定 page-check.*附件[\s\S]*msg_question[\s\S]*reply-decision/)
     c.stop(); await worker.deactivate(); worker = await open()
     const task = (await worker.request('project.task', { projectId: 'p1', taskId: target.taskId }))!
     const saved = task.acceptance[0].history

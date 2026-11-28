@@ -2,6 +2,7 @@ export const executable: string;
 export function userDataPath(platform?: NodeJS.Platform, env?: NodeJS.ProcessEnv, home?: string): string;
 export const clientPath: string;
 export function promptClientPath(): string;
+export function feedbackClientPath(): string | undefined;
 export function installationRoot(options?: { repair?: boolean }): string;
 export function candidateSetupEntry(env: NodeJS.ProcessEnv, home: string): string | undefined;
 export const release: boolean;

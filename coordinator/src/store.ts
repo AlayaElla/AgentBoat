@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto'
 import path from 'node:path'
-import { pluginDataPath } from '../scripts/orca-cli.mjs'
+import { feedbackClientPath, pluginDataPath } from '../scripts/orca-cli.mjs'
 import { mkdir, writeFile } from 'node:fs/promises'
 import type { StorageApi } from 'orca'
 import { ProjectArchive } from './project-archive'
@@ -470,14 +470,23 @@ function applyFeedback(project: Project, tasks: Task[], items: unknown, source?:
   }
   const reported = withdrawal ? validated.filter(v => v.item && 'orcaQuestions' in v.item) : validated
   if (!reported.length) return
+  const client = reported.some(v => v.attachments?.length) ? feedbackClientPath() : undefined
+  const windows = process.platform === 'win32'
+  const quote = (arg: string) => "'" + (windows ? arg.replace(/['‘’‚‛]/g, "$&$&") : arg.replaceAll("'", "'\\''")) + "'"
   const body = reported.map(v => {
     const result = v.item ? (v.discarded ? '已丢弃' : v.subject + '：' + v.result) + '\n' : ''
     const note = v.item && 'status' in v.item && v.result === 'passed' && v.note ? `通过留言：${v.note}` : v.note
     const questions = v.item && 'orcaQuestions' in v.item && v.item.orcaQuestions?.map(q => `- ${q.runId} / ${q.id} / ${q.from}`).join('\n')
     const followUp = questions ? `\n决定 ${v.item!.id} 的原 Orca 问题\n${questions}\n由项目主会话用 reply-decision 回送已保存的结论与补充说明。` : ''
     const decision = v.item && 'question' in v.item
-    const attachments = v.attachments?.length ? `\n\n${decision ? '决定' : '验收'} ${v.item!.id} · 第 ${v.revision} 版的附件（任务详情 → 记录）\n` + v.attachments.map(f => `- ${f.name}（${f.id}）`).join('\n') +
-      `\n项目主会话也可通过 AgentBoat 稳定入口调用 feedback-file ${[project.ref.id, v.task.id, v.item!.id, v.revision].map(value => JSON.stringify(value)).join(' ')} <附件编号>${decision ? ' --decision' : ''} 获取文件位置。` : ''
+    let attachments = ''
+    if (v.attachments?.length) {
+      attachments = `\n\n${decision ? '决定' : '验收'} ${v.item!.id} · 第 ${v.revision} 版的附件（任务详情 → 记录）\n` + v.attachments.map(f => `- ${f.name}（${f.id}）`).join('\n')
+      if (client) {
+        const args = [project.ref.id, v.task.id, v.item!.id, String(v.revision), v.attachments[0].id].map(quote).join(' ')
+        attachments += `\n\n项目主会话可在自己的 Orca 会话中执行以下${windows ? ' PowerShell' : ''}命令获取附件位置。${v.attachments.length > 1 ? '其余附件请换用上方对应编号。' : ''}\nnode ${quote(client.split(path.sep).join('/'))} feedback-file ${args}${decision ? ' --decision' : ''}`
+      }
+    }
     return `[项目 ${project.ref.id} / 任务 ${v.task.id}]\n${v.task.title}\n${v.title}\n${result}${note}${attachments}${followUp}`
   }).join('\n\n')
   project.deliveries.push({ id: randomUUID(), subject: `${withdrawal ? '决定撤下' : '用户反馈'} · ${reported.length} 条`, body: source ? `${source}\n\n${body}` : body, state: 'pending' })

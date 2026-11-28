@@ -69,6 +69,18 @@ export function promptClientPath() {
   if (installed) try { return path.join(installationRoot(), clientScript); } catch { /* Keep using this worker's own release. */ }
   return clientPath;
 }
+export function feedbackClientPath() {
+  if (!release) return;
+  // The worker's release supplies the command. Only use the stable alias if it resolves to that same release.
+  try {
+    if (!lstatSync(clientPath).isFile() || path.relative(clientPath, realpathSync(clientPath))) return;
+  } catch { return; }
+  if (installed) try {
+    const entry = installationRoot({ repair: false });
+    if (!path.relative(versionDir, realpathSync(entry))) return path.join(entry, clientScript);
+  } catch { /* The worker's own package is still available. */ }
+  return clientPath;
+}
 export const pluginDataPath = (root = activeUserDataPath()) => path.join(root, 'plugins-data', pluginKey);
 export const roleRegistryPath = (...profile) => path.join(pluginDataPath(profile.length ? userDataPath(...profile) : undefined), 'roles.json');
 
