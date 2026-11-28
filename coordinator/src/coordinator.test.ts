@@ -152,7 +152,7 @@ test('overdue Run questions remind the project once and clear on a matching repl
   } finally { c.stop(); await worker.deactivate() }
 })
 
-test('questions and worker reports require recent mail from a verified unfinished dispatch and task', async () => {
+test('questions need active work and reports need an authentic successful completion in their Run', async () => {
   const run = 'run_fixture', now = Date.now()
   const row = (id: string, dispatch: string, age = questionWait + 1) => ({
     id, from_handle: 'dispatch:' + dispatch, to_handle: 'run:' + run, run_id: run, type: 'question',
@@ -161,9 +161,12 @@ test('questions and worker reports require recent mail from a verified unfinishe
   const worker = (id: string, taskId = 'open', overrides = {}) => ({
     dispatchId: id, runId: run, taskId, dispatchStatus: 'dispatched', workerState: 'ready', ...overrides
   })
-  const report = (id: string, dispatch: string, taskId: string, from: string, age: number) =>
-    ({ ...row(id, dispatch, age), type: 'worker_done', from_handle: from, payload: JSON.stringify({ taskId, dispatchId: dispatch, outcome: 'succeeded' }) })
-  const historicSenders = ['structworker_7fa88d8f', 'structworker_636a98be', 'structworker_441cd3ca']
+  const report = (id: string, dispatchId = 'ended', taskId = 'closed', from = 'structworker_fixture', age = reportWait + 1, outcome = 'succeeded') =>
+    ({ ...row(id, dispatchId, age), type: 'worker_done', from_handle: from, payload: JSON.stringify({ taskId, dispatchId, outcome }) })
+  const success = report('recent-report')
+  const receipt = { provenance: 'worker_report', outcome: 'succeeded', messageId: success.id, reportedBy: success.from_handle }
+  const closedTask = { id: 'closed', status: 'completed', run_id: run, completed_at: success.created_at, result: JSON.stringify(receipt) }
+  const completed = { dispatchStatus: 'completed', workerState: 'succeeded', agentTerminalHandle: success.from_handle }
   const messages = [
     row('recent', 'live'), row('edge', 'live', questionMaxAge), row('too-new', 'live', questionWait),
     row('expired', 'live', questionMaxAge + 1), row('finished', 'ended'), row('closed', 'released'),
@@ -171,22 +174,29 @@ test('questions and worker reports require recent mail from a verified unfinishe
     { ...row('send-as-user', 'live'), from_handle: 'orca_session_id:untagged' },
     { ...row('legacy', 'live'), from_handle: 'structworker_fixture', payload: '{"dispatchId":"live","taskId":"open"}' },
     { ...row('wrong-sender', 'live'), from_handle: 'structworker_other', payload: '{"dispatchId":"live","taskId":"open"}' },
-    ...historicSenders.map((handle, i) =>
-      report('historic-' + i, 'historic-' + i, 'open', handle, (5 + i % 2) * questionMaxAge)),
-    report('recent-report', 'live', 'open', 'structworker_fixture', reportWait + 1),
-    report('too-new-report', 'live', 'open', 'structworker_fixture', reportWait),
-    report('ended-dispatch', 'ended', 'open', 'dispatch:ended', reportWait + 1),
-    report('ended-task', 'ended-task', 'closed', 'dispatch:ended-task', reportWait + 1)
+    success,
+    report(success.id, 'ended', 'closed', success.from_handle, reportWait),
+    report(success.id, 'ended', 'closed', success.from_handle, questionMaxAge + 1),
+    report('forged-message'), report(success.id, 'ended', 'closed', 'structworker_other'),
+    { ...success, run_id: 'run_other' }, report(success.id, 'other-run'), report(success.id, 'other-task'),
+    report(success.id, 'other-dispatch'), report(success.id, 'failed'),
+    report(success.id, 'ended', 'closed', success.from_handle, reportWait + 1, 'failed'),
+    report('still-active', 'live', 'open')
   ]
   const results = await openRunMail(messages, run, async () => ({
-    workers: [worker('live', 'open', { agentTerminalHandle: 'structworker_fixture' }), worker('ended', 'open', { dispatchStatus: 'completed' }),
+    workers: [worker('live', 'open', { agentTerminalHandle: 'structworker_fixture' }), worker('ended', 'closed', { ...completed, terminalState: 'released', projection: { liveness: { verdict: 'exited' } } }),
       worker('released', 'open', { terminalState: 'released' }), worker('ended-task', 'closed'),
       worker('settled', 'open', { workerState: 'succeeded' }),
-      ...historicSenders.map((handle, i) => worker('historic-' + i, 'open', { agentTerminalHandle: handle }))],
-    tasks: [{ id: 'open', status: 'dispatched', run_id: run }, { id: 'closed', status: 'completed', run_id: run }]
+      worker('other-run', 'closed', { ...completed, runId: 'run_other' }), worker('other-task', 'unrelated', completed),
+      worker('other-dispatch', 'closed', { ...completed, agentTerminalHandle: 'structworker_other' }),
+      worker('failed', 'closed', { ...completed, workerState: 'failed' })],
+    tasks: [{ id: 'open', status: 'dispatched', run_id: run }, closedTask],
+    readDispatch: async dispatchId => ({ id: dispatchId, status: 'completed', runId: run, taskId: 'closed', assigneeHandle: 'structworker_other' })
   }), now)
   assert.deepEqual(results.questions.map(q => q.id), ['recent', 'edge', 'legacy'])
   assert.deepEqual(results.reports.map(q => q.id), ['recent-report'])
+  assert.deepEqual((await openRunMail([success], run, async () => ({ workers: [worker('ended', 'closed', completed)],
+    tasks: [{ ...closedTask, run_id: 'run_other' }] }), now)).reports, [])
   assert.deepEqual(await openRunMail([row('old', 'live', questionMaxAge + 1)], run, async () => { throw Error('unexpected work lookup') }, now), { questions: [], reports: [] })
   const body = '[业务决定] 选择路线？', id = 'msg_exact'
   const native = { ...row(id, 'live', 0), thread_id: id, body, created_at: new Date(now).toISOString().slice(0, 19).replace('T', ' '),
@@ -202,23 +212,35 @@ test('questions and worker reports require recent mail from a verified unfinishe
 
 test('Run mail first reminds the project and escalates once after two hours unless the project submits', async () => {
   const now = Date.now(), project = fresh(refs[0]); project.runId = 'run_report'
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'agentboat-report-'))
   const host = mockHost({ storage: { 'project:p1': project as any,
     workspace: { version: 1, revision: 0, runId: 'run_main', session: mainSession, requests: [] } } })
   const raw = { type: 'worker_done', id: 'msg_report', run_id: project.runId, to_handle: 'run:' + project.runId, from_handle: 'structworker_fixture',
     body: '实现已完成，等待验收', created_at: new Date(now - reportWait + 10_000).toISOString(),
     payload: JSON.stringify({ taskId: 'orca-task', dispatchId: 'ctx_task', outcome: 'succeeded' }) }
   assert.equal(workerReport({ ...raw, payload: { _orcaLifecycleRejection: { reason: 'fixture' } } }), undefined)
+  const runtime = new OrcaRuntime(async () => 'unused')
+  const runs: string[][] = []
+  ;(runtime as any).call = async (args: string[]) => {
+    runs.push(args)
+    const runId = project.runId, taskId = 'orca-task', dispatchId = 'ctx_task'
+    if (args[1] === 'inbox') return { messages: [raw] }
+    if (args[1] === 'task-list') return { runId, tasks: [{ id: taskId, run_id: runId, status: 'completed', completed_at: raw.created_at,
+      result: JSON.stringify({ provenance: 'worker_report', outcome: 'succeeded', messageId: raw.id, reportedBy: raw.from_handle }) }] }
+    if (args[1] === 'worker-list') return { workers: [{ runId, taskId, dispatchId, dispatchStatus: 'completed', workerState: 'succeeded',
+      agentTerminalHandle: null, projection: { liveness: { verdict: 'exited' } } }], page: { hasMore: false } }
+    if (args[1] === 'worker-show') return { dispatch: { id: dispatchId, taskId, runId, status: 'completed', assigneeHandle: raw.from_handle } }
+    throw Error('unexpected Orca call')
+  }
   const sent: { run: string; body: string }[] = []
   let coordinator!: ReturnType<typeof createCoordinator>
   const worker = await mountWorker({ default: api => {
-    coordinator = createCoordinator(api, { projects: async () => refs, mail: run => openRunMail([raw], run, async () => ({
-      workers: [{ runId: run, taskId: 'orca-task', dispatchId: 'ctx_task', dispatchStatus: 'dispatched', workerState: 'ready', agentTerminalHandle: raw.from_handle }],
-      tasks: [{ id: 'orca-task', run_id: run, status: 'dispatched' }]
-    })), send: async (run, { subject, body }) => { if (subject.includes('执行者回报待提交')) sent.push({ run, body }); return {} } })
+    coordinator = createCoordinator(api, { projects: async () => refs, mail: (run, submitted) => runtime.mail(run, submitted),
+      send: async (run, { subject, body }) => { if (subject.includes('执行者回报待提交')) sent.push({ run, body }); return {} } }, undefined, dir)
   } }, { host })
   async function submit(revision: number, id: string, orcaTaskId: string) {
     return worker.request('project.agent', { operation: 'submit', projectId: 'p1', revision, requestId: 'submit-' + id,
-      task: { id, title: id, goal: id, phase: 'working', executions: [{ runId: project.runId, taskId: orcaTaskId, dispatchId: 'ctx_task', agent: 'codex' }] } })
+      task: { id, title: id, goal: id, phase: 'completed', executions: [{ runId: project.runId, taskId: orcaTaskId, dispatchId: 'ctx_task', agent: 'codex' }] } })
   }
   try {
     await coordinator.refreshQuestions()
@@ -228,6 +250,7 @@ test('Run mail first reminds the project and escalates once after two hours unle
     const raised = (await worker.request('workspace.overview')).reports
     assert.equal(raised?.length, 1)
     assert.equal(raised?.[0].from, 'structworker_fixture')
+    assert.ok(runs.some(args => args.join(' ') === 'orchestration worker-show --dispatch ctx_task'))
     assert.equal(sent.length, 1); assert.ok(sent[0].body.includes(raw.body))
     assert.equal(sent[0].run, project.runId)
     await coordinator.refreshQuestions(); await coordinator.flushMailbox()
@@ -251,7 +274,23 @@ test('Run mail first reminds the project and escalates once after two hours unle
     assert.ok(projectSubmissions(saved).some(proof => reportSubmitted(report, proof)))
     task.executions[0].taskId = 'unrelated'
     assert.ok(!projectSubmissions(saved).some(proof => reportSubmitted(report, proof)))
-  } finally { await coordinator.flush('p1'); coordinator.stop(); await worker.deactivate() }
+    const archived = await coordinator.store.mutate('p1', undefined, p => {
+      for (let i = 0; i < 20; i++) {
+        submitTask(p, { id: 'newer-' + i, title: '其他事项', goal: '夹具', phase: 'completed' })
+        const filler = p.tasks.at(-1)!
+        filler.submittedAt = new Date(report.at! - 1000).toISOString()
+        filler.updatedAt = new Date(now + 60_000).toISOString()
+      }
+    })
+    assert.equal(archived.archive?.taskCount, 1)
+    assert.ok(!projectSubmissions(archived).some(proof => reportSubmitted(report, proof)))
+    raw.id = 'msg_archived_submission'
+    const before = runs.length
+    await coordinator.refreshQuestions(); await coordinator.flushMailbox()
+    assert.deepEqual((await worker.request('workspace.overview')).reports, [])
+    assert.equal(sent.length, 2)
+    assert.deepEqual(runs.slice(before).map(args => args[1]), ['inbox'])
+  } finally { await coordinator.flush('p1'); coordinator.stop(); await worker.deactivate(); await rm(dir, { recursive: true, force: true }) }
 })
 
 test('feedback returns the committed snapshot without waiting for delivery or session inventory', async () => {

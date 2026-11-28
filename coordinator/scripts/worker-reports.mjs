@@ -13,6 +13,7 @@ export function workerReport(message) {
   const at = Date.parse(message.created_at);
   return {
     id: message.id, from, body: message.body || message.subject || '', runId: message.run_id,
+    outcome: typeof payload?.outcome === 'string' ? payload.outcome : undefined,
     taskId: typeof payload?.taskId === 'string' ? payload.taskId : undefined,
     dispatchId: typeof payload?.dispatchId === 'string' ? payload.dispatchId : from.startsWith('dispatch:') ? from.slice(9) : undefined,
     at: Number.isFinite(at) ? at : undefined

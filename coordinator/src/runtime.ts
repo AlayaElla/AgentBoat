@@ -251,7 +251,8 @@ export class OrcaRuntime implements CoordinatorRuntime {
         this.questionWorkers(runId, ids, questionId !== undefined)
       ])
       if (!Array.isArray(taskList.tasks) || taskList.runId !== runId) fail('Orca 项目任务状态无法核对')
-      return { tasks: taskList.tasks, workers }
+      return { tasks: taskList.tasks, workers, readDispatch: (id: string) =>
+        this.call(['orchestration', 'worker-show', '--dispatch', id], readTimeout).then(r => r?.dispatch, () => undefined) }
     }, Date.now(), questionId)
   }
   async question(runId: string, id: string) {

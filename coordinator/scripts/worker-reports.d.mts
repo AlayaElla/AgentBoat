@@ -1,7 +1,7 @@
 import type { Project } from '../src/model.js';
 
 export interface WorkerReport {
-  id: string; from: string; body: string; runId?: string; taskId?: string; dispatchId?: string; at?: number;
+  id: string; from: string; body: string; runId?: string; taskId?: string; dispatchId?: string; at?: number; outcome?: string;
 }
 type Execution = Project['tasks'][number]['executions'][number];
 interface Submission { at?: number; updatedAt?: number; executions?: Execution[] }

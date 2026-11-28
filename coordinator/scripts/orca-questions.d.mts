@@ -11,6 +11,8 @@ export interface OrcaWorkerRecord {
   runId: string; dispatchId: string; taskId: string; dispatchStatus: string; workerState?: string | null;
   terminalState?: string; agentTerminalHandle?: string; projection?: { liveness?: { verdict?: string } };
 }
-interface OrcaTaskRecord { id: string; run_id: string; status: string; completed_at?: string | null }
+interface OrcaTaskRecord { id: string; run_id: string; status: string; completed_at?: string | null; result?: unknown }
+interface OrcaDispatchReceipt { id: string; runId: string; taskId: string; status: string; assigneeHandle?: string }
 export function openRunMail(messages: Record<string, unknown>[], runId: string, readWork: (ids: Set<string>) =>
-  Promise<{ workers: OrcaWorkerRecord[]; tasks: OrcaTaskRecord[] }>, now?: number, questionId?: string): Promise<{ questions: VerifiedOrcaQuestion[]; reports: WorkerReport[] }>;
+  Promise<{ workers: OrcaWorkerRecord[]; tasks: OrcaTaskRecord[]; readDispatch?: (id: string) => Promise<OrcaDispatchReceipt | undefined> }>,
+  now?: number, questionId?: string): Promise<{ questions: VerifiedOrcaQuestion[]; reports: WorkerReport[] }>;
