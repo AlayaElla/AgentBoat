@@ -67,6 +67,7 @@ const inlineRows = new Map<string, Frame>()
 const expandedRows = new Set<string>(), folded = new Map<string, boolean>()
 const collapsedInboxGroups = new Set<string>()
 let error = '', notice = '', busy = false, more = false, nav = 0, refreshing = false, refreshSeq = 0
+let changesDuringFeedback: Map<string, number> | undefined
 let overviewIssue = ''
 let direction = '', leaving: Frame | undefined, lastInline = '', organizationScroll = 0, trayOpen = false
 let toastAction: { label: string; run: () => void } | undefined, toastTimer = 0, toastText = ''
@@ -1220,7 +1221,9 @@ async function writeFeedbackGroup(projectId: string, selected: [string, Draft][]
   const attempt = { signature, input, keys, ...(remote ? { rows: rows.filter(row => entries.some(d => matchesRow(d, row))) } : {}), reason: previous?.reason || '上次提交尚未核实' }
   // The persisted claim lets another panel recover if the submitting frame disappears.
   await saveSubmission({ ...prepare, attempt: { version, value: remote ? { ...attempt, checkingUntil: Date.now() + 60_000 } : attempt } })
+  const changes = changesDuringFeedback
   let updated: Project | undefined
+  let receiptChange = false
   try {
     const expected = await digest(JSON.stringify(input))
     let proof: string | undefined
@@ -1234,9 +1237,13 @@ async function writeFeedbackGroup(projectId: string, selected: [string, Draft][]
       const prior = local?.requests.find(record => record.id === input!.requestId)
       if (prior) { proof = prior.fingerprint; rejected = proof !== expected; updated = local }
       else {
+        const before = changes?.get(projectId) ?? 0
         const reply = await req('project.feedback', input)
         proof = reply?.project?.ref?.id === projectId ? reply.project.requests?.find((record: {id: string}) => record.id === input!.requestId)?.fingerprint : undefined
-        if (proof === expected) updated = reply.project
+        if (proof === expected) {
+          updated = reply.project
+          receiptChange = (changes?.get(projectId) ?? 0) > before
+        }
       }
     }
     if (proof !== expected) throw Error('待核对：缺少匹配的写入凭证')
@@ -1246,6 +1253,12 @@ async function writeFeedbackGroup(projectId: string, selected: [string, Draft][]
     throw Error(reason)
   }
   await finish(null)
+  // Local feedback posts one project change before returning its committed snapshot.
+  if (receiptChange && changes) {
+    const count = changes.get(projectId)!
+    if (count > 1) changes.set(projectId, count - 1)
+    else changes.delete(projectId)
+  }
   if (updated) updateSubmittedProject(updated)
   return entries
 }
@@ -1275,23 +1288,30 @@ async function reconcileFeedback() {
     reconciling = false; render()
   }
 }
+async function actOnFeedback(work: () => Promise<void>, needsOverview: () => boolean) {
+  if (busy) return
+  const changes = changesDuringFeedback = new Map<string, number>()
+  await act(work, false)
+  changesDuringFeedback = undefined
+  if (changes.size) void refresh()
+  else if (needsOverview()) void refreshOverview()
+  void readSheets().then(render).catch(() => {})
+}
 async function retryFeedback(id: string, attempt: Attempt) {
-  await act(async () => {
+  await actOnFeedback(async () => {
     await edits
     if (draftFailure) throw Error(draftFailure)
     try {
       const sent = await submitGroup(id, attemptChoices(id, attempt), attempt.rows ?? [], attempt)
       notice = `已提交 ${sent.length} 条`
     } catch (e) { if (feedbackRequests[id]?.reason !== (e as Error).message) throw e }
-  }, false)
-  if (isRemote(id) || feedbackRequests[id]?.rejected) void refreshOverview()
-  void readSheets().then(render).catch(() => {})
+  }, () => isRemote(id) || !!feedbackRequests[id]?.rejected)
 }
 async function submitFeedback() {
   const groups = feedbackSelection()
   if (!groups.length || groups.some(({ items }) => items.some(([, d]) => missingFeedbackField(d)))) return
   const origin = active
-  await act(async () => {
+  await actOnFeedback(async () => {
     await edits
     if (draftFailure) throw Error(draftFailure)
     const before = inboxRows()
@@ -1320,9 +1340,7 @@ async function submitFeedback() {
       if (closed && !stillPending.has(page.inboxRow!)) back(false, true)
       else render()
     }, 700)
-  }, false)
-  if (groups.some(({ id }) => isRemote(id) || feedbackRequests[id]?.rejected)) void refreshOverview()
-  void readSheets().then(render).catch(() => {})
+  }, () => groups.some(({ id }) => isRemote(id) || feedbackRequests[id]?.rejected))
 }
 function taskList(tasks: { id?: string; title: string; state: keyof typeof labels; updatedAt?: string; open?: () => any }[]) {
   return tasks.length ? tasks.map((t, i) => keyed(item(t.title, [labels[t.state], t.updatedAt && relative(t.updatedAt)].filter(Boolean).join(' · '), t.open), t.id ?? String(i))) : small('还没有任务')
@@ -1906,7 +1924,10 @@ async function start() {
       }
     }
     orca.plugin.on('panel.draftsChanged', () => { if (!busy && !pendingEdits) void readSheets().then(render).catch(e => { error = e.message; render() }) })
-    orca.plugin.on('project.changed', () => { if (!(busy && busyAction.startsWith('提交'))) void refresh() })
+    orca.plugin.on('project.changed', ({ projectId }) => {
+      if (changesDuringFeedback) changesDuringFeedback.set(projectId, (changesDuringFeedback.get(projectId) ?? 0) + 1)
+      else void refresh()
+    })
     orca.plugin.on('workspace.open', () => {
       if (stack.some(f => f.page.inboxRow)) { void refresh(); return }
       void go({ kind: 'home' }, true).then(() => refresh())

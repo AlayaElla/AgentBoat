@@ -165,7 +165,7 @@ async function setup(options = {}, hub) {
     }
     const calls = [];
     const feedbackFiles = options.feedbackFiles ?? {};
-    window.fixture = { project, projects, links, live, workspace, calls, hostCalls: [], stored, workspaceTarget: { workspaceId: 'identity:project-workspace', multipleConversations: true }, emit: () => events['project.changed']?.({}), openWorkspace: () => events['workspace.open']?.({}), race: false, prune: () => { task.acceptance[0].revision++; task.acceptance[0].fingerprint = 'new-version'; project.revision++; } };
+    window.fixture = { project, projects, links, live, workspace, calls, hostCalls: [], stored, workspaceTarget: { workspaceId: 'identity:project-workspace', multipleConversations: true }, emit: (projectId = '') => events['project.changed']?.({ projectId }), openWorkspace: () => events['workspace.open']?.({}), race: false, prune: () => { task.acceptance[0].revision++; task.acceptance[0].fingerprint = 'new-version'; project.revision++; } };
     window.fixture.feedbackFiles = feedbackFiles;
     if (options.firstSetup) window.fixture.setup = {
       paths: ['/fixture/.agents/skills/agentboat-workspace', '/fixture/custom-codex/hooks.json'],
@@ -534,6 +534,43 @@ try {
     await savedFeedback().getByRole('button', { name: '1 条保留草稿' }).click();
     await savedFeedback().getByRole('button', { name: '移除 成果 a1 · 示例项目 · 第 1 版' }).click();
     await page.waitForFunction(() => Object.keys(fixture.stored['panel.feedbackState'].p1.entries).length === 0);
+  });
+  await setup({ inboxBatch: true, width: 1040 });
+  await test('local feedback coalesces concurrent project changes after its receipt', async () => {
+    const startSubmit = async (title, count) => {
+      await review(title).check();
+      await page.evaluate(() => { fixture.delayFeedback = 'p1'; fixture.finishFeedback = undefined; fixture.calls.length = 0; });
+      await dock().getByRole('button', { name: `提交 ${count} 条`, exact: true }).click();
+      await page.waitForFunction(() => !!fixture.finishFeedback);
+    };
+    const reads = () => page.evaluate(() => fixture.calls.filter(c => c.name === 'workspace.overview').length);
+    await startSubmit('动效交付', 1);
+    await page.evaluate(() => { fixture.emit('p1'); fixture.finishFeedback(); });
+    await page.getByRole('status').filter({ hasText: '已提交 1 条' }).waitFor();
+    assert.equal(await reads(), 0);
+
+    const mobile = await openReview('移动端交付');
+    await startSubmit('页面交付', 2);
+    const original = await page.evaluate(() => {
+      const b = fixture.projects[1], task = b.tasks[0], item = task.acceptance[0];
+      const key = JSON.stringify([task.id, 'acceptance', item.id]);
+      const draft = { taskId: task.id, kind: 'acceptance', itemId: item.id, itemRevision: item.revision,
+        title: item.title, signature: item.fingerprint, fingerprint: item.fingerprint, result: 'changes_requested', note: '保留上一版意见' };
+      // A second panel saves its choice while this panel is submitting A.
+      fixture.stored['panel.feedbackState'].p2 = { entries: { [key]: draft }, versions: { [key]: 1 }, floor: 0 };
+      fixture.emit('p1');
+      b.revision++; item.revision++; item.fingerprint = 'version-2-b1'; item.title = '新版移动端成果';
+      fixture.emit('p2'); fixture.emit('p2');
+      fixture.finishFeedback();
+      return fixture.stored['panel.feedbackState'].p2;
+    });
+    await page.getByRole('status').filter({ hasText: '已提交 2 条' }).waitFor();
+    await mobile.getByRole('heading', { name: '新版移动端成果', exact: true }).waitFor({ timeout: 3000 });
+    await savedFeedback().getByRole('button', { name: '1 条保留草稿' }).click();
+    await savedFeedback().getByText('已失效 · 成果 b1 · 移动项目 · 第 1 版', { exact: true }).waitFor();
+    assert.equal(await reads(), 1);
+    assert.deepEqual(await page.evaluate(() => fixture.stored['panel.feedbackState'].p2), original);
+    assert.deepEqual(await page.evaluate(() => fixture.calls.filter(c => c.name === 'project.feedback').map(c => c.input.projectId)), ['p1']);
   });
   const oldKey = JSON.stringify(['retired', 'acceptance', 'old']);
   const oldDraft = { taskId: 'retired', kind: 'acceptance', itemId: 'old', itemRevision: 1, title: '旧验收',
