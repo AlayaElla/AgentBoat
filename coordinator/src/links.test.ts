@@ -279,6 +279,31 @@ test('a failed lightweight receipt leaves ordinary reports and messages availabl
   } finally { a.links.stop(); b.links.stop() }
 })
 
+test('feedback from a dialer bypasses an ordinary report still being collected', async () => {
+  const a = await instance('listener'), b = await instance('dialer', false)
+  const dialer = b.links as any, listener = a.links as any
+  let release!: () => void, collecting!: () => void
+  const held = new Promise<void>(resolve => { release = resolve })
+  const started = new Promise<void>(resolve => { collecting = resolve })
+  const localReport = dialer.localReport.bind(dialer)
+  try {
+    listener.applyFeedback = async (_peer: unknown, request: unknown) => fingerprint(request)
+    await a.links.start(); await b.links.start()
+    const { id } = (await b.links.join((await a.links.invite()).invitation!.code)).peers[0]
+    await a.links.share({ id, revision: (await a.links.snapshot()).revision, scope: 'details', projectIds: ['p1'], delegateFeedback: true })
+    await b.links.refresh()
+    dialer.localReport = async (...args: unknown[]) => { collecting(); await held; return localReport(...args) }
+    const refresh = b.links.refresh()
+    try {
+      await started
+      const request = { projectId: 'p1', revision: a.projects[0].revision, requestId: 'direct-feedback', items: [] }
+      const reply = await Promise.race([b.links.submitFeedback(id, request),
+        delay(3000, undefined, { ref: false }).then(() => assert.fail('feedback waited for the ordinary report'))])
+      assert.deepEqual(reply, { requestId: request.requestId, state: 'submitted', fingerprint: fingerprint(request) })
+    } finally { release(); await refresh }
+  } finally { a.links.stop(); b.links.stop() }
+})
+
 test('a late ordinary response cannot overwrite a newer report returned with a lightweight receipt', async () => {
   const a = await instance('listener'), b = await instance('dialer', false)
   const listener = a.links as any, dialer = b.links as any
@@ -774,7 +799,13 @@ test('details sync shares current main and scoped live agents without local iden
 
     online = false
     live = [{ ...visible, state: 'need', rawState: 'waiting', title: '等你回复' }, ...Array.from({ length: 25 }, (_, i) => ({ ...visible, id: 'copy-' + i }))]
+    const posts = worker.posts.length
     await worker.emit('agent.status.changed', { workspaceId: 'fake', paneKey: 'fake', state: 'waiting', receivedAt: Date.now() })
+    const deadline = Date.now() + 2000
+    while (!worker.posts.slice(posts).some(p => p.event === 'project.changed')) {
+      assert.ok(Date.now() < deadline, 'agent activity was not published')
+      await delay(10)
+    }
     const updated = (await b.links.refresh()).peers[0].report!
     assert.equal(updated.mainAgent?.online, 'offline')
     assert.equal(updated.projects[0].activity?.agents.length, 20)

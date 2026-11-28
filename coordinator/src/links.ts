@@ -664,7 +664,9 @@ export class WorkspaceLinks {
       this.wake(p.id, false)
       return { endpoint: p.endpoint, result }
     })
-    if (endpoint) void this.sync(connectionId).catch(() => {})
+    if (endpoint) void this.sync(connectionId, undefined, true).then(() => {
+      if (this.unsentFeedback(connectionId)) return this.sync(connectionId)
+    }).catch(() => {})
     return result
   }
   private async receiveFeedback(p: Peer, raw: unknown) {

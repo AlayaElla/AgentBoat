@@ -223,7 +223,9 @@ export class ProjectStore {
     this.chain = result.catch(() => {})
     return result
   }
-  async mutate(id: string, expected: number | undefined, fn: (project: Project) => void | Promise<void>, request?: { id: string; input: unknown; authorize?: (project: Project) => void }, backgroundRoles = false): Promise<Project> {
+  async mutate(id: string, expected: number | undefined, fn: (project: Project) => void | Promise<void>,
+    request?: { id: string; input: unknown; authorize?: (project: Project) => void },
+    options: { backgroundRoles?: boolean; deliveryOnly?: boolean } = {}): Promise<Project> {
     return this.serial(async () => {
       const project = await this.get(id)
       request?.authorize?.(project)
@@ -239,14 +241,17 @@ export class ProjectStore {
       const previous = new Set(project.deliveries.map(d => d.id))
       await fn(project)
       for (const d of project.deliveries) if (d.state === 'pending' && !previous.has(d.id)) d.createdAt ??= Date.now()
-      project.revision++
-      project.updatedAt = new Date().toISOString()
+      // Delivery bookkeeping must not invalidate a version read for a content write.
+      if (!options.deliveryOnly) {
+        project.revision++
+        project.updatedAt = new Date().toISOString()
+      }
       if (request) project.requests.push({ id: request.id, fingerprint: hash! })
       await this.archive.compactLead(project)
       await this.archive.compact(project)
       await this.storage.set(`project:${id}`, project as any)
-      if (backgroundRoles) setImmediate(() => { void this.updateRoles?.().catch(() => {}) })
-      else await this.updateRoles?.()
+      if (options.backgroundRoles) setImmediate(() => { void this.updateRoles?.().catch(() => {}) })
+      else if (!options.deliveryOnly) await this.updateRoles?.()
       return project
     })
   }

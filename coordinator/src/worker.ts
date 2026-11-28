@@ -170,7 +170,7 @@ export function createCoordinator(api: OrcaWorkerApi, runtime: CoordinatorRuntim
   }
   const activityEvent = orca.events.on('agent.status.changed', () => {
     activitySequence++
-    return scheduleActivity()
+    void scheduleActivity()
   })
   let questions: OwnerQuestion[] = [], pollingQuestions: Promise<Awaited<ReturnType<typeof availableProjectRecords>> | undefined> | undefined
   let actionableRunMail = new Set<string>()
@@ -694,13 +694,14 @@ export function createCoordinator(api: OrcaWorkerApi, runtime: CoordinatorRuntim
           const { refs, error } = await availableProjects()
           if (error || !refs.some(ref => ref.id === id)) break
           let claimed: Delivery | undefined, role: 'workspace' | 'project' = 'project'
+          const options = delivery.control ? undefined : { deliveryOnly: true }
           await store.mutate(id, undefined, p => {
             const saved = p.deliveries.find(d => d.id === delivery.id)
             if (!saved || saved.state !== 'pending' || !allowed(saved, p)) return
             if (saved.targetRunId) role = 'workspace'
             if (!saved.external) saved.targetRunId ??= p.runId
             saved.state = 'sending'; claimed = saved
-          })
+          }, undefined, options)
           if (!claimed) continue
           attempted = true
           try {
@@ -709,12 +710,12 @@ export function createCoordinator(api: OrcaWorkerApi, runtime: CoordinatorRuntim
               const d = p.deliveries.find(x => x.id === delivery.id)!
               d.state = 'sent'; if ('requestId' in receipt && receipt.requestId) d.requestId = receipt.requestId
               if ('messageId' in receipt && d.external) d.external.messageId = receipt.messageId
-            })
+            }, undefined, options)
           } catch {
             await store.mutate(id, undefined, p => {
               const d = p.deliveries.find(x => x.id === delivery.id)!
               d.state = 'uncertain'; d.error = '通知结果待核对，请在主会话检查；原消息已保存'
-            })
+            }, undefined, options)
             break
           }
         }
@@ -1072,7 +1073,7 @@ export function createCoordinator(api: OrcaWorkerApi, runtime: CoordinatorRuntim
         }
       }
     }, request ? { id: remote ? `link-feedback:${fingerprint([remote.connectionId, request])}` : request,
-      input: owner ? ownerInput : input, authorize: owner ? authorizeLead : remote?.authorize } : undefined, !input.caller)
+      input: owner ? ownerInput : input, authorize: owner ? authorizeLead : remote?.authorize } : undefined, { backgroundRoles: !input.caller })
     changed(input.projectId); defer(input.projectId)
     return project
   }
@@ -1119,7 +1120,7 @@ export function createCoordinator(api: OrcaWorkerApi, runtime: CoordinatorRuntim
       decision.orcaQuestions.push({ id: q.id, runId: p.runId, from: q.from })
     }
   }
-  orca.panels.handle('project.agent', async input => {
+  orca.panels.handle('project.agent', async (input, context) => {
     const id = text(input.projectId, '项目编号', 200)
     if (input.operation === 'read') {
       const result = await snapshot(id)
@@ -1129,7 +1130,8 @@ export function createCoordinator(api: OrcaWorkerApi, runtime: CoordinatorRuntim
       if (!task) return result
       return { ...result, task, ...(!result.project.tasks.some(t => t.id === taskId) ? { archiveStatus: '已归档' as const } : {}) }
     }
-    await ensure(id)
+    const { ref, refs } = await projectEntry(id)
+    await store.register(ref)
     if (!['bind', 'submit'].includes(input.operation)) fail('不支持的协作操作')
     const rawTask = input.operation === 'submit' ? object(input.task) : undefined
     const links = Array.isArray(rawTask?.decisions) ? rawTask.decisions.filter(d => d?.orcaQuestionId !== undefined).map(d => {
@@ -1189,7 +1191,8 @@ export function createCoordinator(api: OrcaWorkerApi, runtime: CoordinatorRuntim
     for (const q of links) actionableRunMail.delete(fingerprint([written.runId, q.messageId]))
     changed(id)
     defer(id)
-    const result = await snapshot(id, written)
+    const result = input.operation === 'submit' && context.panel.id === 'orca-cli'
+      ? { projects: refs, project: projectView(written) } : await snapshot(id, written)
     if (input.operation === 'bind') deferBackupCheck()
     if (input.operation === 'submit') {
       const taskId = text(object(input.task).id, '任务编号', 200)

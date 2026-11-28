@@ -5,6 +5,7 @@ import { testCoordinator } from './test-runtime'
 import { fresh, projectKey } from './store'
 import { refs } from './fixtures'
 import { OrcaRuntime } from './runtime'
+import { setTimeout as delay } from 'node:timers/promises'
 
 const workspace = { id: 'ws-one', hostId: 'local', projectId: refs[0].repoId, path: '/example', kind: 'worktree', name: '示例', branch: 'main' }
 const agent = (state = 'working', sessionId = 's1') => ({ terminalId: null, title: '会话', agent: 'codex', state, stateStartedAt: Date.now(), sessionId })
@@ -259,6 +260,11 @@ test('host catalog matches exact local IDs even without workspaces, refusing a t
   } finally { await worker.deactivate() }
 })
 
+async function waitForActivity(done: () => boolean) {
+  const deadline = Date.now() + 2000
+  while (!done()) { assert.ok(Date.now() < deadline, 'agent activity did not update'); await delay(10) }
+}
+
 test('status bursts sample once, publish visible changes only, and recover errors', async () => {
   const host = mockHost(); let c!: ReturnType<typeof testCoordinator>, state = 'waiting', taskId = 'first', reads = 0, unavailable = false
   const since = Date.now()
@@ -272,21 +278,26 @@ test('status bursts sample once, publish visible changes only, and recover error
     const first = emit()
     await new Promise<void>(resolve => setImmediate(resolve))
     assert.equal(reads, 0)
-    await Promise.all([first, emit(), emit()])
-    assert.equal(reads, 1)
+    await Promise.all([first, ...Array.from({ length: 64 }, emit)])
+    assert.equal(reads, 0, 'events must acknowledge before the background status read')
     const posts = () => worker.posts.filter(p => p.event === 'project.changed').length
+    await waitForActivity(() => host.callsOf('statusBar.update').length === 1)
+    assert.equal(reads, 1)
     assert.equal(posts(), 1)
     assert.equal((host.callsOf('statusBar.update').at(-1) as any).text, '工作间 · 待处理 1')
     const before = reads; await worker.request('workspace.agents'); assert.equal(reads, before)
     state = 'blocked'; await Promise.all([emit(), emit()])
+    await waitForActivity(() => reads === 2)
     assert.equal(reads, 2); assert.equal(posts(), 1); assert.equal(host.callsOf('statusBar.update').length, 1)
     taskId = 'second'; await emit()
+    await waitForActivity(() => posts() === 2)
     assert.equal(posts(), 2)
     assert.equal((await worker.request('workspace.agents')).agents[0].taskId, 'second')
-    state = 'working'; await emit(); assert.equal((host.callsOf('statusBar.update').at(-1) as any).text, '工作间 · 待处理 0')
-    unavailable = true; await emit(); assert.ok((host.callsOf('statusBar.update').at(-1) as any).tooltip.includes('agent 状态读不到'))
+    const status = () => host.callsOf('statusBar.update').at(-1) as { text: string; tooltip: string }
+    state = 'working'; await emit(); await waitForActivity(() => status().text === '工作间 · 待处理 0')
+    unavailable = true; await emit(); await waitForActivity(() => status().tooltip.includes('agent 状态读不到'))
     assert.equal((await worker.request('workspace.agents')).ok, false)
-    unavailable = false; state = 'blocked'; await emit(); assert.equal((host.callsOf('statusBar.update').at(-1) as any).text, '工作间 · 待处理 1')
+    unavailable = false; state = 'blocked'; await emit(); await waitForActivity(() => status().text === '工作间 · 待处理 1')
     const stopped = reads, pending = emit(); c.stop(); await pending; await emit(); assert.equal(reads, stopped)
     assert.deepEqual(worker.refusals, [])
   } finally { c.stop(); await worker.deactivate() }
@@ -300,6 +311,7 @@ test('an event arriving during a host read requests a fresh read before publishi
   try {
     const first = worker.emit('agent.status.changed', event); await started
     const second = worker.emit('agent.status.changed', event); release(); await Promise.all([first, second])
+    await waitForActivity(() => reads === 2)
     assert.equal(reads, 2)
   } finally { c.stop(); await worker.deactivate() }
 })
@@ -330,6 +342,7 @@ test('a status event after the shared inventory starts supersedes that inventory
     const delivered = worker.emit('agent.status.changed', { workspaceId: workspace.id, paneKey: 'pane', state, receivedAt: Date.now() })
     release()
     await delivered
+    await waitForActivity(() => samples.length === 2)
     assert.deepEqual(samples, ['working', 'waiting'])
     assert.equal((await worker.request('workspace.agents')).main?.status.state, 'need')
   } finally { release(); c.stop(); await worker.deactivate() }

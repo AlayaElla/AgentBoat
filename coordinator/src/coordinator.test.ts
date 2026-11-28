@@ -290,6 +290,61 @@ test('feedback returns the committed snapshot without waiting for delivery or se
   } finally {release();await coordinator.flush('p1');coordinator.stop();await worker.deactivate()}
 })
 
+test('notification delivery does not invalidate the version used to submit feedback', async () => {
+  const project = fresh(refs[0]); project.runId = 'run_project'
+  submitTask(project, deliverable)
+  project.deliveries.push({ id: 'earlier-notice', subject: '先前通知', body: '测试', state: 'pending' })
+  const host = mockHost({ storage: { 'project:p1': project as any } })
+  let c!: ReturnType<typeof createCoordinator>
+  const worker = await mountWorker({ default: api => { c = createCoordinator(api, {
+    projects: async () => refs, send: async () => ({ requestId: 'sent' })
+  }) } }, { host })
+  try {
+    const { revision } = (await worker.request('workspace.overview')).projects[0]
+    await c.flush('p1')
+    assert.equal((await c.store.get('p1')).deliveries[0].state, 'sent')
+    const input = { projectId: 'p1', revision, requestId: 'accept', items: [
+      { taskId: deliverable.id, kind: 'acceptance' as const, itemId: 'page-check', itemRevision: 1, result: 'passed' }
+    ] }
+    const saved = (await worker.request('project.feedback', input)).project!
+    assert.equal(saved.requests.find(r => r.id === input.requestId)?.fingerprint, fingerprint(input))
+    await assert.rejects(() => worker.request('project.feedback', { ...input, requestId: 'stale' }), /项目已更新/)
+    const replay = (await worker.request('project.feedback', input)).project!
+    assert.equal(replay.tasks[0].acceptance[0].history.length, 1)
+  } finally { await c.flush('p1'); c.stop(); await worker.deactivate() }
+})
+
+test('the CLI returns a committed submit receipt when the catalog changes after the write', async () => {
+  const profile = await mkdtemp(path.join(os.tmpdir(), 'agentboat-submit-receipt-'))
+  const oldProfile = process.env.ORCA_USER_DATA_PATH
+  process.env.ORCA_USER_DATA_PATH = profile
+  let c!: ReturnType<typeof createCoordinator>, bridge!: ReturnType<typeof cliBridge>
+  let saved = false
+  const worker = await mountWorker({ default: api => {
+    bridge = cliBridge(api)
+    const storage = { ...api.storage, set: async (key: string, value: Parameters<typeof api.storage.set>[1]) => {
+      await api.storage.set(key, value)
+      if (key === 'project:p1' && (value as any)?.revision === 1) saved = true
+    } }
+    c = createCoordinator({ ...bridge.api, storage }, { projects: async () => saved ? [] : refs })
+  } })
+  try {
+    await bridge.start()
+    const input = path.join(profile, 'submit.json'), client = fileURLToPath(new URL('../scripts/client.mjs', import.meta.url))
+    await writeFile(input, JSON.stringify({ projectId: 'p1', revision: 0, requestId: 'deliverable', task: deliverable }))
+    const { stdout } = await promisify(execFile)(process.execPath, [client, 'submit', input], {
+      timeout: 5000, windowsHide: true, env: { ...process.env, ORCA_AGENT_SESSION_ID: '', ORCA_TERMINAL_HANDLE: '' }
+    })
+    assert.equal(JSON.parse(stdout).submission.pendingAcceptance, true)
+    assert.equal((await c.store.get('p1')).tasks[0].acceptance[0].status, 'pending')
+  } finally {
+    bridge.stop(); c.stop(); await worker.deactivate()
+    if (oldProfile === undefined) delete process.env.ORCA_USER_DATA_PATH
+    else process.env.ORCA_USER_DATA_PATH = oldProfile
+    await rm(profile, { recursive: true, force: true })
+  }
+})
+
 test('decision and acceptance attachments survive retry and restart under the original item version', async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'agentboat-feedback-files-'))
   const p = { ...fresh(refs[0]), runId: 'run_project', mainAgentHandle: mainSession.handle }
