@@ -622,6 +622,103 @@ test('an unreadable A2A connection leaves workspace, CLI and healthy recovery av
   }
 })
 
+for (const key of ['workspace.links', 'workspace.connections'] as const) {
+  test(`incompatible ${key} preserves startup and local acceptance, then recovers in place`, async () => {
+    const profile = await mkdtemp(path.join(os.tmpdir(), 'agentboat-directory-recovery-'))
+    const oldProfile = process.env.ORCA_USER_DATA_PATH
+    process.env.ORCA_USER_DATA_PATH = profile
+    const linkData = { version: 1, revision: 0, workspaceId: 'fixture', name: 'Fixture', enabled: true, host: '127.0.0.1', port: 0, publicUrl: '', tls: false,
+      peers: [{ id: 'known-peer', workspaceId: 'peer', name: 'Fixture peer', endpoint: '', state: 'active', scope: 'none', allProjects: false, projectIds: [] }] }
+    const connectionsData = { version: 1, entries: [{ id: 'fixture', name: 'Fixture A2A', type: 'a2a' }] }
+    const directories = { 'workspace.links': linkData, 'workspace.connections': connectionsData }
+    const saved = { ...directories[key], version: 2 }
+    const workspace = { version: 1, revision: 0, runId: 'run_original_workspace', requests: [], session: mainSession,
+      takeover: { id: 'incomplete-switch', target: mainSession, state: 'sending', expiresAt: new Date(Date.now() + 60_000).toISOString(), tokenHash: 'fixture' },
+      retired: [{ id: 'pending-notice', targetRunId: 'run_original_workspace', state: 'pending', subject: 'Fixture', body: 'Finish pending notification' }] }
+    const project = fresh(refs[0]); project.runId = 'run_original_project'
+    submitTask(project, deliverable)
+    project.deliveries.push({ id: 'interrupted', subject: 'Fixture', body: 'Do not repeat', state: 'sending' })
+    const secrets = { 'fixture:inbound': 'test-only-a2a-token-12345678901234', 'workspace-link:known-peer': 'fixture-only-peer-token' }
+    const host = mockHost({ storage: { ...directories, [key]: saved, workspace, 'project:p1': project as any,
+      'workspace.a2a:fixture': { version: 1, revision: 0, enabled: true, port: 0, url: 'http://127.0.0.1:1', entries: [] } }, secrets })
+    const sent: [string, string][] = []
+    let c!: ReturnType<typeof createCoordinator>, bridge!: ReturnType<typeof cliBridge>, storage!: OrcaWorkerApi['storage']
+    const worker = await mountWorker({ default: api => {
+      storage = api.storage
+      bridge = cliBridge(api)
+      c = createCoordinator(bridge.api, { projects: async () => refs, send: async (run, item) => { sent.push([run, item.id]); return {} } })
+    } }, { host })
+    try {
+      const original = JSON.stringify(host.data().storage[key])
+      await c.start()
+      await bridge.start()
+      const client = fileURLToPath(new URL('../scripts/client.mjs', import.meta.url))
+      const env = { ...process.env }
+      delete env.ORCA_AGENT_SESSION_ID
+      delete env.ORCA_TERMINAL_HANDLE
+      const request = async (...args: string[]) => {
+        const { stdout } = await promisify(execFile)(process.execPath, [client, ...args], { env, timeout: 5000, windowsHide: true })
+        return JSON.parse(stdout).result.result
+      }
+      const view = await request('overview')
+      assert.equal(view.workspace.runId, workspace.runId)
+      assert.equal(view.workspace.session.handle, workspace.session.handle)
+      assert.equal(view.workspace.takeover.state, 'uncertain')
+      assert.ok(view.attention.some((a: any) => a.projectId === 'p1' && a.kind === 'review' && a.itemId === 'page-check'))
+      assert.equal((await c.store.get('p1')).deliveries[0].state, 'uncertain')
+      assert.deepEqual(sent.filter(([, id]) => id === 'pending-notice'), [[workspace.runId, 'pending-notice']])
+      const readA2A = () => worker.request('workspace.connections', { operation: 'read', connectionId: 'fixture', includeApprovalMode: false }) as Promise<import('./connections').ConnectionDetail>
+      const healthyA2A = key === 'workspace.links' ? await readA2A() : undefined
+      if (key === 'workspace.links') {
+        assert.match(view.linksError, /工作间连接目录不兼容.*保留原数据.*重试/)
+        assert.equal(view.links, undefined)
+        assert.ok(healthyA2A?.a2a?.listening)
+        await assert.rejects(() => worker.request('workspace.links', { operation: 'rename', revision: 0, name: 'Refused' }), /连接记录不兼容/)
+      } else {
+        assert.match(view.connectionsError, /外部连接目录不兼容.*保留原数据.*重试/)
+        assert.equal(view.connections, undefined)
+        assert.ok(view.links.listening)
+        await assert.rejects(() => worker.request('workspace.connections', { operation: 'save', connectionId: 'fixture', name: 'Refused' }), /连接目录不兼容/)
+      }
+      assert.equal(JSON.stringify(host.data().storage[key]), original)
+      assert.deepEqual(host.data().secrets, secrets)
+      const read = () => worker.request('project.read', { projectId: 'p1' })
+      const before = (await read()).project!
+      assert.equal(before.tasks[0].acceptance[0].status, 'pending')
+      const feedbackFile = path.join(profile, 'acceptance.json')
+      await writeFile(feedbackFile, JSON.stringify({ projectId: 'p1', revision: before.revision, requestId: 'local-acceptance',
+        items: [{ taskId: deliverable.id, kind: 'acceptance', itemId: 'page-check', itemRevision: 1, result: 'passed' }] }))
+      const receipt = await request('feedback', feedbackFile)
+      assert.equal(receipt.project.runId, project.runId)
+      await c.flush('p1')
+      const after = (await read()).project!
+      assert.equal(after.tasks[0].acceptance[0].status, 'passed')
+      assert.equal(after.runId, project.runId)
+      const notifications = sent.filter(([run]) => run === project.runId)
+      assert.equal(notifications.length, 1)
+      assert.notEqual(notifications[0][1], 'interrupted')
+      assert.equal(JSON.stringify(host.data().storage[key]), original)
+      await storage.set(key, directories[key] as any)
+      const [restored, concurrent] = await Promise.all([worker.request('workspace.overview'), worker.request('workspace.overview')])
+      assert.equal(restored.linksError, undefined)
+      assert.equal(restored.connectionsError, undefined)
+      assert.ok(restored.links?.listening)
+      assert.deepEqual(restored.links?.peers.map(({ id, state }) => [id, state]), [['known-peer', 'active']])
+      assert.equal(restored.links?.listening, concurrent.links?.listening)
+      if (key === 'workspace.connections') assert.equal(restored.links?.listening, view.links.listening)
+      assert.deepEqual(restored.connections?.map(c => c.id), ['fixture'])
+      const a2a = await readA2A()
+      assert.ok(a2a.a2a?.listening)
+      if (healthyA2A) assert.equal(a2a.a2a?.listening, healthyA2A.a2a?.listening)
+    } finally {
+      bridge.stop(); c.stop(); await worker.deactivate()
+      if (oldProfile === undefined) delete process.env.ORCA_USER_DATA_PATH
+      else process.env.ORCA_USER_DATA_PATH = oldProfile
+      await rm(profile, { recursive: true, force: true })
+    }
+  })
+}
+
 test('remove uses exact setup, checks every session and terminal, and fails closed on incomplete inventory', async () => {
   const ref = refs[0], idle = { repoId: ref.repoId, hostId: ref.hostId, path: ref.path, worktreeId: 'w', agents: [], liveTerminalCount: 0, unverifiableTerminalCount: 0, hasAttachedPty: false }
   for (const patch of [{ agents: [{ subagentObservation: 'live' }] }, { liveTerminalCount: 1 }, { unverifiableTerminalCount: 1 }, { hasAttachedPty: true }]) assert.throws(() => assertProjectIdle(ref, { worktrees: [{ ...idle, ...patch }] }, { terminals: [] }), /先关掉/)

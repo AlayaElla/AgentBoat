@@ -50,6 +50,7 @@ export interface LinksSnapshot extends Omit<LinkData, 'peers'> {
   peers: (Peer & { status: 'connected' | 'offline' | 'pending'; receivedAt?: string; report?: SharedReport; offlineFeedback?: Pick<SharedReport['projects'][number], 'id' | 'name' | 'feedback'>[] } & Partial<Awaited<ReturnType<LinkMessages['summarize']>>>)[]
   invitation?: { code: string; expiresAt: string }
 }
+export const incompatibleLinksDirectory = '工作间连接记录不兼容，请保留数据并检查版本'
 const peerFields = new Set<keyof Peer>(['id', 'workspaceId', 'name', 'endpoint', 'state', 'scope', 'allProjects', 'projectIds', 'delegateFeedback', 'relation', 'sharingSet', 'lastSyncAt'])
 const defaults = (): Sharing => ({ scope: 'none', allProjects: false, projectIds: [] })
 const secretKey = (id: string) => `workspace-link:${id}`
@@ -360,7 +361,7 @@ export class WorkspaceLinks {
     const raw = await this.orca.storage.get('workspace.links')
     if (raw == null) return structuredClone(this.initial)
     const d = structuredClone(object(raw)) as LinkData
-    if (d.version !== 1 || !Array.isArray(d.peers) || d.peers.some(p => !p || Object.keys(p).some(key => !peerFields.has(key as keyof Peer)) || !['active', 'pending'].includes(p.state) || typeof p.allProjects !== 'boolean' || !Array.isArray(p.projectIds) || p.delegateFeedback !== undefined && typeof p.delegateFeedback !== 'boolean')) fail('工作间连接记录不兼容，请保留数据并检查版本')
+    if (d.version !== 1 || !Array.isArray(d.peers) || d.peers.some(p => !p || Object.keys(p).some(key => !peerFields.has(key as keyof Peer)) || !['active', 'pending'].includes(p.state) || typeof p.allProjects !== 'boolean' || !Array.isArray(p.projectIds) || p.delegateFeedback !== undefined && typeof p.delegateFeedback !== 'boolean')) fail(incompatibleLinksDirectory)
     return d
   }
   private async save(d: LinkData) { if (Buffer.byteLength(JSON.stringify(d)) > 100_000) fail('连接记录已达上限'); await this.orca.storage.set('workspace.links', d as any) }
@@ -422,13 +423,19 @@ export class WorkspaceLinks {
     this.localChanged(); this.changed(); return this.snapshot()
   }
   async start() {
-    const d = await this.serial(async () => { const d = await this.data(); await this.listen(d); return d })
-    this.running = true
-    for (const p of d.peers) this.watch(p)
-    clearInterval(this.timer)
-    this.timer = setInterval(() => { void this.refresh().catch(() => {}) }, 10_000); this.timer.unref()
-    this.catalogDelay = catalogPollMin
-    this.scheduleCatalog()
+    const generation = this.stopGeneration
+    await this.serial(async () => {
+      if (this.running || generation !== this.stopGeneration) return
+      const d = await this.data()
+      if (generation !== this.stopGeneration) return
+      await this.listen(d)
+      if (generation !== this.stopGeneration) { this.closeListener(); return }
+      this.running = true
+      for (const p of d.peers) this.watch(p)
+      this.timer = setInterval(() => { void this.refresh().catch(() => {}) }, 10_000); this.timer.unref()
+      this.catalogDelay = catalogPollMin
+      this.scheduleCatalog()
+    })
   }
   private scheduleCatalog() {
     clearTimeout(this.catalogTimer)
@@ -510,7 +517,7 @@ export class WorkspaceLinks {
     this.changed()
     return { ...await this.snapshot(), invitation }
   }
-  async cancelInvite() { await this.serial(async () => { this.invitation = undefined }); return this.snapshot() }
+  async cancelInvite() { await this.serial(async () => { await this.data(); this.invitation = undefined }); return this.snapshot() }
   async join(code: string) {
     let c: Record<string, any>
     try { if (!code.startsWith('AB1.') || code.length > 6000) throw Error(); c = object(JSON.parse(Buffer.from(code.slice(4), 'base64url').toString('utf8'))) } catch { return fail('连接码格式不正确') }

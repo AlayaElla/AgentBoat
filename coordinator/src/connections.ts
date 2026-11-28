@@ -8,6 +8,7 @@ export interface Connection { id: string; type: 'feishu' | 'a2a'; name: string; 
 type Entry = Pick<Connection, 'id' | 'type' | 'name'>
 export interface ConnectionsInput extends Omit<ButlerInput, 'operation'> { operation: 'read' | 'save' | 'delete' | 'check' | 'send' | 'reply'; connectionId?: string; name?: string; type?: Entry['type']; confirm?: boolean; includeApprovalMode?: boolean; feishu?: import('./model').FeishuConfig; appSecret?: string }
 export interface ConnectionDetail { connection: Connection; a2a?: ButlerSnapshot; feishu?: MessagingSnapshot; approvalMode?: string }
+export const incompatibleConnectionsDirectory = '外部连接目录不兼容，请保留数据并检查版本'
 
 export class Connections {
   private entries: Entry[] = []
@@ -18,8 +19,8 @@ export class Connections {
     private messaging: () => Promise<MessagingSnapshot>, private saveFeishu: (input: any) => Promise<MessagingSnapshot>, private deleteFeishu: () => Promise<void>) {}
   private async directory() {
     const saved = await this.api.storage.get('workspace.connections') as { version: number; entries: Entry[] } | null
-    if (saved) {
-      if (saved.version !== 1 || !Array.isArray(saved.entries) || saved.entries.some(e => !e.id || !e.name || !['a2a', 'feishu'].includes(e.type))) fail('外部连接目录不兼容，请保留数据并检查版本')
+    if (saved != null) {
+      if (saved.version !== 1 || !Array.isArray(saved.entries) || saved.entries.some(e => !e?.id || !e.name || !['a2a', 'feishu'].includes(e.type))) fail(incompatibleConnectionsDirectory)
       this.entries = structuredClone(saved.entries)
     } else this.entries = []
     return this.entries
@@ -107,8 +108,8 @@ export class Connections {
     this.chain = work.catch(() => {}); return work
   }
   async start() {
-    const entries = await this.directory()
     this.started = true
+    const entries = await this.directory()
     for (const e of entries.filter(e => e.type === 'a2a')) await this.a2a(e).catch(() => {})
   }
   stop() { this.started = false; for (const b of this.instances.values()) b.stop() }

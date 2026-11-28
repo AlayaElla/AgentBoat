@@ -102,6 +102,7 @@ function remoteSource(key: string, sources = peers()) {
 }
 const remoteFeedback = (key: string) => remoteSource(key).project?.feedback
 function remoteUnavailable(key: string) {
+  if (all.linksError) return all.linksError
   const { peer, project } = remoteSource(key)
   if (!peer) return '连接已断开'
   if (peer.status !== 'connected') return `「${peer.name}」离线，暂不能提交`
@@ -617,7 +618,7 @@ function workspaceNode(p?: LinksSnapshot['peers'][number]) {
   const flagged = p?.relation === 'below' && report?.scope === 'details' && report.projects.some(pr => pr.tasks?.some(t => t.phase === 'blocked'))
   const body = !p ? [row(small(`你的工作间${all.machines?.[0] ? ` · ${all.machines[0].name}` : ''}`), button('全部 agent', () => go({ kind: 'agents' }), 'text sm')),
     mainAgentLine(all.workspace.session, () => { void go({ kind: 'main' }) }, !!all.workspace.runId),
-    el('div', { class: 'under' }, row(small('外部连接'), all.connections?.map(c => button(c.name, () => go({ kind: 'connection', id: c.id }), 'text sm')), button('＋', () => go({ kind: 'add-connection' }), 'text sm')), ownProjects())]
+    el('div', { class: 'under' }, !all.connectionsError ? row(small('外部连接'), all.connections?.map(c => button(c.name, () => go({ kind: 'connection', id: c.id }), 'text sm')), button('＋', () => go({ kind: 'add-connection' }), 'text sm')) : null, ownProjects())]
     : [row(small(active ? `已连接 · ${relative(p.receivedAt)}同步` : `离线 · 最后同步 ${relative(p.lastSyncAt)}`), button('连接设置', () => go({ kind: 'peer', id }), 'text sm')),
       report?.scope === 'details' ? mainAgentLine(report.mainAgent) : report?.scope === 'summary' ? small('对方只开放了项目摘要，看不到 agent') : null,
       section('项目', !active ? small('未知') : !report?.projects.length ? small('对方没有向你开放项目') : el('div', { class: 'cards' }, report.projects.map(pr => {
@@ -769,7 +770,7 @@ function inboxGroups(entries: DisplayRow[]) {
     const id = inboxGroupId(peerId)
     let group = groups.get(id)
     if (!group) {
-      const name = peerId ? peers().find(p => p.id === peerId)?.name ?? '已断开的工作间' : all.links?.name ?? '我的工作间'
+      const name = peerId ? peers().find(p => p.id === peerId)?.name ?? (all.linksError ? '暂时无法读取的工作间' : '已断开的工作间') : all.links?.name ?? '我的工作间'
       groups.set(id, group = { name, count: 0, previewCount: 0, rows: [] })
     }
     // Keep the narrow preview useful for workspaces that start after its first three rows.
@@ -820,11 +821,13 @@ function inbox(projectId?: string, entries: DisplayRow[] = inboxRows(projectId))
 }
 function home() {
   const note = (text: string, label: string, action: () => any, danger = false) => el('button', { type: 'button', class: `note${danger ? ' danger' : ''}`, onclick: action }, dot(danger ? 'bad' : 'need'), el('span', { class: 'grow any' }, text), el('span', { class: 'go' }, label, icon('chevron')))
+  const linksIssue = all.linksError || all.links?.error
   return [el('div', { class: 'notes', 'data-key': 'notes' },
     !all.workspace.runId ? note('还没有主 agent', '去绑定', () => go({ kind: 'main' })) : null,
     peers().some(p => p.status === 'pending') ? note('有工作间连接待核对', '去核对', () => go({ kind: 'settings' })) : null,
     all.error ? note(all.error, '重试', () => refresh(true), true) : null,
-    all.links?.error ? note(all.links.error, '去核对', () => go({ kind: 'links' }), true) : null,
+    linksIssue ? note(linksIssue, '去核对', () => go({ kind: 'links' }), true) : null,
+    all.connectionsError ? note(all.connectionsError, '去核对', () => go({ kind: 'settings' }), true) : null,
     all.connections?.filter(c => c.enabled && c.state === 'error').map(c => note(`外部连接「${c.name}」异常`, '去核对', () => go({ kind: 'connection', id: c.id }), true)),
     !live.ok ? note(agentStatusText(), '重试', () => refresh(true)) : live.truncated ? note('agent 状态未全部读取，数量仅含已读取的工作区', '重试', () => refresh(true)) : null),
     el('div', { class: wideInbox ? 'home wide' : 'home', 'data-key': 'home' }, inbox(),
@@ -1479,6 +1482,7 @@ async function saveSharing(id: string, revision = form.sharingRevision) {
   form.sharingRevision = all.links!.revision
 }
 function peerPage() {
+  if (all.linksError) return connectionDirectoryIssue(all.linksError)
   const p = peer()
   if (!p) return callout('连接不存在，请返回。')
   if (page.kind === 'peer-project') {
@@ -1536,6 +1540,7 @@ function peerPage() {
     check('确认断开这个工作间', !!form.revoke, v => { form.revoke = v; render() }), button('断开连接', () => act(async () => { all.links = await req('workspace.links', { operation: 'revoke', id: p.id }); back(false, true); await refresh() }), 'danger', !form.revoke)]
 }
 function linksPage() {
+  if (all.linksError) return connectionDirectoryIssue(all.linksError)
   const s = all.links!
   const name = input('工作间名称', s.name, 'text', () => render())
   const invitation: LinksSnapshot['invitation'] = form.invitation
@@ -1598,6 +1603,7 @@ function linksPage() {
     peers().some(p => p.status === 'pending') ? button('核对连接', () => act(async () => { all.links = await req('workspace.links', { operation: 'refresh' }); await refresh() })) : null]
 }
 function connectionPage() {
+  if (all.connectionsError) return connectionDirectoryIssue(all.connectionsError)
   const c = detail?.connection, a = detail?.a2a, f = detail?.feishu, type = c?.type ?? form['类型'] ?? 'a2a'
   if (page.kind === 'connection' && !c) {
     const saved = all.connections?.find(c => c.id === page.id)
@@ -1793,13 +1799,14 @@ function mainPage() {
     fold(active.key + '-binding-' + (w.session?.handle ?? ''), '绑定详情', () => el('dl', { class: 'kv' }, Object.entries({ Run: w.runId || '未绑定', 会话: w.session?.handle || '未知', 目录: w.session?.path || '未知', 绑定时间: w.boundAt || '未知', 授权边界: w.securityBoundary || '未知' }).map(([k, v]) => [el('dt', {}, k), el('dd', {}, v)])), undefined,
       !!(w.bot && w.runId && w.session?.handle && !w.takeover))]
 }
+const connectionDirectoryIssue = (message: string) => [callout(message, 'danger'), button('重试', () => refresh(), 'sm')]
 function settingsPage() {
   return [
     all.versionLabel ? small(all.versionLabel) : null,
     section('主 agent', el('div', {}, mainAgentLine(all.workspace.session, () => go({ kind: 'main' }), !!all.workspace.runId, false))),
-    section('外部连接', button('添加连接', () => go({ kind: 'add-connection' }), 'sm'), (all.connections ?? []).map(c => keyed(
-      item(c.name, `${c.type === 'a2a' ? 'A2A agent' : '飞书'} · ${connectionStates[c.state]}`, () => go({ kind: 'connection', id: c.id })), c.id)), !all.connections?.length ? small('没有外部连接') : null),
-    section('工作间连接', button('邀请或加入', () => go({ kind: 'links' }), 'sm'), peers().map(p => keyed(item(p.name, statuses[p.status], () => go({ kind: 'peer', id: p.id })), p.id)), !peers().length ? small('没有工作间连接') : null),
+    section('外部连接', all.connectionsError ? connectionDirectoryIssue(all.connectionsError) : [button('添加连接', () => go({ kind: 'add-connection' }), 'sm'), (all.connections ?? []).map(c => keyed(
+      item(c.name, `${c.type === 'a2a' ? 'A2A agent' : '飞书'} · ${connectionStates[c.state]}`, () => go({ kind: 'connection', id: c.id })), c.id)), !all.connections?.length ? small('没有外部连接') : null]),
+    section('工作间连接', all.linksError ? connectionDirectoryIssue(all.linksError) : [button('邀请或加入', () => go({ kind: 'links' }), 'sm'), peers().map(p => keyed(item(p.name, statuses[p.status], () => go({ kind: 'peer', id: p.id })), p.id)), !peers().length ? small('没有工作间连接') : null]),
     section('机器', all.machines?.map(m => row(el('span', { class: 'grow any' }, m.name), small(m.role === 'host' ? '主机' : '附属机器'))),
       select('我在哪台电脑上', Object.fromEntries((all.machines ?? []).map(m => [m.id, m.name])), 'local', v => { active.dirty = false; persist('panel.machine', v) })),
     section('隐藏的项目', all.hidden?.length ? all.hidden.map(p => keyed(item(p.name, p.path, () => go({ kind: 'project-settings', projectId: p.id })), p.id)) : small('没有隐藏的项目'))]
@@ -1828,7 +1835,7 @@ function content(): any {
   if (!active.data) return skeleton()
   if (page.projectId) return current ? projectPage() : callout('项目已被移除或不可用')
   if (['peer', 'relation', 'peer-project'].includes(page.kind)) return peerPage()
-  if (page.kind === 'links') return all.links ? linksPage() : callout('没有可用的工作间连接设置')
+  if (page.kind === 'links') return all.links || all.linksError ? linksPage() : callout('没有可用的工作间连接设置')
   if (page.kind === 'add-connection') return connectionPage()
   if (page.kind === 'agents') return agentContent()
   if (page.kind === 'settings') return settingsPage()

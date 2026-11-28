@@ -171,9 +171,11 @@ export interface OwnerQuestion { id: string; projectId: string; runId: string; f
 export interface Overview {
   versionLabel?: string
   connections?: import('./connections').Connection[]
+  connectionsError?: string
   machines?: { id: string; name: string; role: 'host' | 'client'; online?: boolean }[]
   hidden?: ProjectRef[]
   links?: import('./links').LinksSnapshot
+  linksError?: string
   workspace: WorkspaceBinding
   attention: Attention[]
   questions?: OwnerQuestion[]

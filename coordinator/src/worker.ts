@@ -5,7 +5,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { realpath, stat } from 'node:fs/promises'
 import { setTimeout as delay } from 'node:timers/promises'
-import { Connections } from './connections'
+import { Connections, incompatibleConnectionsDirectory } from './connections'
 import { checkedPanels } from './panel-result'
 import type { OrcaWorkerApi } from 'orca/worker'
 import { takeoverActive, waitingForProjectLead, actingMain, workspaceBackupInFlight, type AgentSession, type Project, type ProjectLead, type ProjectRef, type Snapshot, type SourceEvent, type Delivery, type MessagingSnapshot } from './model'
@@ -13,7 +13,7 @@ import type { ProjectLeadRequest } from './protocol'
 import { FeishuSources, notifyFeishu, verifyFeishuDecision, type MessageTransport } from './feishu'
 import { OrcaRuntime, defaultExecutable, readTimeout, targetOnline, type CoordinatorRuntime, type TargetInventory } from './runtime'
 import { ProjectStore, artifactUrl, expireArtifact, fail, feedback, fingerprint, fresh, maxMessageLength, notifyWorkspace, object, overview, resetBackup, retainRecent, receiveEvent, recordSource, submitTask, strings, text, revision, mergeProjects, feishuConfig, verifyTakeover, workerFeedbackNotice } from './store'
-import { WorkspaceLinks } from './links'
+import { WorkspaceLinks, incompatibleLinksDirectory } from './links'
 import { fileErrorText, incomingHash, linkMessageHistory } from './link-messages'
 import { feedbackAttachment, feedbackBytes, fileType, LinkFiles } from './link-files'
 import { groupedAttention, isProjectShared, type OwnerQuestion } from './model'
@@ -768,11 +768,28 @@ export function createCoordinator(api: OrcaWorkerApi, runtime: CoordinatorRuntim
     await flushMailbox(); return messagingSnapshot()
   })
   const versionLabel = pluginVersionLabel()
+  let linksStartupFailed = false
+  const connectionRecovery = (area: '工作间连接' | '外部连接', error: unknown) => {
+    const incompatible = area === '工作间连接' ? incompatibleLinksDirectory : incompatibleConnectionsDirectory
+    if (error instanceof Error && error.message === incompatible) return `${area}目录不兼容。请保留原数据，核对插件版本，恢复后重试。`
+    return `暂时无法读取${area}设置。请保留原数据，恢复后重试。`
+  }
+  async function overviewLinks() {
+    try {
+      if (linksStartupFailed && !stoppedChecks) {
+        await links.start()
+        linksStartupFailed = false
+      }
+      return { links: await links.snapshot() }
+    } catch (error) { return { linksError: connectionRecovery('工作间连接', error) } }
+  }
   orca.panels.handle('workspace.overview', async () => {
     const { list, error } = await availableProjectRecords()
     // Orca registration defines membership. A project can be registered without a workspace.
     const inbox = await unsubmitted(questions, list)
-    return { ...overview(list, await store.workspace(), error), versionLabel, questions: inbox.filter(item => !item.report), reports: inbox.filter(item => item.report), workspace: await main.read(live, list), links: await links.snapshot(), connections: await connections.list(), machines: [{ id: 'local', name: os.hostname(), role: 'host' as const, online: true }] }
+    const [linkSection, connectionSection] = await Promise.all([overviewLinks(), connections.list().then(
+      connections => ({ connections }), error => ({ connectionsError: connectionRecovery('外部连接', error) }))])
+    return { ...overview(list, await store.workspace(), error), versionLabel, questions: inbox.filter(item => !item.report), reports: inbox.filter(item => item.report), workspace: await main.read(live, list), ...linkSection, ...connectionSection, machines: [{ id: 'local', name: os.hostname(), role: 'host' as const, online: true }] }
   })
   orca.panels.handle('workspace.message', async input => {
     const id = text(input.projectId, '项目编号', 200)
@@ -1433,8 +1450,8 @@ export function createCoordinator(api: OrcaWorkerApi, runtime: CoordinatorRuntim
       })
     } catch (error) { console.error('AgentBoat 无法登记 hooks 提醒', error) }
     if (refreshRoles) { await readCatalog(); await refreshRoles() }
-    await links.start()
-    await connections.start()
+    await links.start().catch(error => { linksStartupFailed = true; orca.log(connectionRecovery('工作间连接', error)) })
+    await connections.start().catch(error => orca.log(connectionRecovery('外部连接', error)))
     await main.recover()
     clearTimeout(refreshMain)
     schedulePoll(activityInterval)
