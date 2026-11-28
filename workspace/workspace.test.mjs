@@ -8,7 +8,7 @@ import { createHash } from 'node:crypto';
 import { promisify } from 'node:util';
 import { pathToFileURL } from 'node:url';
 import code from './templates/code.json' with { type: 'json' };
-import { projectLeadAgents, templateLeadAgents, templateLeadPreferences } from './agent-launch.mjs';
+import { launchReceipt, projectLeadAgents, templateLeadAgents, templateLeadPreferences } from './agent-launch.mjs';
 
 const sandboxPath = path.resolve(process.env.AGENTBOAT_SANDBOX || path.join(os.tmpdir(), 'agentboat-sandbox'));
 mkdirSync(sandboxPath, { recursive: true });
@@ -110,10 +110,10 @@ test('记忆按来源隔离、带日期、重复记录拒绝追加', () => {
   assert.throws(() => api.testPath(path.join(sandbox, 'real-project')));
   assert.equal(existsSync(path.join(testHome, 'memory/.git')), true);
   const launch = { outcome: { handle: 'agent-1' }, prompt: { outcome: 'journaled' } };
-  assert.equal(api.launchReceipt(launch), 'agent-1');
-  assert.throws(() => api.launchReceipt({ launch }));
-  assert.equal(api.launchReceipt({ outcome: { kind: 'structured', handle: 'tab', sessionId: 'test-chat' }, prompt: { outcome: 'journaled' } }), 'orca_session_id:test-chat');
-  assert.throws(() => api.launchReceipt({ outcome: { handle: 'agent-1' }, prompt: { outcome: 'unknown' } }));
+  assert.equal(launchReceipt(launch), 'agent-1');
+  assert.throws(() => launchReceipt({ launch }));
+  assert.equal(launchReceipt({ outcome: { kind: 'structured', handle: 'tab', sessionId: 'test-chat' }, prompt: { outcome: 'journaled' } }), 'orca_session_id:test-chat');
+  assert.throws(() => launchReceipt({ outcome: { handle: 'agent-1' }, prompt: { outcome: 'unknown' } }));
 });
 
 function handlePlugin(name, input, s, save, leadPreferences) {

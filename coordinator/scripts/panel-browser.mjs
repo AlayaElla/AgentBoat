@@ -165,7 +165,7 @@ async function setup(options = {}, hub) {
     }
     const calls = [];
     const feedbackFiles = options.feedbackFiles ?? {};
-    window.fixture = { project, projects, links, live, workspace, calls, hostCalls: [], stored, workspaceTarget: { workspaceId: 'identity:project-workspace', multipleConversations: true }, emit: () => events['project.changed']?.({}), openWorkspace: switching => events['workspace.open']?.({ switching }), race: false, prune: () => { task.acceptance[0].revision++; task.acceptance[0].fingerprint = 'new-version'; project.revision++; } };
+    window.fixture = { project, projects, links, live, workspace, calls, hostCalls: [], stored, workspaceTarget: { workspaceId: 'identity:project-workspace', multipleConversations: true }, emit: () => events['project.changed']?.({}), openWorkspace: () => events['workspace.open']?.({}), race: false, prune: () => { task.acceptance[0].revision++; task.acceptance[0].fingerprint = 'new-version'; project.revision++; } };
     window.fixture.feedbackFiles = feedbackFiles;
     if (options.firstSetup) window.fixture.setup = {
       paths: ['/fixture/.agents/skills/agentboat-workspace', '/fixture/custom-codex/hooks.json'],
@@ -867,7 +867,7 @@ try {
     await stable();
     await setup({ ...resumeOptions, width: 1040, stored: await storage() });
     await stable();
-    await refreshWith(() => page.evaluate(() => fixture.openWorkspace(false)));
+    await refreshWith(() => page.evaluate(() => fixture.openWorkspace()));
     const wide = await acceptance(currentLayer()).isVisible();
     assert.equal(await workspace(5).getAttribute('aria-expanded'), 'true');
     if (wide && process.env.PANEL_EVIDENCE_DIR) {
@@ -878,8 +878,11 @@ try {
     await row(title).waitFor({ state: 'hidden' });
     await workspace(4).waitFor();
     await acceptance(currentLayer()).waitFor({ state: 'detached' });
-    await page.evaluate(() => fixture.openWorkspace(true));
-    await page.locator('.pane-top').getByRole('heading', { name: '主 agent', exact: true }).waitFor();
+    await page.getByRole('button', { name: '设置', exact: true }).click();
+    const settings = currentLayer().getByRole('heading', { name: '工作间连接', exact: true });
+    await settings.waitFor();
+    await refreshWith(() => page.evaluate(() => fixture.openWorkspace()));
+    await settings.waitFor({ state: 'hidden' });
 
     await setup(resumeOptions);
     await rail().getByRole('button', { name: '再看 2 条', exact: true }).click();

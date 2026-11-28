@@ -1893,7 +1893,7 @@ new ResizeObserver(([entry]) => {
 }).observe(root)
 async function start() {
   try {
-    const [saved, opening] = await Promise.all([orca.storage.get('panel.home'), orca.storage.get('workspace.navigation'), readSheets()]) as any[]
+    const [saved] = await Promise.all([orca.storage.get('panel.home'), readSheets()]) as any[]
     if (Array.isArray(saved?.collapsedInboxGroups)) for (const id of saved.collapsedInboxGroups) collapsedInboxGroups.add(id)
     if (saved?.at && Date.now() - saved.at < 30 * 60_000) {
       opened = saved.opened ?? opened; Object.assign(tabsOf, saved.tabs); more = !!saved.more
@@ -1907,14 +1907,10 @@ async function start() {
     }
     orca.plugin.on('panel.draftsChanged', () => { if (!busy && !pendingEdits) void readSheets().then(render).catch(e => { error = e.message; render() }) })
     orca.plugin.on('project.changed', () => { if (!(busy && busyAction.startsWith('提交'))) void refresh() })
-    orca.plugin.on('workspace.open', e => {
-      if (!e.switching && stack.some(f => f.page.inboxRow)) { void refresh(); return }
-      void go({ kind: e.switching ? 'main' : 'home' }, true).then(() => refresh())
+    orca.plugin.on('workspace.open', () => {
+      if (stack.some(f => f.page.inboxRow)) { void refresh(); return }
+      void go({ kind: 'home' }, true).then(() => refresh())
     })
-    if (opening?.switching) {
-      const f = frameFor({ kind: 'main' }); stack = [homeFrame, f]; useFrame(f)
-      await orca.storage.set('workspace.navigation', { switching: false })
-    }
     await refresh()
   } catch (e) { error = (e as Error).message; render() }
 }

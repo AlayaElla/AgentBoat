@@ -38,7 +38,6 @@ declare module 'orca' {
     'workspace.setup': { input: { confirmation: string }; output: { completed: string[]; backup?: string } }
     'workspace.setup.codexHome': { input: { path: string }; output: { path: string } }
     'workspace.projectLead': { input: ProjectLeadSwitch & { projectId: string; runId: string }; output: ProjectLead }
-    'workspace.entry': { output: { opened: boolean } }
     'workspace.message': { input: { projectId: string; revision?: number; requestId: string; runId: string; text: string; caller?: string; ownerDecision?: NonNullable<import('./model').SourceEvent['ownerDecision']> }; output: Snapshot & { queued?: string } }
     'projects.list': { output: { projects: ProjectRef[]; error?: string } }
     'project.read': { input: { projectId: string }; output: Snapshot }
@@ -55,5 +54,5 @@ declare module 'orca' {
     'project.openArtifactFolder': { input: ProjectArtifactRef; output: { opened: boolean } }
     'project.agent': { input: { operation: 'read' | 'bind' | 'submit'; projectId: string; revision?: number; requestId?: string; runId?: string; caller?: string; currentRunId?: string; token?: string; task?: unknown; taskId?: string }; output: Snapshot & { task?: import('./model').Task; submitted?: Pick<import('./model').Task, 'id' | 'phase' | 'submittedAt'> & { pendingAcceptance: boolean; pendingDecision: boolean; decisionQuestionIds?: string[] }; archiveStatus?: '已归档' } }
   }
-  interface PluginPanelEvents { 'workspace.artifactProgress': import('./link-artifacts').ArtifactProgress; 'project.changed': { projectId: string }; 'panel.draftsChanged': {}; 'workspace.open': { switching: boolean } }
+  interface PluginPanelEvents { 'workspace.artifactProgress': import('./link-artifacts').ArtifactProgress; 'project.changed': { projectId: string }; 'panel.draftsChanged': {}; 'workspace.open': {} }
 }

@@ -8,7 +8,6 @@ import path from 'node:path';
 import os from 'node:os';
 import { initialize as initializeSkills } from './project-skills.mjs';
 import { agentFlags, launchReceipt, projectAgentLaunch, projectTemplate, templateLeadAgents } from './agent-launch.mjs';
-export { launchReceipt } from './agent-launch.mjs';
 
 export const root = fileURLToPath(new URL('../', import.meta.url));
 const home = path.resolve(process.env.AGENTBOAT_HOME || path.join(os.homedir(), '.agentboat'));

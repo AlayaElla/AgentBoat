@@ -262,14 +262,10 @@ export function createCoordinator(api: OrcaWorkerApi, runtime: CoordinatorRuntim
       } while (statusDirty && !stoppedChecks)
     })().finally(() => { statusUpdates = undefined })
   }
-  async function openOverview(switching = false) {
-    await orca.storage.set('workspace.navigation', { switching })
+  orca.commands.register('workspace.overview', async () => {
     await runtime.openOverview()
-    orca.panels.post('workspace.open', { switching })
-    return { opened: true }
-  }
-  orca.commands.register('workspace.overview', () => openOverview())
-  orca.panels.handle('workspace.entry', () => openOverview(true))
+    orca.panels.post('workspace.open', {})
+  })
   const links = new WorkspaceLinks(orca, async () => {
     const { list, error } = await availableProjectRecords()
     if (error) fail('本机项目列表不可用，请恢复后再上报')
